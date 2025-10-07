@@ -230,8 +230,8 @@ mod tests {
         let finalization_certificate = signing_schemes[0]
             .assemble_certificate(
                 // FIXME
+                NAMESPACE,
                 VoteContext::Finalize {
-                    namespace: NAMESPACE,
                     proposal: &proposal,
                 },
                 // FIXME
@@ -260,8 +260,8 @@ mod tests {
         let notarization_certificate = signing_schemes[0]
             .assemble_certificate(
                 // FIXME
+                NAMESPACE,
                 VoteContext::Notarize {
-                    namespace: NAMESPACE,
                     proposal: &proposal,
                 },
                 // FIXME

@@ -275,8 +275,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             .signing
             .assemble_certificate(
                 // FIXME
+                &[],
                 VoteContext::Notarize {
-                    namespace: &[],
                     proposal: &proposal,
                 },
                 // FIXME
@@ -322,10 +322,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             .signing
             .assemble_certificate(
                 // FIXME
-                VoteContext::Nullify::<D> {
-                    namespace: &[],
-                    round: self.round,
-                },
+                &[],
+                VoteContext::Nullify::<D> { round: self.round },
                 // FIXME
                 &self
                     .nullifies
@@ -384,8 +382,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             .signing
             .assemble_certificate(
                 // FIXME
+                &[],
                 VoteContext::Finalize {
-                    namespace: &[],
                     proposal: &proposal,
                 },
                 // FIXME

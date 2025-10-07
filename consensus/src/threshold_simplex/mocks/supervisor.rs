@@ -134,8 +134,8 @@ where
                 if self
                     .signing
                     .verify_certificate::<D>(
+                        &self.namespace,
                         new_types::VoteContext::Notarize {
-                            namespace: &self.namespace,
                             proposal: &notarization.proposal,
                         },
                         &notarization.certificate,
@@ -180,8 +180,8 @@ where
                 if self
                     .signing
                     .verify_certificate::<D>(
+                        &self.namespace,
                         new_types::VoteContext::Nullify {
-                            namespace: &self.namespace,
                             round: nullification.round,
                         },
                         &nullification.certificate,
@@ -231,8 +231,8 @@ where
                 if self
                     .signing
                     .verify_certificate::<D>(
+                        &self.namespace,
                         new_types::VoteContext::Finalize {
-                            namespace: &self.namespace,
                             proposal: &finalization.proposal,
                         },
                         &finalization.certificate,

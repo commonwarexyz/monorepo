@@ -278,10 +278,8 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
-            new_types::VoteContext::Notarize {
-                namespace,
-                proposal,
-            },
+            namespace,
+            new_types::VoteContext::Notarize { proposal },
             notarizes.into_iter().map(|notarize| notarize.vote),
         );
 
@@ -370,7 +368,8 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
-            new_types::VoteContext::Nullify { round, namespace },
+            namespace,
+            new_types::VoteContext::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.vote),
         );
 
@@ -439,10 +438,8 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
-            new_types::VoteContext::Finalize {
-                namespace,
-                proposal,
-            },
+            namespace,
+            new_types::VoteContext::Finalize { proposal },
             finalizes.into_iter().map(|finalizes| finalizes.vote),
         );
 

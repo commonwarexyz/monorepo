@@ -43,18 +43,9 @@ pub enum Error {
 
 /// Identifies the context in which a vote or certificate is produced.
 pub enum VoteContext<'a, D: Digest> {
-    Notarize {
-        namespace: &'a [u8],
-        proposal: &'a Proposal<D>,
-    },
-    Nullify {
-        namespace: &'a [u8],
-        round: Round,
-    },
-    Finalize {
-        namespace: &'a [u8],
-        proposal: &'a Proposal<D>,
-    },
+    Notarize { proposal: &'a Proposal<D> },
+    Nullify { round: Round },
+    Finalize { proposal: &'a Proposal<D> },
 }
 
 /// Signed vote emitted by a participant.
@@ -139,21 +130,20 @@ impl<S: SigningScheme, D: Digest> Hash for Notarize<S, D> {
 impl<S: SigningScheme, D: Digest> Notarize<S, D> {
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let context = VoteContext::Notarize {
-            namespace,
             proposal: &proposal,
         };
-        let vote = scheme.sign_vote(context);
+        let vote = scheme.sign_vote(namespace, context);
 
         Self { proposal, vote }
     }
 
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         let context = VoteContext::Notarize {
-            namespace,
             proposal: &self.proposal,
         };
         // FIXME: avoid cloning
-        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        let verification =
+            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
         !verification.verified.is_empty()
     }
 }
@@ -204,20 +194,18 @@ impl<S: SigningScheme> Hash for Nullify<S> {
 
 impl<S: SigningScheme> Nullify<S> {
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Self {
-        let context: VoteContext<D> = VoteContext::Nullify { namespace, round };
-        let vote = scheme.sign_vote(context);
+        let context: VoteContext<D> = VoteContext::Nullify { round };
+        let vote = scheme.sign_vote(namespace, context);
 
         Self { round, vote }
     }
 
     // FIXME: this D sucks
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
-        let context: VoteContext<D> = VoteContext::Nullify {
-            namespace,
-            round: self.round,
-        };
+        let context: VoteContext<D> = VoteContext::Nullify { round: self.round };
         // FIXME: avoid cloning
-        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        let verification =
+            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
         !verification.verified.is_empty()
     }
 }
@@ -269,21 +257,20 @@ impl<S: SigningScheme, D: Digest> Hash for Finalize<S, D> {
 impl<S: SigningScheme, D: Digest> Finalize<S, D> {
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let context = VoteContext::Finalize {
-            namespace,
             proposal: &proposal,
         };
-        let vote = scheme.sign_vote(context);
+        let vote = scheme.sign_vote(namespace, context);
 
         Self { proposal, vote }
     }
 
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         let context = VoteContext::Finalize {
-            namespace,
             proposal: &self.proposal,
         };
         // FIXME: avoid cloning
-        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        let verification =
+            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
         !verification.verified.is_empty()
     }
 }
@@ -335,11 +322,11 @@ impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         let context = VoteContext::Notarize {
-            namespace,
             proposal: &self.proposal,
         };
+
         scheme
-            .verify_certificate(context, &self.certificate)
+            .verify_certificate(namespace, context, &self.certificate)
             .is_ok()
     }
 }
@@ -400,12 +387,9 @@ impl<S: SigningScheme> Write for Nullification<S> {
 
 impl<S: SigningScheme> Nullification<S> {
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
-        let context: VoteContext<D> = VoteContext::Nullify {
-            namespace,
-            round: self.round,
-        };
+        let context: VoteContext<D> = VoteContext::Nullify { round: self.round };
         scheme
-            .verify_certificate(context, &self.certificate)
+            .verify_certificate(namespace, context, &self.certificate)
             .is_ok()
     }
 }
@@ -450,11 +434,10 @@ impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         let context = VoteContext::Finalize {
-            namespace,
             proposal: &self.proposal,
         };
         scheme
-            .verify_certificate(context, &self.certificate)
+            .verify_certificate(namespace, context, &self.certificate)
             .is_ok()
     }
 }
@@ -517,12 +500,14 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn can_sign(&self) -> bool;
 
-    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self>
+    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self>
     where
         Self: Sized;
 
+    // FIXME: avoid cloning votes, maybe just Iterator<&Vote>?
     fn verify_votes<D: Digest, I>(
         &self,
+        namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
     ) -> VoteVerification<Self>
@@ -532,14 +517,17 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn assemble_certificate<D: Digest>(
         &self,
+        namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: &[Vote<Self>],
     ) -> Result<Self::Certificate, Error>
     where
         Self: Sized;
 
+    // FIXME: just return bool
     fn verify_certificate<D: Digest>(
         &self,
+        namespace: &[u8],
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> Result<Option<Self::Randomness>, Error>;
@@ -600,17 +588,14 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         self.share.is_some()
     }
 
-    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self> {
+    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self> {
         let share = self
             .share
             .as_ref()
             .expect("can only be called after checking can_sign");
 
         let signature = match context {
-            VoteContext::Notarize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Notarize { proposal } => {
                 let notarize_ns = notarize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_sig = partial_sign_message::<V>(
@@ -628,7 +613,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 (proposal_sig, seed_sig)
             }
-            VoteContext::Nullify { namespace, round } => {
+            VoteContext::Nullify { round } => {
                 let nullify_ns = nullify_namespace(namespace);
                 let message_bytes = round.encode();
                 let view_sig = partial_sign_message::<V>(
@@ -648,10 +633,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 (view_sig, seed_sig)
             }
-            VoteContext::Finalize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Finalize { proposal } => {
                 let finalize_ns = finalize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_sig = partial_sign_message::<V>(
@@ -679,6 +661,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
     fn assemble_certificate<D: Digest>(
         &self,
+        _namespace: &[u8],
         _context: VoteContext<'_, D>,
         votes: &[Vote<Self>],
     ) -> Result<Self::Certificate, Error> {
@@ -716,6 +699,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
     fn verify_votes<D: Digest, I>(
         &self,
+        namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
     ) -> VoteVerification<Self>
@@ -730,10 +714,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         let mut invalid = BTreeSet::new();
 
         match context {
-            VoteContext::Notarize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Notarize { proposal } => {
                 let notarize_ns = notarize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_partials: Vec<_> = votes
@@ -777,7 +758,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                     }
                 }
             }
-            VoteContext::Nullify { namespace, round } => {
+            VoteContext::Nullify { round } => {
                 let nullify_ns = nullify_namespace(namespace);
                 let message_bytes = round.encode();
                 let view_partials: Vec<_> = votes
@@ -820,10 +801,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                     }
                 }
             }
-            VoteContext::Finalize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Finalize { proposal } => {
                 let finalize_ns = finalize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_partials: Vec<_> = votes
@@ -881,6 +859,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
     fn verify_certificate<D: Digest>(
         &self,
+        namespace: &[u8],
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> Result<Option<Self::Randomness>, Error> {
@@ -891,10 +870,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         };
 
         match context {
-            VoteContext::Notarize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Notarize { proposal } => {
                 let notarize_ns = notarize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let notarize_message = (Some(notarize_ns.as_ref()), proposal_bytes.as_ref());
@@ -905,7 +881,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 aggregate_pair(&[notarize_message, seed_message], certificate)?;
             }
-            VoteContext::Nullify { namespace, round } => {
+            VoteContext::Nullify { round } => {
                 let nullify_ns = nullify_namespace(namespace);
                 let round_bytes = round.encode();
                 let nullify_message = (Some(nullify_ns.as_ref()), round_bytes.as_ref());
@@ -915,10 +891,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 aggregate_pair(&[nullify_message, seed_message], certificate)?;
             }
-            VoteContext::Finalize {
-                namespace,
-                proposal,
-            } => {
+            VoteContext::Finalize { proposal } => {
                 let finalize_ns = finalize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let finalize_message = (Some(finalize_ns.as_ref()), proposal_bytes.as_ref());
@@ -968,7 +941,6 @@ mod tests {
         let proposal = Proposal::new(round, round.view(), payload);
         let namespace = b"ns";
         let ctx = VoteContext::Notarize {
-            namespace,
             proposal: &proposal,
         };
         match ctx {
