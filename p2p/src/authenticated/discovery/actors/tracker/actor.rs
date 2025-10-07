@@ -151,11 +151,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        let (context, lease) = self.context.take();
-        context.spawn(move |context| {
-            self.context.put(context, lease);
-            self.run()
-        })
+        commonware_runtime::spawn_with_context!(self.context, |mut actor| actor.run())
     }
 
     async fn run(mut self) {

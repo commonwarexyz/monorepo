@@ -4,6 +4,7 @@
 //! to spawn a task) without cloning. The lease is an RAII guard—dropping it
 //! without returning the context panics so mistakes are caught immediately.
 
+use rand::{CryptoRng, Rng, RngCore};
 use std::ops::{Deref, DerefMut};
 
 /// Wrapper around a runtime context that supports leasing.
@@ -83,6 +84,58 @@ impl<E> DerefMut for ContextSlot<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.context.as_mut().expect("context slot is empty")
     }
+}
+
+impl<E: RngCore> RngCore for ContextSlot<E> {
+    fn next_u32(&mut self) -> u32 {
+        self.context
+            .as_mut()
+            .expect("context slot is empty")
+            .next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.context
+            .as_mut()
+            .expect("context slot is empty")
+            .next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.context
+            .as_mut()
+            .expect("context slot is empty")
+            .fill_bytes(dest)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.context
+            .as_mut()
+            .expect("context slot is empty")
+            .try_fill_bytes(dest)
+    }
+}
+
+impl<E: CryptoRng> CryptoRng for ContextSlot<E> {}
+
+#[macro_export]
+macro_rules! spawn_with_context {
+    ($owner:ident . $field:ident, |mut $actor:ident| $body:expr) => {{
+        let (__context_handle, __context_lease) = $owner.$field.take();
+        __context_handle.spawn(move |__runtime_context| {
+            let mut $actor = $owner;
+            $actor.$field.put(__runtime_context, __context_lease);
+            $body
+        })
+    }};
+    ($owner:ident . $field:ident, |$actor:ident| $body:expr) => {{
+        let (__context_handle, __context_lease) = $owner.$field.take();
+        __context_handle.spawn(move |__runtime_context| {
+            let $actor = $owner;
+            $actor.$field.put(__runtime_context, __context_lease);
+            $body
+        })
+    }};
 }
 
 #[cfg(test)]
