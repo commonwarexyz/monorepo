@@ -261,9 +261,8 @@ impl SubAssign<u64> for Position {
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::MAX_LOCATION;
-
     use super::{Location, Position};
+    use crate::mmr::MAX_LOCATION;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
