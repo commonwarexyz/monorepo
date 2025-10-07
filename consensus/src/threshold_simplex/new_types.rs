@@ -515,6 +515,8 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     type SignatureReadCfg;
     type CertificateReadCfg;
 
+    fn can_sign(&self) -> bool;
+
     fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self>
     where
         Self: Sized;
@@ -555,7 +557,7 @@ pub struct BlsThresholdScheme<V: Variant> {
     signer: u32,
     polynomial: Vec<V::Public>,
     identity: V::Public,
-    share: Share,
+    share: Option<Share>,
     threshold: u32,
 }
 
@@ -571,9 +573,14 @@ impl<V: Variant> BlsThresholdScheme<V> {
             signer,
             polynomial,
             identity,
-            share,
+            share: Some(share),
             threshold,
         }
+    }
+
+    pub fn into_verifier(mut self) -> Self {
+        self.share.take();
+        self
     }
 
     pub fn identity(&self) -> V::Public {
@@ -589,7 +596,16 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     type SignatureReadCfg = ((), ());
     type CertificateReadCfg = ((), ());
 
+    fn can_sign(&self) -> bool {
+        self.share.is_some()
+    }
+
     fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self> {
+        let share = self
+            .share
+            .as_ref()
+            .expect("can only be called after checking can_sign");
+
         let signature = match context {
             VoteContext::Notarize {
                 namespace,
@@ -598,7 +614,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let notarize_ns = notarize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_sig = partial_sign_message::<V>(
-                    &self.share,
+                    share,
                     Some(notarize_ns.as_ref()),
                     proposal_bytes.as_ref(),
                 )
@@ -606,12 +622,9 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 let seed_ns = seed_namespace(namespace);
                 let seed_bytes = proposal.round.encode();
-                let seed_sig = partial_sign_message::<V>(
-                    &self.share,
-                    Some(seed_ns.as_ref()),
-                    seed_bytes.as_ref(),
-                )
-                .value;
+                let seed_sig =
+                    partial_sign_message::<V>(share, Some(seed_ns.as_ref()), seed_bytes.as_ref())
+                        .value;
 
                 (proposal_sig, seed_sig)
             }
@@ -619,7 +632,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let nullify_ns = nullify_namespace(namespace);
                 let message_bytes = round.encode();
                 let view_sig = partial_sign_message::<V>(
-                    &self.share,
+                    share,
                     Some(nullify_ns.as_ref()),
                     message_bytes.as_ref(),
                 )
@@ -627,7 +640,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 let seed_ns = seed_namespace(namespace);
                 let seed_sig = partial_sign_message::<V>(
-                    &self.share,
+                    share,
                     Some(seed_ns.as_ref()),
                     message_bytes.as_ref(),
                 )
@@ -642,7 +655,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let finalize_ns = finalize_namespace(namespace);
                 let proposal_bytes = proposal.encode();
                 let proposal_sig = partial_sign_message::<V>(
-                    &self.share,
+                    share,
                     Some(finalize_ns.as_ref()),
                     proposal_bytes.as_ref(),
                 )
@@ -650,12 +663,9 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
                 let seed_ns = seed_namespace(namespace);
                 let seed_bytes = proposal.round.encode();
-                let seed_sig = partial_sign_message::<V>(
-                    &self.share,
-                    Some(seed_ns.as_ref()),
-                    seed_bytes.as_ref(),
-                )
-                .value;
+                let seed_sig =
+                    partial_sign_message::<V>(share, Some(seed_ns.as_ref()), seed_bytes.as_ref())
+                        .value;
 
                 (proposal_sig, seed_sig)
             }
@@ -985,7 +995,7 @@ mod tests {
         assert_eq!(scheme.polynomial.len(), polynomial.len());
         assert!(scheme.identity == identity);
         assert_eq!(shares.len(), 4); // ensure we used the DKG outputs
-        assert_eq!(scheme.share.index, shares[0].index);
+        assert_eq!(scheme.share.unwrap().index, shares[0].index);
     }
 
     // #[test]

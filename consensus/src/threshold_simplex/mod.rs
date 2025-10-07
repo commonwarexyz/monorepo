@@ -616,6 +616,8 @@ mod tests {
             let (mut schemes, validators, signing_schemes) =
                 mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n_active);
 
+            let observer_signing_scheme = signing_schemes[0].clone().into_verifier();
+
             // Add observer (no share)
             let scheme_observer = PrivateKey::from_seed(n_active as u64);
             let pk_observer = scheme_observer.public_key();
@@ -647,16 +649,15 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                // FIXME
-                let share = if is_observer {
-                    None
+                let signing = if is_observer {
+                    observer_signing_scheme.clone()
                 } else {
-                    Some(signing_schemes[idx].clone())
+                    signing_schemes[idx].clone()
                 };
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
-                    signing: signing_schemes[idx].clone(),
+                    signing: signing.clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -677,7 +678,7 @@ mod tests {
                     crypto: scheme,
                     blocker,
                     participants: validators.clone(),
-                    signing: signing_schemes[idx].clone(),
+                    signing: signing.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),

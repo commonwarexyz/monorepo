@@ -746,7 +746,9 @@ impl<
         round.nullify_retry = None;
 
         // Return early if we are not a participant
-        // FIXME: should we care?
+        if !self.signing.can_sign() {
+            return;
+        }
 
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
@@ -1313,6 +1315,10 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
+        if !self.signing.can_sign() {
+            return None;
+        }
+
         // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
@@ -1362,6 +1368,10 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
+        if !self.signing.can_sign() {
+            return None;
+        }
+
         // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
