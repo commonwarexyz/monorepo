@@ -6,7 +6,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, BitVec};
+use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -87,18 +87,18 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Self::init_with_bits(context, config, None).await
     }
 
-    /// Initialize a new [Ordinal] instance with a collection of [BitVec]s (indicating which
+    /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
     /// records should be considered available).
     ///
     /// If a section is not provided in the [BTreeMap], all records in that section are considered
-    /// unavailable. If a [BitVec] is provided for a section, all records in that section are
-    /// considered available if and only if the [BitVec] is set for the record. If a section is provided
-    /// but no [BitVec] is populated, all records in that section are considered available.
+    /// unavailable. If a [BitMap] is provided for a section, all records in that section are
+    /// considered available if and only if the [BitMap] is set for the record. If a section is provided
+    /// but no [BitMap] is populated, all records in that section are considered available.
     // TODO(#1227): Hide this complexity from the caller.
     pub async fn init_with_bits(
         context: E,
         config: Config,
-        bits: Option<BTreeMap<u64, &Option<BitVec>>>,
+        bits: Option<BTreeMap<u64, &Option<BitMap>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
@@ -170,7 +170,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     let bits = bits.get(section).unwrap();
                     if let Some(bits) = bits {
                         let bit_index = offset as usize / Record::<V>::SIZE;
-                        if !bits.get(bit_index).expect("invalid index") {
+                        if !bits.get(bit_index as u64) {
                             offset += Record::<V>::SIZE as u64;
                             continue;
                         }

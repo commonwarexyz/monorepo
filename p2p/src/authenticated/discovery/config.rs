@@ -98,7 +98,7 @@ pub struct Config<C: Signer> {
     ///
     /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
     /// the set. This number can be set to a reasonably high value that we never expect to reach.
-    pub max_peer_set_size: usize,
+    pub max_peer_set_size: u64,
 
     /// Frequency we gossip about known peers.
     ///
