@@ -7,7 +7,7 @@ pub fn is_last_block_in_epoch(height: u64) -> Option<u64> {
         return None;
     }
     // Check if the height is the last block in the epoch.
-    if height % BLOCKS_PER_EPOCH != 0 {
+    if !height.is_multiple_of(BLOCKS_PER_EPOCH) {
         return None;
     }
 

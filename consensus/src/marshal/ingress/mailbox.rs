@@ -135,10 +135,13 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get info message to actor: receiver dropped");
         }
-        rx.await
-            .inspect_err(|_| error!("failed to get info: receiver dropped"))
-            .ok()
-            .flatten()
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get info: receiver dropped");
+                None
+            }
+        }
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -159,10 +162,13 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get block message to actor: receiver dropped");
         }
-        rx.await
-            .inspect_err(|_| error!("failed to get block: receiver dropped"))
-            .ok()
-            .flatten()
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get block: receiver dropped");
+                None
+            }
+        }
     }
 
     /// A request to retrieve a block by its commitment.
