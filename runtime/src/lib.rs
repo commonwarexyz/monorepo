@@ -56,6 +56,23 @@ mod iouring;
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
+#[inline]
+fn expect_option<T>(opt: Option<T>, context: &'static str) -> T {
+    opt.unwrap_or_else(|| panic!("{context} called on None"))
+}
+
+#[inline]
+fn expect_option_ref<'a, T>(opt: &'a Option<T>, context: &'static str) -> &'a T {
+    opt.as_ref()
+        .unwrap_or_else(|| panic!("{context} called on None"))
+}
+
+#[inline]
+fn expect_option_mut<'a, T>(opt: &'a mut Option<T>, context: &'static str) -> &'a mut T {
+    opt.as_mut()
+        .unwrap_or_else(|| panic!("{context} called on None"))
+}
+
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -565,6 +582,246 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+impl<T> Runner for Option<T>
+where
+    T: Runner,
+{
+    type Context = T::Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        expect_option(self, "Option<Runner>::start").start(f)
+    }
+}
+
+impl<T> Spawner for Option<T>
+where
+    T: Spawner,
+{
+    fn supervised(self) -> Self {
+        Some(expect_option(self, "Option<Spawner>::supervised").supervised())
+    }
+
+    fn detached(self) -> Self {
+        Some(expect_option(self, "Option<Spawner>::detached").detached())
+    }
+
+    fn dedicated(self) -> Self {
+        Some(expect_option(self, "Option<Spawner>::dedicated").dedicated())
+    }
+
+    fn shared(self) -> Self {
+        Some(expect_option(self, "Option<Spawner>::shared").shared())
+    }
+
+    fn spawn<F, Fut, U>(self, f: F) -> Handle<U>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = U> + Send + 'static,
+        U: Send + 'static,
+    {
+        let inner = expect_option(self, "Option<Spawner>::spawn");
+        inner.spawn(move |ctx| f(Some(ctx)))
+    }
+
+    fn spawn_ref<F, U>(&mut self) -> impl FnOnce(F) -> Handle<U> + 'static
+    where
+        F: Future<Output = U> + Send + 'static,
+        U: Send + 'static,
+    {
+        expect_option_mut(self, "Option<Spawner>::spawn_ref").spawn_ref()
+    }
+
+    fn spawn_blocking<F, U>(self, f: F) -> Handle<U>
+    where
+        F: FnOnce(Self) -> U + Send + 'static,
+        U: Send + 'static,
+    {
+        let inner = expect_option(self, "Option<Spawner>::spawn_blocking");
+        inner.spawn_blocking(move |ctx| f(Some(ctx)))
+    }
+
+    fn spawn_blocking_ref<F, U>(&mut self) -> impl FnOnce(F) -> Handle<U> + 'static
+    where
+        F: FnOnce() -> U + Send + 'static,
+        U: Send + 'static,
+    {
+        expect_option_mut(self, "Option<Spawner>::spawn_blocking_ref").spawn_blocking_ref()
+    }
+
+    fn stop(
+        self,
+        value: i32,
+        timeout: Option<Duration>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option(self, "Option<Spawner>::stop").stop(value, timeout)
+    }
+
+    fn stopped(&self) -> signal::Signal {
+        expect_option_ref(self, "Option<Spawner>::stopped").stopped()
+    }
+}
+
+impl<T> Metrics for Option<T>
+where
+    T: Metrics,
+{
+    fn label(&self) -> String {
+        expect_option_ref(self, "Option<Metrics>::label").label()
+    }
+
+    fn with_label(&self, label: &str) -> Self {
+        Some(expect_option_ref(self, "Option<Metrics>::with_label").with_label(label))
+    }
+
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
+        expect_option_ref(self, "Option<Metrics>::register").register(name, help, metric);
+    }
+
+    fn encode(&self) -> String {
+        expect_option_ref(self, "Option<Metrics>::encode").encode()
+    }
+}
+
+impl<T> Clock for Option<T>
+where
+    T: Clock,
+{
+    fn current(&self) -> SystemTime {
+        expect_option_ref(self, "Option<Clock>::current").current()
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        expect_option_ref(self, "Option<Clock>::sleep").sleep(duration)
+    }
+
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        expect_option_ref(self, "Option<Clock>::sleep_until").sleep_until(deadline)
+    }
+}
+
+impl<T> Network for Option<T>
+where
+    T: Network,
+{
+    type Listener = T::Listener;
+
+    fn bind(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
+        expect_option_ref(self, "Option<Network>::bind").bind(socket)
+    }
+
+    fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
+        expect_option_ref(self, "Option<Network>::dial").dial(socket)
+    }
+}
+
+impl<T> Listener for Option<T>
+where
+    T: Listener,
+{
+    type Sink = T::Sink;
+    type Stream = T::Stream;
+
+    fn accept(
+        &mut self,
+    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send {
+        expect_option_mut(self, "Option<Listener>::accept").accept()
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        expect_option_ref(self, "Option<Listener>::local_addr").local_addr()
+    }
+}
+
+impl<T> Sink for Option<T>
+where
+    T: Sink,
+{
+    fn send(
+        &mut self,
+        msg: impl Into<StableBuf> + Send,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option_mut(self, "Option<Sink>::send").send(msg)
+    }
+}
+
+impl<T> Stream for Option<T>
+where
+    T: Stream,
+{
+    fn recv(
+        &mut self,
+        buf: impl Into<StableBuf> + Send,
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send {
+        expect_option_mut(self, "Option<Stream>::recv").recv(buf)
+    }
+}
+
+impl<T> Storage for Option<T>
+where
+    T: Storage,
+{
+    type Blob = T::Blob;
+
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+        expect_option_ref(self, "Option<Storage>::open").open(partition, name)
+    }
+
+    fn remove(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option_ref(self, "Option<Storage>::remove").remove(partition, name)
+    }
+
+    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+        expect_option_ref(self, "Option<Storage>::scan").scan(partition)
+    }
+}
+
+impl<T> Blob for Option<T>
+where
+    T: Blob,
+{
+    fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send {
+        expect_option_ref(self, "Option<Blob>::read_at").read_at(buf, offset)
+    }
+
+    fn write_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option_ref(self, "Option<Blob>::write_at").write_at(buf, offset)
+    }
+
+    fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option_ref(self, "Option<Blob>::resize").resize(len)
+    }
+
+    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        expect_option_ref(self, "Option<Blob>::sync").sync()
+    }
 }
 
 #[cfg(test)]
