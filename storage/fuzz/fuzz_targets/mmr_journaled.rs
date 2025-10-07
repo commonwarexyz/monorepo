@@ -39,8 +39,8 @@ enum MmrJournaledOperation {
     GetOldestRetainedPos,
     Close,
     Reinit,
-    InitFromPinnedNodes { size: u64 },
-    InitSync { lower_bound: u64, upper_bound: u64 },
+    InitFromPinnedNodes { size: u8 },
+    InitSync { start: u8, end: u8 },
 }
 
 #[derive(Debug)]
@@ -343,7 +343,7 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::InitFromPinnedNodes { size } => {
                     if mmr.size() > 0 {
                         // Ensure limited_size doesn't exceed current MMR size
-                        let limited_size = ((size % mmr.size().as_u64()).max(1)).min(*mmr.size());
+                        let limited_size = (size as u64).min(*mmr.size());
 
                         // Create a reasonable number of pinned nodes - use a simple heuristic
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
@@ -368,24 +368,27 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                MmrJournaledOperation::InitSync {
-                    lower_bound,
-                    upper_bound,
-                } => {
-                    let safe_lower = Position::new(lower_bound % 1000);
-                    let safe_upper = Position::new(*(safe_lower + (upper_bound % 100)));
+                MmrJournaledOperation::InitSync { start, end } => {
+                    let start_poc = Position::new(start as u64);
+                    let end_pos = Position::new(end as u64);
+                    if start_poc >= end_pos
+                        || start_poc < mmr.pruned_to_pos()
+                        || start_poc >= mmr.size()
+                    {
+                        continue;
+                    }
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),
-                        range: safe_lower..safe_upper,
+                        range: start_poc..end_pos,
                         pinned_nodes: None,
                     };
 
                     if let Ok(sync_mmr) =
                         Mmr::<_, Sha256>::init_sync(context.clone(), sync_config).await
                     {
-                        assert!(sync_mmr.size() <= safe_upper);
-                        assert_eq!(sync_mmr.pruned_to_pos(), safe_lower);
+                        assert!(sync_mmr.size() <= start_poc);
+                        assert_eq!(sync_mmr.pruned_to_pos(), start_poc);
                         sync_mmr.destroy().await.unwrap();
                     }
                 }
