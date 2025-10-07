@@ -29,7 +29,7 @@ use core::ops::{Bound, RangeBounds};
 /// assert!(cfg_u32.contains(&500));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct RangeCfg<T> {
+pub struct RangeCfg<T: Copy + PartialOrd> {
     /// The lower bound of the range.
     start: Bound<T>,
 
@@ -112,7 +112,7 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
     }
 }
 
-impl<T> RangeBounds<T> for RangeCfg<T> {
+impl<T: Copy + PartialOrd> RangeBounds<T> for RangeCfg<T> {
     fn start_bound(&self) -> Bound<&T> {
         self.start.as_ref()
     }
