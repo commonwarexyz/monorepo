@@ -33,20 +33,51 @@ pub const MAX_LOCATION: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
 pub struct Location(u64);
 
 impl Location {
-    /// Return a new [Location] from a raw `u64`.
+    /// Create a new [Location] from a raw `u64` without validation.
     ///
-    /// # Warning
+    /// This is an internal constructor that assumes the value is valid. For creating
+    /// locations from external or untrusted sources, use [Location::new_checked].
     ///
-    /// This does not validate that `loc <= MAX_LOCATION`. If you need validation,
-    /// use [Location::new_checked] instead.
+    /// # Panics (debug builds only)
+    ///
+    /// In non-test debug builds, panics if `loc > MAX_LOCATION`. This helps catch bugs
+    /// during development. Tests are allowed to create invalid locations for testing purposes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use commonware_storage::mmr::Location;
+    /// // Internal code with known-valid values
+    /// let loc = Location::new(42);
+    /// assert_eq!(*loc, 42);
+    /// ```
     #[inline]
-    pub const fn new(loc: u64) -> Self {
+    pub(crate) const fn new(loc: u64) -> Self {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(loc <= MAX_LOCATION);
         Self(loc)
     }
 
-    /// Return a new [Location] from a raw `u64`, returning `None` if `loc > MAX_LOCATION`.
+    /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
     ///
-    /// Use this when you need to ensure the location can be safely converted to a [Position].
+    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [MAX_LOCATION] cannot be
+    /// safely converted to [Position] and will cause panics in MMR operations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_storage::mmr::{Location, MAX_LOCATION};
+    ///
+    /// let loc = Location::new_checked(100).unwrap();
+    /// assert_eq!(*loc, 100);
+    ///
+    /// // Values at MAX_LOCATION are valid
+    /// assert!(Location::new_checked(MAX_LOCATION).is_some());
+    ///
+    /// // Values exceeding MAX_LOCATION return None
+    /// assert!(Location::new_checked(MAX_LOCATION + 1).is_none());
+    /// assert!(Location::new_checked(u64::MAX).is_none());
+    /// ```
     #[inline]
     pub const fn new_checked(loc: u64) -> Option<Self> {
         if loc > MAX_LOCATION {
@@ -64,17 +95,24 @@ impl Location {
 
     /// Returns `true` if this location can be safely converted to a [Position].
     ///
-    /// This is equivalent to checking `self.as_u64() <= MAX_LOCATION`.
+    /// Returns `false` if this location exceeds [MAX_LOCATION], which would cause
+    /// [Position::from] to panic due to overflowing u64.
     #[inline]
-    pub const fn is_valid_for_position(self) -> bool {
+    pub const fn is_valid(self) -> bool {
         self.0 <= MAX_LOCATION
     }
 
-    /// Return `self + rhs` returning `None` on overflow.
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_LOCATION].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => {
+                if value <= MAX_LOCATION {
+                    Some(Self(value))
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     }
@@ -88,10 +126,15 @@ impl Location {
         }
     }
 
-    /// Return `self + rhs` saturating at `u64::MAX`.
+    /// Return `self + rhs` saturating at [MAX_LOCATION].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
-        Self(self.0.saturating_add(rhs))
+        let result = self.0.saturating_add(rhs);
+        if result > MAX_LOCATION {
+            Self(MAX_LOCATION)
+        } else {
+            Self(result)
+        }
     }
 
     /// Return `self - rhs` saturating at zero.
@@ -380,7 +423,16 @@ mod tests {
     fn test_checked_add() {
         let loc = Location::new(10);
         assert_eq!(loc.checked_add(5).unwrap(), 15);
+
+        // Overflow returns None
         assert!(Location::new(u64::MAX).checked_add(1).is_none());
+
+        // Exceeding MAX_LOCATION returns None
+        assert!(Location::new(MAX_LOCATION).checked_add(1).is_none());
+
+        // At MAX_LOCATION is OK
+        let loc = Location::new(MAX_LOCATION - 10);
+        assert_eq!(loc.checked_add(10).unwrap(), MAX_LOCATION);
     }
 
     #[test]
@@ -394,7 +446,14 @@ mod tests {
     fn test_saturating_add() {
         let loc = Location::new(10);
         assert_eq!(loc.saturating_add(5), 15);
-        assert_eq!(Location::new(u64::MAX).saturating_add(1), u64::MAX);
+
+        // Saturates at MAX_LOCATION, not u64::MAX
+        assert_eq!(Location::new(u64::MAX).saturating_add(1), MAX_LOCATION);
+        assert_eq!(Location::new(MAX_LOCATION).saturating_add(1), MAX_LOCATION);
+        assert_eq!(
+            Location::new(MAX_LOCATION).saturating_add(1000),
+            MAX_LOCATION
+        );
     }
 
     #[test]
@@ -470,18 +529,18 @@ mod tests {
 
     #[test]
     fn test_is_valid_for_position() {
-        assert!(Location::new(0).is_valid_for_position());
-        assert!(Location::new(1000).is_valid_for_position());
-        assert!(Location::new(MAX_LOCATION).is_valid_for_position());
-        assert!(!Location::new(MAX_LOCATION + 1).is_valid_for_position());
-        assert!(!Location::new(u64::MAX).is_valid_for_position());
+        assert!(Location::new(0).is_valid());
+        assert!(Location::new(1000).is_valid());
+        assert!(Location::new(MAX_LOCATION).is_valid());
+        assert!(!Location::new(MAX_LOCATION + 1).is_valid());
+        assert!(!Location::new(u64::MAX).is_valid());
     }
 
     #[test]
     fn test_max_location_boundary() {
         // MAX_LOCATION should convert successfully
         let max_loc = Location::new(MAX_LOCATION);
-        assert!(max_loc.is_valid_for_position());
+        assert!(max_loc.is_valid());
         let pos = Position::from(max_loc);
         // Verify the position value
         // For MAX_LOCATION = 2^63 - 1, popcount = 63
@@ -491,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "leaf_loc overflow")]
+    #[should_panic(expected = "location overflow: exceeds MAX_LOCATION")]
     fn test_overflow_location_panics() {
         use super::Position;
 

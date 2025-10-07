@@ -110,6 +110,8 @@ impl<D: Digest> Default for Proof<D> {
 impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
     /// with root digest `root`.
+    ///
+    /// Returns `false` if `loc` exceeds [MAX_LOCATION], or if the proof is invalid.
     pub fn verify_element_inclusion<I, H>(
         &self,
         hasher: &mut H,
@@ -125,8 +127,9 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the `elements` appear consecutively starting at
-    /// position `start_loc` within the MMR with root digest `root`. A malformed proof will return
-    /// false.
+    /// position `start_loc` within the MMR with root digest `root`.
+    ///
+    /// Returns `false` if `start_loc` exceeds [MAX_LOCATION], or if the proof is invalid or malformed.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -139,6 +142,13 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        // Validate location can be safely converted to Position
+        if !start_loc.is_valid() {
+            #[cfg(feature = "std")]
+            debug!(loc = ?start_loc, "location too large");
+            return false;
+        }
+
         if !PeakIterator::check_validity(self.size) {
             #[cfg(feature = "std")]
             debug!(size = ?self.size, "invalid proof size");
@@ -156,7 +166,10 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the elements at the specified locations are included
-    /// in the MMR with the root digest `root`. A malformed proof will return false.
+    /// in the MMR with the root digest `root`.
+    ///
+    /// Returns `false` if any location in `elements` exceeds [MAX_LOCATION], or if the proof is
+    /// invalid or malformed.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
@@ -175,6 +188,16 @@ impl<D: Digest> Proof<D> {
             return self.size == Position::new(0)
                 && *root == hasher.root(Position::new(0), core::iter::empty());
         }
+
+        // Validate all locations can be safely converted to Position
+        for (_, loc) in elements {
+            if !loc.is_valid() {
+                #[cfg(feature = "std")]
+                debug!(loc = ?loc, "location too large");
+                return false;
+            }
+        }
+
         if !PeakIterator::check_validity(self.size) {
             return false;
         }
@@ -444,7 +467,14 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Panics
 ///
-/// Panics if `size` is invalid or the range is invalid for an MMR of the provided `size`.
+/// Panics if:
+/// - The range is invalid for the given `size`
+/// - Any location in `range` exceeds [MAX_LOCATION] (panics in [Position::from])
+///
+/// # Assumptions
+///
+/// This is an internal function. Callers must validate locations using [Location::is_valid]
+/// before calling this function to avoid panics.
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
@@ -533,7 +563,14 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// # Panics
 ///
-/// Panics if locations is empty.
+/// Panics if:
+/// - `locations` is empty
+/// - Any location in `locations` exceeds [MAX_LOCATION] (panics in [Position::from])
+///
+/// # Assumptions
+///
+/// This is an internal function. Callers must validate locations using [Location::is_valid]
+/// before calling this function to avoid panics.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: Position,

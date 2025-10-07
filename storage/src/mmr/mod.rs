@@ -119,4 +119,6 @@ pub enum Error {
     InvalidSize(u64),
     #[error("empty")]
     Empty,
+    #[error("location {0} exceeds MAX_LOCATION (Position overflows u64)")]
+    LocationOverflow(Location),
 }

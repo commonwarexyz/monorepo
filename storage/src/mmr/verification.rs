@@ -79,10 +79,13 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 
 /// Return a range proof for the nodes corresponding to the given location range.
 ///
+/// Validates locations and returns errors instead of panicking.
+///
 /// # Errors
 ///
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
-/// Empty error if the requested range is empty.
+/// - Returns [Error::LocationOverflow] if any location in `range` exceeds [MAX_LOCATION]
+/// - Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// - Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -93,20 +96,31 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
 /// had `size` nodes.
 ///
+/// Validates locations and returns errors instead of panicking.
+///
 /// # Errors
 ///
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
-/// Empty error if the requested range is empty.
+/// - Returns [Error::LocationOverflow] if any location in `range` exceeds [MAX_LOCATION]
+/// - Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// - Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: Position,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
+    // Validate locations before passing to internal functions
+    if !range.start.is_valid() {
+        return Err(Error::LocationOverflow(range.start));
+    }
+    if !range.end.is_valid() {
+        return Err(Error::LocationOverflow(range.end));
+    }
     if range.is_empty() {
         return Err(Error::Empty);
     }
 
     // Get the positions of all nodes needed to generate the proof.
+    // Locations have been validated above, so this won't panic
     let positions = proof::nodes_required_for_range_proof(size, range);
 
     // Fetch the digest of each.
@@ -129,9 +143,13 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 ///
 /// The order of positions does not affect the output (sorted internally).
 ///
+/// Validates locations and returns errors instead of panicking.
+///
 /// # Errors
 ///
-/// Returns Empty error if the requested locations are empty.
+/// Returns [Error::LocationOverflow] if any location in `locations` exceeds [MAX_LOCATION].
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+/// Returns [Error::Empty] if locations is empty.
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     locations: &[Location],
@@ -141,7 +159,15 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
         return Err(Error::Empty);
     }
 
+    // Validate all locations before passing to internal functions
+    for loc in locations {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(*loc));
+        }
+    }
+
     // Collect all required node positions
+    // Locations have been validated above, so this won't panic
     let size = mmr.size();
     let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
 

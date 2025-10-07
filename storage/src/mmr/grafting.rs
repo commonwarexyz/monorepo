@@ -327,7 +327,13 @@ pub struct Verifier<'a, H: CHasher> {
 }
 
 impl<'a, H: CHasher> Verifier<'a, H> {
+    /// Create a new Verifier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is too large to be safely converted to a Position (> MAX_LOCATION).
     pub fn new(height: u32, loc: Location, elements: Vec<&'a [u8]>) -> Self {
+        assert!(loc.is_valid(), "location {loc} > MAX_LOCATION");
         Self {
             hasher: StandardHasher::new(),
             height,

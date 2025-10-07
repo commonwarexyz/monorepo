@@ -183,8 +183,8 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let op_count = Location::new(u64::read(buf)?);
-        let start_loc = Location::new(u64::read(buf)?);
+        let op_count = Location::new_checked(u64::read(buf)?).unwrap();
+        let start_loc = Location::new_checked(u64::read(buf)?).unwrap();
         let max_ops_raw = u64::read(buf)?;
         let max_ops = NonZeroU64::new(max_ops_raw)
             .ok_or_else(|| CodecError::Invalid("GetOperationsRequest", "max_ops cannot be zero"))?;

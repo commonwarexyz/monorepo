@@ -119,8 +119,10 @@ impl From<Position> for u64 {
 ///
 /// # Panics
 ///
-/// Panics if `loc > MAX_LOCATION`. Use [Position::checked_from_location] if you need to handle
-/// this case without panicking.
+/// Panics if `loc > MAX_LOCATION`.
+///
+/// Use [Position::checked_from_location] for a non-panicking alternative that returns `None`
+/// on overflow.
 ///
 /// # Examples
 ///
@@ -136,7 +138,11 @@ impl From<Location> for Position {
     fn from(loc: Location) -> Self {
         // This will never underflow since 2*n >= count_ones(n).
         let loc = *loc;
-        Self(loc.checked_mul(2).expect("leaf_loc overflow") - loc.count_ones() as u64)
+        Self(
+            loc.checked_mul(2)
+                .expect("location overflow: exceeds MAX_LOCATION")
+                - loc.count_ones() as u64,
+        )
     }
 }
 

@@ -363,13 +363,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
-    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    /// Get the value of the operation with location `loc` in the db.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `loc` exceeds [mmr::MAX_LOCATION].
+    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than or equal to the number of operations in the log.
+    /// Panics if `loc >= op_count()`.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        // Validate location can be safely converted to Position
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
         assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
@@ -429,13 +438,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
     }
 
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. The
-    /// location is assumed valid.
+    /// Get the value of the operation with location `loc` in the db if it matches `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `loc` exceeds [mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than or equal to the number of operations in the log.
+    /// Panics if `loc >= op_count()`.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        // Validate location can be safely converted to Position
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
         assert!(loc < self.op_count());
 
         match self.locations.read(*loc).await {
@@ -751,10 +768,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Prune historical operations. This does not affect the db's root or current snapshot.
     ///
+    /// # Errors
+    ///
+    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `target_prune_loc` exceeds [mmr::MAX_LOCATION].
+    ///
     /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        // Validate location can be safely converted to Position
+        if !target_prune_loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(
+                target_prune_loc,
+            )));
+        }
+
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());

@@ -611,18 +611,26 @@ impl<H: CHasher> Mmr<H> {
         hasher.root(size, peaks)
     }
 
-    /// Return an inclusion proof for the element at location `loc`, or ElementPruned error if some
-    /// element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the element at location `loc`.
     ///
-    /// # Warning
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    ///
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates, or if `loc` is out of bounds.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
         self.range_proof(loc..loc + 1)
     }
 
-    /// Return an inclusion proof for all elements within the provided `range` of locations. Returns
-    /// ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for all elements within the provided `range` of locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     ///
     /// # Panics
     ///
@@ -632,6 +640,15 @@ impl<H: CHasher> Mmr<H> {
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
+
+        // Validate locations
+        if !range.start.is_valid() {
+            return Err(Error::LocationOverflow(range.start));
+        }
+        if !range.end.is_valid() {
+            return Err(Error::LocationOverflow(range.end));
+        }
+
         let leaves = self.leaves();
         assert!(
             range.start < leaves,

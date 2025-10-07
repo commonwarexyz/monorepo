@@ -628,20 +628,32 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(pinned_nodes)
     }
 
-    /// Return an inclusion proof for the element at the location `loc`, or ElementPruned error if
-    /// some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the element at the location `loc`.
     ///
-    /// # Warning
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [Error::Empty] if the range is empty.
+    ///
+    /// # Panics
     ///
     /// Panics if there are unprocessed updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
         self.range_proof(loc..loc + 1).await
     }
 
-    /// Return an inclusion proof for the elements within the specified location range, or
-    /// ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the elements within the specified location range.
     ///
-    /// # Warning
+    /// Locations are validated by [verification::range_proof].
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [Error::Empty] if the range is empty.
+    ///
+    /// # Panics
     ///
     /// Panics if there are unprocessed updates.
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
@@ -651,6 +663,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Analogous to range_proof but for a previous database state. Specifically, the state when the
     /// MMR had `size` nodes.
+    ///
+    /// Locations are validated by [verification::historical_range_proof].
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [Error::Empty] if the range is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are unprocessed updates.
     pub async fn historical_range_proof(
         &self,
         size: Position,

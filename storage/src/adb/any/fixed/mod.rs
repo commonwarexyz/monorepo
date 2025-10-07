@@ -332,10 +332,22 @@ impl<
         Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
-    /// if the location precedes the oldest retained location. The location is otherwise assumed
-    /// valid.
+    /// Get the value of the operation with location `loc` in the db.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `loc` exceeds [mmr::MAX_LOCATION].
+    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc >= op_count()`.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        // Validate location can be safely converted to Position
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
         assert!(loc < self.op_count());
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
@@ -622,10 +634,21 @@ impl<
     /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
     /// or current snapshot.
     ///
+    /// # Errors
+    ///
+    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `target_prune_loc` exceeds [mmr::MAX_LOCATION].
+    ///
     /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        // Validate location can be safely converted to Position
+        if !target_prune_loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(
+                target_prune_loc,
+            )));
+        }
+
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.

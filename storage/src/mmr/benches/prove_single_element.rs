@@ -36,7 +36,13 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         let samples = elements
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()
-                            .map(|(loc, element)| (Location::new(loc as u64), element))
+                            .map(|(loc, element)| {
+                                (
+                                    Location::new_checked(loc as u64)
+                                        .expect("benchmark location within bounds"),
+                                    element,
+                                )
+                            })
                             .collect::<Vec<_>>();
                         samples
                     },
