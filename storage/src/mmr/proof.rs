@@ -146,21 +146,21 @@ impl<D: Digest> Proof<D> {
         // Validate location can be safely converted to Position
         if !start_loc.is_valid() {
             #[cfg(feature = "std")]
-            debug!(loc = ?start_loc, "location too large");
+            debug!(?start_loc, "location too large");
             return false;
         }
 
         if !PeakIterator::check_validity(self.size) {
             #[cfg(feature = "std")]
-            debug!(size = ?self.size, "invalid proof size");
+            debug!(?self.size, "invalid proof size");
             return false;
         }
 
         match self.reconstruct_root(hasher, elements, start_loc) {
             Ok(reconstructed_root) => *root == reconstructed_root,
-            Err(_error) => {
+            Err(error) => {
                 #[cfg(feature = "std")]
-                tracing::debug!(error = ?_error, "invalid proof input");
+                tracing::debug!(?error, "invalid proof input");
                 false
             }
         }
