@@ -5,7 +5,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
-use commonware_utils::{BitVec as UtilsBitVec, IpAddrExt, SystemTimeExt};
+use commonware_utils::{IpAddrExt, SystemTimeExt};
 use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
@@ -42,6 +42,9 @@ const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
+// Use chunk size of 1 to minimize encoded size.
+type BitMap = commonware_utils::bitmap::BitMap<1>;
+
 /// Configuration when deserializing messages.
 ///
 /// This is used to limit the size of the messages received from peers.
@@ -51,7 +54,7 @@ pub struct Config {
     pub max_peers: usize,
 
     /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bit_vec: usize,
+    pub max_bit_vec: u64,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -135,7 +138,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: UtilsBitVec,
+    pub bits: BitMap,
 }
 
 impl EncodeSize for BitVec {
@@ -152,11 +155,11 @@ impl Write for BitVec {
 }
 
 impl Read for BitVec {
-    type Cfg = usize;
+    type Cfg = u64;
 
-    fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
+        let bits = BitMap::read_cfg(buf, max_bits)?;
         Ok(Self { index, bits })
     }
 }
@@ -362,7 +365,7 @@ mod tests {
     fn test_bit_vec_codec() {
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitVec::ones(71),
+            bits: BitMap::ones(71),
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
@@ -401,7 +404,7 @@ mod tests {
         // Test BitVec
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitVec::ones(100),
+            bits: BitMap::ones(100),
         };
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {

@@ -739,25 +739,26 @@ pub struct Iterator<'a, const N: usize> {
     bitmap: &'a BitMap<N>,
 
     /// Current index in the BitMap
-    pos: usize,
+    pos: u64,
 }
 
 impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos as u64 >= self.bitmap.len() {
+        if self.pos >= self.bitmap.len() {
             return None;
         }
 
-        let bit = self.bitmap.get(self.pos as u64);
+        let bit = self.bitmap.get(self.pos);
         self.pos += 1;
         Some(bit)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = (self.bitmap.len() - self.pos as u64) as usize;
-        (remaining, Some(remaining))
+        let remaining = self.bitmap.len().saturating_sub(self.pos);
+        let capped = remaining.min(usize::MAX as u64) as usize;
+        (capped, Some(capped))
     }
 }
 
