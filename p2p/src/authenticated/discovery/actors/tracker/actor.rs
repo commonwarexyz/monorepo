@@ -153,7 +153,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        spawn_ref!(self.context, |mut actor| actor.run())
+        spawn_ref!(self.context, |actor| actor.run())
     }
 
     async fn run(mut self) {
