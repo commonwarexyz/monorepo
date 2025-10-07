@@ -151,7 +151,8 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(context.clone(), config);
+        let mut requester = requester::Requester::new(context.clone(), config);
+        requester.reconcile(&cfg.participants);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
@@ -386,10 +387,6 @@ impl<
                                 continue;
                             }
 
-                            // Update stored validators
-                            // FIXME: shouldn't be needed
-                            self.requester.reconcile(&self.participants);
-
                             // If waiting for this notarization, remove it
                             self.required.remove(&Entry { task: Task::Notarization, view });
 
@@ -404,10 +401,6 @@ impl<
                             } else {
                                 continue;
                             }
-
-                            // Update stored validators
-                            // FIXME: shouldn't be needed
-                            self.requester.reconcile(&self.participants);
 
                             // If waiting for this nullification, remove it
                             self.required.remove(&Entry { task: Task::Nullification, view });

@@ -205,7 +205,6 @@ impl<S: SigningScheme> Nullify<S> {
         Self { round, vote }
     }
 
-    // FIXME: this D sucks
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote::<D>(
             namespace,
@@ -556,7 +555,6 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
-    // FIXME: this probably doesn't make sense, only needed for certificates
     fn signature_read_cfg() -> Self::SignatureReadCfg;
     fn certificate_read_cfg() -> Self::CertificateReadCfg;
 }

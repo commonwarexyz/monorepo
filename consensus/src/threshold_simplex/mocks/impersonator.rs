@@ -63,14 +63,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Imperson
                     // Manipulate index
                     if n.vote.signer == 0 {
                         n.vote.signer = 1;
-                        // FIXME
-                        // n.seed_signature.index = 1;
-                        // n.proposal_signature.index = 1;
                     } else {
                         n.vote.signer = 0;
-                        // FIXME
-                        // n.proposal_signature.index = 0;
-                        // n.proposal_signature.index = 0;
                     }
 
                     // Send invalid message
