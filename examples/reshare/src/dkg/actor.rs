@@ -1,5 +1,9 @@
 use super::{Mailbox, Message};
-use crate::dkg::DkgManager;
+use crate::{
+    dkg::DkgManager,
+    orchestrator::{self, EpochTransition, BLOCKS_PER_EPOCH},
+};
+use commonware_consensus::Reporter;
 use commonware_cryptography::{
     bls12381::{
         dkg::player::Output,
@@ -13,9 +17,6 @@ use commonware_runtime::{tokio, Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use std::cmp::Ordering;
 use tracing::info;
-
-/// The number of blocks in an epoch.
-const EPOCH_LENGTH: u64 = 150;
 
 pub struct Actor {
     context: tokio::Context,
@@ -52,6 +53,7 @@ impl Actor {
         mut self,
         initial_public: Public<MinSig>,
         initial_share: Share,
+        mut orchestrator: impl Reporter<Activity = EpochTransition<Sha256>>,
         (mut sender, mut receiver): (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
@@ -85,15 +87,23 @@ impl Actor {
                         let _ = response.send(outcome);
                     }
                     Message::Finalized { block } => {
-                        let round = block.height / EPOCH_LENGTH;
-                        let relative_height = block.height % EPOCH_LENGTH;
+                        let round = block.height / BLOCKS_PER_EPOCH;
+                        let relative_height = block.height % BLOCKS_PER_EPOCH;
 
-                        // Finalize the round if at the end of an epoch.
-                        //
-                        // This will never include genesis, as marshal never reports that block.
-                        if relative_height == 0 {
+                        // Attempt to transition epochs.
+                        if let Some(epoch) = orchestrator::is_last_block_in_epoch(block.height) {
                             let Output { public, share } =
                                 manager.finalize(round.saturating_sub(1)).await;
+
+                            let transition: EpochTransition<Sha256> = EpochTransition {
+                                epoch: epoch + 1,
+                                seed: <Sha256 as commonware_cryptography::Hasher>::empty(),
+                                poly: public.clone(),
+                                share: share.clone(),
+                            };
+                            orchestrator.report(transition).await;
+
+                            tracing::info!(target: "dkg", epoch, "INSTRUCTED ENTRY OF NEW EPOCH 🚨");
 
                             // Rotate the manager to begin a new round.
                             manager = DkgManager::new(
@@ -105,9 +115,9 @@ impl Actor {
                                 &mut sender,
                                 &mut receiver,
                             );
-                        }
+                        };
 
-                        match relative_height.cmp(&(EPOCH_LENGTH / 2)) {
+                        match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
                             Ordering::Less => {
                                 // Continuously distribute shares to any players who haven't acknowledged
                                 // receipt yet.

@@ -1,4 +1,5 @@
-/// [commonware_consensus::Supervisor] implementation.
+//! [commonware_consensus::Supervisor] implementation.
+
 use crate::application::types::{Evaluation, Identity, Signature};
 use commonware_codec::Encode;
 use commonware_consensus::{types::View, ThresholdSupervisor};
@@ -11,7 +12,7 @@ use commonware_cryptography::{
             variant::MinSig,
         },
     },
-    ed25519::PublicKey,
+    PublicKey,
 };
 use commonware_resolver::p2p;
 use commonware_utils::modulo;
@@ -19,20 +20,20 @@ use std::collections::HashMap;
 
 /// Implementation of [commonware_consensus::Supervisor] for a static set of participants.
 #[derive(Clone)]
-pub struct Supervisor {
+pub struct Supervisor<P: PublicKey> {
     identity: Identity,
     polynomial: Vec<Evaluation>,
-    participants: Vec<PublicKey>,
-    participants_map: HashMap<PublicKey, u32>,
+    participants: Vec<P>,
+    participants_map: HashMap<P, u32>,
 
     share: group::Share,
 }
 
-impl Supervisor {
+impl<P: PublicKey> Supervisor<P> {
     /// Create a new [Supervisor].
     pub fn new(
         polynomial: Poly<Evaluation>,
-        mut participants: Vec<PublicKey>,
+        mut participants: Vec<P>,
         share: group::Share,
     ) -> Self {
         participants.sort();
@@ -53,8 +54,8 @@ impl Supervisor {
     }
 }
 
-impl p2p::Coordinator for Supervisor {
-    type PublicKey = PublicKey;
+impl<P: PublicKey> p2p::Coordinator for Supervisor<P> {
+    type PublicKey = P;
 
     fn peers(&self) -> &Vec<Self::PublicKey> {
         &self.participants
@@ -65,9 +66,9 @@ impl p2p::Coordinator for Supervisor {
     }
 }
 
-impl commonware_consensus::Supervisor for Supervisor {
+impl<P: PublicKey> commonware_consensus::Supervisor for Supervisor<P> {
     type Index = View;
-    type PublicKey = PublicKey;
+    type PublicKey = P;
 
     fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
         unimplemented!("only defined in threshold supervisor")
@@ -82,7 +83,7 @@ impl commonware_consensus::Supervisor for Supervisor {
     }
 }
 
-impl ThresholdSupervisor for Supervisor {
+impl<P: PublicKey> ThresholdSupervisor for Supervisor<P> {
     type Seed = Signature;
     type Identity = Identity;
     type Polynomial = Vec<Evaluation>;

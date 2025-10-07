@@ -10,6 +10,7 @@ use tracing::Level;
 
 mod application;
 mod dkg;
+mod orchestrator;
 mod setup;
 mod validator;
 
