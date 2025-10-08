@@ -125,9 +125,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of `Spawner` configured to spawn new tasks supervised by the current
     /// context.
     ///
-    /// Any async task spawned from this context will be aborted automatically if the current task
-    /// completes or is cancelled. Only async tasks can be spawned as supervised, since blocking tasks
-    /// cannot be aborted and therefore can't support parent-child relationships.
+    /// Any task spawned from this context will be aborted automatically if the current task
+    /// completes or is cancelled. Note, a task can only be aborted if it yields (i.e. blocking tasks
+    /// that never yield can never be aborted).
     ///
     /// This is the default behavior, tasks spawned from supervised contexts exit when their parent finishes
     /// (either through completion or abortion).
@@ -142,7 +142,11 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
     /// executor.
     ///
-    /// This is the default behavior.
+    /// If `blocking` is true and the runtime supports it, the task should be spawned
+    /// in a dedicated thread pool to avoid monopolizing work-stealing worker threads. For long-running
+    /// tasks that don't yield, see [`Spawner::dedicated`].
+    ///
+    /// Non-blocking, shared tasks are the default behavior.
     fn shared(self, blocking: bool) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
