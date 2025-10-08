@@ -21,6 +21,9 @@ mod handle;
 pub use handle::Handle;
 pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 
+mod context_slot;
+pub use context_slot::ContextSlot;
+
 /// Yield control back to the runtime.
 pub async fn reschedule() {
     struct Reschedule {
