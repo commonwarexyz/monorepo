@@ -151,6 +151,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
         let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();
@@ -207,6 +208,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
         let mmr_size = Position::try_from(Location::new_unchecked(self.pruned_chunks as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
