@@ -3377,7 +3377,7 @@ mod tests {
             let seed_namespace = seed_namespace(&namespace);
             let ciphertext = encrypt::<_, V>(
                 &mut context,
-                signing_schemes[0].identity(),
+                *signing_schemes[0].identity(),
                 (Some(&seed_namespace), &target.encode()),
                 &message,
             );

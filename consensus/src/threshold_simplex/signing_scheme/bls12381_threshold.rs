@@ -12,14 +12,17 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        ops::{
-            aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
+    bls12381::{
+        dkg::ops,
+        primitives::{
+            group::Share,
+            ops::{
+                aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
+            },
+            poly::{self, PartialSignature, Public},
+            variant::Variant,
         },
-        poly::PartialSignature,
-        variant::Variant,
     },
     Digest,
 };
@@ -30,62 +33,100 @@ use std::{
     fmt::Debug,
 };
 
-/// Placeholder for the upcoming BLS threshold implementation.
 #[derive(Clone, Debug)]
-pub struct Scheme<V: Variant> {
-    identity: V::Public,
-    polynomial: Vec<V::Public>,
-    share: Option<Share>,
-    threshold: u32,
-}
-
-impl<V: Variant> Scheme<V> {
-    pub fn new<P>(
-        participants: &[P],
+pub enum Scheme<V: Variant> {
+    Signer {
         identity: V::Public,
         polynomial: Vec<V::Public>,
         share: Share,
-    ) -> Self {
-        assert!(
-            participants.len() == polynomial.len(),
-            "number of participants must match polynomial degree"
-        );
-
-        let threshold = quorum(polynomial.len() as u32);
-        Self {
-            polynomial,
-            identity,
-            share: Some(share),
-            threshold,
-        }
-    }
-
-    pub fn verifier<P>(
-        participants: &[P],
+        threshold: u32,
+    },
+    Verifier {
         identity: V::Public,
         polynomial: Vec<V::Public>,
-    ) -> Self {
-        assert!(
-            participants.len() == polynomial.len(),
-            "number of participants must match polynomial degree"
-        );
+        threshold: u32,
+    },
+    CertificateVerifier {
+        identity: V::Public,
+    },
+}
 
+impl<V: Variant> Scheme<V> {
+    pub fn new<P>(participants: &[P], polynomial: &Public<V>, share: Share) -> Self {
+        let identity = *poly::public::<V>(polynomial);
+        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let threshold = quorum(polynomial.len() as u32);
-        Self {
-            identity,
+
+        Self::Signer {
             polynomial,
-            share: None,
+            identity,
+            share,
             threshold,
         }
     }
 
-    pub fn into_verifier(mut self) -> Self {
-        self.share.take();
-        self
+    pub fn verifier<P>(participants: &[P], polynomial: &Public<V>) -> Self {
+        let identity = *poly::public::<V>(polynomial);
+        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let threshold = quorum(polynomial.len() as u32);
+
+        Self::Verifier {
+            identity,
+            polynomial,
+            threshold,
+        }
     }
 
-    pub fn identity(&self) -> V::Public {
-        self.identity
+    pub fn certificate_verifier(identity: V::Public) -> Self {
+        Self::CertificateVerifier { identity }
+    }
+
+    pub fn into_verifier(self) -> Self {
+        match self {
+            Scheme::Signer {
+                identity,
+                polynomial,
+                threshold,
+                ..
+            } => Scheme::Verifier {
+                identity,
+                polynomial,
+                threshold,
+            },
+            Scheme::Verifier { .. } => self,
+            _ => panic!("cannot convert certificate verifier into verifier"),
+        }
+    }
+
+    pub fn identity(&self) -> &V::Public {
+        match self {
+            Scheme::Signer { identity, .. } => identity,
+            Scheme::Verifier { identity, .. } => identity,
+            Scheme::CertificateVerifier { identity } => identity,
+        }
+    }
+
+    pub fn share(&self) -> Option<&Share> {
+        match self {
+            Scheme::Signer { share, .. } => Some(share),
+            _ => None,
+        }
+    }
+
+    pub fn polynomial(&self) -> &[V::Public] {
+        match self {
+            Scheme::Signer { polynomial, .. } => polynomial,
+            Scheme::Verifier { polynomial, .. } => polynomial,
+            _ => panic!("can only be called for signer and verifier"),
+        }
+    }
+
+    pub fn threshold(&self) -> u32 {
+        match self {
+            Scheme::Signer { threshold, .. } => *threshold,
+            Scheme::Verifier { threshold, .. } => *threshold,
+            _ => panic!("can only be called for signer and verifier"),
+        }
     }
 }
 
@@ -130,13 +171,12 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type CertificateCfg = ();
 
     fn can_sign(&self) -> bool {
-        self.share.is_some()
+        self.share().is_some()
     }
 
     fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self> {
         let share = self
-            .share
-            .as_ref()
+            .share()
             .expect("can only be called after checking can_sign");
 
         let signature = match context {
@@ -223,6 +263,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
+        let threshold = self.threshold();
+
         let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
@@ -239,12 +281,12 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
             })
             .unzip();
 
-        if message_partials.len() < self.threshold as usize {
+        if message_partials.len() < threshold as usize {
             return None;
         }
 
         let (message_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
-            self.threshold,
+            threshold,
             message_partials.iter(),
             seed_partials.iter(),
         )
@@ -262,9 +304,11 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
+        let polynomial = self.polynomial();
+
         match context {
             VoteContext::Notarize { proposal } => {
-                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
                     return false;
                 };
 
@@ -291,7 +335,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 .is_ok()
             }
             VoteContext::Nullify { round } => {
-                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
                     return false;
                 };
 
@@ -316,7 +360,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 .is_ok()
             }
             VoteContext::Finalize { proposal } => {
-                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
                     return false;
                 };
 
@@ -357,6 +401,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
+        let polynomial = self.polynomial();
+
         let mut invalid = BTreeSet::new();
         let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
@@ -380,7 +426,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let notarize_message = proposal.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(notarize_namespace.as_ref()),
                     notarize_message.as_ref(),
                     message_partials.iter(),
@@ -394,7 +440,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(seed_namespace.as_ref()),
                     seed_message.as_ref(),
                     seed_partials
@@ -411,7 +457,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let nullify_message = round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(nullify_namespace.as_ref()),
                     nullify_message.as_ref(),
                     message_partials.iter(),
@@ -424,7 +470,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_namespace = seed_namespace(namespace);
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(seed_namespace.as_ref()),
                     nullify_message.as_ref(),
                     seed_partials
@@ -441,7 +487,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let finalize_message = proposal.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(finalize_namespace.as_ref()),
                     finalize_message.as_ref(),
                     message_partials.iter(),
@@ -455,7 +501,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    &self.polynomial,
+                    polynomial,
                     Some(seed_namespace.as_ref()),
                     seed_message.as_ref(),
                     seed_partials
@@ -494,6 +540,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
+        let identity = self.identity();
+
         match context {
             VoteContext::Notarize { proposal } => {
                 let notarize_namespace = notarize_namespace(namespace);
@@ -511,7 +559,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &self.identity,
+                    identity,
                     &[notarize_message, seed_message],
                     &signature,
                     1,
@@ -532,7 +580,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &self.identity,
+                    identity,
                     &[nullify_message, seed_message],
                     &signature,
                     1,
@@ -555,7 +603,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &self.identity,
+                    identity,
                     &[finalize_message, seed_message],
                     &signature,
                     1,
@@ -576,6 +624,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
+        let identity = self.identity();
+
         let mut seeds = HashMap::new();
         let mut messages = Vec::new();
         let mut signatures = Vec::new();
@@ -653,7 +703,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         // Aggregate signatures
         let signature = aggregate_signatures::<V, _>(signatures);
         aggregate_verify_multiple_messages::<V, _>(
-            &self.identity,
+            identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
@@ -702,21 +752,17 @@ mod tests {
     fn bls_scheme_stores_configuration() {
         let mut rng = StdRng::seed_from_u64(7);
         let threshold = 3;
-        let (public_poly, shares) =
+        let (polynomial, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-        let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-        let participants = vec![0; 4];
-        let identity = *public_poly.constant();
-        let scheme: Scheme<MinSig> = Scheme::new(
-            &participants,
-            identity,
-            polynomial.clone(),
-            shares[0].clone(),
-        );
-        assert_eq!(scheme.polynomial.len(), polynomial.len());
-        assert!(scheme.identity == identity);
+        let scheme: Scheme<MinSig> = Scheme::new(&vec![0; 4], &polynomial, shares[0].clone());
+
+        let identity = *polynomial.constant();
+        let polynomial = evaluate_all::<MinSig>(&polynomial, 4);
+
+        assert_eq!(scheme.polynomial().len(), polynomial.len());
+        assert!(*scheme.identity() == identity);
         assert_eq!(shares.len(), 4); // ensure we used the DKG outputs
-        assert_eq!(scheme.share.unwrap().index, shares[0].index);
+        assert_eq!(scheme.share().unwrap().index, shares[0].index);
     }
 
     // #[test]

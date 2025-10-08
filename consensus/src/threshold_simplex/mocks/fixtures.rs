@@ -1,9 +1,6 @@
 use crate::threshold_simplex::signing_scheme::bls12381_threshold;
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops,
-        primitives::{poly, variant::Variant},
-    },
+    bls12381::{dkg::ops, primitives::variant::Variant},
     ed25519, PrivateKeyExt, Signer,
 };
 use commonware_utils::quorum;
@@ -39,14 +36,10 @@ where
         .collect::<Vec<_>>();
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
-    let evaluations = ops::evaluate_all::<V>(&polynomial, n);
-    let identity = *poly::public::<V>(&polynomial);
 
     let schemes = shares
         .into_iter()
-        .map(|share| {
-            bls12381_threshold::Scheme::new(&ed25519_public, identity, evaluations.clone(), share)
-        })
+        .map(|share| bls12381_threshold::Scheme::new(&ed25519_public, &polynomial, share))
         .collect();
 
     (ed25519_keys, ed25519_public, schemes)
