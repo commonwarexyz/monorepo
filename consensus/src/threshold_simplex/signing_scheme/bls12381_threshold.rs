@@ -23,6 +23,7 @@ use commonware_cryptography::{
     },
     Digest,
 };
+use commonware_utils::quorum;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -32,26 +33,48 @@ use std::{
 /// Placeholder for the upcoming BLS threshold implementation.
 #[derive(Clone, Debug)]
 pub struct Scheme<V: Variant> {
-    signer: u32,
-    polynomial: Vec<V::Public>,
     identity: V::Public,
+    polynomial: Vec<V::Public>,
     share: Option<Share>,
     threshold: u32,
 }
 
 impl<V: Variant> Scheme<V> {
-    pub fn new(
-        signer: u32,
-        polynomial: Vec<V::Public>,
+    pub fn new<P>(
+        participants: &[P],
         identity: V::Public,
+        polynomial: Vec<V::Public>,
         share: Share,
-        threshold: u32,
     ) -> Self {
+        assert!(
+            participants.len() == polynomial.len(),
+            "number of participants must match polynomial degree"
+        );
+
+        let threshold = quorum(polynomial.len() as u32);
         Self {
-            signer,
             polynomial,
             identity,
             share: Some(share),
+            threshold,
+        }
+    }
+
+    pub fn verifier<P>(
+        participants: &[P],
+        identity: V::Public,
+        polynomial: Vec<V::Public>,
+    ) -> Self {
+        assert!(
+            participants.len() == polynomial.len(),
+            "number of participants must match polynomial degree"
+        );
+
+        let threshold = quorum(polynomial.len() as u32);
+        Self {
+            identity,
+            polynomial,
+            share: None,
             threshold,
         }
     }
@@ -191,7 +214,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         };
 
         Vote {
-            signer: self.signer,
+            signer: share.index,
             signature,
         }
     }
@@ -682,13 +705,13 @@ mod tests {
         let (public_poly, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
         let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
+        let participants = vec![0; 4];
         let identity = *public_poly.constant();
         let scheme: Scheme<MinSig> = Scheme::new(
-            shares[0].index,
-            polynomial.clone(),
+            &participants,
             identity,
+            polynomial.clone(),
             shares[0].clone(),
-            threshold,
         );
         assert_eq!(scheme.polynomial.len(), polynomial.len());
         assert!(scheme.identity == identity);

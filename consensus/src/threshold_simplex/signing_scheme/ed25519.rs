@@ -14,50 +14,40 @@ use std::collections::BTreeSet;
 /// Ed25519 implementation of the [`SigningScheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme {
-    signer: u32,
     participants: Participants<PublicKey>,
-    private_key: Option<PrivateKey>,
+    signer: Option<(u32, PrivateKey)>,
 }
 
 impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// * `signer` - index of the local validator in the participant set.
     /// * `participants` - ordered validator set used for verification.
+    /// * `signer_index` - index of the local validator in the participant set.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(signer: u32, participants: Vec<PublicKey>, private_key: PrivateKey) -> Self {
+    pub fn new(participants: Vec<PublicKey>, signer_index: u32, private_key: PrivateKey) -> Self {
         assert!(
-            (signer as usize) < participants.len(),
+            (signer_index as usize) < participants.len(),
             "signer index {} is out of bounds for validator set of size {}",
-            signer,
+            signer_index,
             participants.len()
         );
 
         Self {
-            signer,
             participants: participants.into(),
-            private_key: Some(private_key),
+            signer: Some((signer_index, private_key)),
         }
     }
 
-    pub fn verifier(signer: u32, participants: Vec<PublicKey>) -> Self {
-        assert!(
-            (signer as usize) < participants.len(),
-            "signer index {} is out of bounds for validator set of size {}",
-            signer,
-            participants.len()
-        );
-
+    pub fn verifier(participants: Vec<PublicKey>) -> Self {
         Self {
-            signer,
             participants: participants.into(),
-            private_key: None,
+            signer: None,
         }
     }
 
     /// Converts the scheme into a pure verifier by removing the private key.
     pub fn into_verifier(mut self) -> Self {
-        self.private_key = None;
+        self.signer = None;
         self
     }
 }
@@ -130,12 +120,12 @@ impl SigningScheme for Scheme {
     type CertificateCfg = usize;
 
     fn can_sign(&self) -> bool {
-        self.private_key.is_some()
+        self.signer.is_some()
     }
 
     fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self> {
-        let private_key = self
-            .private_key
+        let (index, private_key) = self
+            .signer
             .as_ref()
             .expect("can only be called after checking can_sign");
 
@@ -152,7 +142,7 @@ impl SigningScheme for Scheme {
         let signature = private_key.sign(Some(domain.as_ref()), message.as_ref());
 
         Vote {
-            signer: self.signer,
+            signer: *index,
             signature,
         }
     }

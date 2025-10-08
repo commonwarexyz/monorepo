@@ -33,7 +33,10 @@ where
         .collect();
     ed25519_keys.sort_by_key(|k| k.public_key());
 
-    let ed25519_public = ed25519_keys.iter().map(|k| k.public_key()).collect();
+    let ed25519_public = ed25519_keys
+        .iter()
+        .map(|k| k.public_key())
+        .collect::<Vec<_>>();
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
     let evaluations = ops::evaluate_all::<V>(&polynomial, n);
@@ -42,7 +45,7 @@ where
     let schemes = shares
         .into_iter()
         .map(|share| {
-            bls12381_threshold::Scheme::new(share.index, evaluations.clone(), identity, share, t)
+            bls12381_threshold::Scheme::new(&ed25519_public, identity, evaluations.clone(), share)
         })
         .collect();
 
