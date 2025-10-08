@@ -373,7 +373,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Panics
     ///
-    /// Panics if `loc >= op_count()`.
+    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
@@ -446,7 +446,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Panics
     ///
-    /// Panics if `loc >= op_count()`.
+    /// Panics if `loc` >= self.op_count().
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
@@ -623,9 +623,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
     /// [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > the current number of
-    /// operations, or if `start_loc` >= `op_count`.
-    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` or `start_loc` >
+    /// self.op_count().
+    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof
+    /// has been pruned.
     ///
     /// # Panics
     ///

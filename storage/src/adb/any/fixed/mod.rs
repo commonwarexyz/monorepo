@@ -341,7 +341,7 @@ impl<
     ///
     /// # Panics
     ///
-    /// Panics if `loc >= op_count()`.
+    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
