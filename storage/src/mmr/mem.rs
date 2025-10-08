@@ -631,8 +631,6 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return an inclusion proof for all elements within the provided `range` of locations.
     ///
-    /// Locations are validated by [proof::nodes_required_for_range_proof].
-    ///
     /// # Errors
     ///
     /// Returns [Error::Empty] if the range is empty.

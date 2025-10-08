@@ -435,7 +435,6 @@ impl<
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    ///
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     ///
     /// # Panics

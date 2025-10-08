@@ -593,10 +593,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
     /// [crate::mmr::MAX_LOCATION].
-    ///
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    ///
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,

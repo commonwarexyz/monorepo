@@ -503,7 +503,6 @@ impl<
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
     /// [crate::mmr::MAX_LOCATION].
-    ///
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     pub async fn historical_proof(
         &self,
