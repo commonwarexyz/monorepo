@@ -640,6 +640,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Panics if there are unprocessed updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
         self.range_proof(loc..loc + 1).await
     }
 

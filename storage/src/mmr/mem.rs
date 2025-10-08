@@ -622,6 +622,10 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if there are unprocessed batch updates, or if `loc` is out of bounds.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
         self.range_proof(loc..loc + 1)
     }
 
@@ -642,7 +646,6 @@ impl<H: CHasher> Mmr<H> {
             "dirty nodes must be processed before computing proofs"
         );
 
-        // Validate locations
         if range.is_empty() {
             return Err(Error::Empty);
         }

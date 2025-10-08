@@ -452,11 +452,6 @@ impl<
             "must process updates before computing proofs"
         );
 
-        // Validate start_loc
-        if !start_loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
-        }
-
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
@@ -588,9 +583,13 @@ impl<
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
+        // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(*loc);
 
@@ -705,6 +704,9 @@ impl<
         hasher: &mut H,
         loc: Location,
     ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
         let op = self.any.log.read(*loc).await?;
 
         let height = Self::grafting_height();

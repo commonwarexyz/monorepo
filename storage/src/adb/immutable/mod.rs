@@ -604,9 +604,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
-        if !start_loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
-        }
         if op_count > self.op_count() {
             return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
         }
@@ -618,7 +615,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
         let mmr_size = Position::try_from(op_count)?;
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        // TODO handle case where start_loc == end_loc
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)

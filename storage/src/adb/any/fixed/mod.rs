@@ -512,9 +512,6 @@ impl<
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        if !start_loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
-        }
         if start_loc >= op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }

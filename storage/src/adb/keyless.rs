@@ -611,15 +611,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        if !start_loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
-        }
         if start_loc >= op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
         let mmr_size = Position::try_from(op_count)?;
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        // TODO handle case where start_loc == end_loc
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
