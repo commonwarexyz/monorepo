@@ -1939,101 +1939,45 @@ impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, Eq)]
 pub struct ConflictingNotarize<S: SigningScheme, D: Digest> {
-    // FIXME: why not store two Notarize here?
-    /// The round in which the conflict occurred
-    pub round: Round,
-    pub signer: u32,
-    /// The parent view of the first conflicting proposal
-    pub parent_1: View,
-    /// The payload of the first conflicting proposal
-    pub payload_1: D,
-    /// The signature on the first conflicting proposal
-    pub signature_1: S::Signature,
-    /// The parent view of the second conflicting proposal
-    pub parent_2: View,
-    /// The payload of the second conflicting proposal
-    pub payload_2: D,
-    /// The signature on the second conflicting proposal
-    pub signature_2: S::Signature,
+    notarize_1: Notarize<S, D>,
+    notarize_2: Notarize<S, D>,
 }
 
 impl<S: SigningScheme, D: Digest> PartialEq for ConflictingNotarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.round == other.round
-            && self.signer == other.signer
-            && self.parent_1 == other.parent_1
-            && self.payload_1 == other.payload_1
-            && self.signature_1 == other.signature_1
-            && self.parent_2 == other.parent_2
-            && self.payload_2 == other.payload_2
-            && self.signature_2 == other.signature_2
+        self.notarize_1 == other.notarize_1 && self.notarize_2 == other.notarize_2
     }
 }
 
 impl<S: SigningScheme, D: Digest> Hash for ConflictingNotarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.signer.hash(state);
-        self.parent_1.hash(state);
-        self.payload_1.hash(state);
-        self.signature_1.hash(state);
-        self.parent_2.hash(state);
-        self.payload_2.hash(state);
-        self.signature_2.hash(state);
+        self.notarize_1.hash(state);
+        self.notarize_2.hash(state);
     }
 }
 
 impl<S: SigningScheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
+        assert_eq!(notarize_1.epoch(), notarize_2.epoch());
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
-        ConflictingNotarize {
-            round: notarize_1.proposal.round,
-            signer: notarize_1.signer(),
-            parent_1: notarize_1.proposal.parent,
-            payload_1: notarize_1.proposal.payload,
-            signature_1: notarize_1.vote.signature,
-            parent_2: notarize_2.proposal.parent,
-            payload_2: notarize_2.proposal.payload,
-            signature_2: notarize_2.vote.signature,
-        }
-    }
 
-    /// Reconstructs the original proposals from this evidence.
-    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
-        (
-            Proposal::new(self.round, self.parent_1, self.payload_1),
-            Proposal::new(self.round, self.parent_2, self.payload_2),
-        )
+        ConflictingNotarize {
+            notarize_1,
+            notarize_2,
+        }
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        let (proposal_1, proposal_2) = self.proposals();
-        let notarize1 = Notarize {
-            proposal: proposal_1,
-            vote: Vote {
-                signer: self.signer,
-                signature: self.signature_1.clone(),
-            },
-        };
-
-        let notarize2 = Notarize {
-            proposal: proposal_2,
-            vote: Vote {
-                signer: self.signer,
-                signature: self.signature_2.clone(),
-            },
-        };
-
-        notarize1.verify(signing, namespace) && notarize2.verify(signing, namespace)
+        self.notarize_1.verify(signing, namespace) && self.notarize_2.verify(signing, namespace)
     }
 }
 
 impl<S: SigningScheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
     fn signer(&self) -> u32 {
-        self.signer
+        self.notarize_1.signer()
     }
 }
 
@@ -2041,7 +1985,7 @@ impl<S: SigningScheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.round.epoch()
+        self.notarize_1.epoch()
     }
 }
 
@@ -2049,20 +1993,14 @@ impl<S: SigningScheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.round.view()
+        self.notarize_1.view()
     }
 }
 
 impl<S: SigningScheme, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        UInt(self.signer).write(writer);
-        UInt(self.parent_1).write(writer);
-        self.payload_1.write(writer);
-        self.signature_1.write(writer);
-        UInt(self.parent_2).write(writer);
-        self.payload_2.write(writer);
-        self.signature_2.write(writer);
+        self.notarize_1.write(writer);
+        self.notarize_2.write(writer);
     }
 }
 
@@ -2070,44 +2008,28 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let signer = UInt::read(reader)?.into();
-        let parent_1 = UInt::read(reader)?.into();
-        let payload_1 = D::read(reader)?;
-        let signature_1 = S::Signature::read(reader)?;
-        let parent_2 = UInt::read(reader)?.into();
-        let payload_2 = D::read(reader)?;
-        let signature_2 = S::Signature::read(reader)?;
-        // FIXME: need to store Notarize directly
-        // if signature_1.index != signature_2.index {
-        //     return Err(Error::Invalid(
-        //         "consensus::threshold_simplex::ConflictingNotarize",
-        //         "mismatched signatures",
-        //     ));
-        // }
+        let notarize_1 = Notarize::read(reader)?;
+        let notarize_2 = Notarize::read(reader)?;
+
+        if notarize_1.signer() != notarize_2.signer()
+            || notarize_1.proposal.round != notarize_2.proposal.round
+        {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::ConflictingNotarize",
+                "invalid conflicting notarize",
+            ));
+        }
+
         Ok(ConflictingNotarize {
-            round,
-            signer,
-            parent_1,
-            payload_1,
-            signature_1,
-            parent_2,
-            payload_2,
-            signature_2,
+            notarize_1,
+            notarize_2,
         })
     }
 }
 
 impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + UInt(self.signer).encode_size()
-            + UInt(self.parent_1).encode_size()
-            + self.payload_1.encode_size()
-            + self.signature_1.encode_size()
-            + UInt(self.parent_2).encode_size()
-            + self.payload_2.encode_size()
-            + self.signature_2.encode_size()
+        self.notarize_1.encode_size() + self.notarize_2.encode_size()
     }
 }
 
@@ -2115,101 +2037,45 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, Eq)]
 pub struct ConflictingFinalize<S: SigningScheme, D: Digest> {
-    /// The round in which the conflict occurred
-    pub round: Round,
-    pub signer: u32,
-    /// The parent view of the first conflicting proposal
-    pub parent_1: View,
-    /// The payload of the first conflicting proposal
-    pub payload_1: D,
-    /// The signature on the first conflicting proposal
-    pub signature_1: S::Signature,
-    /// The parent view of the second conflicting proposal
-    pub parent_2: View,
-    /// The payload of the second conflicting proposal
-    pub payload_2: D,
-    /// The signature on the second conflicting proposal
-    pub signature_2: S::Signature,
+    finalize_1: Finalize<S, D>,
+    finalize_2: Finalize<S, D>,
 }
 
 impl<S: SigningScheme, D: Digest> PartialEq for ConflictingFinalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.round == other.round
-            && self.signer == other.signer
-            && self.parent_1 == other.parent_1
-            && self.payload_1 == other.payload_1
-            && self.signature_1 == other.signature_1
-            && self.parent_2 == other.parent_2
-            && self.payload_2 == other.payload_2
-            && self.signature_2 == other.signature_2
+        self.finalize_1 == other.finalize_1 && self.finalize_2 == other.finalize_2
     }
 }
 
 impl<S: SigningScheme, D: Digest> Hash for ConflictingFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.signer.hash(state);
-        self.parent_1.hash(state);
-        self.payload_1.hash(state);
-        self.signature_1.hash(state);
-        self.parent_2.hash(state);
-        self.payload_2.hash(state);
-        self.signature_2.hash(state);
+        self.finalize_1.hash(state);
+        self.finalize_2.hash(state);
     }
 }
 
 impl<S: SigningScheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
+        assert_eq!(finalize_1.epoch(), finalize_2.epoch());
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
-        ConflictingFinalize {
-            round: finalize_1.proposal.round,
-            signer: finalize_1.signer(),
-            parent_1: finalize_1.proposal.parent,
-            payload_1: finalize_1.proposal.payload,
-            signature_1: finalize_1.vote.signature,
-            parent_2: finalize_2.proposal.parent,
-            payload_2: finalize_2.proposal.payload,
-            signature_2: finalize_2.vote.signature,
-        }
-    }
 
-    /// Reconstructs the original proposals from this evidence.
-    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
-        (
-            Proposal::new(self.round, self.parent_1, self.payload_1),
-            Proposal::new(self.round, self.parent_2, self.payload_2),
-        )
+        ConflictingFinalize {
+            finalize_1,
+            finalize_2,
+        }
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        // FIXME
-        let (proposal_1, proposal_2) = self.proposals();
-        let finalize1 = Finalize {
-            proposal: proposal_1,
-            vote: Vote {
-                signer: self.signer,
-                signature: self.signature_1.clone(),
-            },
-        };
-
-        let finalize2 = Finalize {
-            proposal: proposal_2,
-            vote: Vote {
-                signer: self.signer,
-                signature: self.signature_2.clone(),
-            },
-        };
-
-        finalize1.verify(signing, namespace) && finalize2.verify(signing, namespace)
+        self.finalize_1.verify(signing, namespace) && self.finalize_2.verify(signing, namespace)
     }
 }
 
 impl<S: SigningScheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
     fn signer(&self) -> u32 {
-        self.signer
+        self.finalize_1.signer()
     }
 }
 
@@ -2217,7 +2083,7 @@ impl<S: SigningScheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.round.epoch()
+        self.finalize_1.epoch()
     }
 }
 
@@ -2225,20 +2091,14 @@ impl<S: SigningScheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.round.view()
+        self.finalize_1.view()
     }
 }
 
 impl<S: SigningScheme, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        UInt(self.signer).write(writer);
-        UInt(self.parent_1).write(writer);
-        self.payload_1.write(writer);
-        self.signature_1.write(writer);
-        UInt(self.parent_2).write(writer);
-        self.payload_2.write(writer);
-        self.signature_2.write(writer);
+        self.finalize_1.write(writer);
+        self.finalize_2.write(writer);
     }
 }
 
@@ -2246,44 +2106,28 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let signer = UInt::read(reader)?.into();
-        let parent_1 = UInt::read(reader)?.into();
-        let payload_1 = D::read(reader)?;
-        let signature_1 = S::Signature::read(reader)?;
-        let parent_2 = UInt::read(reader)?.into();
-        let payload_2 = D::read(reader)?;
-        let signature_2 = S::Signature::read(reader)?;
-        // FIXME: need to store Finalize directly
-        // if signature_1.index != signature_2.index {
-        //     return Err(Error::Invalid(
-        //         "consensus::threshold_simplex::ConflictingFinalize",
-        //         "mismatched signatures",
-        //     ));
-        // }
+        let finalize_1 = Finalize::read(reader)?;
+        let finalize_2 = Finalize::read(reader)?;
+
+        if finalize_1.signer() != finalize_2.signer()
+            || finalize_1.proposal.round != finalize_2.proposal.round
+        {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::ConflictingFinalize",
+                "invalid conflicting finalize",
+            ));
+        }
+
         Ok(ConflictingFinalize {
-            round,
-            signer,
-            parent_1,
-            payload_1,
-            signature_1,
-            parent_2,
-            payload_2,
-            signature_2,
+            finalize_1,
+            finalize_2,
         })
     }
 }
 
 impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + UInt(self.signer).encode_size()
-            + UInt(self.parent_1).encode_size()
-            + self.payload_1.encode_size()
-            + self.signature_1.encode_size()
-            + UInt(self.parent_2).encode_size()
-            + self.payload_2.encode_size()
-            + self.signature_2.encode_size()
+        self.finalize_1.encode_size() + self.finalize_2.encode_size()
     }
 }
 
@@ -2292,72 +2136,42 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 /// finalize a proposal, not both).
 #[derive(Clone, Debug, Eq)]
 pub struct NullifyFinalize<S: SigningScheme, D: Digest> {
-    /// The proposal that the validator tried to finalize
-    pub proposal: Proposal<D>,
-    pub signer: u32,
-    /// The signature on the nullify
-    pub view_signature: S::Signature,
-    /// The signature on the finalize
-    pub finalize_signature: S::Signature,
+    nullify: Nullify<S>,
+    finalize: Finalize<S, D>,
 }
 
 impl<S: SigningScheme, D: Digest> PartialEq for NullifyFinalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal
-            && self.signer == other.signer
-            && self.view_signature == other.view_signature
-            && self.finalize_signature == other.finalize_signature
+        self.nullify == other.nullify && self.finalize == other.finalize
     }
 }
 
 impl<S: SigningScheme, D: Digest> Hash for NullifyFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.proposal.hash(state);
-        self.signer.hash(state);
-        self.view_signature.hash(state);
-        self.finalize_signature.hash(state);
+        self.nullify.hash(state);
+        self.finalize.hash(state);
     }
 }
 
 impl<S: SigningScheme, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
+        assert_eq!(nullify.epoch(), finalize.epoch());
         assert_eq!(nullify.view(), finalize.view());
         assert_eq!(nullify.signer(), finalize.signer());
-        NullifyFinalize {
-            proposal: finalize.proposal,
-            signer: nullify.signer(),
-            view_signature: nullify.vote.signature,
-            finalize_signature: finalize.vote.signature,
-        }
+
+        NullifyFinalize { nullify, finalize }
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        // FIXME
-        let finalize = Finalize {
-            proposal: self.proposal.clone(),
-            vote: Vote {
-                signer: self.signer,
-                signature: self.finalize_signature.clone(),
-            },
-        };
-
-        let nullify = Nullify {
-            round: self.proposal.round,
-            vote: Vote {
-                signer: self.signer,
-                signature: self.view_signature.clone(),
-            },
-        };
-
-        finalize.verify(signing, namespace) && nullify.verify::<D>(signing, namespace)
+        self.nullify.verify::<D>(signing, namespace) && self.finalize.verify(signing, namespace)
     }
 }
 
 impl<S: SigningScheme, D: Digest> Attributable for NullifyFinalize<S, D> {
     fn signer(&self) -> u32 {
-        self.signer
+        self.nullify.signer()
     }
 }
 
@@ -2365,7 +2179,7 @@ impl<S: SigningScheme, D: Digest> Epochable for NullifyFinalize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
+        self.nullify.epoch()
     }
 }
 
@@ -2373,16 +2187,14 @@ impl<S: SigningScheme, D: Digest> Viewable for NullifyFinalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.proposal.view()
+        self.nullify.view()
     }
 }
 
 impl<S: SigningScheme, D: Digest> Write for NullifyFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        UInt(self.signer).write(writer);
-        self.view_signature.write(writer);
-        self.finalize_signature.write(writer);
+        self.nullify.write(writer);
+        self.finalize.write(writer);
     }
 }
 
@@ -2390,32 +2202,23 @@ impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let signer = UInt::read(reader)?.into();
-        let view_signature = S::Signature::read(reader)?;
-        let finalize_signature = S::Signature::read(reader)?;
-        // FIXME: need to store Nullify/Finalize directly
-        // if view_signature.index != finalize_signature.index {
-        //     return Err(Error::Invalid(
-        //         "consensus::threshold_simplex::NullifyFinalize",
-        //         "mismatched signatures",
-        //     ));
-        // }
-        Ok(NullifyFinalize {
-            proposal,
-            signer,
-            view_signature,
-            finalize_signature,
-        })
+        let nullify = Nullify::read(reader)?;
+        let finalize = Finalize::read(reader)?;
+
+        if nullify.signer() != finalize.signer() || nullify.round != finalize.proposal.round {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::NullifyFinalize",
+                "mismatched signatures",
+            ));
+        }
+
+        Ok(NullifyFinalize { nullify, finalize })
     }
 }
 
 impl<S: SigningScheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size()
-            + UInt(self.signer).encode_size()
-            + self.view_signature.encode_size()
-            + self.finalize_signature.encode_size()
+        self.nullify.encode_size() + self.finalize.encode_size()
     }
 }
 

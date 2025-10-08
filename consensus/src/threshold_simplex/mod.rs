@@ -220,7 +220,6 @@ where
     use commonware_codec::Encode;
 
     let idx = if let Some(seed) = randomness {
-        // FIXME: maybe require AsRef<[u8]> for seed?
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
         (view as usize) % participants.len()
