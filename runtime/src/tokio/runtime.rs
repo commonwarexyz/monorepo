@@ -437,15 +437,19 @@ impl crate::Spawner for Context {
         let future = f(self);
         let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         if dedicated {
-            let runtime_handle = executor.runtime.handle().clone();
-            thread::spawn(move || {
-                runtime_handle.block_on(f);
+            thread::spawn({
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
             });
         } else if blocking {
-            let runtime_handle = executor.runtime.handle().clone();
-            executor
-                .runtime
-                .spawn_blocking(move || runtime_handle.block_on(f));
+            executor.runtime.spawn_blocking({
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
+            });
         } else {
             executor.runtime.spawn(f);
         }
