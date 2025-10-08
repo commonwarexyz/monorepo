@@ -407,7 +407,8 @@ impl<
         receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
-        let mut receiver: WrappedReceiver<_, Voter<S, D>> = WrappedReceiver::new((), receiver);
+        let mut receiver: WrappedReceiver<_, Voter<S, D>> =
+            WrappedReceiver::new(self.signing.certificate_codec_config(), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;

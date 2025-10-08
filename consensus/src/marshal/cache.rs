@@ -74,8 +74,8 @@ pub(crate) struct Manager<
     /// Configuration for underlying prunable archives
     cfg: Config,
 
-    /// Codec configuration for block type
-    codec_config: B::Cfg,
+    /// Codec configuration for block type and signing certificates
+    codec_config: (B::Cfg, S::CertificateCfg),
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
@@ -89,7 +89,11 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
     Manager<R, B, S>
 {
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(context: R, cfg: Config, codec_config: B::Cfg) -> Self {
+    pub(crate) async fn init(
+        context: R,
+        cfg: Config,
+        codec_config: (B::Cfg, S::CertificateCfg),
+    ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
@@ -162,13 +166,17 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
         let verified_blocks = self
-            .init_archive(epoch, "verified", self.codec_config.clone())
+            .init_archive(epoch, "verified", self.codec_config.0.clone())
             .await;
         let notarized_blocks = self
-            .init_archive(epoch, "notarized", self.codec_config.clone())
+            .init_archive(epoch, "notarized", self.codec_config.0.clone())
             .await;
-        let notarizations = self.init_archive(epoch, "notarizations", ()).await;
-        let finalizations = self.init_archive(epoch, "finalizations", ()).await;
+        let notarizations = self
+            .init_archive(epoch, "notarizations", self.codec_config.1.clone())
+            .await;
+        let finalizations = self
+            .init_archive(epoch, "finalizations", self.codec_config.1.clone())
+            .await;
         let existing = self.caches.insert(
             epoch,
             Cache {

@@ -103,7 +103,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Certificate = Signature<V>;
     type Randomness = V::Signature;
 
-    type CertificateReadCfg = ();
+    type CertificateCfg = ();
 
     fn can_sign(&self) -> bool {
         self.share.is_some()
@@ -633,9 +633,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         Some(certificate.seed_signature)
     }
 
-    fn certificate_read_cfg() -> Self::CertificateReadCfg {
-        ()
-    }
+    fn certificate_codec_config(&self) -> Self::CertificateCfg {}
 }
 
 #[cfg(test)]

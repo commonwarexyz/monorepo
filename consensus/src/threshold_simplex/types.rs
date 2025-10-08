@@ -135,11 +135,11 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + Sync
         + EncodeSize
         + Write
-        + Read<Cfg = Self::CertificateReadCfg>;
+        + Read<Cfg = Self::CertificateCfg>;
 
     type Randomness: EncodeSize + Write + Send;
 
-    type CertificateReadCfg;
+    type CertificateCfg: Clone + Send + Sync;
 
     fn can_sign(&self) -> bool;
 
@@ -190,7 +190,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
-    fn certificate_read_cfg() -> Self::CertificateReadCfg;
+    fn certificate_codec_config(&self) -> Self::CertificateCfg;
 }
 
 /// `BatchVerifier` is a utility for tracking and batch verifying consensus messages.
@@ -665,9 +665,9 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Voter<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
-    type Cfg = ();
+    type Cfg = S::CertificateCfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -675,7 +675,7 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
                 Ok(Voter::Notarize(v))
             }
             1 => {
-                let v = Notarization::read(reader)?;
+                let v = Notarization::read_cfg(reader, cfg)?;
                 Ok(Voter::Notarization(v))
             }
             2 => {
@@ -683,7 +683,7 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
                 Ok(Voter::Nullify(v))
             }
             3 => {
-                let v = Nullification::read(reader)?;
+                let v = Nullification::read_cfg(reader, cfg)?;
                 Ok(Voter::Nullification(v))
             }
             4 => {
@@ -691,7 +691,7 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
                 Ok(Voter::Finalize(v))
             }
             5 => {
-                let v = Finalization::read(reader)?;
+                let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Voter::Finalization(v))
             }
             _ => Err(Error::Invalid(
@@ -935,11 +935,11 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Notarization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
-    type Cfg = ();
+    type Cfg = S::CertificateCfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
         Ok(Self {
             proposal,
@@ -1090,11 +1090,11 @@ impl<S: SigningScheme> EncodeSize for Nullification<S> {
 }
 
 impl<S: SigningScheme> Read for Nullification<S> {
-    type Cfg = ();
+    type Cfg = S::CertificateCfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
         Ok(Self { round, certificate })
     }
@@ -1251,11 +1251,11 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Finalization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
-    type Cfg = ();
+    type Cfg = S::CertificateCfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
         Ok(Self {
             proposal,
@@ -1315,13 +1315,14 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Backfiller<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Backfiller<S, D> {
-    type Cfg = usize;
+    type Cfg = (usize, S::CertificateCfg);
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
-                let v = Request::read_cfg(reader, cfg)?;
+                let (max_len, _) = cfg;
+                let v = Request::read_cfg(reader, max_len)?;
                 Ok(Backfiller::Request(v))
             }
             1 => {
@@ -1479,12 +1480,16 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Response<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
-    type Cfg = usize;
+    type Cfg = (usize, S::CertificateCfg);
 
-    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let (max_len, certificate_cfg) = cfg;
         let id = UInt::read(reader)?.into();
         let mut views = HashSet::new();
-        let notarizations = Vec::<Notarization<S, D>>::read_range(reader, ..=*max_len)?;
+        let notarizations = Vec::<Notarization<S, D>>::read_cfg(
+            reader,
+            &((..=*max_len).into(), certificate_cfg.clone()),
+        )?;
         for notarization in notarizations.iter() {
             if !views.insert(notarization.view()) {
                 return Err(Error::Invalid(
@@ -1495,7 +1500,10 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
         }
         let remaining = max_len - notarizations.len();
         views.clear();
-        let nullifications = Vec::<Nullification<S>>::read_range(reader, ..=remaining)?;
+        let nullifications = Vec::<Nullification<S>>::read_cfg(
+            reader,
+            &((..=remaining).into(), certificate_cfg.clone()),
+        )?;
         for nullification in nullifications.iter() {
             if !views.insert(nullification.view()) {
                 return Err(Error::Invalid(
@@ -1686,9 +1694,9 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Activity<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
-    type Cfg = ();
+    type Cfg = S::CertificateCfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -1696,7 +1704,7 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
                 Ok(Activity::Notarize(v))
             }
             1 => {
-                let v = Notarization::<S, D>::read(reader)?;
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Activity::Notarization(v))
             }
             2 => {
@@ -1704,7 +1712,7 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
                 Ok(Activity::Nullify(v))
             }
             3 => {
-                let v = Nullification::<S>::read(reader)?;
+                let v = Nullification::<S>::read_cfg(reader, cfg)?;
                 Ok(Activity::Nullification(v))
             }
             4 => {
@@ -1712,7 +1720,7 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
                 Ok(Activity::Finalize(v))
             }
             5 => {
-                let v = Finalization::<S, D>::read(reader)?;
+                let v = Finalization::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Activity::Finalization(v))
             }
             6 => {

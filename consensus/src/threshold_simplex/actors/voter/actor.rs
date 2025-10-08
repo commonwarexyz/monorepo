@@ -1620,8 +1620,11 @@ impl<
     ) {
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);
-        let (mut recovered_sender, mut recovered_receiver) =
-            wrap::<_, _, Voter<S, D>>((), recovered_sender, recovered_receiver);
+        let (mut recovered_sender, mut recovered_receiver) = wrap::<_, _, Voter<S, D>>(
+            self.signing.certificate_codec_config(),
+            recovered_sender,
+            recovered_receiver,
+        );
 
         // Compute genesis
         let genesis = self.automaton.genesis(self.epoch).await;
@@ -1638,7 +1641,7 @@ impl<
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
-                codec_config: (),
+                codec_config: self.signing.certificate_codec_config(),
                 buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },

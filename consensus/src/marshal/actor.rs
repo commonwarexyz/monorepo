@@ -77,7 +77,7 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     view_retention_timeout: u64,
     // Maximum number of blocks to repair at once
     max_repair: u64,
-    // Codec configuration
+    // Codec configuration for block type
     codec_config: B::Cfg,
     // Partition prefix
     partition_prefix: String,
@@ -119,7 +119,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
         let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
-            config.codec_config.clone(),
+            (
+                config.codec_config.clone(),
+                config.signing.certificate_codec_config(),
+            ),
         )
         .await;
 
@@ -151,7 +154,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: (),
+                codec_config: config.signing.certificate_codec_config(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -582,7 +585,12 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
                                 },
                                 Request::Finalized { height } => {
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<S, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) =
+                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                            value,
+                                            &(self.signing.certificate_codec_config(), self.codec_config.clone()),
+                                        )
+                                    else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -603,7 +611,12 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
                                 },
                                 Request::Notarized { round } => {
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<S, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) =
+                                        <(Notarization<S, B::Commitment>, B)>::decode_cfg(
+                                            value,
+                                            &(self.signing.certificate_codec_config(), self.codec_config.clone()),
+                                        )
+                                    else {
                                         let _ = response.send(false);
                                         continue;
                                     };

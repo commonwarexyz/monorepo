@@ -317,7 +317,14 @@ impl<
         receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap(self.max_fetch_count, sender, receiver);
+        let (mut sender, mut receiver) = wrap(
+            (
+                self.max_fetch_count,
+                self.signing.certificate_codec_config(),
+            ),
+            sender,
+            receiver,
+        );
 
         // Wait for an event
         let mut current_view = 0;
@@ -451,7 +458,7 @@ impl<
                         },
                     };
 
-                    match msg{
+                    match msg {
                         Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
                             let mut missing_notarizations = Vec::new();

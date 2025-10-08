@@ -1,7 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -39,7 +39,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflict
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<S, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode_cfg(
+                msg,
+                &self.signing.certificate_codec_config(),
+            ) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");

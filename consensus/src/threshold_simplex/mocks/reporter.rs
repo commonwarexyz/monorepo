@@ -12,7 +12,7 @@ use crate::{
     types::View,
     Monitor, Viewable,
 };
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
@@ -139,7 +139,8 @@ where
                     return;
                 }
                 let encoded = notarization.encode();
-                Notarization::<S, D>::decode(encoded).unwrap();
+                Notarization::<S, D>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                    .unwrap();
                 self.notarizations
                     .lock()
                     .unwrap()
@@ -181,7 +182,8 @@ where
                     return;
                 }
                 let encoded = nullification.encode();
-                Nullification::<S>::decode(encoded).unwrap();
+                Nullification::<S>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                    .unwrap();
                 self.nullifications
                     .lock()
                     .unwrap()
@@ -228,7 +230,8 @@ where
                     return;
                 }
                 let encoded = finalization.encode();
-                Finalization::<S, D>::decode(encoded).unwrap();
+                Finalization::<S, D>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                    .unwrap();
                 self.finalizations
                     .lock()
                     .unwrap()
