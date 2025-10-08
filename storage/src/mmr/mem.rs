@@ -649,12 +649,6 @@ impl<H: CHasher> Mmr<H> {
         if range.is_empty() {
             return Err(Error::Empty);
         }
-        if !range.start.is_valid() {
-            return Err(Error::LocationOverflow(range.start));
-        }
-        if !(range.end - 1).is_valid() {
-            return Err(Error::LocationOverflow(range.end));
-        }
 
         let leaves = self.leaves();
         assert!(

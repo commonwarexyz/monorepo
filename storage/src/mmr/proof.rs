@@ -218,7 +218,8 @@ impl<D: Digest> Proof<D> {
             if pos >= self.size {
                 return false;
             }
-            let Ok(required) = nodes_required_for_range_proof(self.size, *loc..(*loc + 1)) else {
+            // It's safe to +1 because nodes_required_for_range_proof validates the range
+            let Ok(required) = nodes_required_for_range_proof(self.size, *loc..*loc + 1) else {
                 return false;
             };
             for req_pos in &required {
