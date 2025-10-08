@@ -43,31 +43,27 @@ impl Default for Model {
 
 impl Model {
     /// Return a new configuration with supervision enabled.
-    pub(crate) fn supervised(&self) -> Self {
-        let mut cfg = *self;
-        cfg.supervised = true;
-        cfg
+    pub(crate) fn supervised(mut self) -> Self {
+        self.supervised = true;
+        self
     }
 
     /// Return a new configuration with supervision disabled.
-    pub(crate) fn detached(&self) -> Self {
-        let mut cfg = *self;
-        cfg.supervised = false;
-        cfg
+    pub(crate) fn detached(mut self) -> Self {
+        self.supervised = false;
+        self
     }
 
     /// Return a new configuration that requests a dedicated thread.
-    pub(crate) fn dedicated(&self) -> Self {
-        let mut cfg = *self;
-        cfg.dedicated = true;
-        cfg
+    pub(crate) fn dedicated(mut self) -> Self {
+        self.dedicated = true;
+        self
     }
 
     /// Return a new configuration that requests shared runtime scheduling.
-    pub(crate) fn shared(&self) -> Self {
-        let mut cfg = *self;
-        cfg.dedicated = false;
-        cfg
+    pub(crate) fn shared(mut self) -> Self {
+        self.dedicated = false;
+        self
     }
 
     /// Returns `true` when the task should be supervised by its parent.
