@@ -1600,11 +1600,12 @@ mod tests {
 
     fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // Create task
-            let (sender, mut receiver) = oneshot::channel();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (continue_tx, mut continue_rx) = oneshot::channel();
 
             let context = if dedicated {
                 context.dedicated()
@@ -1613,10 +1614,19 @@ mod tests {
             };
 
             let handle = context.spawn(move |_| async move {
+                // Mark that the task has started (from here on can't be interrupted)
+                started_tx.send(()).unwrap();
+
                 // Wait for abort to be called
                 loop {
-                    if receiver.try_recv().is_ok() {
-                        break;
+                    match continue_rx.try_recv() {
+                        Ok(Some(())) => break,
+                        Ok(None) => {
+                            continue;
+                        }
+                        Err(_) => {
+                            panic!("try_recv error");
+                        }
                     }
                 }
 
@@ -1636,8 +1646,9 @@ mod tests {
             // If there was an `.await` prior to sending a message over the oneshot, this test
             // could deadlock (depending on the runtime implementation) because the blocking task
             // would never yield (preventing send from being called).
+            started_rx.await.unwrap();
             handle.abort();
-            sender.send(()).unwrap();
+            continue_tx.send(()).unwrap();
 
             // Wait for the task to complete
             assert!(matches!(handle.await, Ok(100_000_000)));
