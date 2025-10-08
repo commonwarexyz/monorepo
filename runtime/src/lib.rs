@@ -1999,6 +1999,35 @@ mod tests {
         });
     }
 
+    fn test_spawn_detached<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            // Setup channels
+            let (inner_tx, inner_rx) = oneshot::channel();
+            let (outer_tx, outer_rx) = oneshot::channel();
+
+            // Spawn task
+            let handle = context.spawn(move |context| async move {
+                // Spawn detached task
+                context.detached().spawn(|_| async move {
+                    inner_rx.await.unwrap();
+                    outer_tx.send(()).unwrap();
+                });
+            });
+
+            // Wait for task to finish
+            handle.await.unwrap();
+
+            // Send message to detached task
+            inner_tx.send(()).unwrap();
+
+            // Wait for detached task to respond
+            outer_rx.await.unwrap();
+        });
+    }
+
     fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -2402,6 +2431,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_detached() {
+        let executor = deterministic::Runner::default();
+        test_spawn_detached(executor);
+    }
+
+    #[test]
     fn test_deterministic_circular_reference_prevents_cleanup() {
         let executor = deterministic::Runner::default();
         test_circular_reference_prevents_cleanup(executor);
@@ -2664,6 +2699,12 @@ mod tests {
             let executor = tokio::Runner::default();
             test_spawn_blocking_abort(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_tokio_spawn_detached() {
+        let executor = tokio::Runner::default();
+        test_spawn_detached(executor);
     }
 
     #[test]
