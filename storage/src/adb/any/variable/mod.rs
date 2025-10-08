@@ -368,14 +368,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
     ///
     /// # Panics
     ///
     /// Panics if `loc >= op_count()`.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        // Validate location can be safely converted to Position
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
@@ -443,7 +442,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///
