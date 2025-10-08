@@ -80,7 +80,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the directory
         let directory = Directory::init(
-            context.clone(),
+            context.with_label("directory"),
             cfg.bootstrappers,
             myself,
             directory_cfg,
@@ -98,7 +98,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context: ContextCell::Present(context),
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,

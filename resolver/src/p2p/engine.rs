@@ -106,7 +106,7 @@ impl<
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(context.with_label("metrics"));
         let fetcher = Fetcher::new(
             context.with_label("fetcher"),
             cfg.requester_config,

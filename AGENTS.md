@@ -339,7 +339,7 @@ fn test_crash_recovery() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Initialize journal/storage
-        let mut journal = Journal::init(context.clone(), cfg)
+        let mut journal = Journal::init(context.with_label("journal"), cfg)
             .await
             .expect("Failed to init");
 
@@ -350,7 +350,7 @@ fn test_crash_recovery() {
         journal.close().await.expect("Failed to close");
 
         // Re-initialize to simulate restart
-        let journal = Journal::init(context.clone(), cfg)
+        let journal = Journal::init(context.with_label("journal"), cfg)
             .await
             .expect("Failed to re-init");
 
@@ -368,7 +368,7 @@ fn test_corruption_recovery() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Write valid data
-        let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+        let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
         journal.close().await.unwrap();
 
@@ -383,7 +383,7 @@ fn test_corruption_recovery() {
         blob.sync().await.unwrap();
 
         // Re-initialize and verify recovery
-        let journal = Journal::init(context.clone(), cfg).await.unwrap();
+        let journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
 
         // Replay should handle corruption gracefully
         let stream = journal.replay(buffer_size).await.unwrap();
@@ -431,7 +431,7 @@ fn test_storage_conformance() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Write known data
-        let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+        let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
         for i in 0..100 {
             journal.append(1, i).await.unwrap();
         }

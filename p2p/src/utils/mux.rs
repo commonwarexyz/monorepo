@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner>(
+    async fn create_peer<E: Spawner + Metrics>(
         context: &E,
         oracle: &mut Oracle<Pk>,
         seed: u64,
@@ -312,7 +312,7 @@ mod tests {
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
-        let (mux, handle) = Muxer::new(context.clone(), sender, receiver, CAPACITY);
+        let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }

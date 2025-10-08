@@ -91,7 +91,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    pub fn new(context: E, cfg: Config) -> (Self, Oracle<P>) {
+    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -104,10 +104,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
-        let next_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::from_bits(context.clone().next_u32())),
-            0,
-        );
+        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
         (
             Self {
                 context: ContextCell::new(context),
@@ -180,7 +177,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
-                        &mut self.context.clone(),
+                        self.context.with_label("peer"),
                         public_key.clone(),
                         self.get_next_socket(),
                         self.max_size,
@@ -197,7 +194,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let sender = Sender::new(
-                    self.context.clone(),
+                    self.context.with_label("sender"),
                     public_key,
                     channel,
                     self.max_size,
@@ -547,7 +544,7 @@ impl<P: PublicKey> Peer<P> {
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
     fn new<E: Spawner + RNetwork + Metrics + Clock>(
-        context: &mut E,
+        context: E,
         public_key: P,
         socket: SocketAddr,
         max_size: usize,

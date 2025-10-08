@@ -100,7 +100,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of time from new proposal to threshold signature generation",
             e2e_duration.clone(),
         );
-        let clock = Arc::new(context.clone());
+        let clock = Arc::new(context.with_label("clock"));
 
         Self {
             sequencer_heights,

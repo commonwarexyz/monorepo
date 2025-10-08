@@ -146,7 +146,7 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(context.clone(), config);
+        let requester = requester::Requester::new(context.with_label("requester"), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();

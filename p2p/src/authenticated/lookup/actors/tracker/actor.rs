@@ -68,7 +68,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
-        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser);
+        let directory = Directory::init(
+            context.with_label("directory"),
+            myself,
+            directory_cfg,
+            releaser,
+        );
 
         (
             Self {
@@ -228,8 +233,8 @@ mod tests {
         cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        runner_context.spawn(|_| actor.run());
+        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
+        actor.start();
 
         TestHarness { mailbox, oracle }
     }
