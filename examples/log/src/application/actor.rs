@@ -4,7 +4,7 @@ use super::{
     Config,
 };
 use commonware_cryptography::{Hasher, PublicKey, Signature};
-use commonware_runtime::{ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -47,11 +47,7 @@ impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, 
 
     /// Run the application actor.
     pub fn start(mut self) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run().await;
-        })
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {

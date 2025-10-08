@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
@@ -89,11 +89,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(routing).await;
-        })
+        spawn_cell!(self.context, self.run(routing).await)
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

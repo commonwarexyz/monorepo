@@ -19,7 +19,7 @@ use commonware_p2p::{
     },
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -302,11 +302,7 @@ impl<
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(voter, sender, receiver).await;
-        })
+        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
 
     async fn run(

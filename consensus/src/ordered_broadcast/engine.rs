@@ -24,6 +24,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     buffer::PoolRef,
+    spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
@@ -272,11 +273,7 @@ impl<
     ///   - Nodes
     ///   - Acks
     pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(chunk_network, ack_network).await;
-        })
+        spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
     }
 
     /// Inner run loop called by `start`.

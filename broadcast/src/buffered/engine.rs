@@ -8,6 +8,7 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::status::{CounterExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -142,11 +143,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(network).await;
-        })
+        spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.

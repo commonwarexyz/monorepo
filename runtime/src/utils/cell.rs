@@ -11,6 +11,22 @@ use std::{
 const MISSING_CONTEXT: &str = "runtime context missing";
 const DUPLICATE_CONTEXT: &str = "runtime context already present";
 
+/// Spawn a task using a [`Cell`] by taking its context, executing the provided
+/// async block, and restoring the context before the block completes.
+///
+/// If you need to modify the context before spawning (i.e. non-default spawn configuration),
+/// you should interact with [`Cell`] directly.
+#[macro_export]
+macro_rules! spawn_cell {
+    ($cell:expr, $body:expr $(,)?) => {{
+        let __commonware_context = $cell.take();
+        __commonware_context.spawn(move |context| async move {
+            $cell.restore(context);
+            $body
+        })
+    }};
+}
+
 /// A wrapper around context that allows it to be taken and returned without requiring
 /// all interactions to unwrap (as with `Option<C>`).
 // TODO(#1833): Remove `Clone`

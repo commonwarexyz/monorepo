@@ -7,7 +7,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -130,11 +130,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(tracker, supervisor).await;
-        })
+        spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
     #[allow(clippy::type_complexity)]

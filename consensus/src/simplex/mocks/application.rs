@@ -8,7 +8,7 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -248,11 +248,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     }
 
     pub fn start(mut self) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run().await;
-        })
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {

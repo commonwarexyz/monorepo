@@ -20,7 +20,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey}
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
@@ -241,11 +241,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(application, buffer, resolver).await;
-        })
+        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
