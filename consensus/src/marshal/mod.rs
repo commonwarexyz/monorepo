@@ -76,7 +76,7 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
-        marshal::ingress::mailbox::{Error as MailboxError, Identifier},
+        marshal::ingress::mailbox::{Closed, Identifier},
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Proposal,
@@ -107,13 +107,13 @@ mod tests {
     };
     use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{NZUsize, SystemTimeExt, NZU64};
+    use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},
-        time::{Duration, UNIX_EPOCH},
+        time::Duration,
     };
 
     type D = Sha256Digest;
@@ -151,12 +151,8 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<V, B>,
     ) {
-        let genesis_parent = Sha256Digest::from([0u8; 32]);
-        let genesis_timestamp = UNIX_EPOCH.epoch_millis();
-        let genesis = Block::new::<Sha256>(genesis_parent, 0, genesis_timestamp);
         let config = Config {
             identity,
-            genesis,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
@@ -1010,13 +1006,9 @@ mod tests {
         runner.start(|mut context| async move {
             // Initialize config
             let (schemes, _peers, identity, _shares) = setup_validators_and_shares(&mut context);
-            let genesis_parent = Sha256Digest::from([0u8; 32]);
-            let genesis_timestamp = UNIX_EPOCH.epoch_millis();
-            let genesis = Block::new::<Sha256>(genesis_parent, 0, genesis_timestamp);
             let secret = schemes[0].clone();
             let config: Config<V, B> = Config {
                 identity,
-                genesis,
                 mailbox_size: 10,
                 namespace: NAMESPACE.to_vec(),
                 view_retention_timeout: 10,
@@ -1041,33 +1033,21 @@ mod tests {
 
             // GetInfo
             let res = mailbox.get_info(Identifier::Latest).await;
-            assert!(
-                matches!(res, Err(MailboxError::Closed)),
-                "get info should return Closed"
-            );
+            assert!(matches!(res, Err(Closed)), "get info should return Closed");
 
             // GetBlock
             let res = mailbox.get_block(Identifier::Latest).await;
-            assert!(
-                matches!(res, Err(MailboxError::Closed)),
-                "get block should return Closed"
-            );
+            assert!(matches!(res, Err(Closed)), "get block should return Closed");
 
             // Broadcast
             let parent = Sha256::hash(b"");
             let block = B::new::<Sha256>(parent, 1, 1);
             let res = mailbox.broadcast(block.clone()).await;
-            assert!(
-                matches!(res, Err(MailboxError::Closed)),
-                "broadcast should return Closed"
-            );
+            assert!(matches!(res, Err(Closed)), "broadcast should return Closed");
 
             // Verified
             let res = mailbox.verified(Round::new(0, 1), block.clone()).await;
-            assert!(
-                matches!(res, Err(MailboxError::Closed)),
-                "verified should return Closed"
-            );
+            assert!(matches!(res, Err(Closed)), "verified should return Closed");
 
             // Subscribe returns a receiver which should error when awaited
             let rx = mailbox

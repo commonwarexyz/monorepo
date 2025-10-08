@@ -47,10 +47,8 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("mailbox closed")]
-    Closed,
-}
+#[error("mailbox closed")]
+pub struct Closed;
 
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
 ///
@@ -128,7 +126,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Result<Option<(u64, B::Commitment)>, Error> {
+    ) -> Result<Option<(u64, B::Commitment)>, Closed> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::GetInfo {
@@ -136,8 +134,8 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
                 response: tx,
             })
             .await
-            .map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)
+            .map_err(|_| Closed)?;
+        rx.await.map_err(|_| Closed)
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -145,7 +143,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_block(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Result<Option<B>, Error> {
+    ) -> Result<Option<B>, Closed> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::GetBlock {
@@ -153,8 +151,8 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
                 response: tx,
             })
             .await
-            .map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)
+            .map_err(|_| Closed)?;
+        rx.await.map_err(|_| Closed)
     }
 
     /// A request to retrieve a block by its commitment.
@@ -186,19 +184,19 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) -> Result<(), Error> {
+    pub async fn broadcast(&mut self, block: B) -> Result<(), Closed> {
         self.sender
             .send(Message::Broadcast { block })
             .await
-            .map_err(|_| Error::Closed)
+            .map_err(|_| Closed)
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) -> Result<(), Error> {
+    pub async fn verified(&mut self, round: Round, block: B) -> Result<(), Closed> {
         self.sender
             .send(Message::Verified { round, block })
             .await
-            .map_err(|_| Error::Closed)
+            .map_err(|_| Closed)
     }
 }
 

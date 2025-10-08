@@ -159,7 +159,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
         // Initialize finalized blocks
         let start = Instant::now();
-        let mut finalized_blocks = immutable::Archive::init(
+        let finalized_blocks = immutable::Archive::init(
             context.with_label("finalized_blocks"),
             immutable::Config {
                 metadata_partition: format!(
@@ -190,19 +190,6 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         .await
         .expect("finalized_blocks should initialize");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
-
-        // Seed the genesis block (height 0) if it is not present
-        if finalized_blocks
-            .has(ArchiveID::Index(0))
-            .await
-            .expect("finalized_blocks should not fail to get genesis block")
-        {
-            let g = config.genesis.clone();
-            finalized_blocks
-                .put_sync(0, g.commitment(), g)
-                .await
-                .expect("failed to seed genesis block");
-        }
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -758,18 +745,12 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
     async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
-        if let Some(height) = self.finalizations_by_height.last_index() {
-            let finalization = self
-                .get_finalization_by_height(height)
-                .await
-                .expect("finalization for latest height must exist");
-            return Some((height, finalization.proposal.payload));
-        }
-        // Fall back to genesis block if no finalizations exist yet
-        if let Some(block) = self.get_finalized_block(0).await {
-            return Some((0, block.commitment()));
-        }
-        None
+        let height = self.finalizations_by_height.last_index()?;
+        let finalization = self
+            .get_finalization_by_height(height)
+            .await
+            .expect("finalization missing");
+        Some((height, finalization.proposal.payload))
     }
 
     // -------------------- Mixed Storage --------------------
