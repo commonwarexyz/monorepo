@@ -80,18 +80,6 @@ pub(crate) enum Message<V: Variant, B: Block> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<B>,
     },
-    /// A request to broadcast a block to all peers.
-    Broadcast {
-        /// The block to broadcast.
-        block: B,
-    },
-    /// A notification that a block has been verified by the application.
-    Verified {
-        /// The round in which the block was verified.
-        round: Round,
-        /// The verified block.
-        block: B,
-    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
@@ -171,7 +159,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         }
     }
 
-    /// A request to retrieve a block by its commitment.
+    /// Subscribe is a request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -199,30 +187,6 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             error!("failed to send subscribe message to actor: receiver dropped");
         }
         rx
-    }
-
-    /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
-        if self
-            .sender
-            .send(Message::Broadcast { block })
-            .await
-            .is_err()
-        {
-            error!("failed to send broadcast message to actor: receiver dropped");
-        }
-    }
-
-    /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Verified { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
     }
 }
 

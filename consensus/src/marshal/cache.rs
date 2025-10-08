@@ -36,8 +36,6 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> {
-    /// Verified blocks stored by view
-    verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
     notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarizations stored by view
@@ -50,7 +48,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
-            self.verified_blocks.prune(min_view),
             self.notarized_blocks.prune(min_view),
             self.notarizations.prune(min_view),
             self.finalizations.prune(min_view),
@@ -158,9 +155,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let verified_blocks = self
-            .init_archive(epoch, "verified", self.codec_config.clone())
-            .await;
         let notarized_blocks = self
             .init_archive(epoch, "notarized", self.codec_config.clone())
             .await;
@@ -169,7 +163,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         let existing = self.caches.insert(
             epoch,
             Cache {
-                verified_blocks,
                 notarized_blocks,
                 notarizations,
                 finalizations,
@@ -201,18 +194,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
-    }
-
-    /// Add a verified block to the prunable archive.
-    pub(crate) async fn put_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
-        let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
-            return;
-        };
-        let result = cache
-            .verified_blocks
-            .put_sync(round.view(), commitment, block)
-            .await;
-        Self::handle_result(result, round, "verified");
     }
 
     /// Add a notarized block to the prunable archive.
@@ -304,20 +285,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         None
     }
 
-    /// Looks for a block (verified or notarized).
+    /// Looks for a block (notarized).
     pub(crate) async fn find_block(&self, commitment: B::Commitment) -> Option<B> {
         // Check in reverse order
         for cache in self.caches.values().rev() {
-            // Check verified blocks
-            if let Some(block) = cache
-                .verified_blocks
-                .get(Identifier::Key(&commitment))
-                .await
-                .expect("failed to get verified block")
-            {
-                return Some(block);
-            }
-
             // Check notarized blocks
             if let Some(block) = cache
                 .notarized_blocks
@@ -343,12 +314,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .collect();
         for epoch in old_epochs.iter() {
             let Cache::<R, B, V> {
-                verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
-            vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");

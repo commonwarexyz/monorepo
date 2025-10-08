@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
 commonware-codec = { workspace = true }
+commonware-coding = { workspace = true }
 commonware-broadcast = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-resolver = { workspace = true }
@@ -20,6 +21,7 @@ bytes = { workspace = true }
 cfg-if = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+rand_core = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
@@ -28,6 +30,7 @@ commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"] }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
+rayon = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 tracing = { workspace = true }

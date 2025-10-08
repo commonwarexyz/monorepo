@@ -9,16 +9,18 @@ use super::{
     },
 };
 use crate::{
-    marshal::ingress::mailbox::Identifier as BlockID,
+    marshal::{
+        coding::{self, CodedBlock},
+        ingress::mailbox::Identifier as BlockID,
+    },
     threshold_simplex::types::{Finalization, Notarization},
-    types::Round,
+    types::{CodingCommitment, Round},
     Block, Reporter,
 };
-use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_coding::Scheme;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
@@ -57,7 +59,13 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<B, E, V, S>
+where
+    B: Block<Commitment = CodingCommitment>,
+    E: Rng + Spawner + Metrics + Clock + GClock + Storage,
+    V: Variant,
+    S: Scheme,
+{
     // ---------- Context ----------
     context: E,
 
@@ -89,11 +97,11 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, V>,
+    cache: cache::Manager<E, CodedBlock<B, S>, V>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
     // Finalized blocks stored by height
-    finalized_blocks: immutable::Archive<E, B::Commitment, B>,
+    finalized_blocks: immutable::Archive<E, B::Commitment, CodedBlock<B, S>>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -102,7 +110,13 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<B, E, V, S> Actor<B, E, V, S>
+where
+    B: Block<Commitment = CodingCommitment>,
+    E: Rng + Spawner + Metrics + Clock + GClock + Storage,
+    V: Variant,
+    S: Scheme,
+{
     /// Create a new application actor.
     pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
@@ -234,11 +248,11 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     pub fn start<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
-        buffer: buffered::Mailbox<P, B>,
-        resolver: (mpsc::Receiver<handler::Message<B>>, R),
+        buffer: coding::Mailbox<V, B, S, P>,
+        resolver: (mpsc::Receiver<handler::Message<CodedBlock<B, S>>>, R),
     ) -> Handle<()>
     where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<Key = handler::Request<CodedBlock<B, S>>>,
         P: PublicKey,
     {
         self.context.spawn_ref()(self.run(application, buffer, resolver))
@@ -248,10 +262,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     async fn run<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
-        mut buffer: buffered::Mailbox<P, B>,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
+        mut shards: coding::Mailbox<V, B, S, P>,
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<CodedBlock<B, S>>>, R),
     ) where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<Key = handler::Request<CodedBlock<B, S>>>,
         P: PublicKey,
     {
         // Process all finalized blocks in order (fetching any that are missing)
@@ -270,7 +284,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         finalizer_context.spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
-        let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
+        let mut block_waiters = AbortablePool::<(B::Commitment, B)>::default();
 
         // Handle messages
         loop {
@@ -283,11 +297,11 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             // Select messages
             select! {
                 // Handle waiter completions first
-                result = waiters.next_completed() => {
+                result = block_waiters.next_completed() => {
                     let Ok((commitment, block)) = result else {
                         continue; // Aborted future
                     };
-                    self.notify_subscribers(commitment, &block).await;
+                    self.notify_block_subscribers(commitment, &block).await;
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -319,69 +333,29 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             };
                             let _ = response.send(info);
                         }
-                        Message::Broadcast { block } => {
-                            let _peers = buffer.broadcast(Recipients::All, block).await;
-                        }
-                        Message::Verified { round, block } => {
-                            self.cache_verified(round, block.commitment(), block).await;
-                        }
-                        Message::Notarization { notarization } => {
-                            let round = notarization.round();
-                            let commitment = notarization.proposal.payload;
-
-                            // Store notarization by view
-                            self.cache.put_notarization(round, commitment, notarization.clone()).await;
-
-                            // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                // If found, persist the block
-                                self.cache_block(round, commitment, block).await;
-                            } else {
-                                debug!(?round, "notarized block missing");
-                                resolver.fetch(Request::<B>::Notarized { round }).await;
-                            }
-                        }
-                        Message::Finalization { finalization } => {
-                            // Cache finalization by round
-                            let round = finalization.round();
-                            let commitment = finalization.proposal.payload;
-                            self.cache.put_finalization(round, commitment, finalization.clone()).await;
-
-                            // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                // If found, persist the block
-                                let height = block.height();
-                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
-                                debug!(?round, height, "finalized block stored");
-                            } else {
-                                // Otherwise, fetch the block from the network.
-                                debug!(?round, ?commitment, "finalized block missing");
-                                resolver.fetch(Request::<B>::Block(commitment)).await;
-                            }
-                        }
                         Message::GetBlock { identifier, response } => {
                             match identifier {
                                 BlockID::Commitment(commitment) => {
-                                    let result = self.find_block(&mut buffer, commitment).await;
-                                    let _ = response.send(result);
+                                    let result = self.find_block(&mut shards, commitment).await;
+                                    let _ = response.send(result.map(CodedBlock::into_inner));
                                 }
                                 BlockID::Height(height) => {
                                     let result = self.get_finalized_block(height).await;
-                                    let _ = response.send(result);
+                                    let _ = response.send(result.map(CodedBlock::into_inner));
                                 }
                                 BlockID::Latest => {
                                     let block = match self.get_latest().await {
-                                        Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
+                                        Some((_, commitment)) => self.find_block(&mut shards, commitment).await,
                                         None => None,
                                     };
-                                    let _ = response.send(block);
+                                    let _ = response.send(block.map(CodedBlock::into_inner));
                                 }
                             }
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                let _ = response.send(block);
+                            if let Some(block) = self.find_block(&mut shards, commitment).await {
+                                let _ = response.send(block.into_inner());
                                 continue;
                             }
 
@@ -402,7 +376,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 // If this is a valid view, this request should be fine to keep open
                                 // until resolution or pruning (even if the oneshot is canceled).
                                 debug!(?round, ?commitment, "requested block missing");
-                                resolver.fetch(Request::<B>::Notarized { round }).await;
+                                resolver.fetch(Request::<CodedBlock<B, S>>::Notarized { round }).await;
                             }
 
                             // Register subscriber
@@ -412,16 +386,50 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     entry.get_mut().subscribers.push(response);
                                 }
                                 Entry::Vacant(entry) => {
-                                    let (tx, rx) = oneshot::channel();
-                                    buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                    let aborter = waiters.push(async move {
-                                        (commitment, rx.await.expect("buffer subscriber closed"))
+                                    let rx = shards.subscribe_block(commitment).await;
+                                    let aborter = block_waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed").into_inner())
                                     });
                                     entry.insert(BlockSubscription {
                                         subscribers: vec![response],
                                         _aborter: aborter,
                                     });
                                 }
+                            }
+                        }
+                        Message::Notarization { notarization } => {
+                            tracing::warn!(?notarization, "Received notarization");
+                            let round = notarization.round();
+                            let commitment = notarization.proposal.payload;
+
+                            // Store notarization by round
+                            self.cache.put_notarization(round, commitment, notarization.clone()).await;
+
+                            // Search for block locally, otherwise fetch it remotely
+                            if let Some(block) = self.find_block(&mut shards, commitment).await {
+                                // If found, persist the block
+                                self.cache_block(round, commitment, block).await;
+                            } else {
+                                debug!(?round, "notarized block missing");
+                                resolver.fetch(Request::<CodedBlock<B, S>>::Notarized { round }).await;
+                            }
+                        }
+                        Message::Finalization { finalization } => {
+                            // Cache finalization by round
+                            let round = finalization.round();
+                            let commitment = finalization.proposal.payload;
+                            self.cache.put_finalization(round, commitment, finalization.clone()).await;
+
+                            // Search for block locally, otherwise fetch it remotely
+                            if let Some(block) = self.find_block(&mut shards, commitment).await {
+                                // If found, persist the block
+                                let height = block.height();
+                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
+                                debug!(?round, height, "finalized block stored");
+                            } else {
+                                // Otherwise, fetch the block from the network.
+                                debug!(?round, ?commitment, "finalized block missing");
+                                resolver.fetch(Request::<CodedBlock<B, S>>::Block(commitment)).await;
                             }
                         }
                     }
@@ -438,13 +446,13 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             let block = self.get_finalized_block(height).await;
                             result.send(block).unwrap_or_else(|_| warn!(?height, "Failed to send block to orchestrator"));
                         }
-                        Orchestration::Processed { height, digest } => {
+                        Orchestration::Processed { height, commitment } => {
                             // Update metrics
                             self.processed_height.set(height as i64);
 
-                            // Cancel any outstanding requests (by height and by digest)
-                            resolver.cancel(Request::<B>::Block(digest)).await;
-                            resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
+                            // Cancel any outstanding requests (by height and by commitment)
+                            resolver.cancel(Request::<CodedBlock<B, S>>::Block(commitment)).await;
+                            resolver.retain(Request::<CodedBlock<B, S>>::Finalized { height }.predicate()).await;
 
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -454,13 +462,14 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
                                 // Prune archives
                                 self.cache.prune(prune_round).await;
+                                shards.finalized(commitment).await;
 
                                 // Update the last processed round
                                 let round = finalization.round();
                                 self.last_processed_round = round;
 
                                 // Cancel useless requests
-                                resolver.retain(Request::<B>::Notarized { round }.predicate()).await;
+                                resolver.retain(Request::<CodedBlock<B, S>>::Notarized { round }.predicate()).await;
                             }
                         }
                         Orchestration::Repair { height } => {
@@ -480,14 +489,14 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             // Iterate backwards, repairing blocks as we go.
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
-                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                                if let Some(block) = self.find_block(&mut shards, commitment).await {
                                     let finalization = self.cache.get_finalization_for(commitment).await;
                                     self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
                                 } else {
                                     // Request the next missing block digest
-                                    resolver.fetch(Request::<B>::Block(commitment)).await;
+                                    resolver.fetch(Request::<CodedBlock<B, S>>::Block(commitment)).await;
                                     break;
                                 }
                             }
@@ -500,7 +509,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
                             debug!(gap_start, gap_end, "requesting any finalized blocks");
                             for height in gap_start..gap_end {
-                                resolver.fetch(Request::<B>::Finalized { height }).await;
+                                resolver.fetch(Request::<CodedBlock<B, S>>::Finalized { height }).await;
                             }
                         }
                     }
@@ -516,7 +525,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             match key {
                                 Request::Block(commitment) => {
                                     // Check for block locally
-                                    let Some(block) = self.find_block(&mut buffer, commitment).await else {
+                                    let Some(block) = self.find_block(&mut shards, commitment).await else {
                                         debug!(?commitment, "block missing on request");
                                         continue;
                                     };
@@ -547,8 +556,8 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
                                     // Get block
                                     let commitment = notarization.proposal.payload;
-                                    let Some(block) = self.find_block(&mut buffer, commitment).await else {
-                                        debug!(?commitment, "block missing on request");
+                                    let Some(block) = self.find_block(&mut shards, commitment).await else {
+                                        debug!(?commitment, "notarized block missing on request");
                                         continue;
                                     };
                                     let _ = response.send((notarization, block).encode().into());
@@ -559,7 +568,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             match key {
                                 Request::Block(commitment) => {
                                     // Parse block
-                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
+                                    let Ok(block) = CodedBlock::<B, S>::decode_cfg(value.as_ref(), &self.codec_config) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -579,7 +588,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Finalized { height } => {
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, CodedBlock<B, S>)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -600,7 +609,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Notarized { round } => {
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, CodedBlock<B, S>)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -645,7 +654,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given commitment with the provided block.
-    async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
+    async fn notify_block_subscribers(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
             for subscriber in bs.subscribers.drain(..) {
                 let _ = subscriber.send(block.clone());
@@ -655,22 +664,22 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
     // -------------------- Prunable Storage --------------------
 
-    /// Add a verified block to the prunable archive.
-    async fn cache_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
-        self.notify_subscribers(commitment, &block).await;
-        self.cache.put_verified(round, commitment, block).await;
-    }
-
     /// Add a notarized block to the prunable archive.
-    async fn cache_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
-        self.notify_subscribers(commitment, &block).await;
+    async fn cache_block(
+        &mut self,
+        round: Round,
+        commitment: B::Commitment,
+        block: CodedBlock<B, S>,
+    ) {
+        self.notify_block_subscribers(commitment, block.inner())
+            .await;
         self.cache.put_block(round, commitment, block).await;
     }
 
     // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
-    async fn get_finalized_block(&self, height: u64) -> Option<B> {
+    async fn get_finalized_block(&self, height: u64) -> Option<CodedBlock<B, S>> {
         match self.finalized_blocks.get(ArchiveID::Index(height)).await {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
@@ -700,11 +709,12 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         &mut self,
         height: u64,
         commitment: B::Commitment,
-        block: B,
+        block: CodedBlock<B, S>,
         finalization: Option<Finalization<V, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.notify_subscribers(commitment, &block).await;
+        self.notify_block_subscribers(commitment, block.inner())
+            .await;
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
@@ -758,14 +768,21 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     /// Looks for a block anywhere in local storage.
     async fn find_block<P: PublicKey>(
         &mut self,
-        buffer: &mut buffered::Mailbox<P, B>,
+        buffer: &mut coding::Mailbox<V, B, S, P>,
         commitment: B::Commitment,
-    ) -> Option<B> {
-        // Check buffer.
-        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
+    ) -> Option<CodedBlock<B, S>> {
+        // Check shard mailbox.
+        if let Some(block) = buffer
+            .try_reconstruct(commitment)
+            .await
+            .await
+            .expect("mailbox closed")
+            .expect("reconstruction error not yet handled")
+        {
             return Some(block);
         }
-        // Check verified / notarized blocks via cache manager.
+
+        // Check notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block(commitment).await {
             return Some(block);
         }
