@@ -44,9 +44,8 @@ pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 ///
 /// # Limits
 ///
-/// While [Location] can technically hold any `u64` value, only values up to [`MAX_LOCATION`]
-/// can be safely converted to [Position]. Values exceeding this limit will cause the
-/// conversion to panic due to overflow in the underlying arithmetic.
+/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
+/// can be safely converted to [Position]. Values beyond this are considered invalid.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
 
@@ -62,8 +61,7 @@ impl Location {
 
     /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
     ///
-    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [MAX_LOCATION] cannot be
-    /// safely converted to [Position] and will cause panics in MMR operations.
+    /// Returns `None` if `loc > MAX_LOCATION`.
     ///
     /// # Examples
     ///
@@ -125,7 +123,7 @@ impl Location {
         }
     }
 
-    /// Return `self + rhs` saturating at [`MAX_LOCATION`].
+    /// Return `self + rhs` saturating at [MAX_LOCATION].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
