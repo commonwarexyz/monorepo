@@ -1634,7 +1634,7 @@ mod tests {
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child that completes immediately
-                let handle = context.supervised().spawn(|_| async {});
+                let handle = context.spawn(|_| async {});
 
                 // Store child handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1671,7 +1671,7 @@ mod tests {
             let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child task that hangs forever, should be aborted when parent aborts
-                let handle = context.supervised().spawn(|_| pending::<()>());
+                let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1706,7 +1706,7 @@ mod tests {
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child task that hangs forever, should be aborted when parent completes
-                let handle = context.supervised().spawn(|_| pending::<()>());
+                let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1750,21 +1750,16 @@ mod tests {
                     for _ in 0..3 {
                         let handles2 = handles.clone();
                         let mut initialized_tx2 = initialized_tx.clone();
-                        let handle =
-                            context
-                                .clone()
-                                .supervised()
-                                .spawn(move |context| async move {
-                                    for _ in 0..2 {
-                                        let handle =
-                                            context.clone().supervised().spawn(|_| async {
-                                                pending::<()>().await;
-                                            });
-                                        handles2.lock().unwrap().push(handle);
-                                        initialized_tx2.send(()).await.unwrap();
-                                    }
+                        let handle = context.clone().spawn(move |context| async move {
+                            for _ in 0..2 {
+                                let handle = context.clone().spawn(|_| async {
                                     pending::<()>().await;
                                 });
+                                handles2.lock().unwrap().push(handle);
+                                initialized_tx2.send(()).await.unwrap();
+                            }
+                            pending::<()>().await;
+                        });
 
                         handles.lock().unwrap().push(handle);
                         initialized_tx.send(()).await.unwrap();
@@ -1856,7 +1851,7 @@ mod tests {
             let cloned_context = context.clone();
             let parent = cloned_context.spawn(move |context| async move {
                 // Spawn a child task
-                context.supervised().spawn(|_| async move {
+                context.spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     child_complete_rx.await.unwrap();
                 });
@@ -1867,7 +1862,7 @@ mod tests {
 
             // Use the original context that was previously cloned and spawn a
             // task. This task should NOT inherit the child relationship
-            context.spawn(move |_| async move {
+            context.detached().spawn(move |_| async move {
                 cloned_task_started_tx.send(()).unwrap();
                 cloned_task_complete_rx.await.unwrap();
             });
