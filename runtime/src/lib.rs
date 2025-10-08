@@ -1862,7 +1862,7 @@ mod tests {
 
             // Use the original context that was previously cloned and spawn a
             // task. This task should NOT inherit the child relationship
-            context.detached().spawn(move |_| async move {
+            context.spawn(move |_| async move {
                 cloned_task_started_tx.send(()).unwrap();
                 cloned_task_complete_rx.await.unwrap();
             });
