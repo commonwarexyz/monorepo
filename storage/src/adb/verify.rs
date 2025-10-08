@@ -80,8 +80,7 @@ pub fn digests_required_for_proof<D: Digest>(
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - op_count exceeds MAX_LOCATION
+/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` > [crate::mmr::MAX_LOCATION].
 pub fn create_proof<D: Digest>(
     op_count: Location,
     digests: Vec<D>,
@@ -293,7 +292,7 @@ mod tests {
             assert!(!nodes.is_empty());
 
             // Verify the extracted nodes match what we expect from the proof
-            let start_pos = Position::try_from(start_loc).expect("test location valid");
+            let start_pos = Position::try_from(start_loc).unwrap();
             let expected_pinned: Vec<Position> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
@@ -369,8 +368,7 @@ mod tests {
             // Get required digests (note: range is exclusive, so end_loc + 1)
             let end_plus_one = end_loc.checked_add(1).expect("test location in bounds");
             let required_positions =
-                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_plus_one)
-                    .expect("test locations valid");
+                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_plus_one).unwrap();
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -382,10 +380,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(OP_COUNT, digests.clone()).expect("test locations valid");
-            assert_eq!(
-                proof.size,
-                Position::try_from(OP_COUNT).expect("test location valid")
-            );
+            assert_eq!(proof.size, Position::try_from(OP_COUNT).unwrap());
             assert_eq!(proof.digests.len(), digests.len());
 
             assert!(verify_proof(

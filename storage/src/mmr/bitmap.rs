@@ -359,9 +359,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     #[cfg(test)]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         let leaf_loc = Location::new_unchecked(Self::chunk_loc(bit_offset) as u64);
-        Position::try_from(leaf_loc)
-            .expect("test location valid")
-            .into()
+        Position::try_from(leaf_loc).unwrap().into()
     }
 
     #[inline]

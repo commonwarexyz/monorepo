@@ -1486,7 +1486,7 @@ pub(super) mod test {
                 .unwrap();
             assert_eq!(
                 historical_proof.size,
-                Position::try_from(original_op_count).expect("test location valid")
+                Position::try_from(original_op_count).unwrap()
             );
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
@@ -1526,7 +1526,7 @@ pub(super) mod test {
                 .unwrap();
             assert_eq!(
                 single_proof.size,
-                Position::try_from(Location::new_unchecked(1)).expect("test location valid")
+                Position::try_from(Location::new_unchecked(1)).unwrap()
             );
             assert_eq!(single_ops.len(), 1);
 
@@ -1568,7 +1568,7 @@ pub(super) mod test {
                 .unwrap();
             assert_eq!(
                 min_proof.size,
-                Position::try_from(Location::new_unchecked(3)).expect("test location valid")
+                Position::try_from(Location::new_unchecked(3)).unwrap()
             );
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
@@ -1599,10 +1599,7 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(
-                    historical_proof.size,
-                    Position::try_from(end_loc).expect("test location valid")
-                );
+                assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
@@ -1644,8 +1641,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let historical_op_count = Location::new_unchecked(5);
-            let historical_mmr_size =
-                Position::try_from(historical_op_count).expect("test location valid");
+            let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
 
             let (proof, ops) = db
                 .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))

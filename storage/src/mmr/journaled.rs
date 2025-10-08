@@ -1007,8 +1007,7 @@ mod tests {
                     mmr.sync(&mut hasher).await.unwrap();
                 }
             }
-            let leaf_pos =
-                Position::try_from(Location::new_unchecked(50)).expect("test location valid");
+            let leaf_pos = Position::try_from(Location::new_unchecked(50)).unwrap();
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();
