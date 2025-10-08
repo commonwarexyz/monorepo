@@ -470,54 +470,6 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
-
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.spawn_config.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
-
-        // Set up the task
-        let executor = self.executor.clone();
-        let dedicated = self.spawn_config.is_dedicated();
-        move |f: F| {
-            // Spawn the task
-            let (f, handle) =
-                Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
-            if dedicated {
-                let runtime = executor.runtime.handle().clone();
-                thread::spawn(move || {
-                    runtime.block_on(f);
-                });
-            } else {
-                executor.runtime.spawn(f);
-            }
-
-            // Register this child with the parent
-            if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-                parent_children.lock().unwrap().push(aborter);
-            }
-
-            handle
-        }
-    }
-
     fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
@@ -542,35 +494,6 @@ impl crate::Spawner for Context {
             executor.runtime.spawn_blocking(f);
         }
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        let dedicated = self.spawn_config.is_dedicated();
-
-        // Spawn the blocking task
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
-
-            if dedicated {
-                thread::spawn(f);
-            } else {
-                executor.runtime.spawn_blocking(f);
-            }
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {

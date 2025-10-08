@@ -905,45 +905,6 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, future);
-
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.spawn_config.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
-
-        // Set up the task
-        let executor = self.executor();
-        move |f: F| {
-            // Spawn the task
-            let (f, handle) = Handle::init_future(f, metric, executor.panicker.clone(), children);
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-
-            // Register this child with the parent
-            if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-                parent_children.lock().unwrap().push(aborter);
-            }
-
-            handle
-        }
-    }
-
     fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
@@ -966,30 +927,6 @@ impl crate::Spawner for Context {
         let f = async move { f() };
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking);
-
-        // Set up the task
-        let executor = self.executor();
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
-
-            // Spawn the task
-            let f = async move { f() };
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
