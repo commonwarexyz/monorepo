@@ -338,7 +338,6 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
-            spawned: false,
             executor: executor.clone(),
             network,
             children: Arc::new(Mutex::new(Vec::new())),
@@ -370,9 +369,9 @@ cfg_if::cfg_if! {
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
+#[derive(Clone)]
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -384,20 +383,6 @@ impl Context {
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
-    }
-}
-
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            spawned: false,
-            spawn_config: self.spawn_config,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            children: self.children.clone(),
-        }
     }
 }
 
@@ -428,9 +413,6 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (_, metric) = spawn_metrics!(self, future);
 
@@ -475,9 +457,6 @@ impl crate::Spawner for Context {
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (_, metric) = spawn_metrics!(self, blocking);
 
@@ -539,12 +518,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
-            spawn_config: self.spawn_config,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            children: self.children.clone(),
+            ..self.clone()
         }
     }
 

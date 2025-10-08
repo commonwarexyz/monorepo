@@ -696,9 +696,9 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
+#[derive(Clone)]
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -746,7 +746,6 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -802,7 +801,6 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -827,20 +825,6 @@ impl Context {
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
-    }
-}
-
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            spawned: false,
-            spawn_config: self.spawn_config,
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            children: self.children.clone(),
-        }
     }
 }
 
@@ -871,9 +855,6 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (label, metric) = spawn_metrics!(self, future);
 
@@ -910,9 +891,6 @@ impl crate::Spawner for Context {
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (label, metric) = spawn_metrics!(self, blocking);
 
@@ -979,12 +957,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
-            spawn_config: self.spawn_config,
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            children: self.children.clone(),
+            ..self.clone()
         }
     }
 
