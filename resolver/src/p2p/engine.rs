@@ -13,6 +13,7 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
