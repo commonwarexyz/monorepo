@@ -21,8 +21,8 @@ mod handle;
 pub use handle::Handle;
 pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 
-mod context_cell;
-pub use context_cell::ContextCell;
+mod cell;
+pub use cell::Cell as ContextCell;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
