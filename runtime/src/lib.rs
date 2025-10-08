@@ -1809,7 +1809,7 @@ mod tests {
                 });
 
                 // Spawn an independent sibling task
-                context.detached().spawn(move |_| async move {
+                context.spawn(move |_| async move {
                     sibling_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     sibling_complete_rx.await.unwrap();
