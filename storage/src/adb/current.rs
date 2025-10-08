@@ -211,7 +211,10 @@ impl<
             steps: 0,
             hasher: Standard::<H>::new(),
         };
-        let last_commit_loc = status.bit_count().checked_sub(1).map(Location::new_unchecked);
+        let last_commit_loc = status
+            .bit_count()
+            .checked_sub(1)
+            .map(Location::new_unchecked);
 
         Ok(Self {
             any,

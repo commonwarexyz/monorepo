@@ -126,7 +126,9 @@ where
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
             if size > range.end {
-                return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(size)));
+                return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(
+                    size,
+                )));
             }
 
             Ok(journal::Journal::new(

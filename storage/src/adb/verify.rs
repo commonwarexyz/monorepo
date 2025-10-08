@@ -73,7 +73,7 @@ pub fn digests_required_for_proof<D: Digest>(
     if !op_count.is_valid() {
         return Err(crate::mmr::Error::LocationOverflow(op_count));
     }
-    let mmr_size = Position::from(op_count);
+    let mmr_size = Position::try_from(op_count)?;
     proof::nodes_required_for_range_proof(mmr_size, range)
 }
 
@@ -89,11 +89,8 @@ pub fn create_proof<D: Digest>(
     op_count: Location,
     digests: Vec<D>,
 ) -> Result<Proof<D>, crate::mmr::Error> {
-    if !op_count.is_valid() {
-        return Err(crate::mmr::Error::LocationOverflow(op_count));
-    }
     Ok(Proof::<D> {
-        size: Position::from(op_count),
+        size: Position::try_from(op_count)?,
         digests,
     })
 }
@@ -299,7 +296,7 @@ mod tests {
             assert!(!nodes.is_empty());
 
             // Verify the extracted nodes match what we expect from the proof
-            let start_pos = Position::from(start_loc);
+            let start_pos = Position::try_from(start_loc).expect("test location valid");
             let expected_pinned: Vec<Position> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
@@ -388,7 +385,10 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(OP_COUNT, digests.clone()).expect("test locations valid");
-            assert_eq!(proof.size, Position::from(OP_COUNT));
+            assert_eq!(
+                proof.size,
+                Position::try_from(OP_COUNT).expect("test location valid")
+            );
             assert_eq!(proof.digests.len(), digests.len());
 
             assert!(verify_proof(

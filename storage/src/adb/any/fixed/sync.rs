@@ -70,7 +70,8 @@ where
                 },
                 // The last node of an MMR with `range.end` leaves is at the position
                 // right before where the next leaf (at location `range.end`) goes.
-                range: Position::from(range.start)..Position::from(range.end + 1),
+                range: Position::try_from(range.start).expect("valid location")
+                    ..Position::try_from(range.end + 1).expect("valid location"),
                 pinned_nodes,
             },
         )
@@ -183,7 +184,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         journal.prune(range.start).await?;
         journal
     } else {
-        return Err(adb::Error::UnexpectedData(Location::new_unchecked(journal_size)));
+        return Err(adb::Error::UnexpectedData(Location::new_unchecked(
+            journal_size,
+        )));
     };
     let journal_size = journal.size().await?;
     assert!(journal_size <= range.end);
@@ -1388,7 +1391,7 @@ mod tests {
             let upper_bound = source_db.op_count();
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = nodes_to_pin(Position::from(lower_bound));
+            let pinned_nodes_pos = nodes_to_pin(Position::try_from(lower_bound).unwrap());
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
@@ -1507,7 +1510,9 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = nodes_to_pin(Position::from(Location::new_unchecked(lower_bound)))
+                let pinned_nodes = nodes_to_pin(
+                    Position::try_from(Location::new_unchecked(lower_bound)).expect("valid location"),
+                )
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1528,7 +1533,10 @@ mod tests {
 
                 // Verify database state
                 assert_eq!(db.log.size().await.unwrap(), upper_bound);
-                assert_eq!(db.mmr.size(), Position::from(Location::new_unchecked(upper_bound)));
+                assert_eq!(
+                    db.mmr.size(),
+                    Position::try_from(Location::new_unchecked(upper_bound)).expect("valid location")
+                );
                 assert_eq!(db.op_count(), upper_bound);
                 assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(lower_bound));
 
@@ -1586,9 +1594,10 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes = nodes_to_pin(Position::from(sync_db_original_size))
-                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                .collect::<Vec<_>>();
+            let pinned_nodes =
+                nodes_to_pin(Position::try_from(sync_db_original_size).expect("valid location"))
+                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                    .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();
@@ -1680,7 +1689,7 @@ mod tests {
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
-                nodes_to_pin(Position::from(db.inactivity_floor_loc))
+                nodes_to_pin(Position::try_from(db.inactivity_floor_loc).expect("valid location"))
                     .map(|pos| db.mmr.get_node(pos)),
             )
             .await;

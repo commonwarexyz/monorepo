@@ -264,7 +264,8 @@ mod tests {
             .map(Location::new_unchecked)
             .collect();
         let result = find_next(
-            Location::new_unchecked(test_case.lower_bound)..Location::new_unchecked(test_case.upper_bound),
+            Location::new_unchecked(test_case.lower_bound)
+                ..Location::new_unchecked(test_case.upper_bound),
             &fetched_ops,
             &outstanding_requests,
             NonZeroU64::new(test_case.fetch_batch_size).unwrap(),
@@ -273,7 +274,8 @@ mod tests {
             result,
             test_case
                 .expected
-                .map(|range| Location::new_unchecked(range.start)..Location::new_unchecked(range.end))
+                .map(|range| Location::new_unchecked(range.start)
+                    ..Location::new_unchecked(range.end))
         );
     }
 }

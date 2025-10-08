@@ -16,32 +16,6 @@ impl Position {
         Self(pos)
     }
 
-    /// Attempts to convert a [Location] to a [Position], returning `None` if overflow would occur.
-    ///
-    /// This is a checked alternative to [Position::from] which panics on overflow.
-    ///
-    /// Note: We cannot use `TryFrom<Location>` because we already have `impl From<Location> for Position`,
-    /// and the standard library provides a blanket `impl<T, U> TryFrom<U> for T where U: Into<T>` that
-    /// conflicts with any manual `TryFrom` implementation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
-    ///
-    /// let valid_loc = Location::new(100);
-    /// assert!(Position::checked_from_location(valid_loc).is_some());
-    ///
-    /// let invalid_loc = Location::new(MAX_LOCATION + 1);
-    /// assert!(Position::checked_from_location(invalid_loc).is_none());
-    /// ```
-    #[inline]
-    pub fn checked_from_location(loc: Location) -> Option<Self> {
-        let loc_val = *loc;
-        let doubled = loc_val.checked_mul(2)?;
-        Some(Self(doubled - loc_val.count_ones() as u64))
-    }
-
     /// Return the underlying `u64` value.
     #[inline]
     pub const fn as_u64(self) -> u64 {
@@ -119,34 +93,39 @@ impl From<Position> for u64 {
     }
 }
 
-/// Returns the position of the leaf at the given location in an MMR.
+/// Try to convert a [Location] to a [Position].
 ///
-/// # Panics
-///
-/// Panics if `loc` > [super::MAX_LOCATION].
-///
-/// Use [Position::checked_from_location] for a non-panicking alternative that returns `None`
-/// on overflow.
+/// Returns an error if `loc` > [super::MAX_LOCATION].
 ///
 /// # Examples
 ///
 /// ```
-/// use commonware_storage::mmr::{Location, Position};
+/// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
+/// use core::convert::TryFrom;
 ///
-/// let loc = Location::new(5);
-/// let pos = Position::from(loc);
+/// let loc = Location::new(5).unwrap();
+/// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
+///
+/// // Invalid locations return error  
+/// assert!(Location::new(MAX_LOCATION + 1).is_none());
 /// ```
-impl From<Location> for Position {
+impl TryFrom<Location> for Position {
+    type Error = super::Error;
+
     #[inline]
-    fn from(loc: Location) -> Self {
+    fn try_from(loc: Location) -> Result<Self, Self::Error> {
+        if !loc.is_valid() {
+            return Err(super::Error::LocationOverflow(loc));
+        }
         // This will never underflow since 2*n >= count_ones(n).
-        let loc = *loc;
-        Self(
-            loc.checked_mul(2)
-                .expect("location overflow: exceeds MAX_LOCATION")
-                - loc.count_ones() as u64,
-        )
+        let loc_val = *loc;
+        Ok(Self(
+            loc_val
+                .checked_mul(2)
+                .expect("should not overflow for valid location")
+                - loc_val.count_ones() as u64,
+        ))
     }
 }
 
@@ -262,7 +241,6 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
-    use crate::mmr::MAX_LOCATION;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -286,7 +264,7 @@ mod tests {
             (Location::new_unchecked(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
-            let pos = Position::from(*loc);
+            let pos = Position::try_from(*loc).expect("test location valid");
             assert_eq!(pos, *expected_pos);
         }
     }
@@ -369,36 +347,5 @@ mod tests {
         // Test sub assignment
         pos -= 3;
         assert_eq!(pos, 12u64);
-    }
-
-    #[test]
-    fn test_checked_from_location_success() {
-        // Normal conversions should work
-        let cases = vec![
-            (Location::new_unchecked(0), Position::new(0)),
-            (Location::new_unchecked(1), Position::new(1)),
-            (Location::new_unchecked(100), Position::from(Location::new_unchecked(100))),
-        ];
-
-        for (loc, expected) in cases {
-            let pos = Position::checked_from_location(loc).expect("should succeed");
-            assert_eq!(pos, expected);
-        }
-
-        // MAX_LOCATION should work
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-        let pos = Position::checked_from_location(max_loc).expect("MAX_LOCATION should succeed");
-        assert_eq!(*pos, u64::MAX - 64);
-    }
-
-    #[test]
-    fn test_checked_from_location_overflow() {
-        // MAX_LOCATION + 1 should fail
-        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
-        assert!(Position::checked_from_location(over_loc).is_none());
-
-        // u64::MAX should fail
-        let max_loc = Location::new_unchecked(u64::MAX);
-        assert!(Position::checked_from_location(max_loc).is_none());
     }
 }

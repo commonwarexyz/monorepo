@@ -30,6 +30,8 @@ pub enum ReconstructionError {
     MissingDigests,
     #[error("extra digests in proof")]
     ExtraDigests,
+    #[error("start location is out of bounds")]
+    InvalidStartLoc,
     #[error("end location is out of bounds")]
     InvalidEndLoc,
     #[error("missing elements")]
@@ -208,9 +210,12 @@ impl<D: Digest> Proof<D> {
         let mut nodes_required = BTreeMap::new();
 
         for (_, loc) in elements {
-            if Position::from(*loc) >= self.size {
-                // Since `elements` may be untrusted input, verify they are not malformed before
-                // using them.
+            // Since `elements` may be untrusted input, verify they are not malformed before
+            // using them.
+            let Ok(pos) = Position::try_from(*loc) else {
+                return false;
+            };
+            if pos >= self.size {
                 return false;
             }
             let Ok(required) = nodes_required_for_range_proof(self.size, *loc..(*loc + 1)) else {
@@ -282,7 +287,7 @@ impl<D: Digest> Proof<D> {
         range: std::ops::Range<Location>,
     ) -> Result<Vec<D>, Error> {
         // Get the positions of all nodes that should be pinned.
-        let start_pos = Position::from(range.start);
+        let start_pos = Position::try_from(range.start)?;
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
@@ -403,12 +408,13 @@ impl<D: Digest> Proof<D> {
             }
             return Err(ReconstructionError::MissingElements);
         }
-        let start_element_pos = Position::from(start_loc);
+        let start_element_pos =
+            Position::try_from(start_loc).map_err(|_| ReconstructionError::InvalidStartLoc)?;
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
             let end_loc = start_loc.checked_add(elements.len() as u64 - 1).unwrap();
-            Position::from(end_loc)
+            Position::try_from(end_loc).map_err(|_| ReconstructionError::InvalidEndLoc)?
         };
         if end_element_pos >= self.size {
             return Err(ReconstructionError::InvalidEndLoc);
@@ -491,12 +497,12 @@ pub(crate) fn nodes_required_for_range_proof(
         return Err(Error::LocationOverflow(range.end));
     }
 
-    let start_element_pos = Position::from(range.start);
+    let start_element_pos = Position::try_from(range.start)?;
     let end_minus_one = range
         .end
         .checked_sub(1)
         .expect("can't underflow because range is non-empty");
-    let end_element_pos = Position::from(end_minus_one);
+    let end_element_pos = Position::try_from(end_minus_one)?;
     if end_element_pos >= size {
         return Err(Error::RangeOutOfBounds(range.end));
     }
@@ -995,7 +1001,7 @@ mod tests {
             for loc in 0..elements.len() {
                 let loc = Location::new_unchecked(loc as u64);
                 let proof = mmr.proof(loc);
-                if Position::from(loc) < Position::new(i) {
+                if Position::try_from(loc).unwrap() < Position::new(i) {
                     continue;
                 }
                 assert!(proof.is_ok());
@@ -1021,14 +1027,14 @@ mod tests {
         }
 
         // prune up to the first peak
-        const PRUNE_POS: u64 = 62;
-        mmr.prune_to_pos(Position::new(PRUNE_POS));
+        const PRUNE_POS: Position = Position::new(62);
+        mmr.prune_to_pos(PRUNE_POS);
         assert_eq!(mmr.oldest_retained_pos().unwrap(), PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root(&mut hasher);
         for i in 0..elements.len() - 1 {
-            if Position::from(Location::new_unchecked(i as u64)) < Position::new(PRUNE_POS) {
+            if Position::try_from(Location::new_unchecked(i as u64)).unwrap() < PRUNE_POS {
                 continue;
             }
             for j in (i + 2)..elements.len() {
@@ -1189,8 +1195,9 @@ mod tests {
                         );
 
                     let pinned_nodes = extract_result.unwrap();
-                    let expected_pinned: Vec<Position> =
-                        nodes_to_pin(Position::from(Location::new_unchecked(leaf))).collect();
+                    let leaf_loc = Location::new_unchecked(leaf);
+                    let leaf_pos = Position::try_from(leaf_loc).unwrap();
+                    let expected_pinned: Vec<Position> = nodes_to_pin(leaf_pos).collect();
 
                     // Verify count matches expected
                     assert_eq!(

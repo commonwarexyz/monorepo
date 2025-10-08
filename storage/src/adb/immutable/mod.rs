@@ -209,7 +209,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                range: Position::from(cfg.range.start)..Position::from(cfg.range.end + 1),
+                range: Position::try_from(cfg.range.start)?
+                    ..Position::try_from(cfg.range.end.saturating_add(1))?,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -307,7 +308,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
-                            log_size = Location::new_unchecked(section * log_items_per_section.get());
+                            log_size =
+                                Location::new_unchecked(section * log_items_per_section.get());
                             oldest_retained_loc = Some(log_size);
                         }
 
@@ -423,7 +425,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(*self.oldest_retained_loc).await?;
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
+            .prune_to_pos(
+                &mut self.hasher,
+                Position::try_from(self.oldest_retained_loc)?,
+            )
             .await?;
         Ok(())
     }
@@ -597,7 +602,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let mmr_size = Position::from(op_count);
+        let mmr_size = Position::try_from(op_count)?;
 
         let proof = self
             .mmr
@@ -1124,7 +1129,9 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
-            db.prune(Location::new_unchecked(ELEMENTS / 2)).await.unwrap();
+            db.prune(Location::new_unchecked(ELEMENTS / 2))
+                .await
+                .unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
@@ -1181,7 +1188,10 @@ pub(super) mod test {
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
             let proof_result = db
-                .proof(Location::new_unchecked(pruned_pos), NZU64!(pruned_pos + 100))
+                .proof(
+                    Location::new_unchecked(pruned_pos),
+                    NZU64!(pruned_pos + 100),
+                )
                 .await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 

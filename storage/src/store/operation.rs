@@ -356,7 +356,10 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
             COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(metadata, Location::new_unchecked(floor_loc.into())))
+                Ok(Self::CommitFloor(
+                    metadata,
+                    Location::new_unchecked(floor_loc.into()),
+                ))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }

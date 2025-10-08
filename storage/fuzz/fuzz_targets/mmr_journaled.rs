@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                     mmr.process_updates(&mut hasher);
                     let location = location % mmr.leaves().as_u64();
                     let location = Location::new(location).unwrap();
-                    let position = Position::from(location);
+                    let position = Position::try_from(location).unwrap();
 
                     if position > mmr.size() || position < mmr.pruned_to_pos() {
                         continue;
@@ -220,7 +220,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let range = Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
-                    let start_pos = Position::from(range.start);
+                    let start_pos = Position::try_from(range.start).unwrap();
 
                     if start_loc >= mmr.leaves()
                         || end_loc >= mmr.leaves()

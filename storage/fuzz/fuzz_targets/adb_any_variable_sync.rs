@@ -228,8 +228,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::GetLoc { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
-                        let loc = Location::new((*loc_offset as u64) % op_count.as_u64())
-                            .unwrap();
+                        let loc = Location::new((*loc_offset as u64) % op_count.as_u64()).unwrap();
                         let _ = db.get_loc(loc).await;
                     }
                 }
@@ -264,8 +263,7 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     if db.op_count() > 0 && !has_uncommitted {
-                        let op_count =
-                            Location::new((*size) % db.op_count().as_u64()).unwrap() + 1;
+                        let op_count = Location::new((*size) % db.op_count().as_u64()).unwrap() + 1;
 
                         if *start_loc >= op_count || op_count > max_ops.get() {
                             continue;

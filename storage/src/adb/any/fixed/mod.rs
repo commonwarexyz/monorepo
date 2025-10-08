@@ -507,7 +507,7 @@ impl<
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
-        let mmr_size = Position::from(op_count);
+        let mmr_size = Position::try_from(op_count)?;
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
@@ -643,11 +643,7 @@ impl<
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         // Validate location can be safely converted to Position
-        if !target_prune_loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(
-                target_prune_loc,
-            )));
-        }
+        let target_prune_pos = Position::try_from(target_prune_loc)?;
 
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if self.mmr.size() == 0 {
@@ -671,7 +667,7 @@ impl<
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::from(target_prune_loc))
+            .prune_to_pos(&mut self.hasher, target_prune_pos)
             .await?;
 
         Ok(())
@@ -1456,7 +1452,8 @@ pub(super) mod test {
                 .historical_proof(original_op_count, Location::new_unchecked(5), max_ops)
                 .await
                 .unwrap();
-            let (regular_proof, regular_ops) = db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
+            let (regular_proof, regular_ops) =
+                db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
 
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1480,7 +1477,10 @@ pub(super) mod test {
                 .historical_proof(original_op_count, Location::new_unchecked(5), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, Position::from(original_op_count));
+            assert_eq!(
+                historical_proof.size,
+                Position::try_from(original_op_count).expect("test location valid")
+            );
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1510,10 +1510,17 @@ pub(super) mod test {
 
             // Test singleton database
             let (single_proof, single_ops) = db
-                .historical_proof(Location::new_unchecked(1), Location::new_unchecked(0), NZU64!(1))
+                .historical_proof(
+                    Location::new_unchecked(1),
+                    Location::new_unchecked(0),
+                    NZU64!(1),
+                )
                 .await
                 .unwrap();
-            assert_eq!(single_proof.size, Position::from(Location::new_unchecked(1)));
+            assert_eq!(
+                single_proof.size,
+                Position::try_from(Location::new_unchecked(1)).expect("test location valid")
+            );
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1533,7 +1540,11 @@ pub(super) mod test {
 
             // Test requesting more operations than available in historical position
             let (_limited_proof, limited_ops) = db
-                .historical_proof(Location::new_unchecked(10), Location::new_unchecked(5), NZU64!(20))
+                .historical_proof(
+                    Location::new_unchecked(10),
+                    Location::new_unchecked(5),
+                    NZU64!(20),
+                )
                 .await
                 .unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
@@ -1541,10 +1552,17 @@ pub(super) mod test {
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db
-                .historical_proof(Location::new_unchecked(3), Location::new_unchecked(0), NZU64!(3))
+                .historical_proof(
+                    Location::new_unchecked(3),
+                    Location::new_unchecked(0),
+                    NZU64!(3),
+                )
                 .await
                 .unwrap();
-            assert_eq!(min_proof.size, Position::from(Location::new_unchecked(3)));
+            assert_eq!(
+                min_proof.size,
+                Position::try_from(Location::new_unchecked(3)).expect("test location valid")
+            );
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1574,7 +1592,10 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, Position::from(end_loc));
+                assert_eq!(
+                    historical_proof.size,
+                    Position::try_from(end_loc).expect("test location valid")
+                );
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
@@ -1615,11 +1636,15 @@ pub(super) mod test {
             apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
 
+            let historical_op_count = Location::new_unchecked(5);
+            let historical_mmr_size =
+                Position::try_from(historical_op_count).expect("test location valid");
+
             let (proof, ops) = db
-                .historical_proof(Location::new_unchecked(5), Location::new_unchecked(1), NZU64!(10))
+                .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(proof.size, Position::from(Location::new_unchecked(5)));
+            assert_eq!(proof.size, historical_mmr_size);
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();

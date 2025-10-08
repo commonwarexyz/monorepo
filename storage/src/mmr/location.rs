@@ -36,25 +36,9 @@ impl Location {
     /// Create a new [Location] from a raw `u64` without validation.
     ///
     /// This is an internal constructor that assumes the value is valid. For creating
-    /// locations from external or untrusted sources, use [Location::new_checked].
-    ///
-    /// # Panics (debug builds only)
-    ///
-    /// In non-test debug builds, panics if `loc > MAX_LOCATION`. This helps catch bugs
-    /// during development. Tests are allowed to create invalid locations for testing purposes.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use commonware_storage::mmr::Location;
-    /// // Internal code with known-valid values
-    /// let loc = Location::new(42);
-    /// assert_eq!(*loc, 42);
-    /// ```
+    /// locations from external or untrusted sources, use [Location::new].
     #[inline]
     pub(crate) const fn new_unchecked(loc: u64) -> Self {
-        #[cfg(all(debug_assertions, not(test)))]
-        debug_assert!(loc <= MAX_LOCATION);
         Self(loc)
     }
 
@@ -68,15 +52,15 @@ impl Location {
     /// ```
     /// use commonware_storage::mmr::{Location, MAX_LOCATION};
     ///
-    /// let loc = Location::new_checked(100).unwrap();
+    /// let loc = Location::new(100).unwrap();
     /// assert_eq!(*loc, 100);
     ///
     /// // Values at MAX_LOCATION are valid
-    /// assert!(Location::new_checked(MAX_LOCATION).is_some());
+    /// assert!(Location::new(MAX_LOCATION).is_some());
     ///
     /// // Values exceeding MAX_LOCATION return None
-    /// assert!(Location::new_checked(MAX_LOCATION + 1).is_none());
-    /// assert!(Location::new_checked(u64::MAX).is_none());
+    /// assert!(Location::new(MAX_LOCATION + 1).is_none());
+    /// assert!(Location::new(u64::MAX).is_none());
     /// ```
     #[inline]
     pub const fn new(loc: u64) -> Option<Self> {
@@ -425,7 +409,9 @@ mod tests {
         assert_eq!(loc.checked_add(5).unwrap(), 15);
 
         // Overflow returns None
-        assert!(Location::new_unchecked(u64::MAX).checked_add(1).is_none());
+        assert!(Location::new_unchecked(MAX_LOCATION)
+            .checked_add(1)
+            .is_none());
 
         // Exceeding MAX_LOCATION returns None
         assert!(Location::new_unchecked(MAX_LOCATION)
@@ -536,11 +522,11 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_for_position() {
+    fn test_is_valid() {
         assert!(Location::new_unchecked(0).is_valid());
         assert!(Location::new_unchecked(1000).is_valid());
         assert!(Location::new_unchecked(MAX_LOCATION).is_valid());
-        assert!(!Location::new_unchecked(MAX_LOCATION + 1).is_valid());
+        assert!(Location::new_unchecked(MAX_LOCATION).is_valid());
         assert!(!Location::new_unchecked(u64::MAX).is_valid());
     }
 
@@ -549,7 +535,7 @@ mod tests {
         // MAX_LOCATION should convert successfully
         let max_loc = Location::new_unchecked(MAX_LOCATION);
         assert!(max_loc.is_valid());
-        let pos = Position::from(max_loc);
+        let pos = Position::try_from(max_loc).expect("test location valid");
         // Verify the position value
         // For MAX_LOCATION = 2^63 - 1, popcount = 63
         // Position = 2 * (2^63 - 1) - 63 = 2^64 - 2 - 63 = u64::MAX - 64
@@ -558,33 +544,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "location overflow: exceeds MAX_LOCATION")]
-    fn test_overflow_location_panics() {
-        use super::Position;
-
-        // MAX_LOCATION + 1 should panic
+    fn test_overflow_location_returns_error() {
+        // MAX_LOCATION + 1 should return error
         let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
-        let _ = Position::from(over_loc);
-    }
+        assert!(Position::try_from(over_loc).is_err());
 
-    #[test]
-    fn test_checked_from_location() {
-        use super::Position;
-
-        // Valid conversion
-        let valid_loc = Location::new_unchecked(1000);
-        assert!(Position::checked_from_location(valid_loc).is_some());
-
-        // MAX_LOCATION should succeed
-        let max_loc = Location::new_unchecked(MAX_LOCATION);
-        assert!(Position::checked_from_location(max_loc).is_some());
-
-        // Over MAX_LOCATION should fail
-        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
-        assert!(Position::checked_from_location(over_loc).is_none());
-
-        // u64::MAX should fail
-        let max_u64_loc = Location::new_unchecked(u64::MAX);
-        assert!(Position::checked_from_location(max_u64_loc).is_none());
+        // Verify the error message
+        match Position::try_from(over_loc) {
+            Err(crate::mmr::Error::LocationOverflow(loc)) => {
+                assert_eq!(loc, over_loc);
+            }
+            _ => panic!("expected LocationOverflow error"),
+        }
     }
 }

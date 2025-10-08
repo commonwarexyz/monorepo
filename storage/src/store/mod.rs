@@ -377,7 +377,8 @@ where
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
-        self.oldest_retained_loc = Location::new_unchecked(section_with_target * self.log_items_per_section);
+        self.oldest_retained_loc =
+            Location::new_unchecked(section_with_target * self.log_items_per_section);
         debug!(
             log_size = ?self.log_size,
             oldest_retained_loc = ?self.oldest_retained_loc,
@@ -493,7 +494,8 @@ where
                     }
                     Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
-                            self.log_size = Location::new_unchecked(section * self.log_items_per_section);
+                            self.log_size =
+                                Location::new_unchecked(section * self.log_items_per_section);
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }

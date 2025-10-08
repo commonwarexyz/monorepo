@@ -1133,7 +1133,8 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos = Position::from(Location::new_unchecked(100));
+            let leaf_pos =
+                Position::try_from(Location::new_unchecked(100)).expect("test location valid");
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());

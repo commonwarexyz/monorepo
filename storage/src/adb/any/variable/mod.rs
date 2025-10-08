@@ -237,7 +237,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
-                            self.log_size = Location::new_unchecked(section * self.log_items_per_section);
+                            self.log_size =
+                                Location::new_unchecked(section * self.log_items_per_section);
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
@@ -629,7 +630,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         assert!(start_loc < op_count);
 
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let mmr_size = Position::from(op_count);
+        let mmr_size = Position::try_from(op_count)?;
 
         let proof = self
             .mmr
@@ -777,11 +778,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         // Validate location can be safely converted to Position
-        if !target_prune_loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(
-                target_prune_loc,
-            )));
-        }
+        let target_prune_pos = Position::try_from(target_prune_loc)?;
 
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if target_prune_loc <= self.oldest_retained_loc {
@@ -807,7 +804,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
-        self.oldest_retained_loc = Location::new_unchecked(section_with_target * self.log_items_per_section);
+        self.oldest_retained_loc =
+            Location::new_unchecked(section_with_target * self.log_items_per_section);
 
         debug!(
             log_size = ?self.log_size,
@@ -821,7 +819,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 .prune(*self.oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
-                .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
+                .prune_to_pos(&mut self.hasher, target_prune_pos)
                 .map_err(Error::Mmr),
         )?;
 
@@ -981,7 +979,10 @@ pub(super) mod test {
             ));
 
             // Single op proof should verify.
-            let (proof, ops) = db.proof(Location::new_unchecked(0), NZU64!(1)).await.unwrap();
+            let (proof, ops) = db
+                .proof(Location::new_unchecked(0), NZU64!(1))
+                .await
+                .unwrap();
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
@@ -994,7 +995,11 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             // Historical proof from larger db should match proof from smaller db.
             let (proof2, ops2) = db
-                .historical_proof(Location::new_unchecked(1), Location::new_unchecked(0), NZU64!(1))
+                .historical_proof(
+                    Location::new_unchecked(1),
+                    Location::new_unchecked(0),
+                    NZU64!(1),
+                )
                 .await
                 .unwrap();
             assert_eq!(proof, proof2);
@@ -1185,7 +1190,10 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), 1477);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new_unchecked(0)); // no pruning yet
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(0)
+            ); // no pruning yet
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
@@ -1194,7 +1202,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1478));
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new_unchecked(1477));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1241,7 +1252,10 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for loc in *start_loc..*end_loc {
-                let (proof, log) = db.proof(Location::new_unchecked(loc), max_ops).await.unwrap();
+                let (proof, log) = db
+                    .proof(Location::new_unchecked(loc), max_ops)
+                    .await
+                    .unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
@@ -1414,7 +1428,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1480));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new_unchecked(1477));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
             db.close().await.unwrap();
 
@@ -1427,7 +1444,10 @@ pub(super) mod test {
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1480));
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new_unchecked(1477));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
