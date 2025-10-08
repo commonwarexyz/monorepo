@@ -6,20 +6,38 @@ use core::{
 };
 use thiserror::Error;
 
-/// Maximum valid [Location] value that can be safely converted to a [Position].
+/// Maximum valid [Location] value that can exist in a valid MMR.
 ///
-/// This limit exists because converting `Location` to `Position` requires multiplying by 2,
-/// which would overflow for values larger than this. The formula `Position = 2L - popcount(L)`
-/// means the maximum safe location is the largest value where `2L` fits in a u64.
+/// This limit exists because the total MMR size (number of nodes) must be representable in a u64
+/// with at least one leading zero bit for validity checking. The MMR size for N leaves is:
 ///
-/// For `Location = 2^63 - 1 = 0x7FFF_FFFF_FFFF_FFFF`:
-/// - `2 * Location = 2^64 - 2 = u64::MAX - 1` ✓ (fits in u64)
-/// - `popcount = 63`
-/// - `Position = (2^64 - 2) - 63 = u64::MAX - 64`
+/// ```text
+/// MMR_size = 2*N - popcount(N)
+/// ```
 ///
-/// For `Location = 2^63 = 0x8000_0000_0000_0000`:
-/// - `2 * Location = 2^64` ✗ (overflow)
-pub const MAX_LOCATION: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
+/// where `popcount(N)` is the number of set bits in N (the number of binary trees in the MMR forest).
+///
+/// The worst case occurs when N is a power of 2 (popcount = 1), giving `MMR_size = 2*N - 1`.
+///
+/// For validity, we require `MMR_size < 2^63` (top bit clear), which gives us:
+///
+/// ```text
+/// 2*N - 1 < 2^63
+/// 2*N < 2^63 + 1
+/// N ≤ 2^62
+/// ```
+///
+/// Therefore, the maximum number of leaves is `2^62`, and the maximum location (0-indexed) is `2^62 - 1`.
+///
+/// ## Verification
+///
+/// For `N = 2^62` leaves (worst case):
+/// - `MMR_size = 2 * 2^62 - 1 = 2^63 - 1 = 0x7FFF_FFFF_FFFF_FFFF` ✓
+/// - Leading zeros: 1 ✓
+///
+/// For `N = 2^62 + 1` leaves:
+/// - `2 * N = 2^63 + 2` ✗ (exceeds maximum valid MMR size)
+pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 
 /// A [Location] is an index into an MMR's _leaves_.
 /// This is in contrast to a [Position], which is an index into an MMR's _nodes_.
@@ -537,9 +555,9 @@ mod tests {
         assert!(max_loc.is_valid());
         let pos = Position::try_from(max_loc).expect("test location valid");
         // Verify the position value
-        // For MAX_LOCATION = 2^63 - 1, popcount = 63
-        // Position = 2 * (2^63 - 1) - 63 = 2^64 - 2 - 63 = u64::MAX - 64
-        let expected = u64::MAX - 64;
+        // For MAX_LOCATION = 2^62 - 1 = 0x3FFFFFFFFFFFFFFF, popcount = 62
+        // Position = 2 * (2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
+        let expected = (1u64 << 63) - 64;
         assert_eq!(*pos, expected);
     }
 
