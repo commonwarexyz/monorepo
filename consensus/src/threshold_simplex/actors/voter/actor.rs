@@ -1682,7 +1682,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Voter<V, D>>::init(
-            self.context.with_label("journal").into_inner(),
+            self.context.with_label("journal").into(),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

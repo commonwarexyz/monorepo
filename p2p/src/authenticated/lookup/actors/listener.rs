@@ -258,7 +258,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         let supervisor = supervisor.clone();
                         move |context| async move {
                             Self::handshake(
-                                context.into_inner(), address, stream_cfg, sink, stream, tracker, supervisor,
+                                context.into(), address, stream_cfg, sink, stream, tracker, supervisor,
                             )
                             .await;
 

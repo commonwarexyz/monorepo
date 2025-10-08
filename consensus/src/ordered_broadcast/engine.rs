@@ -976,7 +976,7 @@ impl<
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
-            self.context.with_label("journal").into_inner(),
+            self.context.with_label("journal").into(),
             cfg,
         )
         .await
