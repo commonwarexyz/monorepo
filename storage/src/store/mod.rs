@@ -343,10 +343,9 @@ where
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
-    ///
-    /// TODO(https://github.com/commonwarexyz/monorepo/issues/1805): implement improved floor
-    /// raising logic.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1805): implement improved floor
+        // raising logic.
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
