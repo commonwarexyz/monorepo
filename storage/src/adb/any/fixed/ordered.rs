@@ -1,8 +1,8 @@
-//! An _ordered_ variant of the [super::Any] authenticated database which additionally maintains the
-//! lexicographic-next active key of each active key.  For example, if the active key set is `{bar,
-//! baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for `baz` is `foo`,
-//! and because we define the next-key of the very last key as the first key, the next-key value for
-//! `foo` is `bar`.
+//! An _ordered_ variant of a Any authenticated database with fixed-size values which additionally
+//! maintains the lexicographic-next active key of each active key. For example, if the active key
+//! set is `{bar, baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for
+//! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
+//! next-key value for `foo` is `bar`.
 
 use crate::{
     adb::{
@@ -36,55 +36,6 @@ enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
     /// The key did not already exist in the snapshot. The wrapped values are the immediately
     /// preceding key that does exist in the snapshot, plus its value and next-key.
     NotExists((K, V, K)),
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > KVStore<E, K, V, T> for Any<E, K, V, H, T>
-{
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
-        self.get(key).await.map_err(Into::into)
-    }
-
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
-        self.update(key, value).await.map_err(Into::into)
-    }
-
-    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
-        self.delete(key).await.map_err(Into::into)
-    }
-
-    async fn commit(&mut self) -> Result<(), crate::store::Error> {
-        self.commit().await.map_err(Into::into)
-    }
-
-    async fn sync(&mut self) -> Result<(), crate::store::Error> {
-        self.sync().await.map_err(Into::into)
-    }
-
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
-        self.prune(target_prune_loc).await.map_err(Into::into)
-    }
-
-    async fn close(self) -> Result<(), crate::store::Error> {
-        self.close().await.map_err(Into::into)
-    }
-
-    async fn destroy(self) -> Result<(), crate::store::Error> {
-        self.destroy().await.map_err(Into::into)
-    }
 }
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
@@ -937,6 +888,55 @@ impl<
         }
 
         Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+    > KVStore<E, K, V, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+        self.get(key).await.map_err(Into::into)
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+        self.update(key, value).await.map_err(Into::into)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+        self.delete(key).await.map_err(Into::into)
+    }
+
+    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+        self.commit().await.map_err(Into::into)
+    }
+
+    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+        self.sync().await.map_err(Into::into)
+    }
+
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+        self.prune(target_prune_loc).await.map_err(Into::into)
+    }
+
+    async fn close(self) -> Result<(), crate::store::Error> {
+        self.close().await.map_err(Into::into)
+    }
+
+    async fn destroy(self) -> Result<(), crate::store::Error> {
+        self.destroy().await.map_err(Into::into)
     }
 }
 

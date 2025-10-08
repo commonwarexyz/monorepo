@@ -1,4 +1,4 @@
-//! Unordered fixed-size Any database implementation.
+//! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
     adb::{
