@@ -130,7 +130,7 @@ struct SpawnConfig {
 impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
-            // Default to supervised tasks like UNIX (and unlike tokio)
+            // Default to supervised tasks like UNIX (and **unlike tokio**)
             supervised: true,
             dedicated: false,
         }
@@ -183,31 +183,31 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// context.
     ///
     /// Any async task spawned from this context will be aborted automatically if the current task
-    /// completes or is cancelled.
+    /// completes or is cancelled. Only async tasks can be spawned as supervised, since blocking tasks
+    /// cannot be aborted and therefore can't support parent-child relationships.
     ///
-    /// # Note
-    ///
-    /// Only async tasks can be spawned as supervised, since blocking tasks cannot be aborted and
-    /// therefore can't support parent-child relationships.
+    /// This is the default behavior, tasks spawned from supervised contexts exit when their parent finishes
+    /// (either through completion or abortion).
     fn supervised(self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks detached from the current
     /// context.
     ///
-    /// This is the default behavior, tasks spawned from detached contexts continue running
-    /// independently when their parent finishes (either through completion or abortion).
+    /// This is not the default behavior. See [`Spawner::supervised`] for more information.
     fn detached(self) -> Self;
-
-    /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
-    ///
-    /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
-    fn dedicated(self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
     /// executor.
     ///
     /// This is the default behavior.
     fn shared(self) -> Self;
+
+    /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
+    ///
+    /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
+    ///
+    /// This is not the default behavior. See [`Spawner::shared`] for more information.
+    fn dedicated(self) -> Self;
 
     /// Enqueue a task to be executed.
     ///
@@ -240,8 +240,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// # Warning
     ///
-    /// Blocking tasks cannot be aborted or supervised. Calling this method on a context created with
-    /// [`Spawner::supervised`] will panic to prevent accidental misuse.
+    /// Blocking tasks cannot be aborted or supervised. Calling this method with [`Spawner::supervised`]
+    /// is a no-op.
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
