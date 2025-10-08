@@ -8,7 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -21,7 +21,7 @@ pub struct Actor<
     St: Stream,
     C: PublicKey,
 > {
-    context: E,
+    context: ContextSlot<E>,
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
@@ -67,7 +67,7 @@ impl<
 
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
@@ -86,7 +86,11 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(tracker, router).await;
+        })
     }
 
     async fn run(

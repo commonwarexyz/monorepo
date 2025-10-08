@@ -7,7 +7,9 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{
+    Clock, ContextSlot, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{
     concurrency::Limiter,
@@ -47,7 +49,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: ContextSlot<E>,
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
@@ -93,20 +95,20 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             handshakes_subnet_rate_limited.clone(),
         );
 
+        // Setup the rate limiters
+        let ip_rate_limiter =
+            RateLimiter::hashmap_with_clock(cfg.allowed_handshake_rate_per_ip, &context);
+        let subnet_rate_limiter =
+            RateLimiter::hashmap_with_clock(cfg.allowed_handshake_rate_per_subnet, &context);
+
         Self {
-            context: context.clone(),
+            context: ContextSlot::new(context),
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
-            ip_rate_limiter: RateLimiter::hashmap_with_clock(
-                cfg.allowed_handshake_rate_per_ip,
-                &context,
-            ),
-            subnet_rate_limiter: RateLimiter::hashmap_with_clock(
-                cfg.allowed_handshake_rate_per_subnet,
-                &context,
-            ),
+            ip_rate_limiter,
+            subnet_rate_limiter,
             registered_ips: HashSet::new(),
             mailbox,
             handshakes_blocked,
@@ -161,7 +163,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, supervisor))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(tracker, supervisor).await;
+        })
     }
 
     #[allow(clippy::type_complexity)]
@@ -252,7 +258,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         let supervisor = supervisor.clone();
                         move |context| async move {
                             Self::handshake(
-                                context, address, stream_cfg, sink, stream, tracker, supervisor,
+                                context.into_inner(), address, stream_cfg, sink, stream, tracker, supervisor,
                             )
                             .await;
 

@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
+use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use futures::channel::mpsc;
@@ -29,7 +29,7 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: ContextSlot<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
@@ -76,7 +76,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 cfg,
 
                 channels,
@@ -119,7 +119,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run().await;
+        })
     }
 
     async fn run(self) {

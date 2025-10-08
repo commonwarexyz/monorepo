@@ -11,7 +11,9 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
+use commonware_runtime::{
+    Clock, ContextSlot, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use either::Either;
 use futures::{
@@ -44,7 +46,7 @@ pub struct Config {
 
 /// Implementation of a simulated network.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
-    context: E,
+    context: ContextSlot<E>,
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
@@ -108,7 +110,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 next_addr,
@@ -386,7 +388,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run().await;
+        })
     }
 
     async fn run(mut self) {
