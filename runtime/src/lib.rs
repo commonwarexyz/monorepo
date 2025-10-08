@@ -547,11 +547,17 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort<R: Runner>(runner: R)
+    fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared(blocking)
+            };
+
             let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -1598,63 +1604,6 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
-    where
-        R::Context: Spawner + Clock,
-    {
-        runner.start(|context| async move {
-            // Create task
-            let (started_tx, started_rx) = oneshot::channel();
-            let (continue_tx, mut continue_rx) = oneshot::channel();
-
-            let context = if dedicated {
-                context.dedicated()
-            } else {
-                context.shared(true)
-            };
-
-            let handle = context.spawn(move |_| async move {
-                // Mark that the task has started (from here on can't be interrupted)
-                started_tx.send(()).unwrap();
-
-                // Wait for abort to be called
-                loop {
-                    match continue_rx.try_recv() {
-                        Ok(Some(())) => break,
-                        Ok(None) => {
-                            continue;
-                        }
-                        Err(_) => {
-                            panic!("try_recv error");
-                        }
-                    }
-                }
-
-                // Perform a long-running operation
-                let mut count = 0;
-                loop {
-                    count += 1;
-                    if count >= 100_000_000 {
-                        break;
-                    }
-                }
-                count
-            });
-
-            // Abort the task
-            //
-            // If there was an `.await` prior to sending a message over the oneshot, this test
-            // could deadlock (depending on the runtime implementation) because the blocking task
-            // would never yield (preventing send from being called).
-            started_rx.await.unwrap();
-            handle.abort();
-            continue_tx.send(()).unwrap();
-
-            // Wait for the task to complete
-            assert!(matches!(handle.await, Ok(100_000_000)));
-        });
-    }
-
     fn test_spawn_detached<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -1879,7 +1828,7 @@ mod tests {
     #[test]
     fn test_deterministic_spawn_abort() {
         let executor = deterministic::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
@@ -2082,7 +2031,7 @@ mod tests {
     fn test_deterministic_spawn_blocking_abort() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, true);
         }
     }
 
@@ -2150,7 +2099,7 @@ mod tests {
     #[test]
     fn test_tokio_spawn_abort() {
         let executor = tokio::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
@@ -2353,7 +2302,7 @@ mod tests {
     fn test_tokio_spawn_blocking_abort() {
         for dedicated in [false, true] {
             let executor = tokio::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, true);
         }
     }
 
