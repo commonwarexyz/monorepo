@@ -647,7 +647,6 @@ impl<H: CHasher> Mmr<H> {
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
-
         let leaves = self.leaves();
         assert!(
             range.start < leaves,
@@ -1128,8 +1127,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos =
-                Position::try_from(Location::new_unchecked(100)).expect("test location valid");
+            let leaf_pos = Position::try_from(Location::new_unchecked(100)).unwrap();
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());
