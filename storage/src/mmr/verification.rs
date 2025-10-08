@@ -108,12 +108,6 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     if range.is_empty() {
         return Err(Error::Empty);
     }
-    if !range.start.is_valid() {
-        return Err(Error::LocationOverflow(range.start));
-    }
-    if !(range.end - 1).is_valid() {
-        return Err(Error::LocationOverflow(range.end));
-    }
 
     // Get the positions of all nodes needed to generate the proof.
     let positions = proof::nodes_required_for_range_proof(size, range)?;

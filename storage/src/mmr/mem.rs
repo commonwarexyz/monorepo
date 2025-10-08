@@ -631,11 +631,13 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return an inclusion proof for all elements within the provided `range` of locations.
     ///
+    /// Locations are validated by [proof::nodes_required_for_range_proof].
+    ///
     /// # Errors
     ///
+    /// Returns [Error::Empty] if the range is empty.
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
     ///
     /// # Panics
     ///
@@ -645,10 +647,6 @@ impl<H: CHasher> Mmr<H> {
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
-
-        if range.is_empty() {
-            return Err(Error::Empty);
-        }
 
         let leaves = self.leaves();
         assert!(

@@ -486,8 +486,8 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Errors
 ///
+/// Returns [Error::Empty] if the range is empty.
 /// Returns [Error::LocationOverflow] if a location in `range` exceeds [crate::mmr::MAX_LOCATION].
-///
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
@@ -495,7 +495,7 @@ pub(crate) fn nodes_required_for_range_proof(
     range: Range<Location>,
 ) -> Result<Vec<Position>, Error> {
     if range.is_empty() {
-        return Ok(vec![]);
+        return Err(Error::Empty);
     }
     let start_element_pos = Position::try_from(range.start)?;
     let end_minus_one = range
@@ -583,10 +583,9 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - `locations` is empty
-/// - Any location in `locations` exceeds [crate::mmr::MAX_LOCATION]
-/// - Any location is out of bounds for the given `size`
+/// Returns [Error::Empty] if locations is empty.
+/// Returns [Error::LocationOverflow] if any location in `locations` exceeds [crate::mmr::MAX_LOCATION].
+/// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: Position,
@@ -596,7 +595,7 @@ pub(crate) fn nodes_required_for_multi_proof(
     //
     // TODO(#1472): Optimize this loop
     if locations.is_empty() {
-        return Err(Error::InvalidProof);
+        return Err(Error::Empty);
     }
     locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
         // It's safe to +1 because nodes_required_for_range_proof validates the range
