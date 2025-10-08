@@ -121,4 +121,6 @@ pub enum Error {
     Empty,
     #[error("location {0} exceeds MAX_LOCATION (Position overflows u64)")]
     LocationOverflow(Location),
+    #[error("range out of bounds: end location {0} exceeds MMR size")]
+    RangeOutOfBounds(Location),
 }

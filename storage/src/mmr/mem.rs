@@ -668,7 +668,7 @@ impl<H: CHasher> Mmr<H> {
         );
 
         let size = self.size();
-        let positions = proof::nodes_required_for_range_proof(size, range);
+        let positions = proof::nodes_required_for_range_proof(size, range)?;
         let digests = positions
             .into_iter()
             .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))

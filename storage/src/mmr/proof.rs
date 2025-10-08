@@ -213,7 +213,9 @@ impl<D: Digest> Proof<D> {
                 // using them.
                 return false;
             }
-            let required = nodes_required_for_range_proof(self.size, *loc..(*loc + 1));
+            let Ok(required) = nodes_required_for_range_proof(self.size, *loc..(*loc + 1)) else {
+                return false;
+            };
             for req_pos in &required {
                 node_positions.insert(*req_pos);
             }
@@ -284,7 +286,7 @@ impl<D: Digest> Proof<D> {
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
-        let required_positions = nodes_required_for_range_proof(self.size, range);
+        let required_positions = nodes_required_for_range_proof(self.size, range)?;
 
         if required_positions.len() != self.digests.len() {
             #[cfg(feature = "std")]
@@ -466,23 +468,38 @@ impl<D: Digest> Proof<D> {
 /// Return the list of node positions required by the range proof for the specified range of
 /// elements.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if:
-/// - The Position of the last element in the range exceeds `size`
-/// - Any location in `range` exceeds MAX_LOCATION
+/// Returns [`Error::LocationOverflow`] if `range.start` or `range.end` exceeds
+/// [`crate::mmr::MAX_LOCATION`].
+///
+/// Returns [`Error::RangeOutOfBounds`] if the last element position in `range` is out of bounds
+/// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
-) -> Vec<Position> {
+) -> Result<Vec<Position>, Error> {
     let mut positions = Vec::new();
     if range.is_empty() {
-        return positions;
+        return Ok(positions);
+    }
+
+    if !range.start.is_valid() {
+        return Err(Error::LocationOverflow(range.start));
+    }
+    if !range.end.is_valid() {
+        return Err(Error::LocationOverflow(range.end));
     }
 
     let start_element_pos = Position::from(range.start);
-    let end_element_pos = Position::from(range.end - 1);
-    assert!(end_element_pos < size, "range is out of bounds");
+    let end_minus_one = range
+        .end
+        .checked_sub(1)
+        .expect("can't underflow because range is non-empty");
+    let end_element_pos = Position::from(end_minus_one);
+    if end_element_pos >= size {
+        return Err(Error::RangeOutOfBounds(range.end));
+    }
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
     // are required to prove the range, so they are added to the result.
@@ -549,7 +566,7 @@ pub(crate) fn nodes_required_for_range_proof(
         }
     }
     positions.extend(siblings.into_iter().map(|(_, pos)| pos));
-    positions
+    Ok(positions)
 }
 
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
@@ -557,24 +574,29 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// The order of positions does not affect the output (sorted internally).
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if:
+/// Returns an error if:
 /// - `locations` is empty
 /// - Any location in `locations` exceeds [crate::mmr::MAX_LOCATION]
+/// - Any location is out of bounds for the given `size`
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: Position,
     locations: &[Location],
-) -> BTreeSet<Position> {
+) -> Result<BTreeSet<Position>, Error> {
     // Collect all required node positions
     //
     // TODO(#1472): Optimize this loop
-    assert!(!locations.is_empty(), "empty locations");
-    locations
-        .iter()
-        .flat_map(|loc| nodes_required_for_range_proof(size, *loc..(*loc + 1)))
-        .collect()
+    if locations.is_empty() {
+        return Err(Error::InvalidProof);
+    }
+    locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
+        let end = loc.checked_add(1).ok_or(Error::LocationOverflow(*loc))?;
+        let positions = nodes_required_for_range_proof(size, *loc..end)?;
+        acc.extend(positions);
+        Ok(acc)
+    })
 }
 
 /// Information about the current range of nodes being traversed.
@@ -1034,7 +1056,8 @@ mod tests {
         assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
 
         let updated_root = mmr.root(&mut hasher);
-        let range = Location::new_unchecked(elements.len() as u64 - 10)..Location::new_unchecked(elements.len() as u64);
+        let range = Location::new_unchecked(elements.len() as u64 - 10)
+            ..Location::new_unchecked(elements.len() as u64);
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
@@ -1206,7 +1229,9 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr.range_proof(Location::new_unchecked(0)..mmr.leaves()).unwrap();
+        let proof = mmr
+            .range_proof(Location::new_unchecked(0)..mmr.leaves())
+            .unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1323,8 +1348,13 @@ mod tests {
         let root = mmr.root(&mut hasher);
 
         // Generate proof for non-contiguous single elements
-        let locations = &[Location::new_unchecked(0), Location::new_unchecked(5), Location::new_unchecked(10)];
-        let nodes_for_multi_proof = nodes_required_for_multi_proof(mmr.size(), locations);
+        let locations = &[
+            Location::new_unchecked(0),
+            Location::new_unchecked(5),
+            Location::new_unchecked(10),
+        ];
+        let nodes_for_multi_proof =
+            nodes_required_for_multi_proof(mmr.size(), locations).expect("test locations valid");
         let digests = nodes_for_multi_proof
             .into_iter()
             .map(|pos| mmr.get_node(pos).unwrap())
@@ -1476,7 +1506,8 @@ mod tests {
 
         // Generate multi-proof for the same positions
         let locations = &[Location::new_unchecked(0), Location::new_unchecked(1)];
-        let multi_proof = nodes_required_for_multi_proof(mmr.size(), locations);
+        let multi_proof =
+            nodes_required_for_multi_proof(mmr.size(), locations).expect("test locations valid");
         let digests = multi_proof
             .into_iter()
             .map(|pos| mmr.get_node(pos).unwrap())

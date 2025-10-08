@@ -53,6 +53,7 @@ impl Location {
     /// ```
     #[inline]
     pub(crate) const fn new_unchecked(loc: u64) -> Self {
+        #[cfg(all(debug_assertions, not(test)))]
         debug_assert!(loc <= MAX_LOCATION);
         Self(loc)
     }

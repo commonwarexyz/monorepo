@@ -59,18 +59,19 @@ where
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if:
-/// - Any location in `range` exceeds MAX_LOCATION
-/// - op_count exceeds MAX_LOCATION
-/// - The location of the last element in the range exceeds op_count
+/// Returns [`crate::mmr::Error::LocationOverflow`] if `op_count`, `range.start`, or `range.end`
+/// exceeds [`crate::mmr::MAX_LOCATION`].
+///
+/// Returns [`crate::mmr::Error::RangeOutOfBounds`] if the last element position in `range`
+/// is out of bounds for the MMR size.
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
     range: Range<Location>,
-) -> Vec<Position> {
+) -> Result<Vec<Position>, crate::mmr::Error> {
     if !op_count.is_valid() {
-        panic!("op_count exceeds MAX_LOCATION");
+        return Err(crate::mmr::Error::LocationOverflow(op_count));
     }
     let mmr_size = Position::from(op_count);
     proof::nodes_required_for_range_proof(mmr_size, range)
@@ -80,16 +81,21 @@ pub fn digests_required_for_proof<D: Digest>(
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if:
+/// Returns an error if:
 /// - op_count exceeds MAX_LOCATION
-pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
-    assert!(op_count.is_valid(), "op_count exceeds MAX_LOCATION");
-    Proof::<D> {
+pub fn create_proof<D: Digest>(
+    op_count: Location,
+    digests: Vec<D>,
+) -> Result<Proof<D>, crate::mmr::Error> {
+    if !op_count.is_valid() {
+        return Err(crate::mmr::Error::LocationOverflow(op_count));
+    }
+    Ok(Proof::<D> {
         size: Position::from(op_count),
         digests,
-    }
+    })
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
@@ -187,7 +193,9 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Generate proof for all operations
-            let proof = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(3)).unwrap();
+            let proof = mmr
+                .range_proof(Location::new_unchecked(0)..Location::new_unchecked(3))
+                .unwrap();
 
             // Verify the proof
             assert!(verify_proof(
@@ -240,7 +248,9 @@ mod tests {
                 mmr.add(&mut hasher, &encoded);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(8)).unwrap();
+            let proof = mmr
+                .range_proof(Location::new_unchecked(5)..Location::new_unchecked(8))
+                .unwrap();
 
             // Verify with correct start location
             assert!(verify_proof(
@@ -363,8 +373,10 @@ mod tests {
             let end_loc = Location::new_unchecked(8u64);
 
             // Get required digests (note: range is exclusive, so end_loc + 1)
+            let end_plus_one = end_loc.checked_add(1).expect("test location in bounds");
             let required_positions =
-                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_loc + 1);
+                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_plus_one)
+                    .expect("test locations valid");
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -375,7 +387,7 @@ mod tests {
             }
 
             // Construct proof
-            let proof = create_proof(OP_COUNT, digests.clone());
+            let proof = create_proof(OP_COUNT, digests.clone()).expect("test locations valid");
             assert_eq!(proof.size, Position::from(OP_COUNT));
             assert_eq!(proof.digests.len(), digests.len());
 
@@ -484,7 +496,9 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(3)).unwrap();
+            let proof = mmr
+                .range_proof(Location::new_unchecked(0)..Location::new_unchecked(3))
+                .unwrap();
 
             // First verify and extract digests
             let digests = verify_proof_and_extract_digests(
@@ -500,10 +514,12 @@ mod tests {
             let proof_store = create_proof_store_from_digests(&proof, digests);
 
             // Verify we can use the proof store
-            let sub_proof =
-                verification::range_proof(&proof_store, Location::new_unchecked(0)..Location::new_unchecked(2))
-                    .await
-                    .unwrap();
+            let sub_proof = verification::range_proof(
+                &proof_store,
+                Location::new_unchecked(0)..Location::new_unchecked(2),
+            )
+            .await
+            .unwrap();
 
             // Verify the sub-proof
             assert!(verify_proof(
@@ -537,9 +553,14 @@ mod tests {
                 .unwrap();
 
             // Create proof store
-            let proof_store =
-                create_proof_store(&mut hasher, &proof, Location::new_unchecked(0), &operations, &root)
-                    .unwrap();
+            let proof_store = create_proof_store(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &operations,
+                &root,
+            )
+            .unwrap();
 
             // Generate multi-proof for specific locations
             let target_locations = vec![
@@ -587,7 +608,11 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Generate multi-proof directly from MMR
-            let target_locations = vec![Location::new_unchecked(1), Location::new_unchecked(4), Location::new_unchecked(7)];
+            let target_locations = vec![
+                Location::new_unchecked(1),
+                Location::new_unchecked(4),
+                Location::new_unchecked(7),
+            ];
             let multi_proof = verification::multi_proof(&mmr, &target_locations)
                 .await
                 .unwrap();
@@ -676,10 +701,17 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Create proof store for all elements
-            let proof = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(3)).unwrap();
-            let proof_store =
-                create_proof_store(&mut hasher, &proof, Location::new_unchecked(0), &operations, &root)
-                    .unwrap();
+            let proof = mmr
+                .range_proof(Location::new_unchecked(0)..Location::new_unchecked(3))
+                .unwrap();
+            let proof_store = create_proof_store(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &operations,
+                &root,
+            )
+            .unwrap();
 
             // Generate multi-proof for single element
             let multi_proof = create_multi_proof(&proof_store, &[Location::new_unchecked(1)])

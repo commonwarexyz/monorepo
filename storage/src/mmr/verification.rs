@@ -116,7 +116,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     }
 
     // Get the positions of all nodes needed to generate the proof.
-    let positions = proof::nodes_required_for_range_proof(size, range);
+    let positions = proof::nodes_required_for_range_proof(size, range)?;
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
@@ -161,7 +161,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 
     // Collect all required node positions
     let size = mmr.size();
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations)?;
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
