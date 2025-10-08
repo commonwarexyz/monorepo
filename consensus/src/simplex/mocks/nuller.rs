@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{ContextSlot, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -24,7 +24,7 @@ pub struct Nuller<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: E,
+    context: ContextSlot<E>,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -37,7 +37,7 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            context,
+            context: ContextSlot::new(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -47,7 +47,11 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter_network))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(voter_network).await;
+        })
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
