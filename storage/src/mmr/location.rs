@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_checked() {
+    fn test_new() {
         // Valid locations
         assert!(Location::new(0).is_some());
         assert!(Location::new(1000).is_some());
@@ -553,7 +553,7 @@ mod tests {
         // MAX_LOCATION should convert successfully
         let max_loc = Location::new_unchecked(MAX_LOCATION);
         assert!(max_loc.is_valid());
-        let pos = Position::try_from(max_loc).expect("test location valid");
+        let pos = Position::try_from(max_loc).unwrap();
         // Verify the position value
         // For MAX_LOCATION = 2^62 - 1 = 0x3FFFFFFFFFFFFFFF, popcount = 62
         // Position = 2 * (2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
