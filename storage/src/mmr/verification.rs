@@ -81,9 +81,10 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 ///
 /// # Errors
 ///
-/// - Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
-/// - Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
-/// - Returns [Error::Empty] if the requested range is empty
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -131,6 +132,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
 pub async fn multi_proof<D: Digest, S: Storage<D>>(

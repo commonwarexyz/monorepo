@@ -127,7 +127,8 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the `elements` appear consecutively starting at
-    /// position `start_loc` within the MMR with root digest `root`.
+    /// position `start_loc` within the MMR with root digest `root`. A malformed proof will return
+    /// false.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -157,7 +158,7 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the elements at the specified locations are included
-    /// in the MMR with the root digest `root`.
+    /// in the MMR with the root digest `root`. A malformed proof will return false.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
