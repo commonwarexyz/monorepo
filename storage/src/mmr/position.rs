@@ -264,7 +264,7 @@ mod tests {
             (Location::new_unchecked(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
-            let pos = Position::try_from(*loc).expect("test location valid");
+            let pos = Position::try_from(*loc).unwrap();
             assert_eq!(pos, *expected_pos);
         }
     }
