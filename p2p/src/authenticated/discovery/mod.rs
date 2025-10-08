@@ -232,7 +232,7 @@ mod tests {
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::NZU32;
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::mpsc, try_join, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::{
@@ -328,7 +328,7 @@ mod tests {
                 let addresses = addresses.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
-                    context.with_label("receiver").spawn(move |_| async move {
+                    let receiver = context.with_label("receiver").spawn(move |_| async move {
                         // Wait for all peers to send their identity
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
@@ -349,7 +349,7 @@ mod tests {
 
                     // Send identity to all peers
                     let msg = signer.public_key();
-                    context
+                    let sender = context
                         .with_label("sender")
                         .spawn(move |context| async move {
                             // Loop forever to account for unexpected message drops
@@ -437,6 +437,9 @@ mod tests {
                                 context.sleep(Duration::from_secs(10)).await;
                             }
                         });
+
+                    // Wait for both to finish
+                    try_join!(receiver, sender).unwrap();
                 }
             });
         }
