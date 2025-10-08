@@ -1808,6 +1808,7 @@ mod test {
                 }
                 assert_eq!(keys.len(), 0);
                 assert_eq!(db.snapshot.keys(), 0);
+                assert_eq!(db.get_span(&Digest::random(rng)).await.unwrap(), None);
             }
 
             let mut rng = StdRng::seed_from_u64(context.next_u64());
