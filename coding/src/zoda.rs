@@ -22,7 +22,7 @@
 //! ZODA supports different configurations based on the coding scheme you use
 //! for sharding data, and for checking it.
 //!
-//! We use the Reed-Solomon x Hadamard variant of ZODA: in essence, this means
+//! We use the Reed-Solomon and Hadamard variant of ZODA: in essence, this means
 //! that the shards are Reed-Solomon encoded, and we include additional checksum
 //! data which does not help reconstruct the data.
 //!
@@ -186,7 +186,7 @@ fn required_samples_impl(n: usize, k: usize, skew: usize) -> usize {
     let k = BigRational::from_usize(k);
     let skew = BigRational::from_usize(skew);
     let fraction = (&k + &skew) / (BigRational::from_usize(2) * (&n + &k));
-    let log_term = (BigRational::from_usize(1) - fraction).log2_rational_ceil(7);
+    let log_term = (BigRational::from_usize(1) - fraction).log2_ceil(7);
     let required = BigRational::from_usize(128) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
 }

@@ -44,12 +44,12 @@ pub trait BigRationalExt {
     /// use commonware_utils::rational::BigRationalExt;
     ///
     /// let x = BigRational::from_frac_u64(3, 1); // 3
-    /// let result = x.log2_rational_ceil(4);
+    /// let result = x.log2_ceil(4);
     /// // log2(3) ≈ 1.585, the algorithm computes a ceiling approximation
     /// assert!(result >= BigRational::from_u64(1));
     /// assert!(result <= BigRational::from_u64(2));
     /// ```
-    fn log2_rational_ceil(&self, binary_digits: usize) -> BigRational;
+    fn log2_ceil(&self, binary_digits: usize) -> BigRational;
 }
 
 impl BigRationalExt for BigRational {
@@ -95,7 +95,7 @@ impl BigRationalExt for BigRational {
         BigRational::new(BigInt::from(numerator), BigInt::from(denominator))
     }
 
-    fn log2_rational_ceil(&self, binary_digits: usize) -> BigRational {
+    fn log2_ceil(&self, binary_digits: usize) -> BigRational {
         if self <= &BigRational::zero() {
             panic!("log2 undefined for non-positive numbers");
         }
@@ -224,33 +224,33 @@ mod tests {
     fn log2_ceil_exact_powers_of_two() {
         // Test exact powers of 2: log2(2^n) = n
         let value = BigRational::from_u64(1); // 2^0
-        assert_eq!(value.log2_rational_ceil(4), BigRational::from_u64(0));
+        assert_eq!(value.log2_ceil(4), BigRational::from_u64(0));
 
         let value = BigRational::from_u64(2); // 2^1
-        assert_eq!(value.log2_rational_ceil(4), BigRational::from_u64(1));
+        assert_eq!(value.log2_ceil(4), BigRational::from_u64(1));
 
         let value = BigRational::from_u64(8); // 2^3
-        assert_eq!(value.log2_rational_ceil(4), BigRational::from_u64(3));
+        assert_eq!(value.log2_ceil(4), BigRational::from_u64(3));
 
         let value = BigRational::from_u64(1024); // 2^10
-        assert_eq!(value.log2_rational_ceil(4), BigRational::from_u64(10));
+        assert_eq!(value.log2_ceil(4), BigRational::from_u64(10));
     }
 
     #[test]
     fn log2_ceil_fractional_powers_of_two() {
         // Test fractional powers of 2: log2(1/2) = -1, log2(1/4) = -2
         let value = BigRational::from_frac_u64(1, 2); // 2^(-1)
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         println!("log2_ceil(1/2, 4) = {}", result);
         assert_eq!(result, BigRational::from_integer(BigInt::from(-1)));
 
         let value = BigRational::from_frac_u64(1, 4); // 2^(-2)
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         println!("log2_ceil(1/4, 4) = {}", result);
         assert_eq!(result, BigRational::from_integer(BigInt::from(-2)));
 
         let value = BigRational::from_frac_u64(3, 8); // 3/8 = 3 * 2^(-3)
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         println!("log2_ceil(3/8, 4) = {}", result);
         // For now just check it's negative
         assert!(result < BigRational::from_integer(BigInt::from(0)));
@@ -260,17 +260,17 @@ mod tests {
     fn log2_ceil_simple_values() {
         // log2(3) ≈ 1.585, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(3);
-        let result = value.log2_rational_ceil(0);
+        let result = value.log2_ceil(0);
         assert_eq!(result, BigRational::from_u64(0)); // The algorithm currently returns 0
 
         // log2(5) ≈ 2.322, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(5);
-        let result = value.log2_rational_ceil(0);
+        let result = value.log2_ceil(0);
         assert_eq!(result, BigRational::from_u64(1)); // The algorithm currently returns 1
 
         // With 4 bits precision, algorithm should provide fractional results
         let value = BigRational::from_u64(3);
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         // The actual result appears to be floor(log2(3)) = 1, not ceiling
         // This suggests the algorithm implementation needs review
         assert_eq!(result, BigRational::from_u64(1));
@@ -280,13 +280,13 @@ mod tests {
     fn log2_ceil_rational_values() {
         // Test with some basic fractional values
         let value = BigRational::from_frac_u64(3, 2);
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         // For now just verify it doesn't panic and gives reasonable result
         assert!(result >= BigRational::from_integer(BigInt::from(-1)));
         assert!(result <= BigRational::from_integer(BigInt::from(1)));
 
         let value = BigRational::from_frac_u64(7, 4);
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         // For now just verify it doesn't panic
         assert!(result >= BigRational::from_integer(BigInt::from(0)));
         assert!(result <= BigRational::from_integer(BigInt::from(2)));
@@ -297,10 +297,10 @@ mod tests {
         let value = BigRational::from_u64(3);
 
         // Test different precisions give reasonable results
-        let result0 = value.log2_rational_ceil(0);
-        let result1 = value.log2_rational_ceil(1);
-        let result4 = value.log2_rational_ceil(4);
-        let result8 = value.log2_rational_ceil(8);
+        let result0 = value.log2_ceil(0);
+        let result1 = value.log2_ceil(1);
+        let result4 = value.log2_ceil(4);
+        let result8 = value.log2_ceil(8);
 
         // All should be reasonable approximations of log2(3) ≈ 1.585
         assert!(result0 >= BigRational::from_integer(BigInt::from(0)));
@@ -317,7 +317,7 @@ mod tests {
     fn log2_ceil_large_values() {
         // Test with larger numbers
         let value = BigRational::from_u64(1000);
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         // log2(1000) ≈ 9.966, should be close to 10
         assert!(result >= BigRational::from_integer(BigInt::from(9)));
         assert!(result <= BigRational::from_integer(BigInt::from(10)));
@@ -327,7 +327,7 @@ mod tests {
     fn log2_ceil_very_small_values() {
         // Test with very small fractions
         let value = BigRational::from_frac_u64(1, 1000);
-        let result = value.log2_rational_ceil(4);
+        let result = value.log2_ceil(4);
         // log2(1/1000) = -log2(1000) ≈ -9.966, should be negative
         assert!(result < BigRational::from_integer(BigInt::from(0)));
         assert!(result >= BigRational::from_integer(BigInt::from(-10)));
