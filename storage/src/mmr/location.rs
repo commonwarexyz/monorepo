@@ -427,9 +427,7 @@ mod tests {
         assert_eq!(loc.checked_add(5).unwrap(), 15);
 
         // Overflow returns None
-        assert!(Location::new_unchecked(MAX_LOCATION)
-            .checked_add(1)
-            .is_none());
+        assert!(Location::new_unchecked(u64::MAX).checked_add(1).is_none());
 
         // Exceeding MAX_LOCATION returns None
         assert!(Location::new_unchecked(MAX_LOCATION)
