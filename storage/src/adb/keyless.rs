@@ -598,14 +598,28 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
     /// operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
+    ///
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        if !start_loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
+        }
+        if start_loc >= op_count {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let mmr_size = Position::try_from(op_count)?;
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+        // TODO handle case where start_loc == end_loc
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)

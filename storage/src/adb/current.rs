@@ -432,9 +432,15 @@ impl<
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    ///
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    ///
     /// # Panics
     ///
-    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
+    /// Panics if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -446,10 +452,17 @@ impl<
             "must process updates before computing proofs"
         );
 
+        // Validate start_loc
+        if !start_loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
+        }
+
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
-        assert!(start_loc < leaves, "start_loc is invalid");
+        if start_loc >= leaves {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 

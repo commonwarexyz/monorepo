@@ -615,23 +615,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
     /// operations.
     ///
+    /// # Errors
     ///
-    /// # Panics
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
     ///
-    /// - Panics if `start_loc` greater than or equal to `op_count`.
-    /// - Panics if `op_count` is greater than the number of operations.
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` exceeds the current number of
+    /// operations, or if `start_loc` >= `op_count`.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        assert!(op_count <= self.op_count());
-        assert!(start_loc < op_count);
-
-        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+        if !start_loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
+        }
+        if op_count > self.op_count() {
+            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
+        }
+        if start_loc >= op_count {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let mmr_size = Position::try_from(op_count)?;
-
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+        // TODO handle case where start_loc == end_loc
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)

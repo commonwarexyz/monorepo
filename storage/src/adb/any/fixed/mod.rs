@@ -499,14 +499,26 @@ impl<
 
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
     /// operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
+    ///
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        if !start_loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(start_loc).into());
+        }
+        if start_loc >= op_count {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-
         let mmr_size = Position::try_from(op_count)?;
         let proof = self
             .mmr
