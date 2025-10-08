@@ -1257,8 +1257,8 @@ mod test {
             db.commit().await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 2621);
-            assert_eq!(db.inactivity_floor_loc, 103);
+            assert_eq!(db.op_count(), 4240);
+            assert_eq!(db.inactivity_floor_loc, 3382);
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1266,8 +1266,8 @@ mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
-            assert_eq!(db.op_count(), 2621);
-            assert_eq!(db.inactivity_floor_loc, 103);
+            assert_eq!(db.op_count(), 4240);
+            assert_eq!(db.inactivity_floor_loc, 3382);
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
