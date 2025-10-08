@@ -17,7 +17,7 @@ use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner,
+    Clock, ContextSlot, Handle, Metrics, Spawner,
 };
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
@@ -330,7 +330,7 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
     >,
 > {
-    context: E,
+    context: ContextSlot<E>,
     blocker: B,
     reporter: R,
     supervisor: S,
@@ -394,10 +394,11 @@ impl<
             "latency of partial signature verification",
             verify_latency.clone(),
         );
+        let clock = Arc::new(context.with_label("metrics"));
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: context.clone(),
+                context: ContextSlot::new(context),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -413,7 +414,7 @@ impl<
                 verified,
                 inbound_messages,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, Arc::new(context)),
+                verify_latency: histogram::Timed::new(verify_latency, clock),
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
@@ -425,7 +426,11 @@ impl<
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(consensus, receiver))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(consensus, receiver).await;
+        })
     }
 
     pub async fn run(

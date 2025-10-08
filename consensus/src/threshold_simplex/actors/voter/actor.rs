@@ -29,7 +29,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, quorum_from_slice};
@@ -139,7 +139,7 @@ impl<
     > Round<E, C, V, D, S>
 {
     pub fn new(
-        context: &E,
+        context: &ContextSlot<E>,
         supervisor: S,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
@@ -438,7 +438,7 @@ pub struct Actor<
         Share = group::Share,
     >,
 > {
-    context: E,
+    context: ContextSlot<E>,
     crypto: C,
     blocker: B,
     automaton: A,
@@ -540,13 +540,14 @@ impl<
             "threshold signature recover latency",
             recover_latency.clone(),
         );
+        let clock = Arc::new(context.with_label("metrics"));
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context: context.clone(),
+                context: ContextSlot::new(context),
                 crypto: cfg.crypto,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -584,7 +585,7 @@ impl<
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
-                recover_latency: histogram::Timed::new(recover_latency, Arc::new(context)),
+                recover_latency: histogram::Timed::new(recover_latency, clock),
             },
             mailbox,
         )
@@ -1643,13 +1644,18 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            batcher,
-            resolver,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        ))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(
+                batcher,
+                resolver,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            )
+            .await;
+        })
     }
 
     async fn run(
@@ -1676,7 +1682,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Voter<V, D>>::init(
-            self.context.with_label("journal"),
+            self.context.with_label("journal").into_inner(),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

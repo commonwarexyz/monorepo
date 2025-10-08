@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -34,7 +34,7 @@ pub struct Engine<
         Share = group::Share,
     >,
 > {
-    context: E,
+    context: ContextSlot<E>,
 
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
@@ -129,7 +129,7 @@ impl<
 
         // Return the engine
         Self {
-            context,
+            context: ContextSlot::new(context),
 
             voter,
             voter_mailbox,
@@ -160,7 +160,12 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(pending_network, recovered_network, resolver_network))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(pending_network, recovered_network, resolver_network)
+                .await;
+        })
     }
 
     async fn run(
