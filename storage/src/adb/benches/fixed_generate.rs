@@ -7,7 +7,8 @@ use commonware_runtime::{
     ThreadPool,
 };
 use commonware_storage::{
-    adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Any, Config as AConfig},
+    adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
+    store::KVStore,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -73,8 +74,8 @@ async fn get_ordered_any(ctx: Context) -> OAnyDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `COMMIT_FREQUENCY` operations, and pruned before returning.
-async fn gen_random_any<
-    A: Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>,
+async fn gen_random_kv<
+    A: KVStore<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
 >(
     mut db: A,
     num_elements: u64,
@@ -131,12 +132,12 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                 let start = Instant::now();
                                 if db_type == "unordered" {
                                     let db = get_unordered_any(ctx.clone()).await;
-                                    let db = gen_random_any(db, elements, operations).await;
+                                    let db = gen_random_kv(db, elements, operations).await;
                                     total_elapsed += start.elapsed();
                                     db.destroy().await.unwrap(); // don't time destroy
                                 } else {
                                     let db = get_ordered_any(ctx.clone()).await;
-                                    let db = gen_random_any(db, elements, operations).await;
+                                    let db = gen_random_kv(db, elements, operations).await;
                                     total_elapsed += start.elapsed();
                                     db.destroy().await.unwrap(); // don't time destroy
                                 };

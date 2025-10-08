@@ -7,22 +7,23 @@
 use crate::{
     adb::{
         any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Any as AnyTrait, Config,
-            SNAPSHOT_READ_BUFFER_SIZE,
+            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
         Error,
     },
     index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
-    store::operation::{FixedOperation as OperationTrait, FixedOrdered as Operation},
+    store::{
+        operation::{FixedOperation as OperationTrait, FixedOrdered as Operation},
+        KVStore,
+    },
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
-use core::future::Future;
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
 use tracing::info;
@@ -43,7 +44,7 @@ impl<
         V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
-    > AnyTrait<E, K, V, H, T> for Any<E, K, V, H, T>
+    > KVStore<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -53,40 +54,36 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>> {
-        self.get(key)
+    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+        self.get(key).await.map_err(Into::into)
     }
 
-    fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
-        self.root(hasher)
+    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+        self.update(key, value).await.map_err(Into::into)
     }
 
-    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>> {
-        self.update(key, value)
+    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+        self.delete(key).await.map_err(Into::into)
     }
 
-    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>> {
-        self.delete(key)
+    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+        self.commit().await.map_err(Into::into)
     }
 
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> {
-        self.commit()
+    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+        self.sync().await.map_err(Into::into)
     }
 
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> {
-        self.sync()
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+        self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>> {
-        self.prune(target_prune_loc)
+    async fn close(self) -> Result<(), crate::store::Error> {
+        self.close().await.map_err(Into::into)
     }
 
-    fn close(self) -> impl Future<Output = Result<(), Error>> {
-        self.close()
-    }
-
-    fn destroy(self) -> impl Future<Output = Result<(), Error>> {
-        self.destroy()
+    async fn destroy(self) -> Result<(), crate::store::Error> {
+        self.destroy().await.map_err(Into::into)
     }
 }
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
