@@ -121,7 +121,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
 pub type ThreadPool = Arc<RThreadPool>;
 
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.

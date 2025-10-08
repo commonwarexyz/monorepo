@@ -542,7 +542,7 @@ mod tests {
 - Implement `Clone` as cheaply as possible (often just `Arc` clones)
 - Avoid allocations in hot paths
 - Prefer static dispatch with generics over trait objects where possible
-- Use `spawn_blocking` for CPU-intensive work in async contexts
+- Use `context.shared(true).spawn()` for CPU-intensive work in async contexts
 - When in doubt, write a benchmark and profile the code (don't trust your intuition)
 
 ### Debugging Patterns
