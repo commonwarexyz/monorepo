@@ -112,8 +112,6 @@ impl<D: Digest> Default for Proof<D> {
 impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
     /// with root digest `root`.
-    ///
-    /// Returns `false` if `loc` exceeds [crate::mmr::MAX_LOCATION], or if the proof is invalid.
     pub fn verify_element_inclusion<I, H>(
         &self,
         hasher: &mut H,
@@ -130,9 +128,6 @@ impl<D: Digest> Proof<D> {
 
     /// Return true if this proof proves that the `elements` appear consecutively starting at
     /// position `start_loc` within the MMR with root digest `root`.
-    ///
-    /// Returns `false` if `start_loc` exceeds [crate::mmr::MAX_LOCATION], or if the proof is
-    /// invalid or malformed.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -145,16 +140,9 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        // Validate location can be safely converted to Position
-        if !start_loc.is_valid() {
-            #[cfg(feature = "std")]
-            debug!(?start_loc, "location too large");
-            return false;
-        }
-
         if !PeakIterator::check_validity(self.size) {
             #[cfg(feature = "std")]
-            debug!(?self.size, "invalid proof size");
+            debug!(size = ?self.size, "invalid proof size");
             return false;
         }
 
@@ -162,7 +150,7 @@ impl<D: Digest> Proof<D> {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(error) => {
                 #[cfg(feature = "std")]
-                tracing::debug!(?error, "invalid proof input");
+                tracing::debug!(error = ?error, "invalid proof input");
                 false
             }
         }
@@ -170,9 +158,6 @@ impl<D: Digest> Proof<D> {
 
     /// Return true if this proof proves that the elements at the specified locations are included
     /// in the MMR with the root digest `root`.
-    ///
-    /// Returns `false` if any location in `elements` exceeds [crate::mmr::MAX_LOCATION], or if the
-    /// proof is invalid or malformed.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
@@ -191,16 +176,6 @@ impl<D: Digest> Proof<D> {
             return self.size == Position::new(0)
                 && *root == hasher.root(Position::new(0), core::iter::empty());
         }
-
-        // Validate all locations can be safely converted to Position
-        for (_, loc) in elements {
-            if !loc.is_valid() {
-                #[cfg(feature = "std")]
-                debug!(?loc, "location too large");
-                return false;
-            }
-        }
-
         if !PeakIterator::check_validity(self.size) {
             return false;
         }
@@ -210,15 +185,10 @@ impl<D: Digest> Proof<D> {
         let mut nodes_required = BTreeMap::new();
 
         for (_, loc) in elements {
-            // Since `elements` may be untrusted input, verify they are not malformed before
-            // using them.
-            let Ok(pos) = Position::try_from(*loc) else {
-                return false;
-            };
-            if pos >= self.size {
+            if !loc.is_valid() {
                 return false;
             }
-            // It's safe to +1 because nodes_required_for_range_proof validates the range
+            // `loc` is valid so it won't overflow from +1
             let Ok(required) = nodes_required_for_range_proof(self.size, *loc..*loc + 1) else {
                 return false;
             };
@@ -285,7 +255,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if an element in `range` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
     /// positions count.
     /// Returns [Error::MissingDigest] if a pinned node is not found in the proof.
@@ -487,7 +457,7 @@ impl<D: Digest> Proof<D> {
 /// # Errors
 ///
 /// Returns [Error::Empty] if the range is empty.
-/// Returns [Error::LocationOverflow] if a location in `range` exceeds [crate::mmr::MAX_LOCATION].
+/// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
@@ -598,7 +568,10 @@ pub(crate) fn nodes_required_for_multi_proof(
         return Err(Error::Empty);
     }
     locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
-        // It's safe to +1 because nodes_required_for_range_proof validates the range
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(*loc));
+        }
+        // `loc` is valid so it won't overflow from +1
         let positions = nodes_required_for_range_proof(size, *loc..*loc + 1)?;
         acc.extend(positions);
         Ok(acc)
