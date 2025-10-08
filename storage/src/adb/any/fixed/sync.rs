@@ -164,7 +164,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 ) -> Result<fixed::Journal<E, A>, adb::Error> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
+    let mut journal =
+        fixed::Journal::<E, A>::init(context.with_label("journal"), cfg.clone()).await?;
     let journal_size = journal.size().await?;
     let journal = if journal_size <= range.start {
         debug!(
