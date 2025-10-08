@@ -24,6 +24,63 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
+/// Configuration that determines how a task is spawned.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Model {
+    supervised: bool,
+    dedicated: bool,
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self {
+            // Default to supervised tasks like UNIX (and **unlike tokio**)
+            supervised: true,
+            dedicated: false,
+        }
+    }
+}
+
+impl Model {
+    /// Return a new configuration with supervision enabled.
+    pub(crate) fn supervised(&self) -> Self {
+        let mut cfg = *self;
+        cfg.supervised = true;
+        cfg
+    }
+
+    /// Return a new configuration with supervision disabled.
+    pub(crate) fn detached(&self) -> Self {
+        let mut cfg = *self;
+        cfg.supervised = false;
+        cfg
+    }
+
+    /// Return a new configuration that requests a dedicated thread.
+    pub(crate) fn dedicated(&self) -> Self {
+        let mut cfg = *self;
+        cfg.dedicated = true;
+        cfg
+    }
+
+    /// Return a new configuration that requests shared runtime scheduling.
+    pub(crate) fn shared(&self) -> Self {
+        let mut cfg = *self;
+        cfg.dedicated = false;
+        cfg
+    }
+
+    /// Returns `true` when the task should be supervised by its parent.
+    pub(crate) fn is_supervised(&self) -> bool {
+        self.supervised
+    }
+
+    /// Returns `true` when the task should run on a dedicated thread.
+    pub(crate) fn is_dedicated(&self) -> bool {
+        self.dedicated
+    }
+}
+
 /// Yield control back to the runtime.
 pub async fn reschedule() {
     struct Reschedule {

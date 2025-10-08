@@ -16,7 +16,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, Aborter, Panicker},
-    Clock, Error, Handle, SinkOf, SpawnConfig, StreamOf, METRICS_PREFIX,
+    Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -341,7 +341,7 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
             children: Arc::new(Mutex::new(Vec::new())),
-            spawn_config: SpawnConfig::default(),
+            model: Model::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -376,7 +376,7 @@ pub struct Context {
     storage: Storage,
     network: Network,
     children: Arc<Mutex<Vec<Aborter>>>,
-    spawn_config: SpawnConfig,
+    model: Model,
 }
 
 impl Context {
@@ -388,22 +388,22 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn supervised(mut self) -> Self {
-        self.spawn_config = self.spawn_config.supervised();
+        self.model = self.model.supervised();
         self
     }
 
     fn detached(mut self) -> Self {
-        self.spawn_config = self.spawn_config.detached();
+        self.model = self.model.detached();
         self
     }
 
     fn dedicated(mut self) -> Self {
-        self.spawn_config = self.spawn_config.dedicated();
+        self.model = self.model.dedicated();
         self
     }
 
     fn shared(mut self) -> Self {
-        self.spawn_config = self.spawn_config.shared();
+        self.model = self.model.shared();
         self
     }
 
@@ -417,7 +417,7 @@ impl crate::Spawner for Context {
         let (_, metric) = spawn_metrics!(self, future);
 
         // Track parent-child relationship when supervision is requested
-        let parent_children = if self.spawn_config.is_supervised() {
+        let parent_children = if self.model.is_supervised() {
             Some(self.children.clone())
         } else {
             None
@@ -425,8 +425,8 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let dedicated = self.spawn_config.is_dedicated();
-        self.spawn_config = SpawnConfig::default();
+        let dedicated = self.model.is_dedicated();
+        self.model = Model::default();
 
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
@@ -462,8 +462,8 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let dedicated = self.spawn_config.is_dedicated();
-        self.spawn_config = SpawnConfig::default();
+        let dedicated = self.model.is_dedicated();
+        self.model = Model::default();
 
         // Spawn the blocking task
         let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());

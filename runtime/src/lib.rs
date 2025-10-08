@@ -120,63 +120,6 @@ pub trait Runner {
         Fut: Future;
 }
 
-/// Configuration flags that influence how a task is spawned.
-#[derive(Copy, Clone, Debug)]
-struct SpawnConfig {
-    supervised: bool,
-    dedicated: bool,
-}
-
-impl Default for SpawnConfig {
-    fn default() -> Self {
-        Self {
-            // Default to supervised tasks like UNIX (and **unlike tokio**)
-            supervised: true,
-            dedicated: false,
-        }
-    }
-}
-
-impl SpawnConfig {
-    /// Return a new configuration with supervision enabled.
-    fn supervised(&self) -> Self {
-        let mut cfg = *self;
-        cfg.supervised = true;
-        cfg
-    }
-
-    /// Return a new configuration with supervision disabled.
-    fn detached(&self) -> Self {
-        let mut cfg = *self;
-        cfg.supervised = false;
-        cfg
-    }
-
-    /// Return a new configuration that requests a dedicated thread.
-    fn dedicated(&self) -> Self {
-        let mut cfg = *self;
-        cfg.dedicated = true;
-        cfg
-    }
-
-    /// Return a new configuration that requests shared runtime scheduling.
-    fn shared(&self) -> Self {
-        let mut cfg = *self;
-        cfg.dedicated = false;
-        cfg
-    }
-
-    /// Returns `true` when the task should be supervised by its parent.
-    fn is_supervised(&self) -> bool {
-        self.supervised
-    }
-
-    /// Returns `true` when the task should run on a dedicated thread.
-    fn is_dedicated(&self) -> bool {
-        self.dedicated
-    }
-}
-
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of `Spawner` configured to spawn new tasks supervised by the current
