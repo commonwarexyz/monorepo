@@ -451,7 +451,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        spawn_cell!(self.context, self.run(sender, receiver).await)
+        spawn_cell!(self.context, self.run(sender, receiver).await);
     }
 
     async fn run(
