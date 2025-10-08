@@ -227,12 +227,12 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::NZU32;
-    use futures::{channel::mpsc, try_join, SinkExt, StreamExt};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::{
@@ -438,8 +438,15 @@ mod tests {
                             }
                         });
 
-                    // Wait for both to finish
-                    try_join!(receiver, sender).unwrap();
+                    // Neither task should exit
+                    select! {
+                        receiver = receiver => {
+                            panic!("receiver exited: {receiver:?}");
+                        },
+                        sender = sender => {
+                            panic!("sender exited: {sender:?}");
+                        },
+                    }
                 }
             });
         }
