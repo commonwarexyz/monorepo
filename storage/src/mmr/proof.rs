@@ -281,6 +281,13 @@ impl<D: Digest> Proof<D> {
     /// # Returns
     /// A Vec of digests for all nodes in `nodes_to_pin(pruning_boundary)`, in the same order as
     /// returned by `nodes_to_pin` (decreasing height order)
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOverflow] if an element in `range` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
+    /// positions count.
+    /// Returns [Error::MissingDigest] if a pinned node is not found in the proof.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn extract_pinned_nodes(
         &self,
@@ -478,27 +485,17 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::LocationOverflow`] if `range.start` or `range.end` exceeds
-/// [`crate::mmr::MAX_LOCATION`].
+/// Returns [Error::LocationOverflow] if a location in `range` exceeds [crate::mmr::MAX_LOCATION].
 ///
-/// Returns [`Error::RangeOutOfBounds`] if the last element position in `range` is out of bounds
+/// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
 ) -> Result<Vec<Position>, Error> {
-    let mut positions = Vec::new();
     if range.is_empty() {
-        return Ok(positions);
+        return Ok(vec![]);
     }
-
-    if !range.start.is_valid() {
-        return Err(Error::LocationOverflow(range.start));
-    }
-    if !range.end.is_valid() {
-        return Err(Error::LocationOverflow(range.end));
-    }
-
     let start_element_pos = Position::try_from(range.start)?;
     let end_minus_one = range
         .end
@@ -514,6 +511,7 @@ pub(crate) fn nodes_required_for_range_proof(
     let mut start_tree_with_element: Option<(Position, u32)> = None;
     let mut end_tree_with_element: Option<(Position, u32)> = None;
     let mut peak_iterator = PeakIterator::new(size);
+    let mut positions = Vec::new();
     while let Some(peak) = peak_iterator.next() {
         if start_tree_with_element.is_none() && peak.0 >= start_element_pos {
             // Found the first tree to contain an element in the range
@@ -600,8 +598,8 @@ pub(crate) fn nodes_required_for_multi_proof(
         return Err(Error::InvalidProof);
     }
     locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
-        let end = loc.checked_add(1).ok_or(Error::LocationOverflow(*loc))?;
-        let positions = nodes_required_for_range_proof(size, *loc..end)?;
+        // It's safe to +1 because nodes_required_for_range_proof validates the range
+        let positions = nodes_required_for_range_proof(size, *loc..*loc + 1)?;
         acc.extend(positions);
         Ok(acc)
     })
@@ -708,7 +706,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr};
+    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -1539,5 +1537,54 @@ mod tests {
             ],
             &root
         ));
+    }
+
+    #[test]
+    fn test_max_location_is_provable() {
+        // Test that the validation logic accepts MAX_LOCATION as a valid location
+        // We use the maximum valid MMR size (2^63 - 1) which can hold up to 2^62 leaves
+        let max_mmr_size = Position::new((1u64 << 63) - 1);
+
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
+        let max_loc_plus_1 = Location::new_unchecked(MAX_LOCATION + 1);
+        let max_loc_plus_2 = Location::new_unchecked(MAX_LOCATION + 2);
+
+        // MAX_LOCATION should be accepted by the validation logic
+        // (The range MAX_LOCATION..MAX_LOCATION+1 proves a single element at MAX_LOCATION)
+        let result = nodes_required_for_range_proof(max_mmr_size, max_loc..max_loc_plus_1);
+
+        // This should succeed - MAX_LOCATION is a valid location
+        assert!(result.is_ok(), "Should be able to prove MAX_LOCATION");
+
+        // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
+        let result_overflow =
+            nodes_required_for_range_proof(max_mmr_size, max_loc_plus_1..max_loc_plus_2);
+        assert!(
+            result_overflow.is_err(),
+            "Should reject location > MAX_LOCATION"
+        );
+        matches!(result_overflow, Err(Error::LocationOverflow(_)));
+    }
+
+    #[test]
+    fn test_max_location_multi_proof() {
+        // Test that multi_proof can handle MAX_LOCATION
+        let max_mmr_size = Position::new((1u64 << 63) - 1);
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
+
+        // Should be able to generate multi-proof for MAX_LOCATION
+        let result = nodes_required_for_multi_proof(max_mmr_size, &[max_loc]);
+        assert!(
+            result.is_ok(),
+            "Should be able to generate multi-proof for MAX_LOCATION"
+        );
+
+        // Should reject MAX_LOCATION + 1
+        let invalid_loc = Location::new_unchecked(MAX_LOCATION + 1);
+        let result_overflow = nodes_required_for_multi_proof(max_mmr_size, &[invalid_loc]);
+        assert!(
+            result_overflow.is_err(),
+            "Should reject location > MAX_LOCATION in multi-proof"
+        );
     }
 }

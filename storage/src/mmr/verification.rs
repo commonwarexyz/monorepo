@@ -152,13 +152,6 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
         return Err(Error::Empty);
     }
 
-    // Validate all locations before passing to internal functions
-    for loc in locations {
-        if !loc.is_valid() {
-            return Err(Error::LocationOverflow(*loc));
-        }
-    }
-
     // Collect all required node positions
     let size = mmr.size();
     let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations)?;

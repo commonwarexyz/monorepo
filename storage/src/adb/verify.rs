@@ -61,18 +61,15 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`crate::mmr::Error::LocationOverflow`] if `op_count`, `range.start`, or `range.end`
-/// exceeds [`crate::mmr::MAX_LOCATION`].
+/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or an element in `range` >
+/// [crate::mmr::MAX_LOCATION].
 ///
-/// Returns [`crate::mmr::Error::RangeOutOfBounds`] if the last element position in `range`
+/// Returns [crate::mmr::Error::RangeOutOfBounds] if the last element position in `range`
 /// is out of bounds for the MMR size.
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
     range: Range<Location>,
 ) -> Result<Vec<Position>, crate::mmr::Error> {
-    if !op_count.is_valid() {
-        return Err(crate::mmr::Error::LocationOverflow(op_count));
-    }
     let mmr_size = Position::try_from(op_count)?;
     proof::nodes_required_for_range_proof(mmr_size, range)
 }
