@@ -1,13 +1,14 @@
 use super::block::BlockFormat;
+use crate::SigningScheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
+use commonware_cryptography::Digest;
 
 /// Enum representing responses from the indexer to validators.
 ///
 /// These responses correspond to the results of the operations requested by `Inbound` messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Outbound<D: Digest> {
     /// Indicates the success or failure of a `Put` operation,
@@ -16,7 +17,7 @@ pub enum Outbound<D: Digest> {
     /// Contains the requested block data in response to a `GetBlock` message.
     Block(BlockFormat<D>),
     /// Contains the requested finality certificate in response to a `GetFinalization` message.
-    Finalization(Finalization<MinSig, D>),
+    Finalization(Finalization<SigningScheme, D>),
 }
 
 impl<D: Digest> Write for Outbound<D> {
@@ -75,7 +76,10 @@ impl<D: Digest> EncodeSize for Outbound<D> {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
-    use commonware_consensus::{threshold_simplex::types::Proposal, types::Round};
+    use commonware_consensus::{
+        threshold_simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        types::Round,
+    };
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element},
@@ -93,7 +97,7 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_finalization() -> Finalization<MinSig, Sha256Digest> {
+    fn new_finalization() -> Finalization<SigningScheme, Sha256Digest> {
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);
@@ -105,8 +109,10 @@ mod tests {
                 parent: 54321,
                 payload: new_digest(),
             },
-            proposal_signature,
-            seed_signature,
+            certificate: bls12381_threshold::Signature::<MinSig> {
+                message_signature: proposal_signature,
+                seed_signature,
+            },
         }
     }
 

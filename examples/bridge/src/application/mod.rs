@@ -16,7 +16,6 @@ pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};
 mod ingress;
-mod supervisor;
 
 /// Configuration for the application.
 pub struct Config<H: Hasher, Si: Sink, St: Stream, P: PublicKey> {

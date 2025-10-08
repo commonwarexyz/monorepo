@@ -207,7 +207,7 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let (application, supervisor, mailbox) = application::Application::new(
+        let (application, signing, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
@@ -226,11 +226,12 @@ fn main() {
             context.with_label("engine"),
             threshold_simplex::Config {
                 crypto: signer.clone(),
+                participants: validators.clone(),
+                signing,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
-                supervisor,
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: 0,
