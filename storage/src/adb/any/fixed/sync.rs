@@ -70,8 +70,8 @@ where
                 },
                 // The last node of an MMR with `range.end` leaves is at the position
                 // right before where the next leaf (at location `range.end`) goes.
-                range: Position::try_from(range.start).expect("valid location")
-                    ..Position::try_from(range.end + 1).expect("valid location"),
+                range: Position::try_from(range.start).unwrap()
+                    ..Position::try_from(range.end + 1).unwrap(),
                 pinned_nodes,
             },
         )
@@ -1511,7 +1511,7 @@ mod tests {
                 log.sync().await.unwrap();
 
                 let pinned_nodes = nodes_to_pin(
-                    Position::try_from(Location::new_unchecked(lower_bound)).expect("valid location"),
+                    Position::try_from(Location::new_unchecked(lower_bound)).unwrap(),
                 )
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
@@ -1535,7 +1535,7 @@ mod tests {
                 assert_eq!(db.log.size().await.unwrap(), upper_bound);
                 assert_eq!(
                     db.mmr.size(),
-                    Position::try_from(Location::new_unchecked(upper_bound)).expect("valid location")
+                    Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
                 );
                 assert_eq!(db.op_count(), upper_bound);
                 assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(lower_bound));
@@ -1594,10 +1594,9 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes =
-                nodes_to_pin(Position::try_from(sync_db_original_size).expect("valid location"))
-                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                    .collect::<Vec<_>>();
+            let pinned_nodes = nodes_to_pin(Position::try_from(sync_db_original_size).unwrap())
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();
@@ -1689,7 +1688,7 @@ mod tests {
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
-                nodes_to_pin(Position::try_from(db.inactivity_floor_loc).expect("valid location"))
+                nodes_to_pin(Position::try_from(db.inactivity_floor_loc).unwrap())
                     .map(|pos| db.mmr.get_node(pos)),
             )
             .await;
