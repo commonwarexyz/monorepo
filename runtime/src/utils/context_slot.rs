@@ -8,12 +8,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const MISSING_CONTEXT: &'static str = "runtime context missing";
-const DUPLICATE_CONTEXT: &'static str = "runtime context already present";
+const MISSING_CONTEXT: &str = "runtime context missing";
+const DUPLICATE_CONTEXT: &str = "runtime context already present";
 
 /// A wrapper around context that allows it to be taken and returned without requiring
 /// all interactions to unwrap (as with `Option<C>`).
-#[derive(Debug)]
+// TODO(#1833): Remove `Clone`
+#[derive(Clone, Debug)]
 pub enum ContextSlot<C> {
     /// A context available for use.
     Present(C),
@@ -46,14 +47,14 @@ impl<C> ContextSlot<C> {
     pub fn take(&mut self) -> C {
         match std::mem::replace(self, Self::Missing) {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", Self::MISSING_CONTEXT),
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
 
     /// Return a context to the slot, panicking if one is already present.
     pub fn restore(&mut self, context: C) {
         match self {
-            Self::Present(_) => panic!("{}", Self::DUPLICATE_CONTEXT),
+            Self::Present(_) => panic!("{}", DUPLICATE_CONTEXT),
             Self::Missing => {
                 *self = Self::Present(context);
             }
@@ -78,21 +79,21 @@ impl<C> ContextSlot<C> {
     fn present_ref(&self) -> &C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", Self::MISSING_CONTEXT),
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
 
     fn present_mut(&mut self) -> &mut C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", Self::MISSING_CONTEXT),
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
 
     fn into_present(self) -> C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", Self::MISSING_CONTEXT),
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
 }
