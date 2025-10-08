@@ -105,8 +105,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_loc in leaves {
-            let leaf_pos =
-                Position::try_from(*leaf_loc).expect("internal location should be valid");
+            let leaf_pos = Position::try_from(*leaf_loc)?;
             let dest_pos = self.destination_pos(leaf_pos);
             let future = mmr.get_node(dest_pos);
             futures.push(future);
@@ -116,8 +115,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
             let Some(digest) = digest else {
                 panic!("missing grafted digest for leaf {}", leaves[i]);
             };
-            let leaf_pos =
-                Position::try_from(leaves[i]).expect("internal location should be valid");
+            let leaf_pos = Position::try_from(leaves[i])?;
             self.grafted_digests.insert(leaf_pos, digest);
         }
 
