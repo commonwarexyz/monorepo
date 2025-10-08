@@ -60,9 +60,9 @@ impl Location {
         Self(loc)
     }
 
-    /// Create a new [Location] from a raw `u64`, validating it does not exceed [`MAX_LOCATION`].
+    /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
     ///
-    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [`MAX_LOCATION`] cannot be
+    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [MAX_LOCATION] cannot be
     /// safely converted to [Position] and will cause panics in MMR operations.
     ///
     /// # Examples
@@ -95,16 +95,13 @@ impl Location {
         self.0
     }
 
-    /// Returns `true` if this location can be safely converted to a [Position].
-    ///
-    /// Returns `false` if this location exceeds [`MAX_LOCATION`], which would cause
-    /// [Position::from] to panic due to overflowing u64.
+    /// Returns `true` iff this location can be safely converted to a [Position].
     #[inline]
     pub const fn is_valid(self) -> bool {
         self.0 <= MAX_LOCATION
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [`MAX_LOCATION`].
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_LOCATION].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
