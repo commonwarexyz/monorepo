@@ -116,7 +116,9 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
-        let metrics = metrics::Metrics::init(context.with_label("metrics"));
+
+        // TODO(#1833): Metrics should use the post-start context
+        let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
             context: ContextCell::new(context),

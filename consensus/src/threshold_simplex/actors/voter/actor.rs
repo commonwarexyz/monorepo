@@ -540,7 +540,8 @@ impl<
             "threshold signature recover latency",
             recover_latency.clone(),
         );
-        let clock = Arc::new(context.with_label("metrics"));
+        // TODO(#1833): Metrics should use the post-start context
+        let clock = Arc::new(context.clone());
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);

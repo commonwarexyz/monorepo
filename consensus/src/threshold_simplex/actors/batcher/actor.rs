@@ -394,7 +394,8 @@ impl<
             "latency of partial signature verification",
             verify_latency.clone(),
         );
-        let clock = Arc::new(context.with_label("metrics"));
+        // TODO(#1833): Metrics should use the post-start context
+        let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
