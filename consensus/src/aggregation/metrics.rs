@@ -15,8 +15,6 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub acks: status::Counter,
     /// Number of threshold signatures produced
     pub threshold: Counter,
-    /// Number of rebroadcast attempts by status
-    pub rebroadcast: status::Counter,
     /// Histogram of application digest durations
     pub digest_duration: histogram::Timed<E>,
 }
@@ -62,14 +60,12 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         );
         let clock = Arc::new(context);
 
-        let metrics = Self {
+        Self {
             tip,
             digest,
             acks,
             threshold,
-            rebroadcast,
             digest_duration: histogram::Timed::new(digest_duration, clock),
-        };
-        metrics
+        }
     }
 }
