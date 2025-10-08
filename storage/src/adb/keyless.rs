@@ -701,7 +701,7 @@ mod test {
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;
 
-    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg, ())> {
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),

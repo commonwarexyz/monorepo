@@ -105,7 +105,7 @@ struct FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         log_journal_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),

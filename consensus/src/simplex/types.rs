@@ -6,7 +6,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
@@ -1077,10 +1077,10 @@ impl<S: CSignature, D: Digest> Read for Response<S, D> {
     fn read_cfg(reader: &mut impl Buf, (total, max_sigs): &(usize, usize)) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let notarizations =
-            Vec::<Notarization<S, D>>::read_cfg(reader, &((..=total).into(), *max_sigs))?;
+            Vec::<Notarization<S, D>>::read_cfg(reader, &(RangeCfg::new(..=total), *max_sigs))?;
         let rem = total - notarizations.len();
         let nullifications =
-            Vec::<Nullification<S>>::read_cfg(reader, &((..=rem).into(), *max_sigs))?;
+            Vec::<Nullification<S>>::read_cfg(reader, &(RangeCfg::new(..=rem), *max_sigs))?;
         Ok(Self {
             id,
             notarizations,

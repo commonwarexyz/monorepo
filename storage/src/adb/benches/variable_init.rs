@@ -46,8 +46,8 @@ cfg_if::cfg_if! {
     }
 }
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, ())> {
-    AConfig::<EightCap, (commonware_codec::RangeCfg, ())> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,

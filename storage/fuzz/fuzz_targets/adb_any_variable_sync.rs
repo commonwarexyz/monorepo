@@ -154,7 +154,7 @@ struct FuzzInput {
 
 const PAGE_SIZE: usize = 128;
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),

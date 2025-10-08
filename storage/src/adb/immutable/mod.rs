@@ -783,7 +783,9 @@ pub(super) mod test {
     const PAGE_CACHE_SIZE: usize = 9;
     const ITEMS_PER_SECTION: u64 = 5;
 
-    pub(crate) fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    pub(crate) fn db_config(
+        suffix: &str,
+    ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),

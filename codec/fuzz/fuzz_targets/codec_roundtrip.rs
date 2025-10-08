@@ -83,12 +83,19 @@ fn roundtrip_primitive_f64(v: f64) {
     assert_eq!(v, decoded);
 }
 
-fn roundtrip_map<K, V>(map: &HashMap<K, V>, range_cfg: RangeCfg, k_cfg: K::Cfg, v_cfg: V::Cfg)
-where
+fn roundtrip_map<K, V>(
+    map: &HashMap<K, V>,
+    range_cfg: RangeCfg<usize>,
+    k_cfg: K::Cfg,
+    v_cfg: V::Cfg,
+) where
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
-    HashMap<K, V>:
-        Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+    HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+        + std::fmt::Debug
+        + PartialEq
+        + Write
+        + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
