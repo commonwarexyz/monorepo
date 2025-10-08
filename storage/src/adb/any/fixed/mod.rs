@@ -643,7 +643,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///

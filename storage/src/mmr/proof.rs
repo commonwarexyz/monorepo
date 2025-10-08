@@ -554,7 +554,7 @@ pub(crate) fn nodes_required_for_range_proof(
 /// # Errors
 ///
 /// Returns [Error::Empty] if locations is empty.
-/// Returns [Error::LocationOverflow] if any location in `locations` exceeds [crate::mmr::MAX_LOCATION].
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
