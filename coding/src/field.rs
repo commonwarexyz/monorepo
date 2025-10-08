@@ -40,6 +40,30 @@ impl std::fmt::Debug for F {
 }
 
 impl F {
+    // The following constants are not randomly chosen, but computed in a specific
+    // way. They could be computed at compile time, with each definition actually
+    // doing the computation, but to avoid burdening compilation, we instead enforce
+    // where they originate from with tests.
+
+    /// Any non-zero element x = GENERATOR^k, for some k.
+    ///
+    /// This is chosen such that GENERATOR^((P - 1) / 64) = 8.
+    #[cfg(test)]
+    pub const GENERATOR: Self = Self(0xd64f951101aff9bf);
+
+    /// An element of order 2^32.
+    ///
+    /// This is specifically chosen such that ROOT_OF_UNITY^(2^26) = 8.
+    ///
+    /// That enables optimizations when doing NTTs, and things like that.
+    pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
+
+    /// An element guaranteed not to be any power of [Self::ROOT_OF_UNITY].
+    pub const NOT_ROOT_OF_UNITY: Self = Self(0x79bc2f50acd74161);
+
+    /// The inverse of [Self::NOT_ROOT_OF_UNITY].
+    pub const NOT_ROOT_OF_UNITY_INV: Self = Self(0x1036c4023580ce8d);
+
     /// The zero element of the field.
     ///
     /// This is the identity for addition.
@@ -166,28 +190,6 @@ impl F {
         }
         acc
     }
-
-    // These could be computed at compile time, but I'm choosing to just test
-    // their calculation instead.
-
-    /// Any non-zero element x = GENERATOR^k, for some k.
-    ///
-    /// This is chosen such that GENERATOR^((P - 1) / 64) = 8.
-    #[cfg(test)]
-    pub const GENERATOR: Self = Self(0xd64f951101aff9bf);
-
-    /// An element of order 2^32.
-    ///
-    /// This is specifically chosen such that ROOT_OF_UNITY^(2^26) = 8.
-    ///
-    /// That enables optimizations when doing NTTs, and things like that.
-    pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
-
-    /// An element guaranteed not to be any power of [Self::ROOT_OF_UNITY].
-    pub const NOT_ROOT_OF_UNITY: Self = Self(0x79bc2f50acd74161);
-
-    /// The inverse of [Self::NOT_ROOT_OF_UNITY].
-    pub const NOT_ROOT_OF_UNITY_INV: Self = Self(0x1036c4023580ce8d);
 
     /// Construct a 2^lg_k root of unity.
     ///
