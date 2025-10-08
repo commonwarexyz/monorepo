@@ -239,7 +239,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         true
     }
 
-    async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<S, D>> {
+    async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
@@ -253,7 +253,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
 
         // Attempt to construct notarization
-        if self.notarizes.len() < threshold as usize {
+        let quorum = self.participants.quorum() as usize;
+        if self.notarizes.len() < quorum {
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
@@ -280,7 +281,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         Some(notarization)
     }
 
-    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification<S>> {
+    async fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
@@ -293,7 +294,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
 
         // Attempt to construct nullification
-        if self.nullifies.len() < threshold as usize {
+        let quorum = self.participants.quorum() as usize;
+        if self.nullifies.len() < quorum {
             return None;
         }
         debug!(round = ?self.round, "broadcasting nullification");
@@ -315,7 +317,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         Some(nullification)
     }
 
-    async fn finalizable(&mut self, threshold: u32, force: bool) -> Option<Finalization<S, D>> {
+    async fn finalizable(&mut self, force: bool) -> Option<Finalization<S, D>> {
         // Ensure we haven't already broadcast
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
@@ -329,7 +331,8 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
 
         // Attempt to construct finalization
-        if self.finalizes.len() < threshold as usize {
+        let quorum = self.participants.quorum() as usize;
+        if self.finalizes.len() < quorum {
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
@@ -538,8 +541,8 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let threshold = self.participants.quorum();
-        if round.notarizes.len() >= threshold as usize {
+        let quorum = self.participants.quorum() as usize;
+        if round.notarizes.len() >= quorum {
             return Some(&proposal.payload);
         }
         None
@@ -550,8 +553,8 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let threshold = self.participants.quorum();
-        round.nullification.is_some() || round.nullifies.len() >= threshold as usize
+        let quorum = self.participants.quorum() as usize;
+        round.nullification.is_some() || round.nullifies.len() >= quorum
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
@@ -560,8 +563,8 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let threshold = self.participants.quorum();
-        if round.finalizes.len() >= threshold as usize {
+        let quorum = self.participants.quorum() as usize;
+        if round.finalizes.len() >= quorum as usize {
             return Some(&proposal.payload);
         }
         None
@@ -1308,8 +1311,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
-        let threshold = self.participants.quorum();
-        round.notarizable(threshold, force).await
+        round.notarizable(force).await
     }
 
     async fn construct_nullification(
@@ -1321,8 +1323,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
-        let threshold = self.participants.quorum();
-        round.nullifiable(threshold, force).await
+        round.nullifiable(force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
@@ -1365,8 +1366,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
-        let threshold = self.participants.quorum();
-        round.finalizable(threshold, force).await
+        round.finalizable(force).await
     }
 
     async fn notify<Sp: Sender, Sr: Sender>(
