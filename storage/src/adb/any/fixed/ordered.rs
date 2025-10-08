@@ -7,7 +7,8 @@
 use crate::{
     adb::{
         any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
+            historical_proof, init_mmr_and_log, prune_db, Any as AnyTrait, Config,
+            SNAPSHOT_READ_BUFFER_SIZE,
         },
         Error,
     },
@@ -21,6 +22,7 @@ use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
+use core::future::Future;
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
 use tracing::info;
@@ -35,6 +37,58 @@ enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
     NotExists((K, V, K)),
 }
 
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+    > AnyTrait<E, K, V, H, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>> {
+        self.get(key)
+    }
+
+    fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+        self.root(hasher)
+    }
+
+    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>> {
+        self.update(key, value)
+    }
+
+    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>> {
+        self.delete(key)
+    }
+
+    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> {
+        self.commit()
+    }
+
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> {
+        self.sync()
+    }
+
+    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>> {
+        self.prune(target_prune_loc)
+    }
+
+    fn close(self) -> impl Future<Output = Result<(), Error>> {
+        self.close()
+    }
+
+    fn destroy(self) -> impl Future<Output = Result<(), Error>> {
+        self.destroy()
+    }
+}
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
 /// active key.
@@ -530,7 +584,13 @@ impl<
             }
         };
 
-        self.apply_op(op).await
+        self.apply_op(op).await?;
+        // For either a new key or an update of existing key, we inactivate exactly one previous
+        // operation. A new key inactivates a previous span, and an update of existing key
+        // inactivates a previous value.
+        self.steps += 1;
+
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -587,6 +647,7 @@ impl<
             return Ok(());
         };
         self.apply_op(Operation::Delete(key.clone())).await?;
+        self.steps += 1;
 
         if self.snapshot.keys() == 0 {
             // This was the last key in the DB so there is no span to update.
@@ -616,7 +677,10 @@ impl<
         self.update_known_loc(&prev_key.1, prev_key.0, loc).await?;
 
         self.apply_op(Operation::Update(prev_key.1, prev_key.2, next_key))
-            .await
+            .await?;
+        self.steps += 1;
+
+        Ok(())
     }
 
     /// Delete `key` from the snapshot if it exists, returning the location that was previously

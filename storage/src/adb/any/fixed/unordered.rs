@@ -3,7 +3,8 @@
 use crate::{
     adb::{
         any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
+            historical_proof, init_mmr_and_log, prune_db, Any as AnyTrait, Config,
+            SNAPSHOT_READ_BUFFER_SIZE,
         },
         Error,
     },
@@ -17,7 +18,8 @@ use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use core::future::Future;
+use futures::{future::TryFutureExt as _, pin_mut, try_join, FutureExt as _, StreamExt as _};
 use std::num::NonZeroU64;
 use tracing::info;
 
@@ -561,6 +563,59 @@ impl<
         }
 
         Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+    > AnyTrait<E, K, V, H, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>> {
+        self.get(key)
+    }
+
+    fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+        self.root(hasher)
+    }
+
+    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>> {
+        self.update(key, value)
+    }
+
+    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>> {
+        self.delete(key).map(|res| res.map(|_| ()))
+    }
+
+    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> {
+        self.commit()
+    }
+
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> {
+        self.sync()
+    }
+
+    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>> {
+        self.prune(target_prune_loc)
+    }
+
+    fn close(self) -> impl Future<Output = Result<(), Error>> {
+        self.close()
+    }
+
+    fn destroy(self) -> impl Future<Output = Result<(), Error>> {
+        self.destroy()
     }
 }
 
