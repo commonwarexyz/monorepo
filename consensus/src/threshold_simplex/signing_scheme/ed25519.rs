@@ -212,13 +212,10 @@ impl SigningScheme for Scheme {
             candidates.push((vote, public_key));
         }
 
-        if !candidates.is_empty() {
-            if !batch.verify(rng) {
-                for (vote, public_key) in &candidates {
-                    if !public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature)
-                    {
-                        invalid.insert(vote.signer);
-                    }
+        if !candidates.is_empty() && !batch.verify(rng) {
+            for (vote, public_key) in &candidates {
+                if !public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature) {
+                    invalid.insert(vote.signer);
                 }
             }
         }

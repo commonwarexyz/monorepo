@@ -564,7 +564,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let quorum = self.participants.quorum() as usize;
-        if round.finalizes.len() >= quorum as usize {
+        if round.finalizes.len() >= quorum {
             return Some(&proposal.payload);
         }
         None

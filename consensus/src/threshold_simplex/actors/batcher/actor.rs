@@ -449,7 +449,7 @@ impl<
                                     self.inbound_messages.clone(),
                                     initialized
                                 )
-                            ).set_leader(leader_index as u32);
+                            ).set_leader(leader_index);
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active

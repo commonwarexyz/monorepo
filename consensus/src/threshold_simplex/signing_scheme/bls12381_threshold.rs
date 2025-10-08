@@ -754,7 +754,7 @@ mod tests {
         let threshold = 3;
         let (polynomial, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-        let scheme: Scheme<MinSig> = Scheme::new(&vec![0; 4], &polynomial, shares[0].clone());
+        let scheme: Scheme<MinSig> = Scheme::new(&[0; 4], &polynomial, shares[0].clone());
 
         let identity = *polynomial.constant();
         let polynomial = evaluate_all::<MinSig>(&polynomial, 4);
