@@ -17,7 +17,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner,
+    Clock, ContextSlot, Handle, Metrics, Spawner,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
@@ -50,7 +50,7 @@ pub struct Engine<
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
-    context: E,
+    context: ContextSlot<E>,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -115,7 +115,7 @@ impl<
         );
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 coordinator: cfg.coordinator,
@@ -139,7 +139,11 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(network).await;
+        })
     }
 
     /// Inner run loop called by `start`.

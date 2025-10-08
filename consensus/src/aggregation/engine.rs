@@ -25,7 +25,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
@@ -82,7 +82,7 @@ pub struct Engine<
     >,
 > {
     // ---------- Interfaces ----------
-    context: E,
+    context: ContextSlot<E>,
     automaton: A,
     monitor: M,
     validators: TSu,
@@ -176,10 +176,10 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(&context);
 
         Self {
-            context,
+            context: ContextSlot::new(context),
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
@@ -222,7 +222,11 @@ impl<
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(network).await;
+        })
     }
 
     /// Inner run loop called by `start`.
@@ -242,7 +246,7 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
+        let journal = Journal::init(self.context.with_label("journal").into_inner(), journal_cfg)
             .await
             .expect("init failed");
         let unverified_indices = self.replay(&journal).await;
