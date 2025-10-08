@@ -104,11 +104,6 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     size: Position,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    // Validate locations before passing to internal functions
-    if range.is_empty() {
-        return Err(Error::Empty);
-    }
-
     // Get the positions of all nodes needed to generate the proof.
     let positions = proof::nodes_required_for_range_proof(size, range)?;
 
@@ -134,8 +129,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if any location in `locations` >
-/// [crate::mmr::MAX_LOCATION].
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
 /// Returns [Error::Empty] if locations is empty.
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
@@ -143,6 +137,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
     if locations.is_empty() {
+        // Disallow proofs over empty element lists just as we disallow proofs over empty ranges.
         return Err(Error::Empty);
     }
 
