@@ -557,6 +557,7 @@ mod tests {
     {
         runner.start(|context| async move {
             let context = if dedicated {
+                assert!(!blocking);
                 context.dedicated()
             } else {
                 context.shared(blocking)
@@ -2033,9 +2034,9 @@ mod tests {
 
     #[test]
     fn test_deterministic_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = deterministic::Runner::default();
-            test_spawn_abort(executor, dedicated, true);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 
@@ -2304,9 +2305,9 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = tokio::Runner::default();
-            test_spawn_abort(executor, dedicated, true);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 
