@@ -12,7 +12,7 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, ContextSlot, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+    Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use either::Either;
@@ -46,7 +46,7 @@ pub struct Config {
 
 /// Implementation of a simulated network.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
@@ -110,7 +110,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 next_addr,

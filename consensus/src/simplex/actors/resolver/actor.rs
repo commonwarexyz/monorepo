@@ -19,7 +19,7 @@ use commonware_p2p::{
     },
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -104,7 +104,7 @@ pub struct Actor<
     D: Digest,
     S: Supervisor<Index = View, PublicKey = C>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     supervisor: S,
 
     epoch: Epoch,
@@ -168,7 +168,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 supervisor: cfg.supervisor,
 
                 epoch: cfg.epoch,

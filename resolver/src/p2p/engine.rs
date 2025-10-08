@@ -17,7 +17,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, ContextSlot, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
@@ -50,7 +50,7 @@ pub struct Engine<
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -115,7 +115,7 @@ impl<
         );
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 coordinator: cfg.coordinator,

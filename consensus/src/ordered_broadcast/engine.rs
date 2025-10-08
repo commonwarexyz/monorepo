@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::futures::Pool as FuturesPool;
@@ -77,7 +77,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     crypto: C,
     automaton: A,
     relay: R,
@@ -228,7 +228,7 @@ impl<
         let metrics = metrics::Metrics::init(context.with_label("metrics"));
 
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,

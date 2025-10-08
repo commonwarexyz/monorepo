@@ -8,7 +8,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, ContextSlot, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+    Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{
@@ -49,7 +49,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Signer,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
@@ -102,7 +102,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             RateLimiter::hashmap_with_clock(cfg.allowed_handshake_rate_per_subnet, &context);
 
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,

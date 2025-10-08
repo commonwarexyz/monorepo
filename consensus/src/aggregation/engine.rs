@@ -25,7 +25,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
@@ -82,7 +82,7 @@ pub struct Engine<
     >,
 > {
     // ---------- Interfaces ----------
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     automaton: A,
     monitor: M,
     validators: TSu,
@@ -179,7 +179,7 @@ impl<
         let metrics = metrics::Metrics::init(context.with_label("metrics"));
 
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,

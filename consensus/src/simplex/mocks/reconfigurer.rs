@@ -10,7 +10,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{ContextSlot, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -26,7 +26,7 @@ pub struct Reconfigurer<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     crypto: C,
     supervisor: S,
     namespace: Vec<u8>,
@@ -38,7 +38,7 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             namespace: cfg.namespace,

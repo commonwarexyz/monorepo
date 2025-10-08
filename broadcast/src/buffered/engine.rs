@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
-    Clock, ContextSlot, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -51,7 +51,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     ////////////////////////////////////////
     // Configuration
@@ -119,7 +119,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         let metrics = metrics::Metrics::init(context.with_label("metrics"));
 
         let result = Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,

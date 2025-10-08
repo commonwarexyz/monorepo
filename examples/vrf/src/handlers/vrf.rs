@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextSlot, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use std::{
     collections::{HashMap, HashSet},
@@ -25,7 +25,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
 pub struct Vrf<E: Clock + Spawner, P: PublicKey> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     timeout: Duration,
     threshold: u32,
     contributors: Vec<P>,
@@ -48,7 +48,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             timeout,
             threshold,
             contributors,

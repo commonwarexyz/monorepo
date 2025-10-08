@@ -7,7 +7,7 @@ use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -22,7 +22,7 @@ pub struct Engine<
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     voter: voter::Actor<E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<C::Signature, D>,
@@ -91,7 +91,7 @@ impl<
 
         // Return the engine
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
 
             voter,
             voter_mailbox,

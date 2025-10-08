@@ -18,7 +18,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{buffer::PoolRef, Clock, ContextSlot, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::PoolRef, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
@@ -324,7 +324,7 @@ pub struct Actor<
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     crypto: C,
     automaton: A,
     relay: R,
@@ -417,7 +417,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,

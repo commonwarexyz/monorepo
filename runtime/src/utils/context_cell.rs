@@ -15,14 +15,14 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 /// all interactions to unwrap (as with `Option<C>`).
 // TODO(#1833): Remove `Clone`
 #[derive(Clone, Debug)]
-pub enum ContextSlot<C> {
+pub enum ContextCell<C> {
     /// A context available for use.
     Present(C),
     /// The context has been taken elsewhere.
     Missing,
 }
 
-impl<C> ContextSlot<C> {
+impl<C> ContextCell<C> {
     /// Create a new slot containing `context`.
     pub fn new(context: C) -> Self {
         Self::Present(context)
@@ -55,7 +55,7 @@ impl<C> ContextSlot<C> {
     }
 }
 
-impl<C> AsRef<C> for ContextSlot<C> {
+impl<C> AsRef<C> for ContextCell<C> {
     fn as_ref(&self) -> &C {
         match self {
             Self::Present(context) => context,
@@ -64,7 +64,7 @@ impl<C> AsRef<C> for ContextSlot<C> {
     }
 }
 
-impl<C> AsMut<C> for ContextSlot<C> {
+impl<C> AsMut<C> for ContextCell<C> {
     fn as_mut(&mut self) -> &mut C {
         match self {
             Self::Present(context) => context,
@@ -73,7 +73,7 @@ impl<C> AsMut<C> for ContextSlot<C> {
     }
 }
 
-impl<C> crate::Spawner for ContextSlot<C>
+impl<C> crate::Spawner for ContextCell<C>
 where
     C: crate::Spawner,
 {
@@ -124,7 +124,7 @@ where
     }
 }
 
-impl<C> crate::Metrics for ContextSlot<C>
+impl<C> crate::Metrics for ContextCell<C>
 where
     C: crate::Metrics,
 {
@@ -145,7 +145,7 @@ where
     }
 }
 
-impl<C> crate::Clock for ContextSlot<C>
+impl<C> crate::Clock for ContextCell<C>
 where
     C: crate::Clock,
 {
@@ -162,7 +162,7 @@ where
     }
 }
 
-impl<C> crate::Network for ContextSlot<C>
+impl<C> crate::Network for ContextCell<C>
 where
     C: crate::Network,
 {
@@ -183,7 +183,7 @@ where
     }
 }
 
-impl<C> crate::Storage for ContextSlot<C>
+impl<C> crate::Storage for ContextCell<C>
 where
     C: crate::Storage,
 {
@@ -210,7 +210,7 @@ where
     }
 }
 
-impl<C> RngCore for ContextSlot<C>
+impl<C> RngCore for ContextCell<C>
 where
     C: RngCore,
 {
@@ -231,9 +231,9 @@ where
     }
 }
 
-impl<C> CryptoRng for ContextSlot<C> where C: CryptoRng {}
+impl<C> CryptoRng for ContextCell<C> where C: CryptoRng {}
 
-impl<C> GClock for ContextSlot<C>
+impl<C> GClock for ContextCell<C>
 where
     C: GClock,
 {
@@ -244,4 +244,4 @@ where
     }
 }
 
-impl<C> ReasonablyRealtime for ContextSlot<C> where C: ReasonablyRealtime {}
+impl<C> ReasonablyRealtime for ContextCell<C> where C: ReasonablyRealtime {}

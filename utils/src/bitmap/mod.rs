@@ -461,8 +461,7 @@ impl<const N: usize> BitMap<N> {
         let chunk = bit / Self::CHUNK_SIZE_BITS;
         assert!(
             chunk <= usize::MAX as u64,
-            "chunk overflow: {} exceeds usize::MAX",
-            chunk
+            "chunk overflow: {chunk} exceeds usize::MAX",
         );
         chunk as usize
     }

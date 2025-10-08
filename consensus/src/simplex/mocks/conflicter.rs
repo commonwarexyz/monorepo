@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextSlot, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -25,7 +25,7 @@ pub struct Conflicter<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -42,7 +42,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,

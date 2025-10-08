@@ -12,7 +12,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
-use commonware_runtime::{ContextSlot, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -48,7 +48,7 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     sender: S,
     receiver: R,
     mailbox_size: usize,
@@ -62,7 +62,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
         let (control_tx, control_rx) = mpsc::unbounded();
         let mux = Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             sender,
             receiver,
             mailbox_size,

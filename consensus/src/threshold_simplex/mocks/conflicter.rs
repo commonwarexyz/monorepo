@@ -11,7 +11,7 @@ use commonware_cryptography::{
     Digest, Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextSlot, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -27,7 +27,7 @@ pub struct Conflicter<
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     supervisor: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
@@ -43,7 +43,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             supervisor: cfg.supervisor,
             namespace: cfg.namespace,
             _hasher: PhantomData,

@@ -29,7 +29,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, quorum_from_slice};
@@ -139,7 +139,7 @@ impl<
     > Round<E, C, V, D, S>
 {
     pub fn new(
-        context: &ContextSlot<E>,
+        context: &ContextCell<E>,
         supervisor: S,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
@@ -438,7 +438,7 @@ pub struct Actor<
         Share = group::Share,
     >,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     crypto: C,
     blocker: B,
     automaton: A,
@@ -547,7 +547,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,

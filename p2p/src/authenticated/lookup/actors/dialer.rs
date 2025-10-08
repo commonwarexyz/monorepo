@@ -13,7 +13,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
@@ -42,7 +42,7 @@ pub struct Config<C: Signer> {
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
 pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     // ---------- State ----------
     /// The list of peers to dial.
@@ -67,7 +67,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             attempts.clone(),
         );
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,

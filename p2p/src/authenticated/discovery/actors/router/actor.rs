@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{ContextSlot, Handle, Metrics, Spawner};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
@@ -47,7 +47,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,

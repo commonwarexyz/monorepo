@@ -9,7 +9,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextSlot, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
@@ -17,7 +17,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
     contributors: Vec<C>,
@@ -34,7 +34,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
     ) -> Self {
         contributors.sort();
         Self {
-            context: ContextSlot::new(context),
+            context: ContextCell::new(context),
             dkg_frequency,
             dkg_phase_timeout,
             contributors,

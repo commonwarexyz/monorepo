@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Network as RNetwork, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -30,7 +30,7 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
@@ -81,7 +81,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 cfg,
 
                 channels,

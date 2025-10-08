@@ -11,7 +11,7 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, ContextSlot, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -23,7 +23,7 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
@@ -98,7 +98,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context: ContextSlot::Present(context),
+                context: ContextCell::Present(context),
                 crypto: cfg.crypto,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,

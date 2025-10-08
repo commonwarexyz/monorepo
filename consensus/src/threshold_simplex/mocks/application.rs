@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
-use commonware_runtime::{Clock, ContextSlot, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -125,7 +125,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
-    context: ContextSlot<E>,
+    context: ContextCell<E>,
     hasher: H,
     participant: P,
 
@@ -155,7 +155,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
-                context: ContextSlot::new(context),
+                context: ContextCell::new(context),
                 hasher: cfg.hasher,
                 participant: cfg.participant,
 
