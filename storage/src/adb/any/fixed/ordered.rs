@@ -86,7 +86,7 @@ pub struct Any<
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Array + Ord,
         V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
@@ -409,21 +409,24 @@ impl<
         Ok(None)
     }
 
-    /// Get the operation that defines the span whose range contains `key`.
-    pub async fn get_span(&self, key: &K) -> Result<(K, V, K, Location), Error> {
-        assert_ne!(self.snapshot.keys(), 0, "TODO: handle empty dbs");
+    /// Get the operation that defines the span whose range contains `key`, or None if the DB is
+    /// empty.
+    pub async fn get_span(&self, key: &K) -> Result<Option<(K, V, K, Location)>, Error> {
+        if self.snapshot.keys() == 0 {
+            return Ok(None);
+        }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
         let iter = self.snapshot.get(key);
         let span = Self::find_span(&self.log, iter, key).await?;
         if let Some(span) = span {
-            return Ok(span);
+            return Ok(Some(span));
         }
 
         let iter = self.snapshot.prev_translated_key(key);
         let span = Self::find_span(&self.log, iter, key).await?;
         if let Some(span) = span {
-            return Ok(span);
+            return Ok(Some(span));
         }
 
         // If we get here, then `key` must precede the first key in the snapshot, in which case we
@@ -431,7 +434,7 @@ impl<
         let iter = self.snapshot.last_translated_key();
         let span = Self::find_span(&self.log, iter, key).await?;
         if let Some(span) = span {
-            return Ok(span);
+            return Ok(Some(span));
         }
 
         // A span that includes any given key should always exist.
@@ -1775,6 +1778,7 @@ mod test {
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().2, next);
                     next_key = next;
                 }
 
@@ -1792,6 +1796,7 @@ mod test {
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().2, next);
                     next_key = next;
                 }
 
