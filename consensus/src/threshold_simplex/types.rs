@@ -445,33 +445,52 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        // FIXME: avoid cloning here
         self.notarizes_force = false;
 
-        let notarizes = std::mem::take(&mut self.notarizes);
-        let proposal = &notarizes[0].proposal.clone();
+        let mut notarizes = std::mem::take(&mut self.notarizes);
+
+        // Early return if there are no notarizes to verify
+        if notarizes.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        // If there is only one notarize, we can skip batch verification
+        if notarizes.len() == 1 {
+            let notarize = notarizes.pop().expect("checked above that length is 1");
+            if self.signing.verify_vote(
+                namespace,
+                VoteContext::Notarize {
+                    proposal: &notarize.proposal,
+                },
+                &notarize.vote,
+            ) {
+                self.notarizes_verified += 1;
+                return (vec![Voter::Notarize(notarize)], vec![]);
+            } else {
+                return (vec![], vec![notarize.signer()]);
+            };
+        }
+
+        // Otherwise, we need to batch verify
+        let (proposals, votes): (Vec<_>, Vec<_>) =
+            notarizes.into_iter().map(|n| (n.proposal, n.vote)).unzip();
+
+        let proposal = &proposals[0];
 
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes(
-            rng,
-            namespace,
-            VoteContext::Notarize { proposal },
-            notarizes.into_iter().map(|notarize| notarize.vote),
-        );
+        } = self
+            .signing
+            .verify_votes(rng, namespace, VoteContext::Notarize { proposal }, votes);
 
         self.notarizes_verified += verified.len();
 
         (
             verified
                 .into_iter()
-                .map(|vote| {
-                    Voter::Notarize(Notarize {
-                        proposal: proposal.clone(),
-                        vote,
-                    })
-                })
+                .zip(proposals)
+                .map(|(vote, proposal)| Voter::Notarize(Notarize { proposal, vote }))
                 .collect(),
             invalid_signers,
         )
@@ -543,7 +562,31 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        let nullifies = std::mem::take(&mut self.nullifies);
+        let mut nullifies = std::mem::take(&mut self.nullifies);
+
+        // Early return if there are no nullifies to verify
+        if nullifies.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        // If there is only one nullify, we can skip batch verification
+        if nullifies.len() == 1 {
+            let nullify = nullifies.pop().expect("checked above that length is 1");
+            if self.signing.verify_vote::<D>(
+                namespace,
+                VoteContext::Nullify {
+                    round: nullify.round,
+                },
+                &nullify.vote,
+            ) {
+                self.nullifies_verified += 1;
+                return (vec![Voter::Nullify(nullify)], vec![]);
+            } else {
+                return (vec![], vec![nullify.signer()]);
+            };
+        }
+
+        // Otherwise, we need to batch verify
         let round = nullifies[0].round;
 
         let VoteVerification {
@@ -618,30 +661,50 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        let finalizes = std::mem::take(&mut self.finalizes);
-        let proposal = &finalizes[0].proposal.clone();
+        let mut finalizes = std::mem::take(&mut self.finalizes);
+
+        // Early return if there are no finalizes to verify
+        if finalizes.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        // If there is only one finalize, we can skip batch verification
+        if finalizes.len() == 1 {
+            let finalize = finalizes.pop().expect("checked above that length is 1");
+            if self.signing.verify_vote(
+                namespace,
+                VoteContext::Finalize {
+                    proposal: &finalize.proposal,
+                },
+                &finalize.vote,
+            ) {
+                self.finalizes_verified += 1;
+                return (vec![Voter::Finalize(finalize)], vec![]);
+            } else {
+                return (vec![], vec![finalize.signer()]);
+            };
+        }
+
+        // Otherwise, we need to batch verify
+        let (proposals, votes): (Vec<_>, Vec<_>) =
+            finalizes.into_iter().map(|n| (n.proposal, n.vote)).unzip();
+
+        let proposal = &proposals[0];
 
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes(
-            rng,
-            namespace,
-            VoteContext::Finalize { proposal },
-            finalizes.into_iter().map(|finalizes| finalizes.vote),
-        );
+        } = self
+            .signing
+            .verify_votes(rng, namespace, VoteContext::Finalize { proposal }, votes);
 
         self.finalizes_verified += verified.len();
 
         (
             verified
                 .into_iter()
-                .map(|vote| {
-                    Voter::Finalize(Finalize {
-                        proposal: proposal.clone(),
-                        vote,
-                    })
-                })
+                .zip(proposals)
+                .map(|(vote, proposal)| Voter::Finalize(Finalize { proposal, vote }))
                 .collect(),
             invalid_signers,
         )
