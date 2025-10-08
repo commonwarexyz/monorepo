@@ -13,7 +13,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -53,11 +53,7 @@ impl<
     }
 
     pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(pending_network).await;
-        })
+        spawn_cell!(self.context, self.run(pending_network).await)
     }
 
     async fn run(self, pending_network: (impl Sender, impl Receiver)) {

@@ -11,7 +11,9 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -113,11 +115,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run().await;
-        })
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {

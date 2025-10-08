@@ -141,11 +141,7 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(network).await;
-        })
+        spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.

@@ -131,11 +131,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(tracker, supervisor).await;
-        })
+        spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
     #[allow(clippy::type_complexity)]

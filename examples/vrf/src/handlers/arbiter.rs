@@ -9,7 +9,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
@@ -215,11 +215,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(sender, receiver).await;
-        })
+        spawn_cell!(self.context, self.run(sender, receiver).await)
     }
 
     async fn run(

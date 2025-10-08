@@ -7,7 +7,7 @@ use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -114,11 +114,10 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(voter_network, resolver_network).await;
-        })
+        spawn_cell!(
+            self.context,
+            self.run(voter_network, resolver_network).await
+        )
     }
 
     async fn run(

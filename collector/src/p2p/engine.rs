@@ -10,7 +10,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
@@ -111,11 +111,7 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(requests, responses).await;
-        })
+        spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(

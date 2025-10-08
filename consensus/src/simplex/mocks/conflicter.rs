@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -52,11 +52,7 @@ impl<
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(voter_network).await;
-        })
+        spawn_cell!(self.context, self.run(voter_network).await)
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {

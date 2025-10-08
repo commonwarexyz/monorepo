@@ -12,7 +12,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -100,11 +100,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(tracker, router).await;
-        })
+        spawn_cell!(self.context, self.run(tracker, router).await)
     }
 
     async fn run(

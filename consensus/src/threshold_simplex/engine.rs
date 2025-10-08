@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -160,12 +160,11 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
+        spawn_cell!(
+            self.context,
             self.run(pending_network, recovered_network, resolver_network)
-                .await;
-        })
+                .await
+        )
     }
 
     async fn run(

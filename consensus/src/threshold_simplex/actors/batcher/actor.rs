@@ -16,6 +16,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Pu
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -427,11 +428,7 @@ impl<
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(consensus, receiver).await;
-        })
+        spawn_cell!(self.context, self.run(consensus, receiver).await)
     }
 
     pub async fn run(

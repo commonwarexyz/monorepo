@@ -28,6 +28,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     buffer::PoolRef,
+    spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -1645,18 +1646,17 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
+        spawn_cell!(
+            self.context,
             self.run(
                 batcher,
                 resolver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
+                recovered_receiver
             )
-            .await;
-        })
+            .await
+        )
     }
 
     async fn run(

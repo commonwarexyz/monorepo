@@ -12,7 +12,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
-use commonware_runtime::{ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -80,11 +80,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run().await
-        })
+        spawn_cell!(self.context, self.run().await)
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.

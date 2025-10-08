@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use rand_core::CryptoRngCore;
@@ -451,11 +451,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run(sender, receiver).await;
-        });
+        spawn_cell!(self.context, self.run(sender, receiver).await)
     }
 
     async fn run(

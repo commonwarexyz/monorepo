@@ -1,5 +1,5 @@
 use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::FixedBytes;
 use futures::{channel::mpsc, StreamExt};
@@ -62,11 +62,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
 
     /// Start the finalizer.
     pub fn start(mut self) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.run().await;
-        })
+        spawn_cell!(self.context, self.run().await)
     }
 
     /// Run the finalizer, which continuously fetches and processes finalized blocks.
