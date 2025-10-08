@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextSlot, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::futures::Pool as FuturesPool;
@@ -77,7 +77,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: E,
+    context: ContextSlot<E>,
     crypto: C,
     automaton: A,
     relay: R,
@@ -225,10 +225,10 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(context.with_label("metrics"));
 
         Self {
-            context,
+            context: ContextSlot::new(context),
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
@@ -271,7 +271,11 @@ impl<
     ///   - Nodes
     ///   - Acks
     pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(chunk_network, ack_network))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(chunk_network, ack_network).await;
+        })
     }
 
     /// Inner run loop called by `start`.
@@ -971,10 +975,12 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal =
-            Journal::<_, Node<C::PublicKey, V, D>>::init(self.context.with_label("journal"), cfg)
-                .await
-                .expect("unable to init journal");
+        let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
+            self.context.with_label("journal").into_inner(),
+            cfg,
+        )
+        .await
+        .expect("unable to init journal");
 
         // Replay journal
         {
