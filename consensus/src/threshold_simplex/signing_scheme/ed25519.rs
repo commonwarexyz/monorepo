@@ -1,6 +1,6 @@
 use crate::threshold_simplex::{
     signing_scheme::{finalize_namespace, notarize_namespace, nullify_namespace},
-    types::{SigningScheme, Vote, VoteContext, VoteVerification},
+    types::{Participants, SigningScheme, Vote, VoteContext, VoteVerification},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadRangeExt, Write};
@@ -15,36 +15,43 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Scheme {
     signer: u32,
-    public_keys: Vec<PublicKey>,
+    participants: Participants<PublicKey>,
     private_key: Option<PrivateKey>,
-    threshold: u32,
 }
 
 impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// * `signer` - index of the local validator in `public_keys`.
-    /// * `public_keys` - ordered validator set used for verification.
+    /// * `signer` - index of the local validator in the participant set.
+    /// * `participants` - ordered validator set used for verification.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(
-        signer: u32,
-        public_keys: Vec<PublicKey>,
-        private_key: Option<PrivateKey>,
-        threshold: u32,
-    ) -> Self {
-        assert!(!public_keys.is_empty(), "public key set must not be empty");
+    pub fn new(signer: u32, participants: Vec<PublicKey>, private_key: PrivateKey) -> Self {
         assert!(
-            (signer as usize) < public_keys.len(),
+            (signer as usize) < participants.len(),
             "signer index {} is out of bounds for validator set of size {}",
             signer,
-            public_keys.len()
+            participants.len()
         );
 
         Self {
             signer,
-            public_keys,
-            private_key,
-            threshold,
+            participants: participants.into(),
+            private_key: Some(private_key),
+        }
+    }
+
+    pub fn verifier(signer: u32, participants: Vec<PublicKey>) -> Self {
+        assert!(
+            (signer as usize) < participants.len(),
+            "signer index {} is out of bounds for validator set of size {}",
+            signer,
+            participants.len()
+        );
+
+        Self {
+            signer,
+            participants: participants.into(),
+            private_key: None,
         }
     }
 
@@ -156,7 +163,7 @@ impl SigningScheme for Scheme {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.public_keys.get(vote.signer as usize) else {
+        let Some(public_key) = self.participants.get(vote.signer) else {
             return false;
         };
 
@@ -200,7 +207,7 @@ impl SigningScheme for Scheme {
         let mut batch = Batch::new();
 
         for vote in votes.into_iter() {
-            let Some(public_key) = self.public_keys.get(vote.signer as usize) else {
+            let Some(public_key) = self.participants.get(vote.signer) else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -247,14 +254,14 @@ impl SigningScheme for Scheme {
         let mut entries = Vec::new();
 
         for Vote { signer, signature } in votes {
-            if signer as usize >= self.public_keys.len() {
+            if signer as usize >= self.participants.len() {
                 return None;
             }
 
             entries.push((signer, signature));
         }
 
-        if entries.len() < self.threshold as usize {
+        if entries.len() < self.participants.quorum() as usize {
             return None;
         }
 
@@ -274,7 +281,7 @@ impl SigningScheme for Scheme {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        if certificate.signers.len() < self.threshold as usize {
+        if certificate.signers.len() < self.participants.quorum() as usize {
             return false;
         }
 
@@ -290,7 +297,7 @@ impl SigningScheme for Scheme {
 
         let mut batch = Batch::new();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.public_keys.get(*signer as usize) else {
+            let Some(public_key) = self.participants.get(*signer) else {
                 return false;
             };
 
@@ -319,7 +326,7 @@ impl SigningScheme for Scheme {
         let mut batch = Batch::new();
 
         for (context, certificate) in certificates {
-            if certificate.signers.len() < self.threshold as usize {
+            if certificate.signers.len() < self.participants.quorum() as usize {
                 return false;
             }
 
@@ -334,7 +341,7 @@ impl SigningScheme for Scheme {
             };
 
             for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-                let Some(public_key) = self.public_keys.get(*signer as usize) else {
+                let Some(public_key) = self.participants.get(*signer) else {
                     return false;
                 };
 
@@ -355,6 +362,6 @@ impl SigningScheme for Scheme {
     }
 
     fn certificate_codec_config(&self) -> Self::CertificateCfg {
-        self.public_keys.len()
+        self.participants.len()
     }
 }

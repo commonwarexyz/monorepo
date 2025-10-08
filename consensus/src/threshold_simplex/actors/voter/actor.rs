@@ -7,7 +7,7 @@ use crate::{
         min_active, select_leader,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, SigningScheme, Voter,
+            Nullification, Nullify, Participants, Proposal, SigningScheme, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -25,7 +25,6 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{quorum, quorum_from_slice};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -58,11 +57,10 @@ enum Action {
 
 struct Round<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> {
     start: SystemTime,
-    participants: Vec<P>,
+    participants: Participants<P>,
     signing: S,
 
     round: Rnd,
-    quorum: u32,
 
     // Leader is set as soon as we know the seed for the view.
     leader: Option<(P, u32)>,
@@ -109,12 +107,11 @@ struct Round<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> {
 impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
     pub fn new(
         context: &E,
-        participants: Vec<P>,
+        participants: Participants<P>,
         signing: S,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let quorum = quorum(participants.len() as u32);
         let notarizes = Vec::with_capacity(participants.len());
         let nullifies = Vec::with_capacity(participants.len());
         let finalizes = Vec::with_capacity(participants.len());
@@ -125,7 +122,6 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             signing,
 
             round,
-            quorum,
 
             leader: None,
 
@@ -371,7 +367,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let at_least_one_honest = (self.quorum - 1) / 2 + 1;
+        let at_least_one_honest = (self.participants.quorum() - 1) / 2 + 1;
         if self.notarizes.len() < at_least_one_honest as usize {
             return None;
         }
@@ -392,7 +388,7 @@ pub struct Actor<
 > {
     context: E,
     crypto: C,
-    participants: Vec<C::PublicKey>,
+    participants: Participants<C::PublicKey>,
     signing: S,
     blocker: B,
     automaton: A,
@@ -493,7 +489,7 @@ impl<
             Self {
                 context: context.clone(),
                 crypto: cfg.crypto,
-                participants: cfg.participants,
+                participants: cfg.participants.into(),
                 signing: cfg.signing,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -542,7 +538,7 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -554,7 +550,7 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -564,7 +560,7 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1312,7 +1308,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         round.notarizable(threshold, force).await
     }
 
@@ -1325,7 +1321,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         round.nullifiable(threshold, force).await
     }
 
@@ -1369,7 +1365,7 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
-        let threshold = quorum_from_slice(&self.participants);
+        let threshold = self.participants.quorum();
         round.finalizable(threshold, force).await
     }
 

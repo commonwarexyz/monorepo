@@ -6,9 +6,15 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::quorum_from_slice;
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    hash::Hash,
+    ops::Deref,
+};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -200,6 +206,61 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
     fn certificate_codec_config(&self) -> Self::CertificateCfg;
+}
+
+/// The set of consensus participants.
+#[derive(Clone, Debug)]
+pub struct Participants<P: PublicKey + Eq + Hash> {
+    keys: Vec<P>,
+    index_by_key: HashMap<P, u32>,
+    quorum: u32,
+}
+
+impl<P: PublicKey + Eq + Hash> Participants<P> {
+    /// Builds a new participant set from the provided keys.
+    pub fn new(keys: Vec<P>) -> Self {
+        let quorum = quorum_from_slice(&keys);
+        let index_by_key = keys
+            .iter()
+            .enumerate()
+            .map(|(idx, key)| (key.clone(), idx as u32))
+            .collect();
+
+        Self {
+            keys,
+            index_by_key,
+            quorum,
+        }
+    }
+
+    /// Returns the participant key at the given signer index.
+    pub fn get(&self, signer: u32) -> Option<&P> {
+        self.keys.get(signer as usize)
+    }
+
+    /// Returns the signer index for the given key, if present.
+    pub fn signer_index(&self, key: &P) -> Option<u32> {
+        self.index_by_key.get(key).copied()
+    }
+
+    /// Returns the cached quorum value for this participant set.
+    pub fn quorum(&self) -> u32 {
+        self.quorum
+    }
+}
+
+impl<P: PublicKey + Eq + Hash> Deref for Participants<P> {
+    type Target = [P];
+
+    fn deref(&self) -> &Self::Target {
+        self.keys.as_slice()
+    }
+}
+
+impl<P: PublicKey + Eq + Hash> From<Vec<P>> for Participants<P> {
+    fn from(keys: Vec<P>) -> Self {
+        Self::new(keys)
+    }
 }
 
 /// `BatchVerifier` is a utility for tracking and batch verifying consensus messages.

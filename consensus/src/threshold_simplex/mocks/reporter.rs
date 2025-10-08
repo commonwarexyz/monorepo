@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
-            SigningScheme, VoteContext,
+            Participants, SigningScheme, VoteContext,
         },
     },
     types::View,
@@ -37,7 +37,7 @@ pub struct Config<P: PublicKey, S: SigningScheme> {
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: SigningScheme, D: Digest> {
     context: E,
-    participants: Vec<P>,
+    participants: Participants<P>,
     signing: S,
 
     namespace: Vec<u8>,
@@ -68,7 +68,7 @@ where
         Self {
             context,
             namespace: cfg.namespace,
-            participants: cfg.participants,
+            participants: cfg.participants.into(),
             signing: cfg.signing,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             seeds: Arc::new(Mutex::new(HashMap::new())),

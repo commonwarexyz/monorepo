@@ -6,7 +6,7 @@ use crate::{
         metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, SigningScheme, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, Participants, SigningScheme, Voter,
         },
     },
     types::{Epoch, View},
@@ -19,7 +19,6 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, Handle, Metrics, Spawner,
 };
-use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
@@ -33,7 +32,7 @@ struct Round<
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Vec<P>,
+    participants: Participants<P>,
 
     blocker: B,
     reporter: R,
@@ -54,7 +53,7 @@ impl<
     > Round<P, S, B, D, R>
 {
     fn new(
-        participants: Vec<P>,
+        participants: Participants<P>,
         signing: S,
         blocker: B,
         reporter: R,
@@ -63,7 +62,7 @@ impl<
     ) -> Self {
         // Configure quorum params
         let quorum = if batch {
-            Some(quorum(participants.len() as u32))
+            Some(participants.quorum())
         } else {
             None
         };
@@ -90,14 +89,11 @@ impl<
 
     async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
         // Check if sender is a participant
-        let Some(index) = self.participants.iter().position(|p| p == &sender) else {
+        let Some(index) = self.participants.signer_index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
             return false;
         };
-
-        // FIXME: this is ugly
-        let index = index as u32;
 
         // Attempt to reserve
         match message {
@@ -306,7 +302,7 @@ impl<
     }
 
     fn is_active(&self, leader: &P) -> Option<bool> {
-        let leader_index = self.participants.iter().position(|p| p == leader)?;
+        let leader_index = self.participants.signer_index(leader)? as usize;
         Some(self.notarizes[leader_index].is_some() || self.nullifies[leader_index].is_some())
     }
 }
@@ -321,7 +317,7 @@ pub struct Actor<
 > {
     context: E,
 
-    participants: Vec<P>,
+    participants: Participants<P>,
     signing: S,
 
     blocker: B,
@@ -383,7 +379,7 @@ impl<
             Self {
                 context: context.clone(),
 
-                participants: cfg.participants,
+                participants: cfg.participants.into(),
                 signing: cfg.signing,
 
                 blocker: cfg.blocker,
@@ -443,7 +439,7 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            let leader_index = self.participants.iter().position(|p| p == &leader).unwrap();
+                            let leader_index = self.participants.signer_index(&leader).unwrap();
                             work.entry(current).or_insert(
                                 Round::new(
                                     self.participants.clone(),
