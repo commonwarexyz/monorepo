@@ -37,7 +37,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 const THREADS: usize = 8;
 
 cfg_if::cfg_if! {
-    if #[cfg(test)] {
+    if #[cfg(not(full_bench))] {
         const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
         const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
     } else {
