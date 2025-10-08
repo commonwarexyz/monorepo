@@ -366,7 +366,7 @@ mod test {
             });
 
             let (mut dialer_sender, mut dialer_receiver) = dial(
-                context.clone(),
+                context,
                 dialer_config,
                 listener_crypto.public_key(),
                 dialer_stream,

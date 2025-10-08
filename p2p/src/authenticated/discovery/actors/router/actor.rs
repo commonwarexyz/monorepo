@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{ContextSlot, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: E,
+    context: ContextSlot<E>,
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
@@ -47,7 +47,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -89,7 +89,11 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(routing))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(routing).await;
+        })
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages
