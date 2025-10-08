@@ -148,9 +148,9 @@ impl<D: Digest> Proof<D> {
 
         match self.reconstruct_root(hasher, elements, start_loc) {
             Ok(reconstructed_root) => *root == reconstructed_root,
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(feature = "std")]
-                tracing::debug!(error = ?error, "invalid proof input");
+                tracing::debug!(error = ?_error, "invalid proof input");
                 false
             }
         }
