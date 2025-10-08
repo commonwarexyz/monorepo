@@ -48,7 +48,7 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex;
+use commonware_consensus::threshold_simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -169,35 +169,43 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (voter_sender, voter_receiver) = network.register(
+        let (pending_sender, pending_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (resolver_sender, resolver_receiver) = network.register(
+        let (recovered_sender, recovered_receiver) = network.register(
             1,
+            Quota::per_second(NZU32!(10)),
+            256, // 256 messages in flight
+        );
+        let (resolver_sender, resolver_receiver) = network.register(
+            2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let (application, supervisor, mailbox) = application::Application::new(
+        let (application, signing, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
+                private_key: signer.clone(),
             },
         );
 
         // Initialize consensus
-        let cfg = simplex::Config::<_, _, _, _, _, _> {
+        let cfg = threshold_simplex::Config {
             crypto: signer.clone(),
+            participants: validators.clone(),
+            signing,
+            blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
-            reporter: supervisor.clone(),
-            supervisor,
+            reporter: reporter.clone(),
             namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
@@ -211,18 +219,18 @@ fn main() {
             activity_timeout: 10,
             skip_timeout: 5,
             max_fetch_count: 32,
-            max_participants: participants.len(),
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
-        let engine = simplex::Engine::new(context.with_label("engine"), cfg);
+        let engine = threshold_simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
         application.start();
         network.start();
         engine.start(
-            (voter_sender, voter_receiver),
+            (pending_sender, pending_receiver),
+            (recovered_sender, recovered_receiver),
             (resolver_sender, resolver_receiver),
         );
 

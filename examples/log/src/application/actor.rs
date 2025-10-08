@@ -1,46 +1,52 @@
 use super::{
     ingress::{Mailbox, Message},
-    supervisor::Supervisor,
-    Config,
+    reporter::Reporter,
+    Config, SigningScheme,
 };
-use commonware_cryptography::{Hasher, PublicKey, Signature};
+use commonware_cryptography::{Hasher, Signer};
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::marker::PhantomData;
 use tracing::info;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> {
+pub struct Application<R: Rng + Spawner, H: Hasher> {
     context: R,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
-
-    _phantom_p: PhantomData<P>,
-    _phantom_s: PhantomData<S>,
 }
 
-impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, S, H> {
+impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
-        config: Config<P, H>,
-    ) -> (Self, Supervisor<P, S, H::Digest>, Mailbox<H::Digest>) {
+        config: Config<H>,
+    ) -> (Self, SigningScheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+
+        let signing = if let Some(index) = config
+            .participants
+            .iter()
+            .position(|key| *key == config.private_key.public_key())
+        {
+            SigningScheme::new(config.participants, index as u32, config.private_key)
+        } else {
+            SigningScheme::verifier(config.participants)
+        };
+
         (
             Self {
                 context,
                 hasher: config.hasher,
                 mailbox,
-                _phantom_s: PhantomData,
-                _phantom_p: PhantomData,
             },
-            Supervisor::new(config.participants),
+            signing,
+            Reporter::new(),
             Mailbox::new(sender),
         )
     }
