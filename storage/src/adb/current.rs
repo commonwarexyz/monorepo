@@ -714,6 +714,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
+        // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(*loc);
 
