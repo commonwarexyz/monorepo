@@ -402,8 +402,8 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn shared(mut self) -> Self {
-        self.model = self.model.shared();
+    fn shared(mut self, blocking: bool) -> Self {
+        self.model = self.model.shared(blocking);
         self
     }
 
@@ -426,6 +426,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.model.is_dedicated();
+        let blocking = self.model.is_blocking();
         self.model = Model::default();
 
         // Give spawned task its own empty children list
@@ -441,7 +442,11 @@ impl crate::Spawner for Context {
                 runtime_handle.block_on(f);
             });
         } else {
-            executor.runtime.spawn_blocking(move || f);
+            if blocking {
+                executor.runtime.spawn_blocking(move || f);
+            } else {
+                executor.runtime.spawn(f);
+            }
         }
 
         // Register this child with the parent
@@ -450,14 +455,6 @@ impl crate::Spawner for Context {
         }
 
         handle
-    }
-
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawn(move |context| async move { f(context) })
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {

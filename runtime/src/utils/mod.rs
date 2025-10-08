@@ -78,6 +78,11 @@ impl Model {
     pub(crate) fn is_dedicated(&self) -> bool {
         self.dedicated
     }
+
+    /// Returns `true` when the task should run on a blocking-reserved thread.
+    pub(crate) fn is_blocking(&self) -> bool {
+        self.blocking
+    }
 }
 
 /// Yield control back to the runtime.
