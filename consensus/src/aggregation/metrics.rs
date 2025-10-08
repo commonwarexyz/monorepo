@@ -23,48 +23,53 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
-    pub fn init(context: &E) -> Self {
-        // TODO: resolve this clone? or get comfortable with cloning...
-        let clock = Arc::new(context.clone());
-        let digest_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
-        let metrics = Self {
-            tip: Gauge::default(),
-            digest: status::Counter::default(),
-            acks: status::Counter::default(),
-            threshold: Counter::default(),
-            rebroadcast: status::Counter::default(),
-            digest_duration: histogram::Timed::new(digest_duration.clone(), clock.clone()),
-        };
+    pub fn init(context: E) -> Self {
+        let tip = Gauge::default();
         context.register(
             "tip",
             "Lowest index without a threshold signature",
-            metrics.tip.clone(),
+            tip.clone(),
         );
+        let digest = status::Counter::default();
         context.register(
             "digest",
             "Number of digests returned by the automaton by status",
-            metrics.digest.clone(),
+            digest.clone(),
         );
+        let acks = status::Counter::default();
         context.register(
             "acks",
             "Number of Ack messages processed by status",
-            metrics.acks.clone(),
+            acks.clone(),
         );
+        let threshold = Counter::default();
         context.register(
             "threshold",
             "Number of threshold signatures produced",
-            metrics.threshold.clone(),
+            threshold.clone(),
         );
+        let rebroadcast = status::Counter::default();
         context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            metrics.rebroadcast.clone(),
+            rebroadcast.clone(),
         );
+        let digest_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
         context.register(
             "digest_duration",
             "Histogram of application digest durations",
-            digest_duration,
+            digest_duration.clone(),
         );
+        let clock = Arc::new(context);
+
+        let metrics = Self {
+            tip,
+            digest,
+            acks,
+            threshold,
+            rebroadcast,
+            digest_duration: histogram::Timed::new(digest_duration, clock),
+        };
         metrics
     }
 }

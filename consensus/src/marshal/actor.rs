@@ -20,7 +20,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey}
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, ContextSlot, Handle, Metrics, Spawner, Storage};
 use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
@@ -59,7 +59,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
-    context: E,
+    context: ContextSlot<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
@@ -209,7 +209,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 mailbox,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
@@ -241,7 +241,11 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        self.context.spawn_ref()(self.run(application, buffer, resolver))
+        let context = self.context.take();
+        context.spawn(move |context| async move {
+            self.context.restore(context);
+            self.run(application, buffer, resolver).await;
+        })
     }
 
     /// Run the application actor.

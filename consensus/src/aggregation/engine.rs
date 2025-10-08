@@ -176,7 +176,7 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
-        let metrics = metrics::Metrics::init(&context);
+        let metrics = metrics::Metrics::init(context.with_label("metrics"));
 
         Self {
             context: ContextSlot::new(context),
