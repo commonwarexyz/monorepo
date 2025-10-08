@@ -8,7 +8,7 @@ use commonware_cryptography::{
     ed25519::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use rand::rngs::OsRng;
+use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`SigningScheme`] trait.
@@ -173,13 +173,16 @@ impl SigningScheme for Scheme {
         public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature)
     }
 
-    fn verify_votes<D: Digest, I>(
+    fn verify_votes<R, D, I>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
     ) -> VoteVerification<Self>
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
         let (domain, message) = match context {
@@ -213,9 +216,7 @@ impl SigningScheme for Scheme {
         }
 
         if !candidates.is_empty() {
-            // FIXME
-            let mut rng = OsRng;
-            if !batch.verify(&mut rng) {
+            if !batch.verify(rng) {
                 for (vote, public_key) in &candidates {
                     if !public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature)
                     {
@@ -266,8 +267,9 @@ impl SigningScheme for Scheme {
         })
     }
 
-    fn verify_certificate<D: Digest>(
+    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
@@ -300,13 +302,18 @@ impl SigningScheme for Scheme {
             );
         }
 
-        // FIXME
-        let mut rng = OsRng;
-        batch.verify(&mut rng)
+        batch.verify(rng)
     }
 
-    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    fn verify_certificates<'a, R, D, I>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         let mut batch = Batch::new();
@@ -340,9 +347,7 @@ impl SigningScheme for Scheme {
             }
         }
 
-        // FIXME
-        let mut rng = OsRng;
-        batch.verify(&mut rng)
+        batch.verify(rng)
     }
 
     fn randomness(&self, _: &Self::Certificate) -> Option<Self::Randomness> {

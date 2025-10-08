@@ -112,7 +112,8 @@ mod tests {
                 participants: validators.clone(),
                 signing: signing.clone(),
             };
-            let reporter = mocks::reporter::Reporter::new(reporter_config);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -456,7 +457,8 @@ mod tests {
                 participants: validators.clone(),
                 signing: signing.clone(),
             };
-            let reporter = mocks::reporter::Reporter::new(reporter_config);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -881,7 +883,8 @@ mod tests {
                 participants: validators.clone(),
                 signing: signing_schemes[0].clone(),
             };
-            let reporter = mocks::reporter::Reporter::new(reporter_cfg);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),

@@ -15,6 +15,7 @@ use crate::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::mpsc::{Receiver, Sender};
+use rand::{CryptoRng, Rng};
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -34,7 +35,8 @@ pub struct Config<P: PublicKey, S: SigningScheme> {
 }
 
 #[derive(Clone)]
-pub struct Reporter<P: PublicKey, S: SigningScheme, D: Digest> {
+pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: SigningScheme, D: Digest> {
+    context: E,
     participants: Vec<P>,
     signing: S,
 
@@ -55,14 +57,16 @@ pub struct Reporter<P: PublicKey, S: SigningScheme, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P, S, D> Reporter<P, S, D>
+impl<E, P, S, D> Reporter<E, P, S, D>
 where
+    E: Rng + CryptoRng,
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(cfg: Config<P, S>) -> Self {
+    pub fn new(context: E, cfg: Config<P, S>) -> Self {
         Self {
+            context,
             namespace: cfg.namespace,
             participants: cfg.participants,
             signing: cfg.signing,
@@ -91,8 +95,9 @@ where
     }
 }
 
-impl<P, S, D> crate::Reporter for Reporter<P, S, D>
+impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>
 where
+    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
     S::Randomness: Clone,
@@ -127,7 +132,8 @@ where
             Activity::Notarization(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.signing.verify_certificate::<D>(
+                if !self.signing.verify_certificate(
+                    &mut self.context,
                     &self.namespace,
                     VoteContext::Notarize {
                         proposal: &notarization.proposal,
@@ -170,7 +176,8 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.signing.verify_certificate::<D>(
+                if !self.signing.verify_certificate::<_, D>(
+                    &mut self.context,
                     &self.namespace,
                     VoteContext::Nullify {
                         round: nullification.round,
@@ -218,7 +225,8 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.signing.verify_certificate::<D>(
+                if !self.signing.verify_certificate(
+                    &mut self.context,
                     &self.namespace,
                     VoteContext::Finalize {
                         proposal: &finalization.proposal,
@@ -310,8 +318,9 @@ where
     }
 }
 
-impl<P, S, D> Monitor for Reporter<P, S, D>
+impl<E, P, S, D> Monitor for Reporter<E, P, S, D>
 where
+    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
     S::Randomness: Clone + Encode,

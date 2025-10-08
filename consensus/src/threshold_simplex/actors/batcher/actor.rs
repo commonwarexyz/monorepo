@@ -22,6 +22,7 @@ use commonware_runtime::{
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{trace, warn};
 
@@ -272,24 +273,36 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(namespace)
+    fn verify_notarizes<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_notarizes(rng, namespace)
     }
 
     fn ready_nullifies(&self) -> bool {
         self.verifier.ready_nullifies()
     }
 
-    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(namespace)
+    fn verify_nullifies<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_nullifies(rng, namespace)
     }
 
     fn ready_finalizes(&self) -> bool {
         self.verifier.ready_finalizes()
     }
 
-    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(namespace)
+    fn verify_finalizes<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_finalizes(rng, namespace)
     }
 
     fn is_active(&self, leader: &P) -> Option<bool> {
@@ -299,7 +312,7 @@ impl<
 }
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock + Rng + CryptoRng,
     P: PublicKey,
     S: SigningScheme,
     B: Blocker<PublicKey = P>,
@@ -329,7 +342,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock,
+        E: Spawner + Metrics + Clock + Rng + CryptoRng,
         P: PublicKey,
         S: SigningScheme,
         B: Blocker<PublicKey = P>,
@@ -557,10 +570,12 @@ impl<
             let mut selected = None;
             if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_notarizes() {
-                    let (voters, failed) = verifier.verify_notarizes(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_notarizes(&mut self.context, &self.namespace);
                     selected = Some((current, voters, failed));
                 } else if verifier.ready_nullifies() {
-                    let (voters, failed) = verifier.verify_nullifies(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_nullifies(&mut self.context, &self.namespace);
                     selected = Some((current, voters, failed));
                 }
             }
@@ -573,7 +588,8 @@ impl<
                     })
                     .map(|(view, verifier)| (*view, verifier));
                 if let Some((view, verifier)) = potential {
-                    let (voters, failed) = verifier.verify_finalizes(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_finalizes(&mut self.context, &self.namespace);
                     selected = Some((view, voters, failed));
                 }
             }

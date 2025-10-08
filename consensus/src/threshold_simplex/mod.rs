@@ -397,7 +397,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -654,7 +655,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing.clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -805,7 +807,10 @@ mod tests {
                         participants: validators.clone(),
                         signing: signing_schemes[idx].clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(reporter_config);
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label("reporter"),
+                        reporter_config,
+                    );
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -981,7 +986,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1102,7 +1108,8 @@ mod tests {
                 participants: validators.clone(),
                 signing: signing_schemes[0].clone(),
             };
-            let mut reporter = mocks::reporter::Reporter::new(reporter_config);
+            let mut reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1230,7 +1237,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1467,7 +1475,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -1637,7 +1646,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1833,7 +1843,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2025,7 +2036,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2185,7 +2197,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2360,7 +2373,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2520,7 +2534,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2679,7 +2694,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2837,7 +2853,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -3005,7 +3022,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -3155,7 +3173,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -3295,7 +3314,8 @@ mod tests {
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 if idx == 0 {
                     *monitor_reporter.lock().unwrap() = Some(reporter.clone());

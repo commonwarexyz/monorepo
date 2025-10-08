@@ -29,7 +29,7 @@ use futures::{
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
@@ -57,8 +57,11 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: SigningScheme>
-{
+pub struct Actor<
+    B: Block,
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    S: SigningScheme,
+> {
     // ---------- Context ----------
     context: E,
 
@@ -103,8 +106,11 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: SigningScheme>
-    Actor<B, E, S>
+impl<
+        B: Block,
+        E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+        S: SigningScheme,
+    > Actor<B, E, S>
 {
     /// Create a new application actor.
     pub async fn init(context: E, config: Config<S, B>) -> (Self, Mailbox<S, B>) {
@@ -598,7 +604,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&self.signing, &self.namespace)
+                                        || !finalization.verify(&mut self.context, &self.signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -624,7 +630,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: Signing
                                     // Validation
                                     if notarization.proposal.round != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&self.signing, &self.namespace)
+                                        || !notarization.verify(&mut self.context, &self.signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;

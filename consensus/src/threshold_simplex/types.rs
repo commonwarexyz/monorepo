@@ -7,6 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
+use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -150,37 +151,45 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         namespace: &[u8],
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
-    ) -> bool {
-        let verification = self.verify_votes(namespace, context, std::iter::once(vote.clone()));
-        !verification.verified.is_empty()
-    }
+    ) -> bool;
 
-    fn verify_votes<D: Digest, I>(
+    fn verify_votes<R, D, I>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
     ) -> VoteVerification<Self>
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: IntoIterator<Item = Vote<Self>>;
 
     fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>;
 
-    fn verify_certificate<D: Digest>(
+    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
-    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    fn verify_certificates<'a, R, D, I>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         for (context, certificate) in certificates {
-            if !self.verify_certificate(namespace, context, certificate) {
+            if !self.verify_certificate(rng, namespace, context, certificate) {
                 return false;
             }
         }
@@ -370,7 +379,11 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    pub fn verify_notarizes<R: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
         // FIXME: avoid cloning here
         self.notarizes_force = false;
 
@@ -380,7 +393,8 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes::<D, _>(
+        } = self.signing.verify_votes(
+            rng,
             namespace,
             VoteContext::Notarize { proposal },
             notarizes.into_iter().map(|notarize| notarize.vote),
@@ -463,14 +477,19 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    pub fn verify_nullifies<R: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
         let nullifies = std::mem::take(&mut self.nullifies);
         let round = nullifies[0].round;
 
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes::<D, _>(
+        } = self.signing.verify_votes::<_, D, _>(
+            rng,
             namespace,
             VoteContext::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.vote),
@@ -533,14 +552,19 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    pub fn verify_finalizes<R: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
         let finalizes = std::mem::take(&mut self.finalizes);
         let proposal = &finalizes[0].proposal.clone();
 
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes::<D, _>(
+        } = self.signing.verify_votes(
+            rng,
             namespace,
             VoteContext::Finalize { proposal },
             finalizes.into_iter().map(|finalizes| finalizes.vote),
@@ -910,8 +934,9 @@ impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
+            rng,
             namespace,
             VoteContext::Notarize {
                 proposal: &self.proposal,
@@ -1074,8 +1099,14 @@ impl<S: SigningScheme> Write for Nullification<S> {
 }
 
 impl<S: SigningScheme> Nullification<S> {
-    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
-        scheme.verify_certificate::<D>(
+    pub fn verify<R: Rng + CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        namespace: &[u8],
+    ) -> bool {
+        scheme.verify_certificate::<_, D>(
+            rng,
             namespace,
             VoteContext::Nullify { round: self.round },
             &self.certificate,
@@ -1226,8 +1257,9 @@ impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
+            rng,
             namespace,
             VoteContext::Finalize {
                 proposal: &self.proposal,
@@ -1437,7 +1469,7 @@ impl<S: SigningScheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the signatures on this response.
-    pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, signing: &S, namespace: &[u8]) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
@@ -1459,7 +1491,7 @@ impl<S: SigningScheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        signing.verify_certificates(namespace, notarizations.chain(nullifications))
+        signing.verify_certificates(rng, namespace, notarizations.chain(nullifications))
     }
 }
 

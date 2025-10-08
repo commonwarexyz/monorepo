@@ -23,6 +23,7 @@ use commonware_cryptography::{
     },
     Digest,
 };
+use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -321,13 +322,16 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         }
     }
 
-    fn verify_votes<D: Digest, I>(
+    fn verify_votes<R, D, I>(
         &self,
+        _rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
     ) -> VoteVerification<Self>
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
         let mut invalid = BTreeSet::new();
@@ -460,8 +464,9 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         VoteVerification::new(verified, invalid_signers)
     }
 
-    fn verify_certificate<D: Digest>(
+    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
+        _rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
@@ -537,8 +542,15 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         }
     }
 
-    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    fn verify_certificates<'a, R, D, I>(
+        &self,
+        _rng: &mut R,
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
     where
+        R: Rng + CryptoRng,
+        D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         let mut seeds = HashMap::new();

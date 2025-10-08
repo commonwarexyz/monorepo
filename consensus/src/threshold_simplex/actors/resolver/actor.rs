@@ -23,7 +23,7 @@ use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{seq::IteratorRandom, CryptoRng, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -99,7 +99,7 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + Metrics + Spawner,
+    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
     P: PublicKey,
     S: SigningScheme,
     B: Blocker<PublicKey = P>,
@@ -134,7 +134,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
+        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
         P: PublicKey,
         S: SigningScheme,
         B: Blocker<PublicKey = P>,
@@ -507,7 +507,7 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            if !response.verify(&self.signing, &self.namespace) {
+                            if !response.verify(&mut self.context, &self.signing, &self.namespace) {
                                 warn!(sender = ?s, "blocking peer");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;

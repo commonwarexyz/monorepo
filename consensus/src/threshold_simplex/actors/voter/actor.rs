@@ -35,7 +35,7 @@ use futures::{
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -381,7 +381,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
 }
 
 pub struct Actor<
-    E: Clock + Rng + Spawner + Storage + Metrics,
+    E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Signer,
     S: SigningScheme,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -432,7 +432,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + Spawner + Storage + Metrics,
+        E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Signer,
         S: SigningScheme,
         B: Blocker<PublicKey = C::PublicKey>,
@@ -1096,7 +1096,7 @@ impl<
         }
 
         // Verify notarization
-        if !notarization.verify(&self.signing, &self.namespace) {
+        if !notarization.verify(&mut self.context, &self.signing, &self.namespace) {
             return Action::Block;
         }
 
@@ -1153,7 +1153,7 @@ impl<
         }
 
         // Verify nullification
-        if !nullification.verify::<D>(&self.signing, &self.namespace) {
+        if !nullification.verify::<_, D>(&mut self.context, &self.signing, &self.namespace) {
             return Action::Block;
         }
 
@@ -1235,7 +1235,7 @@ impl<
         }
 
         // Verify finalization
-        if !finalization.verify(&self.signing, &self.namespace) {
+        if !finalization.verify(&mut self.context, &self.signing, &self.namespace) {
             return Action::Block;
         }
 
