@@ -1807,14 +1807,14 @@ mod tests {
 
             let parent = context.spawn(move |context| async move {
                 // Spawn a child task
-                context.clone().supervised().spawn(|_| async move {
+                context.clone().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
                 });
 
-                // Spawn an independent sibling task using spawn or spawn_ref based on parameter
-                context.spawn(move |_| async move {
+                // Spawn an independent sibling task
+                context.detached().spawn(move |_| async move {
                     sibling_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     sibling_complete_rx.await.unwrap();
