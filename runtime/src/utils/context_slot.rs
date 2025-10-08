@@ -28,21 +28,6 @@ impl<C> ContextSlot<C> {
         Self::Present(context)
     }
 
-    /// Create a slot without a context.
-    pub const fn missing() -> Self {
-        Self::Missing
-    }
-
-    /// Returns `true` when the slot currently holds a context.
-    pub fn is_present(&self) -> bool {
-        matches!(self, Self::Present(_))
-    }
-
-    /// Returns `true` when the slot is empty.
-    pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-
     /// Remove the context from the slot, panicking if it is missing.
     pub fn take(&mut self) -> C {
         match std::mem::replace(self, Self::Missing) {
@@ -61,36 +46,8 @@ impl<C> ContextSlot<C> {
         }
     }
 
-    /// Borrow the contained context, panicking if it is missing.
-    pub fn get(&self) -> &C {
-        self.present_ref()
-    }
-
-    /// Borrow the contained context mutably, panicking if it is missing.
-    pub fn get_mut(&mut self) -> &mut C {
-        self.present_mut()
-    }
-
     /// Consume the slot, returning the context and panicking if it is missing.
-    pub fn into_inner(self) -> C {
-        self.into_present()
-    }
-
-    fn present_ref(&self) -> &C {
-        match self {
-            Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
-        }
-    }
-
-    fn present_mut(&mut self) -> &mut C {
-        match self {
-            Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
-        }
-    }
-
-    fn into_present(self) -> C {
+    pub fn into(self) -> C {
         match self {
             Self::Present(context) => context,
             Self::Missing => panic!("{}", MISSING_CONTEXT),
@@ -98,9 +55,21 @@ impl<C> ContextSlot<C> {
     }
 }
 
-impl<C> From<C> for ContextSlot<C> {
-    fn from(context: C) -> Self {
-        Self::new(context)
+impl<C> AsRef<C> for ContextSlot<C> {
+    fn as_ref(&self) -> &C {
+        match self {
+            Self::Present(context) => context,
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
+        }
+    }
+}
+
+impl<C> AsMut<C> for ContextSlot<C> {
+    fn as_mut(&mut self) -> &mut C {
+        match self {
+            Self::Present(context) => context,
+            Self::Missing => panic!("{}", MISSING_CONTEXT),
+        }
     }
 }
 
@@ -109,19 +78,19 @@ where
     C: crate::Spawner,
 {
     fn supervised(self) -> Self {
-        Self::Present(self.into_present().supervised())
+        Self::Present(self.into().supervised())
     }
 
     fn detached(self) -> Self {
-        Self::Present(self.into_present().detached())
+        Self::Present(self.into().detached())
     }
 
     fn dedicated(self) -> Self {
-        Self::Present(self.into_present().dedicated())
+        Self::Present(self.into().dedicated())
     }
 
     fn shared(self) -> Self {
-        Self::Present(self.into_present().shared())
+        Self::Present(self.into().shared())
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
@@ -130,8 +99,7 @@ where
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.into_present()
-            .spawn(move |context| f(Self::Present(context)))
+        self.into().spawn(move |context| f(Self::Present(context)))
     }
 
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
@@ -139,7 +107,7 @@ where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.into_present()
+        self.into()
             .spawn_blocking(move |context| f(Self::Present(context)))
     }
 
@@ -148,11 +116,11 @@ where
         value: i32,
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.into_present().stop(value, timeout)
+        self.into().stop(value, timeout)
     }
 
     fn stopped(&self) -> signal::Signal {
-        self.present_ref().stopped()
+        self.as_ref().stopped()
     }
 }
 
@@ -161,19 +129,19 @@ where
     C: crate::Metrics,
 {
     fn label(&self) -> String {
-        self.present_ref().label()
+        self.as_ref().label()
     }
 
     fn with_label(&self, label: &str) -> Self {
-        Self::Present(self.present_ref().with_label(label))
+        Self::Present(self.as_ref().with_label(label))
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.present_ref().register(name, help, metric)
+        self.as_ref().register(name, help, metric)
     }
 
     fn encode(&self) -> String {
-        self.present_ref().encode()
+        self.as_ref().encode()
     }
 }
 
@@ -182,15 +150,15 @@ where
     C: crate::Clock,
 {
     fn current(&self) -> SystemTime {
-        self.present_ref().current()
+        self.as_ref().current()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        self.present_ref().sleep(duration)
+        self.as_ref().sleep(duration)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        self.present_ref().sleep_until(deadline)
+        self.as_ref().sleep_until(deadline)
     }
 }
 
@@ -204,14 +172,14 @@ where
         &self,
         socket: SocketAddr,
     ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
-        self.present_ref().bind(socket)
+        self.as_ref().bind(socket)
     }
 
     fn dial(
         &self,
         socket: SocketAddr,
     ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
-        self.present_ref().dial(socket)
+        self.as_ref().dial(socket)
     }
 }
 
@@ -226,7 +194,7 @@ where
         partition: &str,
         name: &[u8],
     ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        self.present_ref().open(partition, name)
+        self.as_ref().open(partition, name)
     }
 
     fn remove(
@@ -234,11 +202,11 @@ where
         partition: &str,
         name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.present_ref().remove(partition, name)
+        self.as_ref().remove(partition, name)
     }
 
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
-        self.present_ref().scan(partition)
+        self.as_ref().scan(partition)
     }
 }
 
@@ -247,19 +215,19 @@ where
     C: RngCore,
 {
     fn next_u32(&mut self) -> u32 {
-        self.present_mut().next_u32()
+        self.as_mut().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.present_mut().next_u64()
+        self.as_mut().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.present_mut().fill_bytes(dest)
+        self.as_mut().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.present_mut().try_fill_bytes(dest)
+        self.as_mut().try_fill_bytes(dest)
     }
 }
 
@@ -272,7 +240,7 @@ where
     type Instant = <C as GClock>::Instant;
 
     fn now(&self) -> Self::Instant {
-        self.present_ref().now()
+        self.as_ref().now()
     }
 }
 
