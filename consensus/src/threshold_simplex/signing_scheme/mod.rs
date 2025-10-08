@@ -36,3 +36,4 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 pub mod bls12381_threshold;
+pub mod ed25519;
