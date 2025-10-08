@@ -844,8 +844,8 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn shared(mut self) -> Self {
-        self.model = self.model.shared();
+    fn shared(mut self, blocking: bool) -> Self {
+        self.model = self.model.shared(blocking);
         self
     }
 
@@ -856,7 +856,7 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self, task);
 
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.model.is_supervised() {
@@ -873,9 +873,9 @@ impl crate::Spawner for Context {
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
-        // Spawn the task
+        // Spawn the task (we don't care about Model)
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
         // Register this child with the parent
@@ -883,27 +883,6 @@ impl crate::Spawner for Context {
             parent_children.lock().unwrap().push(aborter);
         }
 
-        handle
-    }
-
-    fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking);
-
-        // Reset spawn config
-        self.model = Model::default();
-
-        // Initialize the blocking task
-        let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
-
-        // Spawn the task
-        let f = async move { f() };
-        Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
     }
 

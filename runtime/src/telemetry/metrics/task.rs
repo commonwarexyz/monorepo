@@ -27,10 +27,11 @@ impl Label {
     }
 
     /// Create a new label for a future task.
-    pub fn future(name: String, supervised: bool, dedicated: bool) -> Self {
+    pub fn task(name: String, supervised: bool, dedicated: bool, blocking: bool) -> Self {
+        // TODO: record whether or not blocking
         Self {
             name,
-            kind: Kind::Future,
+            kind: Kind::Task,
             supervision: if supervised {
                 Supervision::Supervised
             } else {
@@ -38,20 +39,8 @@ impl Label {
             },
             schedule: if dedicated {
                 Schedule::Dedicated
-            } else {
-                Schedule::Shared
-            },
-        }
-    }
-
-    /// Create a new label for a blocking task.
-    pub fn blocking(name: String, dedicated: bool) -> Self {
-        Self {
-            name,
-            kind: Kind::Blocking,
-            supervision: Supervision::Detached,
-            schedule: if dedicated {
-                Schedule::Dedicated
+            } else if blocking {
+                Schedule::Blocking
             } else {
                 Schedule::Shared
             },
@@ -70,9 +59,7 @@ pub enum Kind {
     /// The root task.
     Root,
     /// An async task.
-    Future,
-    /// A blocking task.
-    Blocking,
+    Task,
 }
 
 /// Metric label describing whether a task is supervised by its parent.
@@ -89,6 +76,8 @@ pub enum Supervision {
 pub enum Schedule {
     /// Task runs on the shared runtime.
     Shared,
+    /// Task runs on a blocking-reserved thread.
+    Blocking,
     /// Task runs on a dedicated thread.
     Dedicated,
 }

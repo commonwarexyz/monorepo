@@ -414,7 +414,7 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
+        let (_, metric) = spawn_metrics!(self, task);
 
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.model.is_supervised() {
@@ -435,18 +435,16 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         if dedicated {
             let runtime_handle = executor.runtime.handle().clone();
             thread::spawn(move || {
                 runtime_handle.block_on(f);
             });
+        } else if blocking {
+            executor.runtime.spawn_blocking(move || f);
         } else {
-            if blocking {
-                executor.runtime.spawn_blocking(move || f);
-            } else {
-                executor.runtime.spawn(f);
-            }
+            executor.runtime.spawn(f);
         }
 
         // Register this child with the parent

@@ -1538,10 +1538,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            let handle = context.spawn_blocking(|_| 42);
+            let handle = context.spawn(|_| async move { 42 });
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
@@ -1555,10 +1555,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            context.clone().spawn_blocking(|_| {
+            context.clone().spawn(|_| async move {
                 panic!("blocking task panicked");
             });
 
@@ -1577,10 +1577,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            let handle = context.clone().spawn_blocking(|_| {
+            let handle = context.clone().spawn(|_| async move {
                 panic!("blocking task panicked");
             });
             handle.await
@@ -1593,7 +1593,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.supervised().spawn_blocking(|_| {});
+            let handle = context.shared(true).spawn(|_| async move {});
             let _ = handle.await;
         });
     }
@@ -1609,10 +1609,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            let handle = context.spawn_blocking(move |_| {
+            let handle = context.spawn(move |_| async move {
                 // Wait for abort to be called
                 loop {
                     if receiver.try_recv().is_ok() {

@@ -10,7 +10,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -31,7 +31,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init_future<F>(
+    pub(crate) fn init<F>(
         f: F,
         metric: MetricHandle,
         panicker: Panicker,
@@ -78,51 +78,6 @@ where
             abortable,
             Self {
                 abort_handle: Some(abort_handle),
-                receiver,
-                metric,
-            },
-        )
-    }
-
-    pub(crate) fn init_blocking<F>(
-        f: F,
-        metric: MetricHandle,
-        panicker: Panicker,
-    ) -> (impl FnOnce(), Self)
-    where
-        F: FnOnce() -> T + Send + 'static,
-    {
-        // Initialize channel to handle result
-        let (sender, receiver) = oneshot::channel();
-
-        // Wrap the closure with panic handling
-        let f = {
-            let panicker = panicker.clone();
-            let metric = metric.clone();
-            move || {
-                // Run blocking task
-                let result = catch_unwind(AssertUnwindSafe(f));
-
-                // Handle result
-                let result = match result {
-                    Ok(value) => Ok(value),
-                    Err(panic) => {
-                        panicker.notify(panic);
-                        Err(Error::Exited)
-                    }
-                };
-                let _ = sender.send(result);
-
-                // Mark the task as finished
-                metric.finish();
-            }
-        };
-
-        // Return the task and handle
-        (
-            f,
-            Self {
-                abort_handle: None,
                 receiver,
                 metric,
             },
@@ -411,7 +366,7 @@ mod tests {
         runner.start(|context| async move {
             let context = context.with_label(LABEL);
 
-            let blocking_handle = context.clone().spawn_blocking(|_| {
+            let blocking_handle = context.clone().shared(true).spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });
