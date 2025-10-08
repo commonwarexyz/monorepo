@@ -96,9 +96,10 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 ///
 /// # Errors
 ///
-/// - Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
-/// - Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
-/// - Returns [Error::Empty] if the requested range is empty
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `range` > `size`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: Position,
