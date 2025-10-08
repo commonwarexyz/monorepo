@@ -268,22 +268,22 @@ mod tests {
     #[test]
     fn test_from_location() {
         const CASES: &[(Location, Position)] = &[
-            (Location::new(0), Position::new(0)),
-            (Location::new(1), Position::new(1)),
-            (Location::new(2), Position::new(3)),
-            (Location::new(3), Position::new(4)),
-            (Location::new(4), Position::new(7)),
-            (Location::new(5), Position::new(8)),
-            (Location::new(6), Position::new(10)),
-            (Location::new(7), Position::new(11)),
-            (Location::new(8), Position::new(15)),
-            (Location::new(9), Position::new(16)),
-            (Location::new(10), Position::new(18)),
-            (Location::new(11), Position::new(19)),
-            (Location::new(12), Position::new(22)),
-            (Location::new(13), Position::new(23)),
-            (Location::new(14), Position::new(25)),
-            (Location::new(15), Position::new(26)),
+            (Location::new_unchecked(0), Position::new(0)),
+            (Location::new_unchecked(1), Position::new(1)),
+            (Location::new_unchecked(2), Position::new(3)),
+            (Location::new_unchecked(3), Position::new(4)),
+            (Location::new_unchecked(4), Position::new(7)),
+            (Location::new_unchecked(5), Position::new(8)),
+            (Location::new_unchecked(6), Position::new(10)),
+            (Location::new_unchecked(7), Position::new(11)),
+            (Location::new_unchecked(8), Position::new(15)),
+            (Location::new_unchecked(9), Position::new(16)),
+            (Location::new_unchecked(10), Position::new(18)),
+            (Location::new_unchecked(11), Position::new(19)),
+            (Location::new_unchecked(12), Position::new(22)),
+            (Location::new_unchecked(13), Position::new(23)),
+            (Location::new_unchecked(14), Position::new(25)),
+            (Location::new_unchecked(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
             let pos = Position::from(*loc);
@@ -375,9 +375,9 @@ mod tests {
     fn test_checked_from_location_success() {
         // Normal conversions should work
         let cases = vec![
-            (Location::new(0), Position::new(0)),
-            (Location::new(1), Position::new(1)),
-            (Location::new(100), Position::from(Location::new(100))),
+            (Location::new_unchecked(0), Position::new(0)),
+            (Location::new_unchecked(1), Position::new(1)),
+            (Location::new_unchecked(100), Position::from(Location::new_unchecked(100))),
         ];
 
         for (loc, expected) in cases {
@@ -386,7 +386,7 @@ mod tests {
         }
 
         // MAX_LOCATION should work
-        let max_loc = Location::new(MAX_LOCATION);
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
         let pos = Position::checked_from_location(max_loc).expect("MAX_LOCATION should succeed");
         assert_eq!(*pos, u64::MAX - 64);
     }
@@ -394,11 +394,11 @@ mod tests {
     #[test]
     fn test_checked_from_location_overflow() {
         // MAX_LOCATION + 1 should fail
-        let over_loc = Location::new(MAX_LOCATION + 1);
+        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
         assert!(Position::checked_from_location(over_loc).is_none());
 
         // u64::MAX should fail
-        let max_loc = Location::new(u64::MAX);
+        let max_loc = Location::new_unchecked(u64::MAX);
         assert!(Position::checked_from_location(max_loc).is_none());
     }
 }

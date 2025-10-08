@@ -220,7 +220,7 @@ fn fuzz(input: FuzzInput) {
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let start_loc = Location::new_checked(start_loc).unwrap();
+                        let start_loc = Location::new(start_loc).unwrap();
                         if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             let root = db.root(&mut hasher);
                             assert!(
@@ -239,9 +239,9 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                        let size = Location::new_checked(size).unwrap();
+                        let size = Location::new(size).unwrap();
                         let start_loc = (*start_offset as u64) % *size;
-                        let start_loc = Location::new_checked(start_loc).unwrap();
+                        let start_loc = Location::new(start_loc).unwrap();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         let _ = db
                             .historical_proof(size, start_loc, NZU64!(max_ops_value))

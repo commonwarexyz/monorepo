@@ -918,7 +918,7 @@ mod tests {
             assert!(empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
-                Location::new(0),
+                Location::new_unchecked(0),
                 &root
             ));
             assert!(empty_proof.verify_multi_inclusion(
@@ -933,7 +933,7 @@ mod tests {
             assert!(!empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
-                Location::new(0),
+                Location::new_unchecked(0),
                 &root
             ));
             assert!(!empty_proof.verify_multi_inclusion(
@@ -1003,7 +1003,7 @@ mod tests {
                     mmr.sync(&mut hasher).await.unwrap();
                 }
             }
-            let leaf_pos = Position::from(Location::new(50));
+            let leaf_pos = Position::from(Location::new_unchecked(50));
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();
@@ -1048,7 +1048,7 @@ mod tests {
 
             // Generate & verify proof from element that is not yet flushed to the journal.
             const TEST_ELEMENT: usize = 133;
-            const TEST_ELEMENT_LOC: Location = Location::new(TEST_ELEMENT as u64);
+            const TEST_ELEMENT_LOC: Location = Location::new_unchecked(TEST_ELEMENT as u64);
 
             let proof = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
             let root = mmr.root(&mut hasher);
@@ -1070,7 +1070,8 @@ mod tests {
             assert_eq!(proof, proof2);
 
             // Generate & verify a proof that spans flushed elements and the last element.
-            let range = Location::new(TEST_ELEMENT as u64)..Location::new(LEAF_COUNT as u64);
+            let range = Location::new_unchecked(TEST_ELEMENT as u64)
+                ..Location::new_unchecked(LEAF_COUNT as u64);
             let proof = mmr.range_proof(range.clone()).await.unwrap();
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
@@ -1368,7 +1369,10 @@ mod tests {
 
             // Historical proof should match "regular" proof when historical size == current database size
             let historical_proof = mmr
-                .historical_range_proof(original_size, Location::new(2)..Location::new(6))
+                .historical_range_proof(
+                    original_size,
+                    Location::new_unchecked(2)..Location::new_unchecked(6),
+                )
                 .await
                 .unwrap();
             assert_eq!(historical_proof.size, original_size);
@@ -1376,11 +1380,11 @@ mod tests {
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[2..6],
-                Location::new(2),
+                Location::new_unchecked(2),
                 &root
             ));
             let regular_proof = mmr
-                .range_proof(Location::new(2)..Location::new(6))
+                .range_proof(Location::new_unchecked(2)..Location::new_unchecked(6))
                 .await
                 .unwrap();
             assert_eq!(regular_proof.size, historical_proof.size);
@@ -1392,7 +1396,10 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
             let new_historical_proof = mmr
-                .historical_range_proof(original_size, Location::new(2)..Location::new(6))
+                .historical_range_proof(
+                    original_size,
+                    Location::new_unchecked(2)..Location::new_unchecked(6),
+                )
                 .await
                 .unwrap();
             assert_eq!(new_historical_proof.size, historical_proof.size);
@@ -1449,7 +1456,7 @@ mod tests {
             let historical_proof = mmr
                 .historical_range_proof(
                     historical_size,
-                    Location::new(35)..Location::new(39), // Start after prune point to end at historical size
+                    Location::new_unchecked(35)..Location::new_unchecked(39), // Start after prune point to end at historical size
                 )
                 .await
                 .unwrap();
@@ -1460,7 +1467,7 @@ mod tests {
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[35..39],
-                Location::new(35),
+                Location::new_unchecked(35),
                 &historical_root
             ));
 
@@ -1497,7 +1504,7 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
 
-            let range = Location::new(30)..Location::new(61);
+            let range = Location::new_unchecked(30)..Location::new_unchecked(61);
 
             // Only apply elements up to end_loc to the reference MMR.
             let mut ref_mmr = Mmr::init(
@@ -1554,7 +1561,10 @@ mod tests {
 
             // Test single element proof at historical position
             let single_proof = mmr
-                .historical_range_proof(Position::new(1), Location::new(0)..Location::new(1))
+                .historical_range_proof(
+                    Position::new(1),
+                    Location::new_unchecked(0)..Location::new_unchecked(1),
+                )
                 .await
                 .unwrap();
 
@@ -1562,7 +1572,7 @@ mod tests {
             assert!(single_proof.verify_range_inclusion(
                 &mut hasher,
                 &[element],
-                Location::new(0),
+                Location::new_unchecked(0),
                 &root
             ));
 
@@ -1673,9 +1683,12 @@ mod tests {
             assert_eq!(new_mmr.oldest_retained_pos(), Some(original_size)); // Element we just added is the oldest retained
 
             // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
-            let proof = new_mmr.proof(Location::new(NUM_ELEMENTS)).await.unwrap();
+            let proof = new_mmr
+                .proof(Location::new_unchecked(NUM_ELEMENTS))
+                .await
+                .unwrap();
             let original_proof = original_mmr
-                .proof(Location::new(NUM_ELEMENTS))
+                .proof(Location::new_unchecked(NUM_ELEMENTS))
                 .await
                 .unwrap();
             assert_eq!(proof.digests, original_proof.digests);

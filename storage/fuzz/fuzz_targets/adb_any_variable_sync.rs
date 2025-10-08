@@ -107,7 +107,7 @@ impl<'a> Arbitrary<'a> for Operation {
             7 => Ok(Operation::GetMetadata),
             8 => {
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
-                let start_loc = Location::new_checked(start_loc).unwrap();
+                let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
@@ -115,7 +115,7 @@ impl<'a> Arbitrary<'a> for Operation {
             9 => {
                 let size = u.arbitrary()?;
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
-                let start_loc = Location::new_checked(start_loc).unwrap();
+                let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::HistoricalProof {
@@ -228,7 +228,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::GetLoc { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
-                        let loc = Location::new_checked((*loc_offset as u64) % op_count.as_u64())
+                        let loc = Location::new((*loc_offset as u64) % op_count.as_u64())
                             .unwrap();
                         let _ = db.get_loc(loc).await;
                     }
@@ -265,7 +265,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if db.op_count() > 0 && !has_uncommitted {
                         let op_count =
-                            Location::new_checked((*size) % db.op_count().as_u64()).unwrap() + 1;
+                            Location::new((*size) % db.op_count().as_u64()).unwrap() + 1;
 
                         if *start_loc >= op_count || op_count > max_ops.get() {
                             continue;

@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
                     }
                     mmr.process_updates(&mut hasher);
                     let location = location % mmr.leaves().as_u64();
-                    let location = Location::new_checked(location).unwrap();
+                    let location = Location::new(location).unwrap();
                     let position = Position::from(location);
 
                     if position > mmr.size() || position < mmr.pruned_to_pos() {
@@ -196,8 +196,7 @@ fn fuzz(input: FuzzInput) {
                     if mmr.leaves() == 0 {
                         continue;
                     }
-                    let range = Location::new_checked(start_loc).unwrap()
-                        ..Location::new_checked(end_loc).unwrap();
+                    let range = Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
                     let start_pos = Position::from(range.start);
 
                     if start_loc >= mmr.leaves()
@@ -214,7 +213,7 @@ fn fuzz(input: FuzzInput) {
                         assert!(proof.verify_range_inclusion(
                             &mut hasher,
                             &leaves[range.to_usize_range()],
-                            Location::new_checked(start_loc).unwrap(),
+                            Location::new(start_loc).unwrap(),
                             &root
                         ));
                     }
@@ -237,8 +236,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         continue;
                     }
-                    let range = Location::new_checked(start_loc).unwrap()
-                        ..Location::new_checked(end_loc).unwrap();
+                    let range = Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
                     mmr.process_updates(&mut hasher);
                     if let Ok(historical_proof) =
                         mmr.historical_range_proof(mmr.size(), range.clone()).await
@@ -247,7 +245,7 @@ fn fuzz(input: FuzzInput) {
                         assert!(historical_proof.verify_range_inclusion(
                             &mut hasher,
                             &leaves[range.to_usize_range()],
-                            Location::new_checked(start_loc).unwrap(),
+                            Location::new(start_loc).unwrap(),
                             &root
                         ));
                     }

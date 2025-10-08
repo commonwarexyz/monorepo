@@ -211,7 +211,7 @@ impl<
             steps: 0,
             hasher: Standard::<H>::new(),
         };
-        let last_commit_loc = status.bit_count().checked_sub(1).map(Location::new);
+        let last_commit_loc = status.bit_count().checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
             any,
@@ -293,7 +293,7 @@ impl<
         let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
         for _ in 0..steps_to_take {
             if self.any.snapshot.keys() == 0 {
-                self.any.inactivity_floor_loc = Location::new(bit_count);
+                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
                 info!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
@@ -305,7 +305,7 @@ impl<
         self.any
             .apply_op(Operation::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
-        self.last_commit_loc = Some(Location::new(self.status.bit_count()));
+        self.last_commit_loc = Some(Location::new_unchecked(self.status.bit_count()));
         self.status.append(true); // Always treat most recent commit op as active.
 
         // Sync the log and process the updates to the MMR in parallel.
@@ -516,7 +516,7 @@ impl<
         let start_chunk_loc = *start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            Location::new(start_chunk_loc),
+            Location::new_unchecked(start_chunk_loc),
             chunk_vec,
         );
 
@@ -621,7 +621,7 @@ impl<
         let num = *info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            Location::new(num),
+            Location::new_unchecked(num),
             vec![&info.chunk],
         );
         let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
@@ -795,7 +795,7 @@ pub mod test {
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
@@ -1020,7 +1020,7 @@ pub mod test {
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
-                let loc = Location::new(loc);
+                let loc = Location::new_unchecked(loc);
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
@@ -1151,7 +1151,7 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                loc: Location::new(0),
+                loc: Location::new_unchecked(0),
                 chunk: [0; 32],
             };
             for i in 1u8..=255 {

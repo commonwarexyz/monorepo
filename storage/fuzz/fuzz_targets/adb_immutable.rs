@@ -162,7 +162,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::GetLoc { loc } => {
                     let op_count = db.op_count();
                     if op_count > 0 && loc < op_count {
-                        let loc = Location::new_checked(loc).unwrap();
+                        let loc = Location::new(loc).unwrap();
                         let _ = db.get_loc(loc).await;
                     }
                 }
@@ -196,7 +196,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::Prune { loc } => {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
-                        let safe_loc = Location::new_checked(safe_loc).unwrap();
+                        let safe_loc = Location::new(safe_loc).unwrap();
                         if let Ok(()) = db.prune(safe_loc).await {
                             if let Some(oldest) = db.oldest_retained_loc() {
                                 set_locations.retain(|(_, l)| *l >= oldest);
@@ -213,7 +213,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && uncommitted_ops.is_empty() {
                         let safe_start = start_index % op_count.as_u64();
-                        let safe_start = Location::new_checked(safe_start).unwrap();
+                        let safe_start = Location::new(safe_start).unwrap();
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
@@ -232,9 +232,9 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && uncommitted_ops.is_empty() {
                         let safe_size = (size % op_count.as_u64()).max(1);
-                        let safe_size = Location::new_checked(safe_size).unwrap();
+                        let safe_size = Location::new(safe_size).unwrap();
                         let safe_start = start_loc % safe_size.as_u64();
-                        let safe_start = Location::new_checked(safe_start).unwrap();
+                        let safe_start = Location::new(safe_start).unwrap();
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 

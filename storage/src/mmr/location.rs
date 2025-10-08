@@ -52,8 +52,7 @@ impl Location {
     /// assert_eq!(*loc, 42);
     /// ```
     #[inline]
-    pub(crate) const fn new(loc: u64) -> Self {
-        #[cfg(all(debug_assertions, not(test)))]
+    pub(crate) const fn new_unchecked(loc: u64) -> Self {
         debug_assert!(loc <= MAX_LOCATION);
         Self(loc)
     }
@@ -79,7 +78,7 @@ impl Location {
     /// assert!(Location::new_checked(u64::MAX).is_none());
     /// ```
     #[inline]
-    pub const fn new_checked(loc: u64) -> Option<Self> {
+    pub const fn new(loc: u64) -> Option<Self> {
         if loc > MAX_LOCATION {
             None
         } else {
@@ -153,14 +152,14 @@ impl fmt::Display for Location {
 impl From<u64> for Location {
     #[inline]
     fn from(value: u64) -> Self {
-        Self::new(value)
+        Self::new_unchecked(value)
     }
 }
 
 impl From<usize> for Location {
     #[inline]
     fn from(value: usize) -> Self {
-        Self::new(value as u64)
+        Self::new_unchecked(value as u64)
     }
 }
 
@@ -370,22 +369,22 @@ mod tests {
     #[test]
     fn test_try_from_position() {
         const CASES: &[(Position, Location)] = &[
-            (Position::new(0), Location::new(0)),
-            (Position::new(1), Location::new(1)),
-            (Position::new(3), Location::new(2)),
-            (Position::new(4), Location::new(3)),
-            (Position::new(7), Location::new(4)),
-            (Position::new(8), Location::new(5)),
-            (Position::new(10), Location::new(6)),
-            (Position::new(11), Location::new(7)),
-            (Position::new(15), Location::new(8)),
-            (Position::new(16), Location::new(9)),
-            (Position::new(18), Location::new(10)),
-            (Position::new(19), Location::new(11)),
-            (Position::new(22), Location::new(12)),
-            (Position::new(23), Location::new(13)),
-            (Position::new(25), Location::new(14)),
-            (Position::new(26), Location::new(15)),
+            (Position::new(0), Location::new_unchecked(0)),
+            (Position::new(1), Location::new_unchecked(1)),
+            (Position::new(3), Location::new_unchecked(2)),
+            (Position::new(4), Location::new_unchecked(3)),
+            (Position::new(7), Location::new_unchecked(4)),
+            (Position::new(8), Location::new_unchecked(5)),
+            (Position::new(10), Location::new_unchecked(6)),
+            (Position::new(11), Location::new_unchecked(7)),
+            (Position::new(15), Location::new_unchecked(8)),
+            (Position::new(16), Location::new_unchecked(9)),
+            (Position::new(18), Location::new_unchecked(10)),
+            (Position::new(19), Location::new_unchecked(11)),
+            (Position::new(22), Location::new_unchecked(12)),
+            (Position::new(23), Location::new_unchecked(13)),
+            (Position::new(25), Location::new_unchecked(14)),
+            (Position::new(26), Location::new_unchecked(15)),
         ];
         for (pos, expected_loc) in CASES {
             let loc = Location::try_from(*pos).expect("should map to a leaf location");
@@ -421,71 +420,79 @@ mod tests {
 
     #[test]
     fn test_checked_add() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.checked_add(5).unwrap(), 15);
 
         // Overflow returns None
-        assert!(Location::new(u64::MAX).checked_add(1).is_none());
+        assert!(Location::new_unchecked(u64::MAX).checked_add(1).is_none());
 
         // Exceeding MAX_LOCATION returns None
-        assert!(Location::new(MAX_LOCATION).checked_add(1).is_none());
+        assert!(Location::new_unchecked(MAX_LOCATION)
+            .checked_add(1)
+            .is_none());
 
         // At MAX_LOCATION is OK
-        let loc = Location::new(MAX_LOCATION - 10);
+        let loc = Location::new_unchecked(MAX_LOCATION - 10);
         assert_eq!(loc.checked_add(10).unwrap(), MAX_LOCATION);
     }
 
     #[test]
     fn test_checked_sub() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.checked_sub(5).unwrap(), 5);
         assert!(loc.checked_sub(11).is_none());
     }
 
     #[test]
     fn test_saturating_add() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.saturating_add(5), 15);
 
         // Saturates at MAX_LOCATION, not u64::MAX
-        assert_eq!(Location::new(u64::MAX).saturating_add(1), MAX_LOCATION);
-        assert_eq!(Location::new(MAX_LOCATION).saturating_add(1), MAX_LOCATION);
         assert_eq!(
-            Location::new(MAX_LOCATION).saturating_add(1000),
+            Location::new_unchecked(u64::MAX).saturating_add(1),
+            MAX_LOCATION
+        );
+        assert_eq!(
+            Location::new_unchecked(MAX_LOCATION).saturating_add(1),
+            MAX_LOCATION
+        );
+        assert_eq!(
+            Location::new_unchecked(MAX_LOCATION).saturating_add(1000),
             MAX_LOCATION
         );
     }
 
     #[test]
     fn test_saturating_sub() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.saturating_sub(5), 5);
-        assert_eq!(Location::new(0).saturating_sub(1), 0);
+        assert_eq!(Location::new_unchecked(0).saturating_sub(1), 0);
     }
 
     #[test]
     fn test_display() {
-        let location = Location::new(42);
+        let location = Location::new_unchecked(42);
         assert_eq!(location.to_string(), "Location(42)");
     }
 
     #[test]
     fn test_add() {
-        let loc1 = Location::new(10);
-        let loc2 = Location::new(5);
+        let loc1 = Location::new_unchecked(10);
+        let loc2 = Location::new_unchecked(5);
         assert_eq!((loc1 + loc2), 15);
     }
 
     #[test]
     fn test_sub() {
-        let loc1 = Location::new(10);
-        let loc2 = Location::new(3);
+        let loc1 = Location::new_unchecked(10);
+        let loc2 = Location::new_unchecked(3);
         assert_eq!((loc1 - loc2), 7);
     }
 
     #[test]
     fn test_comparison_with_u64() {
-        let loc = Location::new(42);
+        let loc = Location::new_unchecked(42);
 
         // Test equality
         assert_eq!(loc, 42u64);
@@ -504,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_assignment_with_u64() {
-        let mut loc = Location::new(10);
+        let mut loc = Location::new_unchecked(10);
 
         // Test add assignment
         loc += 5;
@@ -518,28 +525,28 @@ mod tests {
     #[test]
     fn test_new_checked() {
         // Valid locations
-        assert!(Location::new_checked(0).is_some());
-        assert!(Location::new_checked(1000).is_some());
-        assert!(Location::new_checked(MAX_LOCATION).is_some());
+        assert!(Location::new(0).is_some());
+        assert!(Location::new(1000).is_some());
+        assert!(Location::new(MAX_LOCATION).is_some());
 
         // Invalid locations (too large)
-        assert!(Location::new_checked(MAX_LOCATION + 1).is_none());
-        assert!(Location::new_checked(u64::MAX).is_none());
+        assert!(Location::new(MAX_LOCATION + 1).is_none());
+        assert!(Location::new(u64::MAX).is_none());
     }
 
     #[test]
     fn test_is_valid_for_position() {
-        assert!(Location::new(0).is_valid());
-        assert!(Location::new(1000).is_valid());
-        assert!(Location::new(MAX_LOCATION).is_valid());
-        assert!(!Location::new(MAX_LOCATION + 1).is_valid());
-        assert!(!Location::new(u64::MAX).is_valid());
+        assert!(Location::new_unchecked(0).is_valid());
+        assert!(Location::new_unchecked(1000).is_valid());
+        assert!(Location::new_unchecked(MAX_LOCATION).is_valid());
+        assert!(!Location::new_unchecked(MAX_LOCATION + 1).is_valid());
+        assert!(!Location::new_unchecked(u64::MAX).is_valid());
     }
 
     #[test]
     fn test_max_location_boundary() {
         // MAX_LOCATION should convert successfully
-        let max_loc = Location::new(MAX_LOCATION);
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
         assert!(max_loc.is_valid());
         let pos = Position::from(max_loc);
         // Verify the position value
@@ -555,7 +562,7 @@ mod tests {
         use super::Position;
 
         // MAX_LOCATION + 1 should panic
-        let over_loc = Location::new(MAX_LOCATION + 1);
+        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
         let _ = Position::from(over_loc);
     }
 
@@ -564,19 +571,19 @@ mod tests {
         use super::Position;
 
         // Valid conversion
-        let valid_loc = Location::new(1000);
+        let valid_loc = Location::new_unchecked(1000);
         assert!(Position::checked_from_location(valid_loc).is_some());
 
         // MAX_LOCATION should succeed
-        let max_loc = Location::new(MAX_LOCATION);
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
         assert!(Position::checked_from_location(max_loc).is_some());
 
         // Over MAX_LOCATION should fail
-        let over_loc = Location::new(MAX_LOCATION + 1);
+        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
         assert!(Position::checked_from_location(over_loc).is_none());
 
         // u64::MAX should fail
-        let max_u64_loc = Location::new(u64::MAX);
+        let max_u64_loc = Location::new_unchecked(u64::MAX);
         assert!(Position::checked_from_location(max_u64_loc).is_none());
     }
 }

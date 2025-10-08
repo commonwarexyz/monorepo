@@ -184,14 +184,14 @@ impl Read for GetOperationsRequest {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let op_count = u64::read(buf)?;
-        let Some(op_count) = Location::new_checked(op_count) else {
+        let Some(op_count) = Location::new(op_count) else {
             return Err(CodecError::Invalid(
                 "GetOperationsRequest",
                 "op_count exceeds MAX_LOCATION",
             ));
         };
         let start_loc = u64::read(buf)?;
-        let Some(start_loc) = Location::new_checked(start_loc) else {
+        let Some(start_loc) = Location::new(start_loc) else {
             return Err(CodecError::Invalid(
                 "GetOperationsRequest",
                 "start_loc exceeds MAX_LOCATION",

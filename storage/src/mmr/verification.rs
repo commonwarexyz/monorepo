@@ -211,8 +211,8 @@ mod tests {
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
-            let mut range_start = Location::new(0);
-            let mut range_end = Location::new(49);
+            let mut range_start = Location::new_unchecked(0);
+            let mut range_end = Location::new_unchecked(49);
             while range_start < range_end {
                 let range = range_start..range_end;
                 let range_proof = mmr.range_proof(range.clone()).unwrap();

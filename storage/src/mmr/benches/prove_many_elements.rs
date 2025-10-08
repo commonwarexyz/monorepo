@@ -51,9 +51,9 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {
                                 for start_index in start_loc_samples {
-                                    let leaf_range = Location::new_checked(start_index)
+                                    let leaf_range = Location::new(start_index)
                                         .expect("benchmark location within bounds")
-                                        ..Location::new_checked(start_index + range)
+                                        ..Location::new(start_index + range)
                                             .expect("benchmark location within bounds");
                                     samples.push(leaf_range);
                                 }

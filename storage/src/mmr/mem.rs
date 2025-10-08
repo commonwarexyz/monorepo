@@ -825,7 +825,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
-            assert_eq!(mmr.leaves(), Location::new(0));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
@@ -937,23 +937,30 @@ mod tests {
             // fact still be able to generate them for some, but it's not guaranteed. For example,
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
-            assert!(matches!(mmr.proof(Location::new(0)), Err(ElementPruned(_))));
-            assert!(matches!(mmr.proof(Location::new(6)), Err(ElementPruned(_))));
+            assert!(matches!(
+                mmr.proof(Location::new_unchecked(0)),
+                Err(ElementPruned(_))
+            ));
+            assert!(matches!(
+                mmr.proof(Location::new_unchecked(6)),
+                Err(ElementPruned(_))
+            ));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
-            assert!(mmr.proof(Location::new(8)).is_ok());
-            assert!(mmr.proof(Location::new(10)).is_ok());
+            assert!(mmr.proof(Location::new_unchecked(8)).is_ok());
+            assert!(mmr.proof(Location::new_unchecked(10)).is_ok());
 
             let root_after_prune = mmr.root(&mut hasher);
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
-                mmr.range_proof(Location::new(5)..Location::new(9)).is_err(),
+                mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(9))
+                    .is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
+                mmr.range_proof(Location::new_unchecked(8)..mmr.leaves()).is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
@@ -1126,7 +1133,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos = Position::from(Location::new(100));
+            let leaf_pos = Position::from(Location::new_unchecked(100));
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());
