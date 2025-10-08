@@ -143,7 +143,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// executor.
     ///
     /// This is the default behavior.
-    fn shared(self) -> Self;
+    fn shared(self, blocking: bool) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
     ///
@@ -151,8 +151,6 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// This is not the default behavior. See [`Spawner::shared`] for more information.
     fn dedicated(self) -> Self;
-
-    fn blocking(self) -> Self;
 
     /// Enqueue a task to be executed.
     ///
@@ -166,34 +164,6 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static;
-
-    /// Enqueue a blocking task to be executed.
-    ///
-    /// This method is designed for synchronous, potentially long-running operations. Combine it
-    /// with [`Spawner::dedicated`] when you need a dedicated thread (tasks that are expected to run
-    /// indefinitely), otherwise the task executes in a shared thread (tasks that are expected to
-    /// finish on their own).
-    ///
-    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
-    /// result.
-    ///
-    /// # Motivation
-    ///
-    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
-    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
-    /// of said runtimes.
-    ///
-    /// # Warning
-    ///
-    /// Blocking tasks cannot be aborted or supervised. Calling this method with [`Spawner::supervised`]
-    /// is a no-op.
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawn(move |context| async move { f(context) })
-    }
 
     /// Signals the runtime to stop execution and waits for all outstanding tasks
     /// to perform any required cleanup and exit.

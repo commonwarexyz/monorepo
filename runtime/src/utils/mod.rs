@@ -29,6 +29,7 @@ pub use cell::Cell as ContextCell;
 pub(crate) struct Model {
     supervised: bool,
     dedicated: bool,
+    blocking: bool,
 }
 
 impl Default for Model {
@@ -37,6 +38,7 @@ impl Default for Model {
             // Default to supervised tasks like UNIX (and **unlike tokio**)
             supervised: true,
             dedicated: false,
+            blocking: false,
         }
     }
 }
@@ -61,8 +63,9 @@ impl Model {
     }
 
     /// Return a new configuration that requests shared runtime scheduling.
-    pub(crate) fn shared(mut self) -> Self {
+    pub(crate) fn shared(mut self, blocking: bool) -> Self {
         self.dedicated = false;
+        self.blocking = blocking;
         self
     }
 
@@ -133,7 +136,7 @@ pub fn create_pool<S: Spawner + Metrics>(
             context
                 .with_label("rayon-thread")
                 .dedicated()
-                .spawn_blocking(move |_| thread.run());
+                .spawn(move |_| async move { thread.run() });
             Ok(())
         })
         .build()?;
