@@ -441,7 +441,7 @@ impl crate::Spawner for Context {
                 runtime_handle.block_on(f);
             });
         } else {
-            executor.runtime.spawn(f);
+            executor.runtime.spawn_blocking(move || f);
         }
 
         // Register this child with the parent
@@ -452,27 +452,12 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        let dedicated = self.model.is_dedicated();
-        self.model = Model::default();
-
-        // Spawn the blocking task
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
-        if dedicated {
-            thread::spawn(f);
-        } else {
-            executor.runtime.spawn_blocking(f);
-        }
-        handle
+        self.spawn(move |context| async move { f(context) })
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {

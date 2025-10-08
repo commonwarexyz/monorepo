@@ -152,6 +152,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// This is not the default behavior. See [`Spawner::shared`] for more information.
     fn dedicated(self) -> Self;
 
+    fn blocking(self) -> Self;
+
     /// Enqueue a task to be executed.
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
@@ -188,7 +190,10 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static;
+        T: Send + 'static,
+    {
+        self.spawn(move |context| async move { f(context) })
+    }
 
     /// Signals the runtime to stop execution and waits for all outstanding tasks
     /// to perform any required cleanup and exit.
