@@ -600,7 +600,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
     ///
-    /// # Warning
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    ///
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= [Self::op_count].
+    ///
+    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    ///
+    /// # Panics
     ///
     /// Panics if there are uncommitted operations.
     pub async fn proof(
@@ -622,6 +630,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` exceeds the current number of
     /// operations, or if `start_loc` >= `op_count`.
+    ///
+    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are uncommitted operations.
     pub async fn historical_proof(
         &self,
         op_count: Location,

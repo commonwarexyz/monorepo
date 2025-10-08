@@ -413,7 +413,9 @@ impl<D: Digest> Proof<D> {
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
-            let end_loc = start_loc.checked_add(elements.len() as u64 - 1).unwrap();
+            let end_loc = start_loc
+                .checked_add(elements.len() as u64 - 1)
+                .ok_or(ReconstructionError::InvalidEndLoc)?;
             Position::try_from(end_loc).map_err(|_| ReconstructionError::InvalidEndLoc)?
         };
         if end_element_pos >= self.size {

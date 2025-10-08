@@ -48,7 +48,7 @@ enum Operation {
         max_ops: NonZeroU64,
     },
     HistoricalProof {
-        size: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     },
@@ -113,13 +113,14 @@ impl<'a> Arbitrary<'a> for Operation {
                 Ok(Operation::Proof { start_loc, max_ops })
             }
             9 => {
-                let size = u.arbitrary()?;
+                let op_count = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
+                let op_count = Location::new(op_count).unwrap();
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::HistoricalProof {
-                    size,
+                    op_count,
                     start_loc,
                     max_ops,
                 })
@@ -242,13 +243,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        if *start_loc < db.oldest_retained_loc().unwrap() || *start_loc >= op_count
-                        {
-                            continue;
-                        }
-
+                    if !has_uncommitted {
                         db.sync().await.expect("Sync should not fail");
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root(&mut hasher);
@@ -258,19 +253,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::HistoricalProof {
-                    size,
+                    op_count,
                     start_loc,
                     max_ops,
                 } => {
-                    if db.op_count() > 0 && !has_uncommitted {
-                        let op_count = Location::new((*size) % db.op_count().as_u64()).unwrap() + 1;
-
-                        if *start_loc >= op_count || op_count > max_ops.get() {
-                            continue;
-                        }
-
+                    if !has_uncommitted {
                         if let Ok((proof, log)) =
-                            db.historical_proof(op_count, *start_loc, *max_ops).await
+                            db.historical_proof(*op_count, *start_loc, *max_ops).await
                         {
                             if let Some(root) = historical_roots.get(&op_count) {
                                 assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));

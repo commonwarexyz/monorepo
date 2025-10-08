@@ -597,8 +597,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
 
         let leaves = Self::chunk_loc(bit_count) as u64;
+        // The chunk index should always be < MAX_LOCATION so this should never fail.
+        let size = Position::try_from(Location::new_unchecked(leaves))
+            .expect("chunk_loc returned invalid location");
         let mut mmr_proof = Proof::<H::Digest> {
-            size: Position::try_from(Location::new_unchecked(leaves)).expect("valid location"),
+            size,
             digests: proof.digests.clone(),
         };
 

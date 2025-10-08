@@ -25,17 +25,17 @@ where
 
 /// Extract pinned nodes from the [Proof] starting at `start_loc`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `start_loc + operations_len` overflows u64.
+/// Returns [Error::LocationOverflow] if `start_loc + operations_len` > [crate::mmr::MAX_LOCATION].
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: Location,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc
-        .checked_add(operations_len)
-        .expect("end_loc overflow");
+    let Some(end_loc) = start_loc.checked_add(operations_len) else {
+        return Err(Error::LocationOverflow(start_loc));
+    };
     proof.extract_pinned_nodes(start_loc..end_loc)
 }
 

@@ -512,7 +512,10 @@ impl<
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let end_loc = start_loc.checked_add(ops.len() as u64).unwrap();
+        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
+            debug!("verification failed, end_loc overflow");
+            return false;
+        };
         if end_loc > op_count {
             debug!(
                 loc = ?end_loc,
