@@ -442,7 +442,10 @@ impl crate::Spawner for Context {
                 runtime_handle.block_on(f);
             });
         } else if blocking {
-            executor.runtime.spawn_blocking(move || f);
+            let runtime_handle = executor.runtime.handle().clone();
+            executor
+                .runtime
+                .spawn_blocking(move || runtime_handle.block_on(f));
         } else {
             executor.runtime.spawn(f);
         }
