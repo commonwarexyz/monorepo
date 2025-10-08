@@ -11,8 +11,8 @@ pub struct Label {
     kind: Kind,
     /// Whether the task is supervised by a parent.
     supervision: Supervision,
-    /// Whether the task runs on a dedicated thread.
-    schedule: Schedule,
+    /// Whether the task runs on a dedicated thread or the shared runtime.
+    mode: Mode,
 }
 
 impl Label {
@@ -22,13 +22,12 @@ impl Label {
             name: String::new(),
             kind: Kind::Root,
             supervision: Supervision::Detached,
-            schedule: Schedule::Shared,
+            mode: Mode::Shared,
         }
     }
 
     /// Create a new label for a future task.
     pub fn task(name: String, supervised: bool, dedicated: bool, blocking: bool) -> Self {
-        // TODO: record whether or not blocking
         Self {
             name,
             kind: Kind::Task,
@@ -37,12 +36,12 @@ impl Label {
             } else {
                 Supervision::Detached
             },
-            schedule: if dedicated {
-                Schedule::Dedicated
+            mode: if dedicated {
+                Mode::Dedicated
             } else if blocking {
-                Schedule::Blocking
+                Mode::SharedBlocking
             } else {
-                Schedule::Shared
+                Mode::Shared
             },
         }
     }
@@ -73,11 +72,11 @@ pub enum Supervision {
 
 /// Metric label describing whether a task runs on a dedicated thread.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Schedule {
+pub enum Mode {
     /// Task runs on the shared runtime.
     Shared,
-    /// Task runs on a blocking-reserved thread.
-    Blocking,
+    /// Task runs on a shared runtime but is blocking.
+    SharedBlocking,
     /// Task runs on a dedicated thread.
     Dedicated,
 }
