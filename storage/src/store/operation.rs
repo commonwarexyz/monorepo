@@ -326,7 +326,13 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::CommitFloor(Location::new_unchecked(floor_loc)))
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::adb::operation::Fixed",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -356,10 +362,13 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
             COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(
-                    metadata,
-                    Location::new_unchecked(floor_loc.into()),
-                ))
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::adb::operation::Variable",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
