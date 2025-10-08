@@ -13,6 +13,9 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 
 /// Spawn a task using a [`Cell`] by taking its context, executing the provided
 /// async block, and restoring the context before the block completes.
+///
+/// If you need to modify the context before spawning (i.e. non-default spawn configuration),
+/// you should interact with [`Cell`] directly.
 #[macro_export]
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
