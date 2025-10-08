@@ -649,7 +649,6 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        // Validate location can be safely converted to Position
         let target_prune_pos = Position::try_from(target_prune_loc)?;
 
         assert!(target_prune_loc <= self.inactivity_floor_loc);

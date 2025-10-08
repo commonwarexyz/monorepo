@@ -448,7 +448,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc >= op_count()`.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        // Validate location can be safely converted to Position
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
@@ -784,13 +783,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [Error::Mmr]([crate::mmr::Error::LocationOverflow]) if `target_prune_loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        // Validate location can be safely converted to Position
         let target_prune_pos = Position::try_from(target_prune_loc)?;
 
         assert!(target_prune_loc <= self.inactivity_floor_loc);
