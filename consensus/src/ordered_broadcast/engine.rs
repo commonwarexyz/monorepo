@@ -225,7 +225,8 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
-        let metrics = metrics::Metrics::init(context.with_label("metrics"));
+        // TODO(#1833): Metrics should use the post-start context
+        let metrics = metrics::Metrics::init(context.clone());
 
         Self {
             context: ContextCell::new(context),
