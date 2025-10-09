@@ -41,7 +41,6 @@ use crate::{
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
-    future::poll_fn,
     task::{waker, ArcWake},
     Future,
 };
@@ -1061,6 +1060,20 @@ impl Sleeper {
     }
 }
 
+struct Poller<F> {
+    executor: Weak<Executor>,
+    time: SystemTime,
+    future: Option<Pin<Box<F>>>,
+    registered: bool,
+}
+
+impl<F> Poller<F> {
+    /// Upgrade Weak reference to [Executor].
+    fn executor(&self) -> Arc<Executor> {
+        self.executor.upgrade().expect("executor already dropped")
+    }
+}
+
 struct Alarm {
     time: SystemTime,
     waker: Waker,
@@ -1109,6 +1122,51 @@ impl Future for Sleeper {
     }
 }
 
+impl<F> Future for Poller<F>
+where
+    F: Future + Send + 'static,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        let executor = this.executor();
+
+        {
+            let current_time = *executor.time.lock().unwrap();
+            if current_time < this.time {
+                if !this.registered {
+                    this.registered = true;
+                    executor.sleeping.lock().unwrap().push(Alarm {
+                        time: this.time,
+                        waker: cx.waker().clone(),
+                    });
+                }
+                return Poll::Pending;
+            }
+        }
+
+        let poll_result = {
+            let future = this
+                .future
+                .as_mut()
+                .expect("future already polled at scheduled time");
+            future.as_mut().poll(cx)
+        };
+
+        match poll_result {
+            Poll::Ready(value) => {
+                this.future = None;
+                Poll::Ready(value)
+            }
+            Poll::Pending => panic!(
+                "future not ready when polled at scheduled time {:?}",
+                this.time
+            ),
+        }
+    }
+}
+
 impl Clock for Context {
     fn current(&self) -> SystemTime {
         *self.executor().time.lock().unwrap()
@@ -1131,27 +1189,20 @@ impl Clock for Context {
         }
     }
 
-    fn poll_after<F, T>(
+    fn poll_at<F, T>(
         &self,
-        duration: Duration,
+        deadline: SystemTime,
         future: F,
     ) -> impl Future<Output = T> + Send + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let context = self.clone();
-        async move {
-            context.sleep(duration).await;
-            let mut future = Box::pin(future);
-            poll_fn(move |cx| match future.as_mut().poll(cx) {
-                Poll::Ready(value) => Poll::Ready(value),
-                Poll::Pending => panic!(
-                    "future not ready after deferred poll of {:?}",
-                    duration
-                ),
-            })
-            .await
+        Poller {
+            executor: self.executor.clone(),
+            time: deadline,
+            future: Some(Box::pin(future)),
+            registered: false,
         }
     }
 }
@@ -1525,9 +1576,17 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            context.poll_after(first_wait, first_rx).await.unwrap();
+            let first_deadline = context
+                .current()
+                .checked_add(first_wait)
+                .expect("first deadline overflowed");
+            context.poll_at(first_deadline, first_rx).await.unwrap();
             println!("first task finished");
-            context.poll_after(second_wait, second_rx).await.unwrap();
+            let second_deadline = context
+                .current()
+                .checked_add(second_wait)
+                .expect("second deadline overflowed");
+            context.poll_at(second_deadline, second_rx).await.unwrap();
             println!("second task finished");
 
             context.auditor().state()

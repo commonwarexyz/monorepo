@@ -170,16 +170,16 @@ where
         self.as_ref().sleep_until(deadline)
     }
 
-    fn poll_after<F, T>(
+    fn poll_at<F, T>(
         &self,
-        duration: Duration,
+        deadline: SystemTime,
         future: F,
     ) -> impl Future<Output = T> + Send + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.as_ref().poll_after(duration, future)
+        self.as_ref().poll_at(deadline, future)
     }
 }
 

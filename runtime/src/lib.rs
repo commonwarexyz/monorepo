@@ -264,18 +264,18 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
-    /// Delay polling of a future until at least `duration` has elapsed.
+    /// Delay polling of a future until the given `deadline`.
     ///
     /// Deterministic runtimes can use this to coordinate with external processes that progress on
-    /// wall-clock time by deferring the first poll of `future` until the provided delay passes.
-    /// Runtimes that do not simulate time may choose to ignore the delay altogether.
+    /// wall-clock time by deferring the first poll of `future` until the provided deadline is
+    /// reached. Runtimes that do not simulate time may choose to ignore the deadline altogether.
     ///
     /// # Panics
     ///
-    /// Panics if `future` is not ready when it is polled after `duration`.
-    fn poll_after<F, T>(
+    /// Panics if `future` is not ready when it is polled at `deadline`.
+    fn poll_at<F, T>(
         &self,
-        duration: Duration,
+        deadline: SystemTime,
         future: F,
     ) -> impl Future<Output = T> + Send + 'static
     where
