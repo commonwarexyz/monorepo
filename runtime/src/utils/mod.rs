@@ -29,8 +29,8 @@ pub use cell::Cell as ContextCell;
 enum Mode {
     /// Task runs on a dedicated thread.
     Dedicated,
-    /// Task runs on a shared runtime. If the boolean
-    /// is true, the task is blocking.
+    /// Task runs on the shared executor. `true` marks short blocking work that should
+    /// use the runtime's blocking-friendly pool.
     Shared(bool),
 }
 
@@ -46,29 +46,31 @@ impl Default for Model {
         Self {
             // Default to supervised tasks like UNIX (and **unlike tokio**)
             supervised: true,
-            // Default to non-blocking tasks on a shared runtime
+            // Default to the shared executor with `blocking == false`
             mode: Mode::Shared(false),
         }
     }
 }
 
 impl Model {
-    /// Return a new configuration with supervision enabled.
+    /// Enable supervision so child tasks are cancelled when the parent exits.
     pub(crate) fn supervised(&mut self) {
         self.supervised = true;
     }
 
-    /// Return a new configuration with supervision disabled.
+    /// Disable supervision so child tasks outlive the parent.
     pub(crate) fn detached(&mut self) {
         self.supervised = false;
     }
 
-    /// Return a new configuration that requests a dedicated thread.
+    /// Request a dedicated thread for long-lived or heavily blocking work.
     pub(crate) fn dedicated(&mut self) {
         self.mode = Mode::Dedicated;
     }
 
-    /// Return a new configuration that requests shared runtime scheduling.
+    /// Return a new configuration that uses the shared executor.
+    ///
+    /// Set `blocking` to `true` for short-lived blocking work so the runtime can isolate it.
     pub(crate) fn shared(&mut self, blocking: bool) {
         self.mode = Mode::Shared(blocking);
     }

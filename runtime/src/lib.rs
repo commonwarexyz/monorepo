@@ -122,52 +122,54 @@ pub trait Runner {
 
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Create a new instance of [`Spawner`] configured to spawn new tasks supervised by the current
-    /// context.
+    /// Return a [`Spawner`] whose tasks remain supervised by the current context.
     ///
-    /// Any task spawned from this context will be aborted automatically if the current task
-    /// completes or is cancelled. Note, a task can only be aborted if it yields (i.e. blocking tasks
-    /// that never yield can never be aborted).
+    /// Tasks spawned with this configuration are cancelled automatically once the current task
+    /// finishes (whether by completing or being aborted). Cancellation still requires the task to
+    /// yield, so a blocking task that never yields cannot be stopped.
     ///
-    /// This is the default behavior, tasks spawned from supervised contexts exit when their parent finishes
-    /// (either through completion or abortion).
+    /// This is the default behavior.
     fn supervised(self) -> Self;
 
-    /// Create a new instance of [`Spawner`] configured to spawn new tasks detached from the current
-    /// context.
+    /// Return a [`Spawner`] that launches tasks detached from the current context.
+    ///
+    /// Detached tasks continue running even after the current task exits. Prefer this only when
+    /// the parent task is not responsible for managing the child task.
     ///
     /// This is not the default behavior. See [`Spawner::supervised`] for more information.
     fn detached(self) -> Self;
 
-    /// Create a new instance of [`Spawner`] configured to spawn new tasks on a shared task pool.
+    /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
     ///
-    /// For blocking, short-lived tasks set `blocking` to `true`. This instructs runtimes
-    /// to spawn the task in an isolated thread pool to avoid starving async tasks in the default
-    /// work-stealing thread pool. For long-running tasks, see [`Spawner::dedicated`].
+    /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
+    /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
+    /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
+    /// [`Spawner::dedicated`] instead.
     ///
-    /// Non-blocking, shared tasks are the default behavior.
+    /// The shared executor with `blocking == false` is the default spawn mode.
     fn shared(self, blocking: bool) -> Self;
 
-    /// Create a new instance of [`Spawner`] configured to spawn new tasks on a dedicated thread.
+    /// Return a [`Spawner`] that runs tasks on a dedicated thread when the runtime supports it.
     ///
-    /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
+    /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
+    /// shared executor.
     ///
     /// This is not the default behavior. See [`Spawner::shared`] for more information.
     fn dedicated(self) -> Self;
 
-    /// Enqueue a task to be executed.
+    /// Spawn a task for execution with the current configuration.
     ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
+    /// Unlike directly awaiting a future, the task starts running immediately even if the caller
+    /// never awaits the returned [`Handle`].
     ///
-    /// Spawned tasks consume the context used to create them. This ensures that context cannot
-    /// be shared between tasks and that a task's context always comes from somewhere.
+    /// Spawning consumes the context so that each task receives its own [`Spawner`]; contexts are
+    /// never implicitly shared between tasks.
     ///
     /// # Spawn Configuration Reset
     ///
-    /// When context passes through [`Spawner::spawn`], the spawn configuration is reset to the default
-    /// (i.e. non-blocking, shared tasks) so that spawned tasks don't need to sanitize the context before use (they
-    /// won't know how they were spawned).
+    /// When a context passes through [`Spawner::spawn`], its configuration resets to the default
+    /// (shared executor, `blocking == false`). Child tasks can therefore assume they start from a
+    /// clean configuration without needing to inspect how they were spawned.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
