@@ -689,6 +689,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::UnexpectedData] if the location does not reference a commit operation.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let mut last_commit = *self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
@@ -698,7 +702,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = last_commit / self.log_items_per_section;
         let offset = self.locations.read(last_commit).await?;
         let Operation::CommitFloor(metadata, _) = self.log.get(section, offset).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
+            return Err(Error::UnexpectedData(Location::new_unchecked(last_commit)));
         };
 
         Ok(Some((Location::new_unchecked(last_commit), metadata)))
