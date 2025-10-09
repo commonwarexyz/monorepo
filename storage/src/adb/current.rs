@@ -212,7 +212,10 @@ impl<
             steps: 0,
             hasher: Standard::<H>::new(),
         };
-        let last_commit_loc = status.bit_count().checked_sub(1).map(Location::new);
+        let last_commit_loc = status
+            .bit_count()
+            .checked_sub(1)
+            .map(Location::new_unchecked);
 
         Ok(Self {
             any,
@@ -294,7 +297,7 @@ impl<
         let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
         for _ in 0..steps_to_take {
             if self.any.snapshot.keys() == 0 {
-                self.any.inactivity_floor_loc = Location::new(bit_count);
+                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
                 info!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
@@ -306,7 +309,7 @@ impl<
         self.any
             .apply_op(Operation::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
-        self.last_commit_loc = Some(Location::new(self.status.bit_count()));
+        self.last_commit_loc = Some(Location::new_unchecked(self.status.bit_count()));
         self.status.append(true); // Always treat most recent commit op as active.
 
         // Sync the log and process the updates to the MMR in parallel.
@@ -430,9 +433,14 @@ impl<
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    ///
     /// # Panics
     ///
-    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
+    /// Panics if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -447,7 +455,9 @@ impl<
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
-        assert!(start_loc < leaves, "start_loc is invalid");
+        if start_loc >= leaves {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
@@ -502,7 +512,10 @@ impl<
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let end_loc = start_loc.checked_add(ops.len() as u64).unwrap();
+        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
+            debug!("verification failed, end_loc overflow");
+            return false;
+        };
         if end_loc > op_count {
             debug!(
                 loc = ?end_loc,
@@ -517,7 +530,7 @@ impl<
         let start_chunk_loc = *start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            Location::new(start_chunk_loc),
+            Location::new_unchecked(start_chunk_loc),
             chunk_vec,
         );
 
@@ -573,9 +586,13 @@ impl<
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
+        // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(*loc);
 
@@ -622,7 +639,7 @@ impl<
         let num = *info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            Location::new(num),
+            Location::new_unchecked(num),
             vec![&info.chunk],
         );
         let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
@@ -690,11 +707,15 @@ impl<
         hasher: &mut H,
         loc: Location,
     ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
         let op = self.any.log.read(*loc).await?;
 
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
+        // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(*loc);
 
@@ -796,7 +817,7 @@ pub mod test {
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
@@ -1021,7 +1042,7 @@ pub mod test {
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
-                let loc = Location::new(loc);
+                let loc = Location::new_unchecked(loc);
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
@@ -1152,7 +1173,7 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                loc: Location::new(0),
+                loc: Location::new_unchecked(0),
                 chunk: [0; 32],
             };
             for i in 1u8..=255 {

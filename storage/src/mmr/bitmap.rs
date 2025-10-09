@@ -151,7 +151,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = Position::from(Location::new(pruned_chunks as u64));
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -207,7 +208,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = Position::from(Location::new(self.pruned_chunks as u64));
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        let mmr_size = Position::try_from(Location::new_unchecked(self.pruned_chunks as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -249,7 +251,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.pruned_chunks = chunk_loc;
         self.authenticated_len = self.bitmap.len() - 1;
 
-        let mmr_pos = Position::from(Location::new(chunk_loc as u64));
+        // This will never panic because chunk_loc is always less than MAX_LOCATION.
+        let mmr_pos = Position::try_from(Location::new_unchecked(chunk_loc as u64)).unwrap();
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -357,7 +360,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     #[inline]
     #[cfg(test)]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        Position::from(Location::new(Self::chunk_loc(bit_offset) as u64)).into()
+        let leaf_loc = Location::new_unchecked(Self::chunk_loc(bit_offset) as u64);
+        Position::try_from(leaf_loc).unwrap().into()
     }
 
     #[inline]
@@ -434,10 +438,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| Location::new((chunk_index + self.pruned_chunks) as u64))
+            .map(|&chunk_index| Location::new_unchecked((chunk_index + self.pruned_chunks) as u64))
             .collect();
         for i in self.authenticated_len..self.bitmap.len() - 1 {
-            chunks.push(Location::new((i + self.pruned_chunks) as u64));
+            chunks.push(Location::new_unchecked((i + self.pruned_chunks) as u64));
         }
 
         chunks
@@ -459,7 +463,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = Position::from(Location::new((*chunk_index + self.pruned_chunks) as u64));
+                let loc = Location::new_unchecked((*chunk_index + self.pruned_chunks) as u64);
+                let pos = Position::try_from(loc).expect("invalid location");
                 (pos, &self.bitmap[*chunk_index])
             })
             .collect::<Vec<_>>();
@@ -557,7 +562,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             ));
         }
 
-        let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
+        let range = Location::new_unchecked(chunk_loc as u64)
+            ..Location::new_unchecked((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = Position::new(self.bit_count());
         if self.next_bit == 0 {
@@ -589,14 +595,22 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
 
         let leaves = Self::chunk_loc(bit_count) as u64;
+        // The chunk index should always be < MAX_LOCATION so this should never fail.
+        let size = Position::try_from(Location::new_unchecked(leaves))
+            .expect("chunk_loc returned invalid location");
         let mut mmr_proof = Proof::<H::Digest> {
-            size: Position::from(Location::new(leaves)),
+            size,
             digests: proof.digests.clone(),
         };
 
         let loc = Self::chunk_loc(bit_offset) as u64;
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, Location::new(loc), root);
+            return mmr_proof.verify_element_inclusion(
+                hasher,
+                chunk,
+                Location::new_unchecked(loc),
+                root,
+            );
         }
 
         if proof.digests.is_empty() {
@@ -629,13 +643,14 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(loc)) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
-        };
+        let mmr_root =
+            match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new_unchecked(loc)) {
+                Ok(root) => root,
+                Err(error) => {
+                    debug!(error = ?error, "invalid proof input");
+                    return false;
+                }
+            };
 
         let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =

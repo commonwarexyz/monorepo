@@ -209,7 +209,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                range: Position::from(cfg.range.start)..Position::from(cfg.range.end + 1),
+                range: Position::try_from(cfg.range.start)?
+                    ..Position::try_from(cfg.range.end.saturating_add(1))?,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -285,7 +286,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut mmr_leaves = super::align_mmr_and_locations(mmr, locations).await?;
 
         // The number of operations in the log.
-        let mut log_size = Location::new(0);
+        let mut log_size = Location::new_unchecked(0);
         // The location and blob-offset of the first operation to follow the last known commit point.
         let mut after_last_commit = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
@@ -307,7 +308,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
-                            log_size = Location::new(section * log_items_per_section.get());
+                            log_size =
+                                Location::new_unchecked(section * log_items_per_section.get());
                             oldest_retained_loc = Some(log_size);
                         }
 
@@ -384,7 +386,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
-        let oldest_retained_loc = oldest_retained_loc.unwrap_or(Location::new(0));
+        let oldest_retained_loc = oldest_retained_loc.unwrap_or(Location::new_unchecked(0));
         Ok((log_size, oldest_retained_loc))
     }
 
@@ -409,7 +411,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit.unwrap_or(Location::new(0)));
+        assert!(loc <= self.last_commit.unwrap_or(Location::new_unchecked(0)));
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
@@ -418,12 +420,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section = *loc / self.log_items_per_section;
         self.log.prune(section).await?;
-        self.oldest_retained_loc = Location::new(section * self.log_items_per_section);
+        self.oldest_retained_loc = Location::new_unchecked(section * self.log_items_per_section);
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(*self.oldest_retained_loc).await?;
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
+            .prune_to_pos(
+                &mut self.hasher,
+                Position::try_from(self.oldest_retained_loc)?,
+            )
             .await?;
         Ok(())
     }
@@ -583,22 +588,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > number of operations, or
+    /// if `start_loc` >= `op_count`.
+    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
-        assert!(op_count <= self.op_count());
-        assert!(start_loc < op_count);
-
+        if op_count > self.op_count() {
+            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
+        }
+        if start_loc >= op_count {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
         }
-
+        let mmr_size = Position::try_from(op_count)?;
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let mmr_size = Position::from(op_count);
-
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
@@ -877,7 +891,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(1), metadata.clone()))
+                Some((Location::new_unchecked(1), metadata.clone()))
             );
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
@@ -888,7 +902,7 @@ pub(super) mod test {
             // Make sure we can still get metadata.
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(1), metadata))
+                Some((Location::new_unchecked(1), metadata))
             );
 
             // Commit the second key.
@@ -896,7 +910,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 4);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(3), None))
+                Some((Location::new_unchecked(3), None))
             );
 
             // Capture state.
@@ -917,7 +931,7 @@ pub(super) mod test {
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(3), None))
+                Some((Location::new_unchecked(3), None))
             );
 
             // Cleanup.
@@ -961,11 +975,11 @@ pub(super) mod test {
             // end.
             let max_ops = NZU64!(5);
             for i in 0..*db.op_count() {
-                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
+                let (proof, log) = db.proof(Location::new_unchecked(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
-                    Location::new(i),
+                    Location::new_unchecked(i),
                     &log,
                     &root
                 ));
@@ -1126,13 +1140,15 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
-            db.prune(Location::new(ELEMENTS / 2)).await.unwrap();
+            db.prune(Location::new_unchecked(ELEMENTS / 2))
+                .await
+                .unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+            assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 1;
@@ -1150,16 +1166,16 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), ELEMENTS + 1);
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+            assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
-            let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
+            let loc = Location::new_unchecked(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
             db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
-                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+                Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
             );
 
             // Confirm boundary persists across restart.
@@ -1168,7 +1184,7 @@ pub(super) mod test {
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
-                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+                Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
             );
 
             // Try to fetch a pruned key.
@@ -1183,7 +1199,10 @@ pub(super) mod test {
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
             let proof_result = db
-                .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
+                .proof(
+                    Location::new_unchecked(pruned_pos),
+                    NZU64!(pruned_pos + 100),
+                )
                 .await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 

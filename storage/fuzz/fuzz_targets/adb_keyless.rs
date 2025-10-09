@@ -220,10 +220,11 @@ fn fuzz(input: FuzzInput) {
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        if let Ok((proof, ops)) = db.proof(Location::new(start_loc), NZU64!(max_ops_value)).await {
+                        let start_loc = Location::new(start_loc).unwrap();
+                        if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             let root = db.root(&mut hasher);
                             assert!(
-                                verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &root),
+                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
                             );
                         }
@@ -238,10 +239,12 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                        let start_loc = (*start_offset as u64) % size;
+                        let size = Location::new(size).unwrap();
+                        let start_loc = (*start_offset as u64) % *size;
+                        let start_loc = Location::new(start_loc).unwrap();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         let _ = db
-                            .historical_proof(Location::new(size), Location::new(start_loc), NZU64!(max_ops_value))
+                            .historical_proof(size, start_loc, NZU64!(max_ops_value))
                             .await;
                     }
                 }

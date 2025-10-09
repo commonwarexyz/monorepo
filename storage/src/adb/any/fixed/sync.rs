@@ -70,7 +70,8 @@ where
                 },
                 // The last node of an MMR with `range.end` leaves is at the position
                 // right before where the next leaf (at location `range.end`) goes.
-                range: Position::from(range.start)..Position::from(range.end + 1),
+                range: Position::try_from(range.start).unwrap()
+                    ..Position::try_from(range.end + 1).unwrap(),
                 pinned_nodes,
             },
         )
@@ -184,7 +185,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         journal.prune(range.start).await?;
         journal
     } else {
-        return Err(adb::Error::UnexpectedData(Location::new(journal_size)));
+        return Err(adb::Error::UnexpectedData(Location::new_unchecked(
+            journal_size,
+        )));
     };
     let journal_size = journal.size().await?;
     assert!(journal_size <= range.end);
@@ -501,7 +504,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new(31)..Location::new(30), // Invalid range: start > end
+                    range: Location::new_unchecked(31)..Location::new_unchecked(30), // Invalid range: start > end
                 },
                 context,
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
@@ -516,8 +519,8 @@ mod tests {
                     lower_bound_pos,
                     upper_bound_pos,
                 })) => {
-                    assert_eq!(lower_bound_pos, Location::new(31));
-                    assert_eq!(upper_bound_pos, Location::new(30));
+                    assert_eq!(lower_bound_pos, Location::new_unchecked(31));
+                    assert_eq!(upper_bound_pos, Location::new_unchecked(30));
                 }
                 _ => panic!("Expected InvalidTarget error"),
             }
@@ -1298,7 +1301,7 @@ mod tests {
                 context,
                 target: Target {
                     root: target_root,
-                    range: Location::new(0)..Location::new(5),
+                    range: Location::new_unchecked(0)..Location::new_unchecked(5),
                 },
                 resolver,
                 apply_batch_size: 2,
@@ -1337,7 +1340,7 @@ mod tests {
                 any_db_config("sync_basic"),
                 log,
                 None,
-                Location::new(0)..Location::new(1),
+                Location::new_unchecked(0)..Location::new_unchecked(1),
                 1024,
             )
             .await
@@ -1345,7 +1348,7 @@ mod tests {
 
             // Verify database state
             assert_eq!(synced_db.op_count(), 0);
-            assert_eq!(synced_db.inactivity_floor_loc, Location::new(0));
+            assert_eq!(synced_db.inactivity_floor_loc, Location::new_unchecked(0));
             assert_eq!(synced_db.log.size().await.unwrap(), 0);
             assert_eq!(synced_db.mmr.size(), 0);
 
@@ -1389,7 +1392,7 @@ mod tests {
             let upper_bound = source_db.op_count();
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = nodes_to_pin(Position::from(lower_bound));
+            let pinned_nodes_pos = nodes_to_pin(Position::try_from(lower_bound).unwrap());
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
@@ -1508,7 +1511,9 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = nodes_to_pin(Position::from(Location::new(lower_bound)))
+                let pinned_nodes = nodes_to_pin(
+                    Position::try_from(Location::new_unchecked(lower_bound)).unwrap(),
+                )
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1521,7 +1526,7 @@ mod tests {
                     create_test_config(context.next_u64()),
                     log,
                     Some(pinned_nodes),
-                    Location::new(lower_bound)..Location::new(upper_bound),
+                    Location::new_unchecked(lower_bound)..Location::new_unchecked(upper_bound),
                     1024,
                 )
                 .await
@@ -1529,9 +1534,12 @@ mod tests {
 
                 // Verify database state
                 assert_eq!(db.log.size().await.unwrap(), upper_bound);
-                assert_eq!(db.mmr.size(), Position::from(Location::new(upper_bound)));
+                assert_eq!(
+                    db.mmr.size(),
+                    Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
+                );
                 assert_eq!(db.op_count(), upper_bound);
-                assert_eq!(db.inactivity_floor_loc, Location::new(lower_bound));
+                assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(lower_bound));
 
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
@@ -1587,7 +1595,7 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes = nodes_to_pin(Position::from(sync_db_original_size))
+            let pinned_nodes = nodes_to_pin(Position::try_from(sync_db_original_size).unwrap())
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
 
@@ -1681,7 +1689,7 @@ mod tests {
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
-                nodes_to_pin(Position::from(db.inactivity_floor_loc))
+                nodes_to_pin(Position::try_from(db.inactivity_floor_loc).unwrap())
                     .map(|pos| db.mmr.get_node(pos)),
             )
             .await;

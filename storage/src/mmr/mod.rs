@@ -86,7 +86,7 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
-pub use location::Location;
+pub use location::{Location, MAX_LOCATION};
 pub use position::Position;
 pub use proof::Proof;
 use thiserror::Error;
@@ -119,4 +119,8 @@ pub enum Error {
     InvalidSize(u64),
     #[error("empty")]
     Empty,
+    #[error("location {0} > MAX_LOCATION")]
+    LocationOverflow(Location),
+    #[error("range out of bounds: end location {0} exceeds MMR size")]
+    RangeOutOfBounds(Location),
 }

@@ -252,9 +252,9 @@ where
             snapshot,
             log_items_per_section: cfg.log_items_per_section.get(),
             locations,
-            inactivity_floor_loc: Location::new(0),
-            oldest_retained_loc: Location::new(0),
-            log_size: Location::new(0),
+            inactivity_floor_loc: Location::new_unchecked(0),
+            oldest_retained_loc: Location::new_unchecked(0),
+            log_size: Location::new_unchecked(0),
             uncommitted_ops: 0,
         };
 
@@ -377,7 +377,8 @@ where
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
-        self.oldest_retained_loc = Location::new(section_with_target * self.log_items_per_section);
+        self.oldest_retained_loc =
+            Location::new_unchecked(section_with_target * self.log_items_per_section);
         debug!(
             log_size = ?self.log_size,
             oldest_retained_loc = ?self.oldest_retained_loc,
@@ -408,7 +409,7 @@ where
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((Location::new(last_commit), metadata)))
+        Ok(Some((Location::new_unchecked(last_commit), metadata)))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -493,7 +494,8 @@ where
                     }
                     Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
-                            self.log_size = Location::new(section * self.log_items_per_section);
+                            self.log_size =
+                                Location::new_unchecked(section * self.log_items_per_section);
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
@@ -880,7 +882,7 @@ mod test {
             store.commit(metadata.clone()).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new(3), metadata.clone()))
+                Some((Location::new_unchecked(3), metadata.clone()))
             );
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
@@ -915,13 +917,13 @@ mod test {
             // Make sure we can still get metadata.
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new(3), metadata))
+                Some((Location::new_unchecked(3), metadata))
             );
 
             store.commit(None).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new(8), None))
+                Some((Location::new_unchecked(8), None))
             );
 
             assert_eq!(store.log_size, 9);

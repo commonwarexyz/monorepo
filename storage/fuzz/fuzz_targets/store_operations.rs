@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = store.op_count();
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
-                        let _ = store.get_loc(Location::new(loc)).await;
+                        let _ = store.get_loc(Location::new(loc).unwrap()).await;
                     }
                 }
 
