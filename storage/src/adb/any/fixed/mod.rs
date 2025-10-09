@@ -17,15 +17,11 @@ use crate::{
     store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _};
+use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::Array;
 use futures::future::try_join_all;
-use std::{
-    future::Future,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 pub mod ordered;
@@ -35,24 +31,6 @@ pub mod unordered;
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
 pub(crate) const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
-
-pub trait Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
-    fn op_count(&self) -> Location;
-    fn inactivity_floor_loc(&self) -> Location;
-
-    fn root(&self, hasher: &mut Standard<H>) -> H::Digest;
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
-
-    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
-    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>>;
-
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>>;
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
-}
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
