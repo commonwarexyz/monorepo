@@ -1482,27 +1482,27 @@ mod tests {
         // Create a deterministic ordering of tasks with variable latency
         let mut rng = StdRng::seed_from_u64(seed);
         let (first_tx, first_rx) = oneshot::channel();
-        let first_wait = rng.gen_range(100..1000);
+        let first_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
         let (second_tx, second_rx) = oneshot::channel();
-        let second_wait = rng.gen_range(100..1000);
+        let second_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
 
         // Create a thread that waits for 1 second
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(first_wait));
+            std::thread::sleep(first_wait);
             first_tx.send(()).unwrap();
         });
 
         // Create a thread
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(second_wait));
+            std::thread::sleep(second_wait);
             second_tx.send(()).unwrap();
         });
 
         // Start runtime
         executor.start(|context| async move {
-            first_rx.await.unwrap();
+            context.poll_after(first_wait, first_rx).await.unwrap();
             println!("first task finished");
-            second_rx.await.unwrap();
+            context.poll_after(second_wait, second_rx).await.unwrap();
             println!("second task finished");
 
             context.auditor().state()

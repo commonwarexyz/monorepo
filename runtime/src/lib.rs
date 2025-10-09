@@ -264,6 +264,39 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
+    /// Delay polling of a future until at least `duration` has elapsed.
+    ///
+    /// Deterministic runtimes can use this to coordinate with external processes that progress on
+    /// wall-clock time by deferring the first poll of `future` until the provided delay passes.
+    /// Runtimes that do not simulate time may choose to ignore the delay altogether.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `future` is not ready when it is polled after `duration`.
+    fn poll_after<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let context = self.clone();
+        async move {
+            context.sleep(duration).await;
+            let mut future = Box::pin(future);
+            futures::future::poll_fn(move |cx| match future.as_mut().poll(cx) {
+                std::task::Poll::Ready(value) => std::task::Poll::Ready(value),
+                std::task::Poll::Pending => panic!(
+                    "future not ready after deferred poll of {:?}",
+                    duration
+                ),
+            })
+            .await
+        }
+    }
+
     /// Await a future with a timeout, returning `Error::Timeout` if it expires.
     ///
     /// # Examples

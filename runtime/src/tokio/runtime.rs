@@ -557,6 +557,18 @@ impl Clock for Context {
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
     }
+
+    fn poll_after<F, T>(
+        &self,
+        _duration: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        future
+    }
 }
 
 impl GClock for Context {
