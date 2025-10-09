@@ -53,6 +53,10 @@ pub enum Error {
     #[error("key not found")]
     KeyNotFound,
 
+    /// The key exists in the db so cannot be proven as excluded.
+    #[error("key exists, cannot prove exclusion")]
+    KeyExists,
+
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
 }

@@ -11,9 +11,7 @@ use crate::{
     index::{Index as _, Unordered as Index},
     mmr::{
         bitmap::Bitmap,
-        grafting::{
-            Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
-        },
+        grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
@@ -26,7 +24,7 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
-use tracing::{debug, info};
+use tracing::info;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -453,62 +451,15 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let Ok(op_count) = Location::try_from(proof.size) else {
-            debug!("verification failed, invalid proof size");
-            return false;
-        };
-        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
-            debug!("verification failed, end_loc overflow");
-            return false;
-        };
-        if end_loc > op_count {
-            debug!(
-                loc = ?end_loc,
-                ?op_count, "proof verification failed, invalid range"
-            );
-            return false;
-        }
-
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier = GraftingVerifier::<H>::new(
+        super::verify_range_proof(
+            hasher,
             Self::grafting_height(),
-            Location::new_unchecked(start_chunk_loc),
-            chunk_vec,
-        );
-
-        let next_bit = *op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        if next_bit == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
-        }
-
-        // The proof must contain the partial chunk digest as its last hash.
-        if proof.digests.is_empty() {
-            debug!("proof has no digests");
-            return false;
-        }
-        let mut proof = proof.clone();
-        let last_chunk_digest = proof.digests.pop().unwrap();
-
-        // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_loc) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
-        };
-
-        let reconstructed_root = Bitmap::<H, N>::partial_chunk_root(
-            hasher.inner(),
-            &mmr_root,
-            next_bit,
-            &last_chunk_digest,
-        );
-
-        reconstructed_root == *root
+            proof,
+            start_loc,
+            ops,
+            chunks,
+            root,
+        )
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
@@ -568,7 +519,7 @@ impl<
         root: &H::Digest,
     ) -> bool {
         let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
-        verify_key_value_proof(hasher, proof, info, root, &element, Self::grafting_height())
+        verify_key_value_proof(hasher, Self::grafting_height(), proof, info, root, &element)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -1061,6 +1012,7 @@ pub mod test {
                 key: k,
                 value: Sha256::fill(0x00),
                 loc: Location::new_unchecked(0),
+                next_key: None,
                 chunk: [0; 32],
             };
             for i in 1u8..=255 {
