@@ -18,9 +18,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{buffer::PoolRef, Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
@@ -1686,16 +1684,7 @@ impl<
         };
     }
 
-    pub fn start(
-        mut self,
-        backfiller: resolver::Mailbox<C::Signature, D>,
-        sender: impl Sender,
-        receiver: impl Receiver,
-    ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(backfiller, sender, receiver).await)
-    }
-
-    async fn run(
+    pub async fn run(
         mut self,
         mut backfiller: resolver::Mailbox<C::Signature, D>,
         sender: impl Sender,

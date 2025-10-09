@@ -184,42 +184,53 @@ impl<
     ) {
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
+        let voter_mailbox = self.voter_mailbox.clone();
+        let mut batcher_context = self.context.with_label("batcher");
+        let mut batcher_task = spawn_cell!(
+            batcher_context,
+            self.batcher.run(voter_mailbox, pending_receiver).await
+        );
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
+        let mut resolver_context = self.context.with_label("resolver");
+        let mut resolver_task = spawn_cell!(
+            resolver_context,
             self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
+                .await
+        );
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_task = self.voter.start(
-            self.batcher_mailbox,
-            self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
+        let mut voter_context = self.context.with_label("voter");
+        let mut voter_task = spawn_cell!(
+            voter_context,
+            self.voter
+                .run(
+                    self.batcher_mailbox,
+                    self.resolver_mailbox,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+                .await
         );
 
         // Wait for the resolver or voter to finish
+        let mut shutdown = self.context.stopped();
         select! {
+            _ = &mut shutdown => {
+                debug!("shutdown");
+            },
             _ = &mut voter_task => {
-                debug!("voter finished");
-                resolver_task.abort();
-                batcher_task.abort();
+                unreachable!("voter should not finish");
             },
             _ = &mut batcher_task => {
-                debug!("batcher finished");
-                voter_task.abort();
-                resolver_task.abort();
+                unreachable!("batcher should not finish");
             },
             _ = &mut resolver_task => {
-                debug!("resolver finished");
-                voter_task.abort();
-                batcher_task.abort();
+                unreachable!("resolver should not finish");
             },
         }
     }

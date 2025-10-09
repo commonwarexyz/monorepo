@@ -192,7 +192,9 @@ mod tests {
             });
 
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            context.with_label("voter").spawn(|_| async move {
+                actor.run(backfiller, voter_sender, voter_receiver).await
+            });
 
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
@@ -391,7 +393,9 @@ mod tests {
             });
 
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            context.with_label("voter").spawn(|_| async move {
+                actor.run(backfiller, voter_sender, voter_receiver).await
+            });
 
             // Establish Prune Floor (50 - 10 + 5 = 45)
             //

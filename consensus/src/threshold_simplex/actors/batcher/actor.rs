@@ -16,9 +16,8 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Pu
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
-    spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
@@ -331,7 +330,6 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
     >,
 > {
-    context: ContextCell<E>,
     blocker: B,
     reporter: R,
     supervisor: S,
@@ -400,7 +398,6 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: ContextCell::new(context),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -421,14 +418,6 @@ impl<
             },
             Mailbox::new(sender),
         )
-    }
-
-    pub fn start(
-        mut self,
-        consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C>,
-    ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(consensus, receiver).await)
     }
 
     pub async fn run(

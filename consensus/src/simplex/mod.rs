@@ -2704,4 +2704,136 @@ mod tests {
             }
         })
     }
+
+    #[test_traced]
+    fn test_children_shutdown_on_engine_abort() {
+        // Create context
+        let n = 1;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register a single participant
+            let scheme = PrivateKey::from_seed(0);
+            let validator = scheme.public_key();
+            let mut registrations =
+                register_validators(&mut oracle, &vec![validator.clone()]).await;
+
+            // Link the single validator to itself (no-ops for completeness)
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &vec![validator.clone()],
+                Action::Link(link),
+                None,
+            )
+            .await;
+
+            // Create engine
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let view_validators = BTreeMap::from_iter(vec![(0, vec![validator.clone()])]);
+            let supervisor_config = mocks::supervisor::Config {
+                namespace: namespace.clone(),
+                participants: view_validators,
+            };
+            let supervisor =
+                mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                participant: validator.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let cfg = config::Config {
+                crypto: scheme,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: supervisor.clone(),
+                supervisor,
+                partition: validator.to_string(),
+                mailbox_size: 64,
+                epoch: 333,
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_millis(50),
+                notarization_timeout: Duration::from_millis(100),
+                nullify_retry: Duration::from_millis(250),
+                fetch_timeout: Duration::from_millis(50),
+                activity_timeout: 4,
+                skip_timeout: 2,
+                max_fetch_count: 1,
+                max_participants: n as usize,
+                fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 16),
+                write_buffer: NZUsize!(1024 * 16),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let engine = Engine::new(context.with_label("engine"), cfg);
+
+            // Start engine
+            let (voter, resolver) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
+            let handle = engine.start(voter, resolver);
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(1000)).await;
+
+            // Verify that engine and child actors are running
+            let metrics_before = context.encode();
+            let is_running = |name: &str| -> bool {
+                metrics_before.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{}\"", name))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 1")
+                })
+            };
+            assert!(is_running("engine"));
+            assert!(is_running("engine_voter"));
+            assert!(is_running("engine_resolver"));
+
+            // Abort engine and ensure children stop
+            handle.abort();
+            let _ = handle.await; // ensure parent tear-down runs
+
+            // Give the runtime a tick to process aborts
+            context.sleep(Duration::from_millis(1000)).await;
+
+            let metrics_after = context.encode();
+            let is_stopped = |name: &str| -> bool {
+                // Either the gauge is 0, or the entry is absent (both imply not running)
+                metrics_after.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{}\"", name))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 0")
+                })
+            };
+            assert!(is_stopped("engine"));
+            assert!(is_stopped("engine_voter"));
+            assert!(is_stopped("engine_resolver"));
+        });
+    }
 }
