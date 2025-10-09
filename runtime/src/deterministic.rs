@@ -65,6 +65,7 @@ use tracing::trace;
 
 #[derive(Debug)]
 struct Metrics {
+    iterations: Counter,
     tasks_spawned: Family<Label, Counter>,
     tasks_running: Family<Label, Gauge>,
     task_polls: Family<Label, Counter>,
@@ -75,11 +76,17 @@ struct Metrics {
 impl Metrics {
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
+            iterations: Counter::default(),
             task_polls: Family::default(),
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
         };
+        registry.register(
+            "iterations",
+            "Total number of iterations",
+            metrics.iterations.clone(),
+        );
         registry.register(
             "tasks_spawned",
             "Total number of tasks spawned",
@@ -366,7 +373,6 @@ impl Runner {
         Tasks::register_root(&executor.tasks);
 
         // Process tasks until root task completes or progress stalls
-        let mut iter = 0;
         let output = loop {
             // Ensure we have not exceeded our deadline
             {
@@ -392,7 +398,11 @@ impl Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
-            trace!(iter, tasks = queue.len(), "starting loop");
+            trace!(
+                iter = executor.metrics.iterations.get(),
+                tasks = queue.len(),
+                "starting loop"
+            );
             let mut output = None;
             for id in queue {
                 // Lookup the task (it may have completed already)
@@ -518,7 +528,7 @@ impl Runner {
             if !executor.realtime && executor.tasks.ready() == 0 {
                 panic!("runtime stalled");
             }
-            iter += 1;
+            executor.metrics.iterations.inc();
         };
 
         // Clear remaining tasks from the executor.
@@ -1183,7 +1193,7 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Runner as _, Storage};
+    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
     use commonware_macros::test_traced;
     use futures::{channel::oneshot, future::pending, task::noop_waker};
 
@@ -1439,6 +1449,51 @@ mod tests {
         // Start runtime
         executor.start(|_| async move {
             rx.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_simulated_skip() {
+        // Initialize runtime
+        let executor = deterministic::Runner::new(Config::default());
+
+        // Start runtime
+        executor.start(|context| async move {
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check if we skipped
+            let metrics = context.encode();
+            let iterations = metrics
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("runtime_iterations_total ")
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                })
+                .expect("missing runtime_iterations_total metric");
+            assert!(iterations < 10);
+        });
+    }
+
+    #[test]
+    fn test_realtime_no_skip() {
+        // Initialize runtime
+        let cfg = Config::default().with_realtime(true);
+        let executor = deterministic::Runner::new(cfg);
+
+        // Start runtime
+        executor.start(|context| async move {
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check if we skipped
+            let metrics = context.encode();
+            let iterations = metrics
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("runtime_iterations_total ")
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                })
+                .expect("missing runtime_iterations_total metric");
+            assert!(iterations > 500);
         });
     }
 }
