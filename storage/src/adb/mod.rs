@@ -55,6 +55,12 @@ pub enum Error {
 
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
+
+    #[error("location out of bounds: {0} >= {1}")]
+    LocationOutOfBounds(Location, Location),
+
+    #[error("prune location {0} beyond last commit {1}")]
+    PruneBeyondCommit(Location, Location),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &

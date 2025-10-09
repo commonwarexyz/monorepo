@@ -407,11 +407,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to blob boundaries.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `loc` is beyond the last commit point.
+    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit.unwrap_or(Location::new_unchecked(0)));
+        let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondCommit(loc, last_commit));
+        }
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
@@ -449,10 +452,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
-    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    /// Get the value of the operation with location `loc` in the db.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc >= op_count()`.
+    /// Returns [Error::OperationPruned] if `loc` precedes the oldest retained location.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }

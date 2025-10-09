@@ -383,8 +383,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Get the value at location `loc` in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.size`.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc < self.size);
+        if loc >= self.size {
+            return Err(Error::LocationOutOfBounds(loc, self.size));
+        }
         let offset = self.locations.read(*loc).await?;
 
         let section = *loc / self.log_items_per_section;
@@ -423,11 +429,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to blob boundaries in the underlying journals.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `loc` is beyond the last commit point.
+    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new_unchecked(0)));
+        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondCommit(loc, last_commit));
+        }
 
         // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
@@ -680,7 +689,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     #[cfg(test)]
     /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
     pub(super) async fn simulate_prune_failure(mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new_unchecked(0)));
+        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondCommit(loc, last_commit));
+        }
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
