@@ -46,6 +46,7 @@ impl Default for Model {
         Self {
             // Default to supervised tasks like UNIX (and **unlike tokio**)
             supervised: true,
+            // Default to non-blocking tasks on a shared runtime
             mode: Mode::Shared(false),
         }
     }
