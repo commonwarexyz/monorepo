@@ -479,7 +479,7 @@ impl Runner {
             trace!(now = current.epoch_millis(), "time advanced");
 
             // Skip time if there is nothing to do
-            if executor.tasks.ready() == 0 {
+            if !executor.realtime && executor.tasks.ready() == 0 {
                 let mut skip = None;
                 {
                     let sleeping = executor.sleeping.lock().unwrap();
@@ -490,11 +490,6 @@ impl Runner {
                     }
                 }
                 if let Some(skip_time) = skip {
-                    // If realtime is enabled, sleep for the cycle duration
-                    if executor.realtime {
-                        std::thread::sleep(executor.cycle);
-                    }
-
                     // Update time
                     {
                         let mut time = executor.time.lock().unwrap();
