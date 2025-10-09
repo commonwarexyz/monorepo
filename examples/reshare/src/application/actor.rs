@@ -7,7 +7,7 @@ use commonware_consensus::{marshal, types::Round};
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{
     channel::mpsc,
     future::{try_join, Either},
@@ -25,7 +25,7 @@ where
     C: PrivateKey,
     V: Variant,
 {
-    context: E,
+    context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
 }
 
@@ -40,7 +40,13 @@ where
     pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H, C, V>) {
         let (sender, mailbox) = mpsc::channel(mailbox_size);
 
-        (Self { context, mailbox }, Mailbox::new(sender))
+        (
+            Self {
+                context: ContextCell::new(context),
+                mailbox,
+            },
+            Mailbox::new(sender),
+        )
     }
 
     /// Start the application.
@@ -49,7 +55,7 @@ where
         marshal: marshal::Mailbox<V, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(marshal, dkg))
+        spawn_cell!(self.context, self.run(marshal, dkg).await)
     }
 
     /// Application control loop

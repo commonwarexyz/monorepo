@@ -19,7 +19,9 @@ use commonware_p2p::{
     utils::mux::{MuxHandle, Muxer},
     Receiver, Sender,
 };
-use commonware_runtime::{buffer::PoolRef, tokio, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    buffer::PoolRef, spawn_cell, tokio, ContextCell, Handle, Metrics, Spawner,
+};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
@@ -58,7 +60,7 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    context: tokio::Context,
+    context: ContextCell<tokio::Context>,
     mailbox: mpsc::Receiver<EpochTransition<V, H>>,
     signer: C,
     application: A,
@@ -87,7 +89,7 @@ where
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox,
                 signer: config.signer,
                 application: config.application,
@@ -121,13 +123,11 @@ where
         initial_poly: Public<V>,
         initial_share: group::Share,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            pending,
-            recovered,
-            resolver,
-            initial_poly,
-            initial_share,
-        ))
+        spawn_cell!(
+            self.context,
+            self.run(pending, recovered, resolver, initial_poly, initial_share,)
+                .await
+        )
     }
 
     async fn run(
@@ -228,7 +228,7 @@ where
         seed: H::Digest,
         polynomial: Public<V>,
         share: group::Share,
-        metadata: &mut Metadata<tokio::Context, FixedBytes<1>, (Epoch, H::Digest)>,
+        metadata: &mut Metadata<ContextCell<tokio::Context>, FixedBytes<1>, (Epoch, H::Digest)>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
