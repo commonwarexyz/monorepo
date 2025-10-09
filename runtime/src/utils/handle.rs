@@ -12,10 +12,100 @@ use std::{
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex, Once, Weak},
     task::{Context, Poll},
 };
 use tracing::error;
+
+/// Tracks abort handles for a task along with any supervised descendants.
+///
+/// `Children` instances form a lightweight tree: cloning a runtime context
+/// creates a new `Children` branch registered under the parent. When the parent later
+/// spawns a task, it swaps its aborter list via [`Children::replace`]. The swap
+/// automatically propagates to every branch that had already been created, so
+/// actors built ahead of time still inherit the correct parent-child linkage.
+pub struct Children {
+    inner: Mutex<ChildrenInner>,
+}
+
+struct ChildrenInner {
+    aborters: Arc<Mutex<Vec<Aborter>>>,
+    dependents: Vec<Weak<Children>>,
+}
+
+impl Children {
+    /// Creates a new root entry with an empty aborter list.
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(ChildrenInner {
+                aborters: Arc::new(Mutex::new(Vec::new())),
+                dependents: Vec::new(),
+            }),
+        }
+    }
+
+    /// Creates a child branch that points at the parent's current aborter list
+    /// and registers itself to receive future updates.
+    pub fn branch(parent: &Arc<Self>) -> Arc<Self> {
+        let child = Arc::new(Self {
+            inner: Mutex::new(ChildrenInner {
+                // Start from the same aborter list the parent is currently using so we stay in sync.
+                aborters: parent.inner.lock().unwrap().aborters.clone(),
+                dependents: Vec::new(),
+            }),
+        });
+
+        // Remember this branch on the parent so the next swap updates us.
+        parent
+            .inner
+            .lock()
+            .unwrap()
+            .dependents
+            .push(Arc::downgrade(&child));
+
+        child
+    }
+
+    /// Replaces the aborter list and forwards the new list to every dependent
+    /// branch that existed before the swap.
+    pub fn replace(&self, next: Arc<Mutex<Vec<Aborter>>>) -> Arc<Mutex<Vec<Aborter>>> {
+        let (previous, dependents) = {
+            let mut inner = self.inner.lock().unwrap();
+            // Keep the old list so we can register with our parent.
+            let previous = inner.aborters.clone();
+            // Future clones should see the new list immediately.
+            inner.aborters = next.clone();
+            // Drain dependents so they observe the swap once.
+            (previous, std::mem::take(&mut inner.dependents))
+        };
+
+        for weak in dependents {
+            if let Some(dependent) = weak.upgrade() {
+                dependent.update_from_parent(next.clone());
+            }
+        }
+
+        previous
+    }
+
+    /// Applies an update from the parent and recursively informs this branch's
+    /// own dependents.
+    fn update_from_parent(&self, next: Arc<Mutex<Vec<Aborter>>>) {
+        let dependents = {
+            let mut inner = self.inner.lock().unwrap();
+            // Adopt the new list.
+            inner.aborters = next.clone();
+            // Inform our own dependents without consuming the vector.
+            inner.dependents.clone()
+        };
+
+        for weak in dependents {
+            if let Some(dependent) = weak.upgrade() {
+                dependent.update_from_parent(next.clone());
+            }
+        }
+    }
+}
 
 /// Handle to a spawned task.
 pub struct Handle<T>

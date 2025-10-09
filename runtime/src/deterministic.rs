@@ -34,7 +34,7 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter, Panicker,
+        Children, Panicker,
     },
     Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
@@ -696,14 +696,26 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<Aborter>>>,
+    children: Arc<Children>,
     model: Model,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            children: Children::branch(&self.children),
+            model: self.model,
+        }
+    }
 }
 
 impl Context {
@@ -749,7 +761,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                children: Arc::new(Mutex::new(Vec::new())),
+                children: Arc::new(Children::new()),
                 model: Model::default(),
             },
             executor,
@@ -804,7 +816,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                children: Arc::new(Mutex::new(Vec::new())),
+                children: Arc::new(Children::new()),
                 model: Model::default(),
             },
             executor,
@@ -858,9 +870,17 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
+        // Allocate a fresh aborter list that the spawned task (and its supervised
+        // descendants) will own.
+        let children = Arc::new(Mutex::new(Vec::new()));
+
+        // Swap our wrapper to point at the new list. Since `Context::clone` branches the
+        // children tree, any clones created before this call (for example, actors built
+        // during initialization) also retarget to `children`. The previous list is kept
+        // so we can link this task back to its parent.
+        let previous = self.children.replace(children.clone());
         let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
+            Some(previous)
         } else {
             None
         };
@@ -868,10 +888,6 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor();
         self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
 
         // Spawn the task (we don't care about Model)
         let future = f(self);
