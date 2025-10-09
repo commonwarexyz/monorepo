@@ -136,5 +136,5 @@ pub enum Error {
     #[error("bitmap has unprocessed updates")]
     DirtyState,
     #[error("bit offset {0} out of bounds (size: {1})")]
-    BitOffsetOutOfBounds(u64, u64),
+    BitOutOfBounds(u64, u64),
 }

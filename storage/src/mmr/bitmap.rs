@@ -418,7 +418,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::BitOffsetOutOfBounds] if `bit` is out of bounds.
+    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     /// Returns [Error::DirtyState] if there are unprocessed updates.
     pub async fn proof(
         &self,
@@ -426,7 +426,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         bit: u64,
     ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
         if bit >= self.len() {
-            return Err(Error::BitOffsetOutOfBounds(bit, self.len()));
+            return Err(Error::BitOutOfBounds(bit, self.len()));
         }
         if self.is_dirty() {
             return Err(Error::DirtyState);
@@ -1076,16 +1076,12 @@ mod tests {
 
             // Proof for bit_offset >= bit_count should fail
             let result = bitmap.proof(&mut hasher, 256).await;
-            assert!(
-                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size))
-                    if offset == 256 && size == 256)
-            );
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 256 && size == 256));
 
             let result = bitmap.proof(&mut hasher, 1000).await;
-            assert!(
-                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size))
-                    if offset == 1000 && size == 256)
-            );
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 1000 && size == 256));
 
             // Valid proof should work
             assert!(bitmap.proof(&mut hasher, 0).await.is_ok());
