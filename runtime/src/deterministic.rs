@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -696,13 +696,14 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
+#[derive(Clone)]
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
     children: Arc<Mutex<Vec<Aborter>>>,
+    model: Model,
 }
 
 impl Context {
@@ -745,11 +746,11 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 children: Arc::new(Mutex::new(Vec::new())),
+                model: Model::default(),
             },
             executor,
             panicked,
@@ -800,11 +801,11 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
                 children: Arc::new(Mutex::new(Vec::new())),
+                model: Model::default(),
             },
             executor,
             panicked,
@@ -827,138 +828,62 @@ impl Context {
     }
 }
 
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            spawned: false,
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            children: self.children.clone(),
-        }
-    }
-}
-
 impl crate::Spawner for Context {
+    fn supervised(mut self) -> Self {
+        self.model.supervised();
+        self
+    }
+
+    fn detached(mut self) -> Self {
+        self.model.detached();
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.model.dedicated();
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.model.shared(blocking);
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self);
+
+        // Track parent-child relationship when supervision is requested
+        let parent_children = if self.model.is_supervised() {
+            Some(self.children.clone())
+        } else {
+            None
+        };
 
         // Set up the task
         let executor = self.executor();
+        self.model = Model::default();
 
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
+        // Spawn the task (we don't care about Model)
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
-
-        // Spawn the task
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
-        handle
-    }
-
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, future);
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
-
-        // Set up the task
-        let executor = self.executor();
-
-        move |f: F| {
-            let (f, handle) = Handle::init_future(f, metric, executor.panicker.clone(), children);
-
-            // Spawn the task
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
-    }
-
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Store parent's children list
-        let parent_children = self.children.clone();
-
-        // Spawn the child
-        let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(aborter) = child_handle.aborter() {
+        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
             parent_children.lock().unwrap().push(aborter);
         }
 
-        child_handle
-    }
-
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Initialize the blocking task
-        let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
-
-        // Spawn the task
-        let f = async move { f() };
-        Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Set up the task
-        let executor = self.executor();
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
-
-            // Spawn the task
-            let f = async move { f() };
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
@@ -1011,11 +936,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            children: self.children.clone(),
+            ..self.clone()
         }
     }
 

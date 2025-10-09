@@ -436,10 +436,9 @@ where
                 match client_result {
                     Ok((client_addr, sink, stream)) => {
                         let state = state.clone();
-                        let context = context.clone();
                         context.with_label("client").spawn(move|context|async move {
                             if let Err(e) =
-                                handle_client::<DB, _>(context, state.clone(), sink, stream, client_addr).await
+                                handle_client::<DB, _>(context, state, sink, stream, client_addr).await
                             {
                                 error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                             }

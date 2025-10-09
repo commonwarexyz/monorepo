@@ -21,6 +21,76 @@ mod handle;
 pub use handle::Handle;
 pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 
+mod cell;
+pub use cell::Cell as ContextCell;
+
+/// The mode of a task.
+#[derive(Copy, Clone, Debug)]
+enum Mode {
+    /// Task runs on a dedicated thread.
+    Dedicated,
+    /// Task runs on the shared executor. `true` marks short blocking work that should
+    /// use the runtime's blocking-friendly pool.
+    Shared(bool),
+}
+
+/// Configuration that determines how a task is spawned.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Model {
+    supervised: bool,
+    mode: Mode,
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self {
+            // Default to supervised tasks like UNIX (and **unlike tokio**)
+            supervised: true,
+            // Default to the shared executor with `blocking == false`
+            mode: Mode::Shared(false),
+        }
+    }
+}
+
+impl Model {
+    /// Enable supervision so child tasks are cancelled when the parent exits.
+    pub(crate) fn supervised(&mut self) {
+        self.supervised = true;
+    }
+
+    /// Disable supervision so child tasks outlive the parent.
+    pub(crate) fn detached(&mut self) {
+        self.supervised = false;
+    }
+
+    /// Request a dedicated thread for long-lived or heavily blocking work.
+    pub(crate) fn dedicated(&mut self) {
+        self.mode = Mode::Dedicated;
+    }
+
+    /// Return a new configuration that uses the shared executor.
+    ///
+    /// Set `blocking` to `true` for short-lived blocking work so the runtime can isolate it.
+    pub(crate) fn shared(&mut self, blocking: bool) {
+        self.mode = Mode::Shared(blocking);
+    }
+
+    /// Returns `true` when the task should be supervised by its parent.
+    pub(crate) fn is_supervised(&self) -> bool {
+        self.supervised
+    }
+
+    /// Returns `true` when the task should run on a dedicated thread.
+    pub(crate) fn is_dedicated(&self) -> bool {
+        matches!(self.mode, Mode::Dedicated)
+    }
+
+    /// Returns `true` when the task is shared but is blocking.
+    pub(crate) fn is_blocking(&self) -> bool {
+        matches!(self.mode, Mode::Shared(true))
+    }
+}
+
 /// Yield control back to the runtime.
 pub async fn reschedule() {
     struct Reschedule {
@@ -57,7 +127,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
 pub type ThreadPool = Arc<RThreadPool>;
 
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
@@ -76,7 +146,8 @@ pub fn create_pool<S: Spawner + Metrics>(
             // task and thus should be provisioned as a dedicated thread.
             context
                 .with_label("rayon-thread")
-                .spawn_blocking(true, move |_| thread.run());
+                .dedicated()
+                .spawn(move |_| async move { thread.run() });
             Ok(())
         })
         .build()?;

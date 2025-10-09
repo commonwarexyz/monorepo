@@ -50,66 +50,69 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let clock = Arc::new(context.clone());
-        let verify_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
-        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
-
-        let metrics = Self {
-            sequencer_heights: Family::default(),
-            acks: status::Counter::default(),
-            nodes: status::Counter::default(),
-            verify: status::Counter::default(),
-            threshold: Counter::default(),
-            propose: status::Counter::default(),
-            rebroadcast: status::Counter::default(),
-            verify_duration: histogram::Timed::new(verify_duration.clone(), clock.clone()),
-            e2e_duration: histogram::Timed::new(e2e_duration.clone(), clock),
-        };
+        let sequencer_heights = Family::default();
         context.register(
             "sequencer_heights",
             "Height per sequencer tracked",
-            metrics.sequencer_heights.clone(),
+            sequencer_heights.clone(),
         );
-        context.register(
-            "acks",
-            "Number of acks processed by status",
-            metrics.acks.clone(),
-        );
+        let acks = status::Counter::default();
+        context.register("acks", "Number of acks processed by status", acks.clone());
+        let nodes = status::Counter::default();
         context.register(
             "nodes",
             "Number of nodes processed by status",
-            metrics.nodes.clone(),
+            nodes.clone(),
         );
+        let verify = status::Counter::default();
         context.register(
             "verify",
             "Number of application verifications by status",
-            metrics.verify.clone(),
+            verify.clone(),
         );
+        let threshold = Counter::default();
         context.register(
             "threshold",
             "Number of threshold signatures produced",
-            metrics.threshold.clone(),
+            threshold.clone(),
         );
+        let propose = status::Counter::default();
         context.register(
             "propose",
             "Number of propose attempts by status",
-            metrics.propose.clone(),
+            propose.clone(),
         );
+        let rebroadcast = status::Counter::default();
         context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            metrics.rebroadcast.clone(),
+            rebroadcast.clone(),
         );
+        let verify_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
         context.register(
             "verify_duration",
             "Histogram of application verification durations",
-            verify_duration,
+            verify_duration.clone(),
         );
+        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
         context.register(
             "e2e_duration",
             "Histogram of time from new proposal to threshold signature generation",
-            e2e_duration,
+            e2e_duration.clone(),
         );
-        metrics
+        // TODO(#1833): Shouldn't require another clone
+        let clock = Arc::new(context.clone());
+
+        Self {
+            sequencer_heights,
+            acks,
+            nodes,
+            verify,
+            threshold,
+            propose,
+            rebroadcast,
+            verify_duration: histogram::Timed::new(verify_duration, clock.clone()),
+            e2e_duration: histogram::Timed::new(e2e_duration, clock),
+        }
     }
 }

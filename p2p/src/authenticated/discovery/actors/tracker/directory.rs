@@ -84,6 +84,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
 
         // Other initialization.
+        // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(context.clone());
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
 
