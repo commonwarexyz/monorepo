@@ -27,7 +27,10 @@ pub use cell::Cell as ContextCell;
 /// The mode of a task.
 #[derive(Copy, Clone, Debug)]
 enum Mode {
+    /// Task runs on a dedicated thread.
     Dedicated,
+    /// Task runs on a shared runtime. If the boolean
+    /// is true, the task is blocking.
     Shared(bool),
 }
 
