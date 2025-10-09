@@ -80,9 +80,6 @@ impl<const N: usize> BitMap<N> {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
 
-        if size == 0 {
-            return Self::new();
-        }
         let num_chunks = size.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
@@ -96,9 +93,6 @@ impl<const N: usize> BitMap<N> {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
 
-        if size == 0 {
-            return Self::new();
-        }
         let num_chunks = size.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
