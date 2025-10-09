@@ -122,7 +122,7 @@ pub trait Runner {
 
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Create a new instance of `Spawner` configured to spawn new tasks supervised by the current
+    /// Create a new instance of [`Spawner`] configured to spawn new tasks supervised by the current
     /// context.
     ///
     /// Any task spawned from this context will be aborted automatically if the current task
@@ -133,23 +133,22 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// (either through completion or abortion).
     fn supervised(self) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks detached from the current
+    /// Create a new instance of [`Spawner`] configured to spawn new tasks detached from the current
     /// context.
     ///
     /// This is not the default behavior. See [`Spawner::supervised`] for more information.
     fn detached(self) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
-    /// executor.
+    /// Create a new instance of [`Spawner`] configured to spawn new tasks on a shared task pool.
     ///
     /// If `blocking` is true and the runtime supports it, the task should be spawned
-    /// in a dedicated thread pool to avoid monopolizing work-stealing worker threads. For long-running
+    /// in a standalone pool to avoid starving async tasks. For long-running
     /// tasks that don't yield, see [`Spawner::dedicated`].
     ///
     /// Non-blocking, shared tasks are the default behavior.
     fn shared(self, blocking: bool) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
+    /// Create a new instance of [`Spawner`] configured to spawn new tasks on a dedicated thread.
     ///
     /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
     ///
