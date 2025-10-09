@@ -19,7 +19,7 @@ use commonware_p2p::{
     },
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -310,7 +310,16 @@ impl<
         }
     }
 
-    pub async fn run(
+    pub fn start(
+        mut self,
+        voter: voter::Mailbox<V, D>,
+        sender: impl Sender<PublicKey = C>,
+        receiver: impl Receiver<PublicKey = C>,
+    ) -> Handle<()> {
+        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
+    }
+
+    async fn run(
         mut self,
         mut voter: voter::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C>,

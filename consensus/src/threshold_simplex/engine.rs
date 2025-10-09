@@ -184,37 +184,24 @@ impl<
     ) {
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
-        let voter_mailbox = self.voter_mailbox.clone();
-        let mut batcher_context = self.context.with_label("batcher");
-        let mut batcher_task = spawn_cell!(
-            batcher_context,
-            self.batcher.run(voter_mailbox, pending_receiver).await
-        );
+        let mut batcher_task = self
+            .batcher
+            .start(self.voter_mailbox.clone(), pending_receiver);
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_context = self.context.with_label("resolver");
-        let mut resolver_task = spawn_cell!(
-            resolver_context,
+        let mut resolver_task =
             self.resolver
-                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
-                .await
-        );
+                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_context = self.context.with_label("voter");
-        let mut voter_task = spawn_cell!(
-            voter_context,
-            self.voter
-                .run(
-                    self.batcher_mailbox,
-                    self.resolver_mailbox,
-                    pending_sender,
-                    recovered_sender,
-                    recovered_receiver,
-                )
-                .await
+        let mut voter_task = self.voter.start(
+            self.batcher_mailbox,
+            self.resolver_mailbox,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
         );
 
         // Wait for the resolver or voter to finish

@@ -133,23 +133,15 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_context = self.context.with_label("voter");
-        let mut voter_task = spawn_cell!(
-            voter_context,
-            self.voter
-                .run(self.resolver_mailbox, voter_sender, voter_receiver)
-                .await
-        );
+        let mut voter_task = self
+            .voter
+            .start(self.resolver_mailbox, voter_sender, voter_receiver);
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_context = self.context.with_label("resolver");
-        let mut resolver_task = spawn_cell!(
-            resolver_context,
+        let mut resolver_task =
             self.resolver
-                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
-                .await
-        );
+                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Wait for the resolver or voter to finish
         let mut shutdown = self.context.stopped();

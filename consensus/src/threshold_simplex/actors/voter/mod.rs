@@ -213,17 +213,13 @@ mod tests {
                 .unwrap();
 
             // Run the actor
-            context.with_label("voter").spawn(|_| async move {
-                actor
-                    .run(
-                        batcher,
-                        resolver,
-                        pending_sender,
-                        recovered_sender,
-                        recovered_receiver,
-                    )
-                    .await
-            });
+            actor.start(
+                batcher,
+                resolver,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -531,17 +527,13 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            context.with_label("voter").spawn(|_| async move {
-                actor
-                    .run(
-                        batcher_mailbox,
-                        resolver_mailbox,
-                        pending_sender,
-                        recovered_sender,
-                        recovered_receiver,
-                    )
-                    .await
-            });
+            actor.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -896,17 +888,13 @@ mod tests {
                 oracle.register(validator.clone(), 1).await.unwrap();
 
             // Start the actor
-            context.with_label("voter").spawn(|_| async move {
-                voter
-                    .run(
-                        batcher_mailbox,
-                        resolver_mailbox,
-                        pending_sender,
-                        recovered_sender,
-                        recovered_receiver,
-                    )
-                    .await
-            });
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
