@@ -97,7 +97,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
-fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg, ())> {
+fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("journal_{suffix}"),
         mmr_metadata_partition: format!("metadata_{suffix}"),
