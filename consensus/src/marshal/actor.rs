@@ -233,6 +233,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     /// Start the actor.
     pub fn start<R, P>(
         mut self,
+        sync_height: u64,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
@@ -241,12 +242,13 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        self.context.spawn_ref()(self.run(application, buffer, resolver))
+        self.context.spawn_ref()(self.run(sync_height, application, buffer, resolver))
     }
 
     /// Run the application actor.
     async fn run<R, P>(
         mut self,
+        sync_height: u64,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
@@ -265,6 +267,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             application,
             orchestrator,
             notifier_rx,
+            sync_height,
         )
         .await;
         finalizer_context.spawn(|_| finalizer.run());
@@ -464,6 +467,12 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             }
                         }
                         Orchestration::Repair { height } => {
+                            // While this should never happen, if the height is less than the sync
+                            // height, then we don't need to repair.
+                            if height < sync_height {
+                                continue;
+                            }
+
                             // Find the end of the "gap" of missing blocks, starting at `height`
                             let (_, Some(gap_end)) = self.finalized_blocks.next_gap(height) else {
                                 // No gap found; height-1 is the last known finalized block
