@@ -3,7 +3,7 @@ use super::{
     reporter::Reporter,
     Config, SigningScheme,
 };
-use commonware_cryptography::{Hasher, Signer};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -29,23 +29,13 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     ) -> (Self, SigningScheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
-        let signing = if let Some(index) = config
-            .participants
-            .iter()
-            .position(|key| *key == config.private_key.public_key())
-        {
-            SigningScheme::new(config.participants, index as u32, config.private_key)
-        } else {
-            SigningScheme::verifier(config.participants)
-        };
-
         (
             Self {
                 context,
                 hasher: config.hasher,
                 mailbox,
             },
-            signing,
+            SigningScheme::new(config.participants, config.private_key),
             Reporter::new(),
             Mailbox::new(sender),
         )
