@@ -169,6 +169,18 @@ where
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         self.as_ref().sleep_until(deadline)
     }
+
+    fn poll_after<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.as_ref().poll_after(duration, future)
+    }
 }
 
 impl<C> crate::Network for Cell<C>

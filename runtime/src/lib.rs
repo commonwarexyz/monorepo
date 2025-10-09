@@ -280,22 +280,7 @@ pub trait Clock: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = T> + Send + 'static
     where
         F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let context = self.clone();
-        async move {
-            context.sleep(duration).await;
-            let mut future = Box::pin(future);
-            futures::future::poll_fn(move |cx| match future.as_mut().poll(cx) {
-                std::task::Poll::Ready(value) => std::task::Poll::Ready(value),
-                std::task::Poll::Pending => panic!(
-                    "future not ready after deferred poll of {:?}",
-                    duration
-                ),
-            })
-            .await
-        }
-    }
+        T: Send + 'static;
 
     /// Await a future with a timeout, returning `Error::Timeout` if it expires.
     ///

@@ -41,6 +41,7 @@ use crate::{
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
+    future::poll_fn,
     task::{waker, ArcWake},
     Future,
 };
@@ -1127,6 +1128,30 @@ impl Clock for Context {
 
             time: deadline,
             registered: false,
+        }
+    }
+
+    fn poll_after<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let context = self.clone();
+        async move {
+            context.sleep(duration).await;
+            let mut future = Box::pin(future);
+            poll_fn(move |cx| match future.as_mut().poll(cx) {
+                Poll::Ready(value) => Poll::Ready(value),
+                Poll::Pending => panic!(
+                    "future not ready after deferred poll of {:?}",
+                    duration
+                ),
+            })
+            .await
         }
     }
 }
