@@ -785,14 +785,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let target_prune_pos = Position::try_from(target_prune_loc)?;
 
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if target_prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondInactivityFloor(
+                target_prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
         if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());
         }
@@ -1716,6 +1718,38 @@ pub(super) mod test {
             assert!(
                 matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
                     if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_prune_beyond_inactivity_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let mut rng = OsRng;
+
+            // Add some operations
+            let key1 = Digest::random(&mut rng);
+            let key2 = Digest::random(&mut rng);
+            let key3 = Digest::random(&mut rng);
+
+            db.update(key1, vec![10]).await.unwrap();
+            db.update(key2, vec![20]).await.unwrap();
+            db.update(key3, vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // inactivity_floor should be at some location < op_count
+            let inactivity_floor = db.inactivity_floor_loc();
+            let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
+
+            // Try to prune beyond the inactivity floor
+            let result = db.prune(beyond_floor).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor)) 
+                    if loc == beyond_floor && floor == inactivity_floor)
             );
 
             db.destroy().await.unwrap();

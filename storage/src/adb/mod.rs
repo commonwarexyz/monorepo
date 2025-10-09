@@ -61,6 +61,9 @@ pub enum Error {
 
     #[error("prune location {0} beyond last commit {1}")]
     PruneBeyondCommit(Location, Location),
+
+    #[error("prune location {0} beyond inactivity floor {1}")]
+    PruneBeyondInactivityFloor(Location, Location),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
