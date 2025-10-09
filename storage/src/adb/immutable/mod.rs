@@ -1218,4 +1218,91 @@ pub(super) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("INFO")]
+    pub fn test_immutable_db_get_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test getting from empty database
+            let result = db.get_loc(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some key-value pairs
+            let k1 = Digest::from(*b"12345678901234567890123456789012");
+            let k2 = Digest::from(*b"abcdefghijklmnopqrstuvwxyz123456");
+            let v1 = vec![1u8; 16];
+            let v2 = vec![2u8; 16];
+            
+            db.set(k1, v1.clone()).await.unwrap();
+            db.set(k2, v2.clone()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations - should succeed
+            assert_eq!(db.get_loc(Location::new_unchecked(0)).await.unwrap().unwrap(), v1);
+            assert_eq!(db.get_loc(Location::new_unchecked(1)).await.unwrap().unwrap(), v2);
+
+            // Test getting out of bounds location (op_count is 3: k1, k2, commit)
+            let result = db.get_loc(Location::new_unchecked(3)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(3) && size == Location::new_unchecked(3))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_immutable_db_prune_beyond_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test pruning empty database (no commits)
+            let result = db.prune(Location::new_unchecked(1)).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                    if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
+            );
+
+            // Add key-value pairs and commit
+            let k1 = Digest::from(*b"12345678901234567890123456789012");
+            let k2 = Digest::from(*b"abcdefghijklmnopqrstuvwxyz123456");
+            let k3 = Digest::from(*b"99999999999999999999999999999999");
+            let v1 = vec![1u8; 16];
+            let v2 = vec![2u8; 16];
+            let v3 = vec![3u8; 16];
+            
+            db.set(k1, v1.clone()).await.unwrap();
+            db.set(k2, v2.clone()).await.unwrap();
+            db.commit(None).await.unwrap();
+            db.set(k3, v3.clone()).await.unwrap();
+
+            // op_count is 4 (k1, k2, commit, k3), last_commit is at location 2
+            let last_commit = db.last_commit.unwrap();
+            assert_eq!(last_commit, Location::new_unchecked(2));
+
+            // Test valid prune (at last commit)
+            assert!(db.prune(last_commit).await.is_ok());
+
+            // Add more and commit again
+            db.commit(None).await.unwrap();
+            let new_last_commit = db.last_commit.unwrap();
+
+            // Test pruning beyond last commit
+            let beyond = Location::new_unchecked(*new_last_commit + 1);
+            let result = db.prune(beyond).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                    if prune_loc == beyond && commit_loc == new_last_commit)
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
