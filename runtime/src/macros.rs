@@ -11,7 +11,7 @@
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks
-    ($ctx:ident, task) => {
+    ($ctx:ident) => {
         $crate::spawn_metrics!(
             $crate::telemetry::metrics::task::Label::task(
                 $ctx.name.clone(),

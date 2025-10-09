@@ -856,7 +856,7 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, task);
+        let (label, metric) = spawn_metrics!(self);
 
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.model.is_supervised() {
