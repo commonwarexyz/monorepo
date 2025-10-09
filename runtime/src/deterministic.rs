@@ -1165,7 +1165,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, reschedule, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
-    use futures::{future::pending, task::noop_waker};
+    use futures::{channel::oneshot, future::pending, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1381,6 +1381,44 @@ mod tests {
         // Start runtime
         executor.start(|_| async move {
             pending::<()>().await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_external_simulated() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Create a thread that waits for 1 second
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            tx.send(()).unwrap();
+        });
+
+        // Start runtime
+        executor.start(|_| async move {
+            rx.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_external_realtime() {
+        // Initialize runtime
+        let cfg = Config::default().with_realtime(true);
+        let executor = deterministic::Runner::new(cfg);
+
+        // Create a thread that waits for 1 second
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            tx.send(()).unwrap();
+        });
+
+        // Start runtime
+        executor.start(|_| async move {
+            rx.await.unwrap();
         });
     }
 }
