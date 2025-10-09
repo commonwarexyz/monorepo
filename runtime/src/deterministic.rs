@@ -1165,7 +1165,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, reschedule, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
-    use futures::task::noop_waker;
+    use futures::{future::pending, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1369,6 +1369,18 @@ mod tests {
                 context.current().duration_since(UNIX_EPOCH).unwrap(),
                 Duration::ZERO
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime stalled")]
+    fn test_stall() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Start runtime
+        executor.start(|_| async move {
+            pending::<()>().await;
         });
     }
 }
