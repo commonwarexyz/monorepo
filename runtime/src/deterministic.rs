@@ -830,22 +830,22 @@ impl Context {
 
 impl crate::Spawner for Context {
     fn supervised(mut self) -> Self {
-        self.model = self.model.supervised();
+        self.model.supervised();
         self
     }
 
     fn detached(mut self) -> Self {
-        self.model = self.model.detached();
+        self.model.detached();
         self
     }
 
     fn dedicated(mut self) -> Self {
-        self.model = self.model.dedicated();
+        self.model.dedicated();
         self
     }
 
     fn shared(mut self, blocking: bool) -> Self {
-        self.model = self.model.shared(blocking);
+        self.model.shared(blocking);
         self
     }
 

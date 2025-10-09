@@ -50,27 +50,23 @@ impl Default for Model {
 
 impl Model {
     /// Return a new configuration with supervision enabled.
-    pub(crate) fn supervised(mut self) -> Self {
+    pub(crate) fn supervised(&mut self) {
         self.supervised = true;
-        self
     }
 
     /// Return a new configuration with supervision disabled.
-    pub(crate) fn detached(mut self) -> Self {
+    pub(crate) fn detached(&mut self) {
         self.supervised = false;
-        self
     }
 
     /// Return a new configuration that requests a dedicated thread.
-    pub(crate) fn dedicated(mut self) -> Self {
+    pub(crate) fn dedicated(&mut self) {
         self.mode = Mode::Dedicated;
-        self
     }
 
     /// Return a new configuration that requests shared runtime scheduling.
-    pub(crate) fn shared(mut self, blocking: bool) -> Self {
+    pub(crate) fn shared(&mut self, blocking: bool) {
         self.mode = Mode::Shared(blocking);
-        self
     }
 
     /// Returns `true` when the task should be supervised by its parent.
