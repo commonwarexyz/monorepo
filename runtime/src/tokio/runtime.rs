@@ -438,6 +438,7 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         if dedicated {
             thread::spawn({
+                // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
                     handle.block_on(f);
@@ -445,6 +446,7 @@ impl crate::Spawner for Context {
             });
         } else if blocking {
             executor.runtime.spawn_blocking({
+                // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
                     handle.block_on(f);
