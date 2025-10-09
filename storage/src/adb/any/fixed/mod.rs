@@ -313,15 +313,13 @@ impl<
     ///
     /// # Warning
     ///
-    /// Panics if the location does not reference an update operation. This should never happen
-    /// unless the snapshot is buggy, or this method is being used to look up an operation
-    /// independent of the snapshot contents.
+    /// Returns [Error::UnexpectedData] if the location does not reference an update operation.
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
     ) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(*loc).await? else {
-            panic!("location does not reference update operation. loc={loc}");
+            return Err(Error::UnexpectedData(loc));
         };
 
         Ok((k, v))
@@ -1764,7 +1762,7 @@ pub(super) mod test {
             let val1 = Digest::random(&mut rng);
             let val2 = Digest::random(&mut rng);
             let val3 = Digest::random(&mut rng);
-            
+
             db.update(key1, val1).await.unwrap();
             db.update(key2, val2).await.unwrap();
             db.update(key3, val3).await.unwrap();

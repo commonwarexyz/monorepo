@@ -490,8 +490,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
-    /// matches `key`, or return [Error::OperationPruned] if the location precedes the oldest
-    /// retained.
+    /// matches `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::UnexpectedData] if the location does not reference a Set operation.
+    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
     async fn get_from_offset(
         &self,
         key: &K,
@@ -504,7 +508,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let section = *loc / self.log_items_per_section;
         let Variable::Set(k, v) = self.log.get(section, offset).await? else {
-            panic!("didn't find Set operation at location {loc} and offset {offset}");
+            return Err(Error::UnexpectedData(loc));
         };
 
         if k != *key {
@@ -1227,31 +1231,39 @@ pub(super) mod test {
 
             // Test getting from empty database
             let result = db.get_loc(Location::new_unchecked(0)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
-                    if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
-            );
+            assert!(matches!(result, Err(Error::LocationOutOfBounds(loc, size))
+                    if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0)));
 
             // Add some key-value pairs
             let k1 = Digest::from(*b"12345678901234567890123456789012");
             let k2 = Digest::from(*b"abcdefghijklmnopqrstuvwxyz123456");
             let v1 = vec![1u8; 16];
             let v2 = vec![2u8; 16];
-            
+
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
             db.commit(None).await.unwrap();
 
             // Test getting valid locations - should succeed
-            assert_eq!(db.get_loc(Location::new_unchecked(0)).await.unwrap().unwrap(), v1);
-            assert_eq!(db.get_loc(Location::new_unchecked(1)).await.unwrap().unwrap(), v2);
+            assert_eq!(
+                db.get_loc(Location::new_unchecked(0))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                v1
+            );
+            assert_eq!(
+                db.get_loc(Location::new_unchecked(1))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                v2
+            );
 
             // Test getting out of bounds location (op_count is 3: k1, k2, commit)
             let result = db.get_loc(Location::new_unchecked(3)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
-                    if loc == Location::new_unchecked(3) && size == Location::new_unchecked(3))
-            );
+            assert!(matches!(result, Err(Error::LocationOutOfBounds(loc, size))
+                    if loc == Location::new_unchecked(3) && size == Location::new_unchecked(3)));
 
             db.destroy().await.unwrap();
         });
@@ -1266,7 +1278,7 @@ pub(super) mod test {
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
                     if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
             );
 
@@ -1277,7 +1289,7 @@ pub(super) mod test {
             let v1 = vec![1u8; 16];
             let v2 = vec![2u8; 16];
             let v3 = vec![3u8; 16];
-            
+
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
             db.commit(None).await.unwrap();
@@ -1298,7 +1310,7 @@ pub(super) mod test {
             let beyond = Location::new_unchecked(*new_last_commit + 1);
             let result = db.prune(beyond).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
                     if prune_loc == beyond && commit_loc == new_last_commit)
             );
 

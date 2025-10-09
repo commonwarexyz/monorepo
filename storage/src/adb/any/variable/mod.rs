@@ -471,6 +471,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
     /// matches `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::UnexpectedData] if the location does not reference an Update operation.
     async fn get_from_offset(
         &self,
         key: &K,
@@ -479,7 +483,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Option<V>, Error> {
         let section = *loc / self.log_items_per_section;
         let Operation::Update(k, v) = self.log.get(section, offset).await? else {
-            panic!("didn't find Update operation at location {loc} and offset {offset}");
+            return Err(Error::UnexpectedData(loc));
         };
 
         if k != *key {

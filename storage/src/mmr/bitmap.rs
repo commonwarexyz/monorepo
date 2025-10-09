@@ -979,7 +979,7 @@ mod tests {
 
             // Repeat the test after pruning.
             let start_bit = SHA256_SIZE as u64 * 8 * 2;
-                bitmap.prune_to_bit(start_bit).unwrap();
+            bitmap.prune_to_bit(start_bit).unwrap();
             for bit_pos in (start_bit..bitmap.bit_count()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
                 bitmap.set_bit(bit_pos, !bit);
@@ -1092,7 +1092,9 @@ mod tests {
 
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
-                bitmap.prune_to_bit(i as u64 * Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS).unwrap();
+                bitmap
+                    .prune_to_bit(i as u64 * Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS)
+                    .unwrap();
                 bitmap
                     .write_pruned(context.clone(), PARTITION)
                     .await
@@ -1157,13 +1159,13 @@ mod tests {
             // Proof for bit_offset >= bit_count should fail
             let result = bitmap.proof(&mut hasher, 256).await;
             assert!(
-                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size)) 
+                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size))
                     if offset == 256 && size == 256)
             );
 
             let result = bitmap.proof(&mut hasher, 1000).await;
             assert!(
-                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size)) 
+                matches!(result, Err(Error::BitOffsetOutOfBounds(offset, size))
                     if offset == 1000 && size == 256)
             );
 
