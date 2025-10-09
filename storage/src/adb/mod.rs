@@ -64,6 +64,9 @@ pub enum Error {
 
     #[error("prune location {0} beyond inactivity floor {1}")]
     PruneBeyondInactivityFloor(Location, Location),
+
+    #[error("uncommitted operations present")]
+    UncommittedOperations,
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
