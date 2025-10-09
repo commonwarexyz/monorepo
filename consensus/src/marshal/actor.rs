@@ -105,6 +105,8 @@ pub struct Actor<
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
+    // Sync floor
+    sync_floor: Option<(u64, B::Commitment)>,
 
     // ---------- Metrics ----------
     // Latest height metric

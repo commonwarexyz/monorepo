@@ -95,6 +95,11 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The verified block.
         block: B,
     },
+    /// A request to set the sync floor.
+    SetSyncFloor {
+        /// The sync floor.
+        sync_floor: (u64, B::Commitment),
+    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
@@ -225,6 +230,13 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .is_err()
         {
             error!("failed to send verified message to actor: receiver dropped");
+        }
+    }
+
+    /// A request to set the sync floor.
+    pub async fn set_sync_floor(&mut self, sync_floor: (u64, B::Commitment)) {
+        if self.sender.send(Message::SetSyncFloor { sync_floor }).await.is_err() {
+            error!("failed to send set sync floor message to actor: receiver dropped");
         }
     }
 }
