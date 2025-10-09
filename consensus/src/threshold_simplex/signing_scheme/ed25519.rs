@@ -349,4 +349,8 @@ impl SigningScheme for Scheme {
     fn certificate_codec_config(&self) -> Self::CertificateCfg {
         self.participants.len()
     }
+
+    fn certificate_codec_config_unbounded() -> Self::CertificateCfg {
+        u32::MAX as usize
+    }
 }

@@ -160,7 +160,7 @@ impl<
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: config.signing.certificate_codec_config(),
+                codec_config: config.signing.certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },

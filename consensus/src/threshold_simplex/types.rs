@@ -221,6 +221,9 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
     fn certificate_codec_config(&self) -> Self::CertificateCfg;
+
+    // unbounded config for storage
+    fn certificate_codec_config_unbounded() -> Self::CertificateCfg;
 }
 
 /// The set of consensus participants.

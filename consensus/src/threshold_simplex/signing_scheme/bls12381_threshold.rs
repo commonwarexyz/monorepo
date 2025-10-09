@@ -719,6 +719,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     }
 
     fn certificate_codec_config(&self) -> Self::CertificateCfg {}
+
+    fn certificate_codec_config_unbounded() -> Self::CertificateCfg {}
 }
 
 #[cfg(test)]
