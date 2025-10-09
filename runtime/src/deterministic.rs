@@ -158,6 +158,13 @@ pub struct Config {
     /// loop. This is useful to prevent starvation if some task never yields.
     cycle: Duration,
 
+    /// Observe the actual passage of time rather than simulating it.
+    ///
+    /// This is necessary when testing an application that coordinates with some external
+    /// process that doesn't rely on the same runtime (often the case for integrating with
+    /// existing codebases).
+    realtime: bool,
+
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
@@ -171,6 +178,7 @@ impl Config {
         Self {
             seed: 42,
             cycle: Duration::from_millis(1),
+            realtime: false,
             timeout: None,
             catch_panics: false,
         }
@@ -185,6 +193,11 @@ impl Config {
     /// See [Config]
     pub fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
+        self
+    }
+    /// See [Config]
+    pub fn with_realtime(mut self, realtime: bool) -> Self {
+        self.realtime = realtime;
         self
     }
     /// See [Config]
@@ -206,6 +219,10 @@ impl Config {
     /// See [Config]
     pub fn cycle(&self) -> Duration {
         self.cycle
+    }
+    /// See [Config]
+    pub fn realtime(&self) -> bool {
+        self.realtime
     }
     /// See [Config]
     pub fn timeout(&self) -> Option<Duration> {
