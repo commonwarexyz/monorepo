@@ -29,6 +29,8 @@
 //! in the SQE. The event loop maintains a `waiters` HashMap that maps each work ID to:
 //! - A oneshot sender for returning results to the caller
 //! - An optional buffer that must be kept alive for the duration of the operation
+//! - An optional timespec, if operation timeouts are enabled, that must be kept
+//!   alive for the duration of the operation
 //!
 //! ## Timeout Handling
 //!
@@ -72,6 +74,15 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+
+type Waiters = HashMap<
+    u64,
+    (
+        oneshot::Sender<(i32, Option<StableBuf>)>,
+        Option<StableBuf>,
+        Option<Box<Timespec>>,
+    ),
+>;
 
 #[derive(Debug)]
 /// Tracks io_uring metrics.
@@ -202,11 +213,7 @@ pub struct Op {
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
 #[allow(clippy::type_complexity)]
-fn handle_cqe(
-    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
-    cqe: CqueueEntry,
-    cfg: &Config,
-) {
+fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
     match work_id {
         TIMEOUT_WORK_ID => {
@@ -224,7 +231,7 @@ fn handle_cqe(
                 result
             };
 
-            let (result_sender, buffer) = waiters.remove(&work_id).expect("missing sender");
+            let (result_sender, buffer, _) = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send((result, buffer));
         }
     }
@@ -239,10 +246,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
     // Maps a work ID to the sender that we will send the result to
     // and the buffer used for the operation.
     #[allow(clippy::type_complexity)]
-    let mut waiters: std::collections::HashMap<
-        _,
-        (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>),
-    > = std::collections::HashMap::with_capacity(cfg.size as usize);
+    let mut waiters = Waiters::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -300,19 +304,22 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             }
             work = work.user_data(work_id);
 
-            // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buffer));
-
             // Submit the operation to the ring, with timeout if configured
-            if let Some(timeout) = &cfg.op_timeout {
+            let timespec = if let Some(timeout) = &cfg.op_timeout {
                 // Link the operation to the (following) timeout
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
 
+                // The timespec needs to be allocated on the heap and kept alive
+                // for the duration of the operation so that the pointer stays
+                // valid
+                let timespec = Box::new(
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos()),
+                );
+
                 // Create the timeout
-                let timeout = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let timeout = LinkTimeout::new(&timeout)
+                let timeout = LinkTimeout::new(&*timespec)
                     .build()
                     .user_data(TIMEOUT_WORK_ID);
 
@@ -322,6 +329,8 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     sq.push(&work).expect("unable to push to queue");
                     sq.push(&timeout).expect("unable to push timeout to queue");
                 }
+
+                Some(timespec)
             } else {
                 // No timeout, submit the operation normally
                 unsafe {
@@ -329,7 +338,12 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                         .push(&work)
                         .expect("unable to push to queue");
                 }
-            }
+
+                None
+            };
+
+            // We'll send the result of this operation to `sender`.
+            waiters.insert(work_id, (sender, buffer, timespec));
         }
 
         // Submit and wait for at least 1 item to be in the completion queue.
@@ -350,11 +364,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
 /// indefinitely.
 #[allow(clippy::type_complexity)]
-fn drain(
-    ring: &mut IoUring,
-    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
-    cfg: &Config,
-) {
+fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
     // When op_timeout is set, each operation uses 2 SQ entries
     // (op + linked timeout).
     let pending = if cfg.op_timeout.is_some() {
