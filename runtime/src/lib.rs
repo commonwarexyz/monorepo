@@ -163,6 +163,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Spawned tasks consume the context used to create them. This ensures that context cannot
     /// be shared between tasks and that a task's context always comes from somewhere.
     ///
+    /// # Spawn Configuration Reset
+    ///
     /// When context passes through [`Spawner::spawn`], the spawn configuration is reset to the default
     /// (i.e. non-blocking, shared tasks) so that spawned tasks don't need to sanitize the context before use (they
     /// won't know how they were spawned).
