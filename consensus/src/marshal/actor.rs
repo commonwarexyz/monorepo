@@ -7,15 +7,17 @@ use super::{
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
+    SigningSchemeProvider,
 };
 use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
-    threshold_simplex::types::{Finalization, Notarization, SigningScheme},
+    threshold_simplex::types::{Finalization, Notarization, Proposal, SigningScheme},
     types::Round,
-    Block, Reporter,
+    Block, Epochable, Reporter,
 };
+use bytes::Buf;
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, Read, ReadExt};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -58,8 +60,9 @@ struct BlockSubscription<B: Block> {
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
 pub struct Actor<
-    B: Block,
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    B: Block,
+    P: SigningSchemeProvider<S>,
     S: SigningScheme,
 > {
     // ---------- Context ----------
@@ -70,8 +73,6 @@ pub struct Actor<
     mailbox: mpsc::Receiver<Message<S, B>>,
 
     // ---------- Configuration ----------
-    // Signing scheme for the consensus engine
-    signing: S,
     // Mailbox size
     mailbox_size: usize,
     // Unique application namespace
@@ -81,7 +82,7 @@ pub struct Actor<
     // Maximum number of blocks to repair at once
     max_repair: u64,
     // Codec configuration for block type
-    codec_config: B::Cfg,
+    block_codec_config: B::Cfg,
     // Partition prefix
     partition_prefix: String,
 
@@ -93,7 +94,7 @@ pub struct Actor<
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, S>,
+    cache: cache::Manager<E, B, P, S>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
@@ -107,13 +108,14 @@ pub struct Actor<
 }
 
 impl<
-        B: Block,
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        Pr: SigningSchemeProvider<S>,
         S: SigningScheme,
-    > Actor<B, E, S>
+    > Actor<E, B, Pr, S>
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<S, B>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(context: E, config: Config<B, Pr, S>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -125,10 +127,8 @@ impl<
         let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
-            (
-                config.codec_config.clone(),
-                config.signing.certificate_codec_config(),
-            ),
+            config.block_codec_config.clone(),
+            config.signing_provider,
         )
         .await;
 
@@ -160,7 +160,7 @@ impl<
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: config.signing.certificate_codec_config_unbounded(),
+                codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -194,7 +194,7 @@ impl<
                 freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: config.codec_config.clone(),
+                codec_config: config.block_codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -223,12 +223,11 @@ impl<
             Self {
                 context,
                 mailbox,
-                signing: config.signing,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
-                codec_config: config.codec_config,
+                block_codec_config: config.block_codec_config,
                 partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
@@ -571,7 +570,7 @@ impl<
                             match key {
                                 Request::Block(commitment) => {
                                     // Parse block
-                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
+                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -590,21 +589,47 @@ impl<
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    // Parse finalization
-                                    let Ok((finalization, block)) =
-                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
-                                            value,
-                                            &(self.signing.certificate_codec_config(), self.codec_config.clone()),
-                                        )
-                                    else {
+                                    let mut reader = value;
+
+                                    // Decode the proposal to learn the epoch.
+                                    let Ok(proposal) = Proposal::<B::Commitment>::read(&mut reader) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
+                                    // Get signing scheme for epoch
+                                    let Some(signing) = self.cache.get_signing_scheme(proposal.epoch()) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
+                                    // Decode the certificate
+                                    let Ok(certificate) = S::Certificate::read_cfg(&mut reader, &signing.certificate_codec_config()) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
+                                    let finalization = Finalization::<S, _> {
+                                        proposal,
+                                        certificate,
+                                    };
+
+                                    // Decode the block
+                                    let Ok(block) = B::read_cfg(&mut reader, &self.block_codec_config) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
+                                    // There should be no remaining data
+                                    if reader.has_remaining() {
+                                        let _ = response.send(false);
+                                        continue;
+                                    }
+
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &self.signing, &self.namespace)
+                                        || !finalization.verify(&mut self.context, &signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -616,11 +641,16 @@ impl<
                                     self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
                                 Request::Notarized { round } => {
+                                    let Some(signing) = self.cache.get_signing_scheme(round.epoch()) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
                                     // Parse notarization
                                     let Ok((notarization, block)) =
                                         <(Notarization<S, B::Commitment>, B)>::decode_cfg(
                                             value,
-                                            &(self.signing.certificate_codec_config(), self.codec_config.clone()),
+                                            &(signing.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
                                     else {
                                         let _ = response.send(false);
@@ -630,7 +660,7 @@ impl<
                                     // Validation
                                     if notarization.proposal.round != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &self.signing, &self.namespace)
+                                        || !notarization.verify(&mut self.context, &signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;

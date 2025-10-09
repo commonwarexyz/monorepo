@@ -1,11 +1,20 @@
+use super::SigningSchemeProvider;
 use crate::{threshold_simplex::types::SigningScheme, Block};
 use commonware_runtime::buffer::PoolRef;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 /// Marshal configuration.
-pub struct Config<S: SigningScheme, B: Block> {
-    /// Signing scheme for the consensus engine.
-    pub signing: S,
+pub struct Config<B, P, S>
+where
+    B: Block,
+    P: SigningSchemeProvider<S>,
+    S: SigningScheme,
+{
+    /// Provider for epoch-specific signing schemes.
+    pub signing_provider: P,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -53,8 +62,10 @@ pub struct Config<S: SigningScheme, B: Block> {
     pub write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    pub codec_config: B::Cfg,
+    pub block_codec_config: B::Cfg,
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
+
+    pub _marker: PhantomData<S>,
 }

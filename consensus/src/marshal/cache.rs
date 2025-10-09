@@ -1,3 +1,4 @@
+use super::SigningSchemeProvider;
 use crate::{
     threshold_simplex::types::{Finalization, Notarization, SigningScheme},
     types::{Epoch, Round, View},
@@ -35,6 +36,8 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: SigningScheme> {
+    /// Signing scheme for this epoch
+    signing: S,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -66,16 +69,20 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
+    P: SigningSchemeProvider<S>,
     S: SigningScheme,
 > {
     /// Context
     context: R,
 
+    /// Provider for epoch-specific signing schemes.
+    signing_provider: P,
+
     /// Configuration for underlying prunable archives
     cfg: Config,
 
-    /// Codec configuration for block type and signing certificates
-    codec_config: (B::Cfg, S::CertificateCfg),
+    /// Codec configuration for block type
+    block_codec_config: B::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
@@ -85,14 +92,19 @@ pub(crate) struct Manager<
     caches: BTreeMap<Epoch, Cache<R, B, S>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: SigningScheme>
-    Manager<R, B, S>
+impl<
+        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        P: SigningSchemeProvider<S>,
+        S: SigningScheme,
+    > Manager<R, B, P, S>
 {
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(
         context: R,
         cfg: Config,
-        codec_config: (B::Cfg, S::CertificateCfg),
+        block_codec_config: B::Cfg,
+        signing_provider: P,
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
@@ -108,11 +120,13 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
         // Restore cache from metadata
         let mut cache = Self {
             context,
+            signing_provider,
             cfg,
-            codec_config,
+            block_codec_config,
             metadata,
             caches: BTreeMap::new(),
         };
+
         let (floor, ceiling) = cache.get_metadata();
         for epoch in floor..=ceiling {
             cache.init_epoch(epoch).await;
@@ -165,21 +179,27 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
+        let signing = self
+            .signing_provider
+            .for_epoch(epoch)
+            .expect("failed to get signing scheme for epoch");
+
         let verified_blocks = self
-            .init_archive(epoch, "verified", self.codec_config.0.clone())
+            .init_archive(epoch, "verified", self.block_codec_config.clone())
             .await;
         let notarized_blocks = self
-            .init_archive(epoch, "notarized", self.codec_config.0.clone())
+            .init_archive(epoch, "notarized", self.block_codec_config.clone())
             .await;
         let notarizations = self
-            .init_archive(epoch, "notarizations", self.codec_config.1.clone())
+            .init_archive(epoch, "notarizations", signing.certificate_codec_config())
             .await;
         let finalizations = self
-            .init_archive(epoch, "finalizations", self.codec_config.1.clone())
+            .init_archive(epoch, "finalizations", signing.certificate_codec_config())
             .await;
         let existing = self.caches.insert(
             epoch,
             Cache {
+                signing,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -212,6 +232,14 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
+    }
+
+    pub(crate) fn get_signing_scheme(&mut self, epoch: Epoch) -> Option<S> {
+        if let Some(cache) = self.caches.get(&epoch) {
+            return Some(cache.signing.clone());
+        } else {
+            self.signing_provider.for_epoch(epoch)
+        }
     }
 
     /// Add a verified block to the prunable archive.
@@ -358,6 +386,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
+                ..
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");

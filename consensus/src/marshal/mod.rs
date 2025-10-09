@@ -64,6 +64,14 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
+use crate::{threshold_simplex::types::SigningScheme, types::Epoch};
+
+/// Supplies the signing scheme the marshal should use for a given epoch.
+pub trait SigningSchemeProvider<S: SigningScheme>: Send + Sync + 'static {
+    /// Return the signing scheme that corresponds to `epoch`.
+    fn for_epoch(&self, epoch: Epoch) -> Option<S>;
+}
+
 #[cfg(test)]
 pub mod mocks;
 
@@ -74,6 +82,7 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
+        SigningSchemeProvider,
     };
     use crate::{
         marshal::ingress::mailbox::Identifier,
@@ -84,7 +93,7 @@ mod tests {
                 Activity, Finalization, Finalize, Notarization, Notarize, Proposal, SigningScheme,
             },
         },
-        types::Round,
+        types::{Epoch, Round},
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
@@ -106,6 +115,7 @@ mod tests {
     use rand::{seq::SliceRandom, Rng};
     use std::{
         collections::BTreeMap,
+        marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         time::Duration,
     };
@@ -116,6 +126,19 @@ mod tests {
     type V = MinPk;
     type E = PrivateKey;
     type S = bls12381_threshold::Scheme<V>;
+    type Pr = ConstantSigningSchemeProvider;
+
+    struct ConstantSigningSchemeProvider(S);
+    impl SigningSchemeProvider<S> for ConstantSigningSchemeProvider {
+        fn for_epoch(&self, _: Epoch) -> Option<S> {
+            Some(self.0.clone())
+        }
+    }
+    impl From<S> for ConstantSigningSchemeProvider {
+        fn from(scheme: S) -> Self {
+            Self(scheme)
+        }
+    }
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -140,18 +163,18 @@ mod tests {
         oracle: &mut Oracle<P>,
         coordinator: p2p::mocks::Coordinator<P>,
         secret: E,
-        signing: S,
+        signing_provider: Pr,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
-            signing,
+            signing_provider,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
-            codec_config: (),
+            block_codec_config: (),
             partition_prefix: format!("validator-{}", secret.public_key()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
@@ -163,6 +186,7 @@ mod tests {
             freezer_journal_compression: None,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             immutable_items_per_section: NZU64!(10),
+            _marker: PhantomData,
         };
 
         // Create the resolver
@@ -328,7 +352,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    signing_schemes[i].clone(),
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 applications.insert(peers[i].clone(), application);
@@ -432,7 +456,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(vec![]),
                     secret.clone(),
-                    signing_schemes[i].clone(),
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -480,7 +504,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    signing_schemes[i].clone(),
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -548,7 +572,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    signing_schemes[i].clone(),
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -608,7 +632,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    signing_schemes[i].clone(),
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -706,7 +730,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                signing_schemes[0].clone(),
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -763,7 +787,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                signing_schemes[0].clone(),
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -835,7 +859,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                signing_schemes[0].clone(),
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -889,7 +913,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(peers),
                 secret,
-                signing_schemes[0].clone(),
+                signing_schemes[0].clone().into(),
             )
             .await;
 
