@@ -75,6 +75,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
+/// Active operations keyed by their work id.
+///
+/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
+/// alive until the kernel finishes touching it, and when op_timeout is enabled,
+/// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
