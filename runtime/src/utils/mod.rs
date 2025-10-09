@@ -19,7 +19,7 @@ pub mod signal;
 
 mod handle;
 pub use handle::Handle;
-pub(crate) use handle::{Aborter, Children, MetricHandle, Panicked, Panicker};
+pub(crate) use handle::{Children, MetricHandle, Panicked, Panicker};
 
 mod cell;
 pub use cell::Cell as ContextCell;
