@@ -89,9 +89,7 @@ mod tests {
         threshold_simplex::{
             self,
             signing_scheme::bls12381_threshold,
-            types::{
-                Activity, Finalization, Finalize, Notarization, Notarize, Proposal, SigningScheme,
-            },
+            types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round},
         Block as _, Reporter,
@@ -237,17 +235,11 @@ mod tests {
         let finalizes = signing_schemes
             .iter()
             .take(quorum as usize)
-            .map(|signing| Finalize::sign(signing, NAMESPACE, proposal.clone()));
+            .map(|signing| Finalize::sign(signing, NAMESPACE, proposal.clone()))
+            .collect::<Vec<_>>();
 
         // Generate certificate signatures
-        let finalization_certificate = signing_schemes[0]
-            .assemble_certificate(finalizes.map(|n| n.vote.clone()))
-            .unwrap();
-
-        Finalization {
-            proposal,
-            certificate: finalization_certificate,
-        }
+        Finalization::from_finalizes(&signing_schemes[0], &finalizes).unwrap()
     }
 
     fn make_notarization(
@@ -259,17 +251,11 @@ mod tests {
         let notarizes = signing_schemes
             .iter()
             .take(quorum as usize)
-            .map(|signing| Notarize::sign(signing, NAMESPACE, proposal.clone()));
+            .map(|signing| Notarize::sign(signing, NAMESPACE, proposal.clone()))
+            .collect::<Vec<_>>();
 
         // Generate certificate signatures
-        let notarization_certificate = signing_schemes[0]
-            .assemble_certificate(notarizes.map(|n| n.vote.clone()))
-            .unwrap();
-
-        Notarization {
-            proposal,
-            certificate: notarization_certificate,
-        }
+        Notarization::from_notarizes(&signing_schemes[0], &notarizes).unwrap()
     }
 
     fn setup_network(context: deterministic::Context) -> Oracle<P> {

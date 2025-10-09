@@ -264,19 +264,12 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             "broadcasting notarization"
         );
 
-        // Recover threshold signature
+        // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization_certificate = self
-            .signing
-            .assemble_certificate(self.notarizes.iter().map(|n| n.vote.clone()))
+        let notarization = Notarization::from_notarizes(&self.signing, &self.notarizes)
             .expect("failed to recover threshold signature");
         timer.observe();
 
-        // Construct notarization
-        let notarization = Notarization {
-            proposal,
-            certificate: notarization_certificate,
-        };
         self.broadcast_notarization = true;
         Some(notarization)
     }
@@ -300,19 +293,12 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
         debug!(round = ?self.round, "broadcasting nullification");
 
-        // Recover threshold signature
+        // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification_certificate = self
-            .signing
-            .assemble_certificate(self.nullifies.iter().map(|n| n.vote.clone()))
+        let nullification = Nullification::from_nullifies(&self.signing, &self.nullifies)
             .expect("failed to recover threshold signature");
         timer.observe();
 
-        // Construct nullification
-        let nullification = Nullification {
-            round: self.round,
-            certificate: nullification_certificate,
-        };
         self.broadcast_nullification = true;
         Some(nullification)
     }
@@ -342,8 +328,6 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             "broadcasting finalization"
         );
 
-        // Recover threshold signature
-        let mut timer = self.recover_latency.timer();
         if let Some(notarization) = &self.notarization {
             // It is not possible to have a finalization that does not match the notarization proposal. If this
             // is detected, there is a critical bug or there has been a safety violation.
@@ -352,18 +336,14 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
                 "finalization proposal does not match notarization"
             );
         }
+
+        // Construct finalization
         // FIXME: ideally we'd be able to reuse the seed signature from notarization if we have it
-        let finalization_certificate = self
-            .signing
-            .assemble_certificate(self.finalizes.iter().map(|f| f.vote.clone()))
+        let mut timer = self.recover_latency.timer();
+        let finalization = Finalization::from_finalizes(&self.signing, &self.finalizes)
             .expect("failed to recover threshold signature");
         timer.observe();
 
-        // Construct finalization
-        let finalization = Finalization {
-            proposal: proposal.clone(),
-            certificate: finalization_certificate,
-        };
         self.broadcast_finalization = true;
         Some(finalization)
     }

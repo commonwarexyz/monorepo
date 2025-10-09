@@ -974,6 +974,12 @@ pub struct Notarize<S: SigningScheme, D: Digest> {
     pub vote: Vote<S>,
 }
 
+impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+}
+
 impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
@@ -1040,12 +1046,6 @@ impl<S: SigningScheme, D: Digest> Attributable for Notarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Notarize<S, D> {
-    pub fn round(&self) -> Round {
-        self.proposal.round
-    }
-}
-
 impl<S: SigningScheme, D: Digest> Epochable for Notarize<S, D> {
     type Epoch = Epoch;
 
@@ -1067,6 +1067,32 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+    pub fn from_notarizes(signing: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
+        if notarizes.is_empty() {
+            return None;
+        }
+
+        let proposal = notarizes[0].proposal.clone();
+
+        if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
+            return None;
+        }
+
+        let notarization_certificate =
+            signing.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
+
+        Some(Notarization {
+            proposal,
+            certificate: notarization_certificate,
+        })
+    }
+
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
 }
 
 impl<S: SigningScheme, D: Digest> PartialEq for Notarization<S, D> {
@@ -1119,12 +1145,6 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
             proposal,
             certificate,
         })
-    }
-}
-
-impl<S: SigningScheme, D: Digest> Notarization<S, D> {
-    pub fn round(&self) -> Round {
-        self.proposal.round
     }
 }
 
@@ -1233,6 +1253,28 @@ pub struct Nullification<S: SigningScheme> {
     pub certificate: S::Certificate,
 }
 
+impl<S: SigningScheme> Nullification<S> {
+    pub fn from_nullifies(signing: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
+        if nullifies.is_empty() {
+            return None;
+        }
+
+        let round = nullifies[0].round;
+
+        if nullifies.iter().skip(1).any(|n| n.round != round) {
+            return None;
+        }
+
+        let nullification_certificate =
+            signing.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
+
+        Some(Nullification {
+            round,
+            certificate: nullification_certificate,
+        })
+    }
+}
+
 impl<S: SigningScheme> PartialEq for Nullification<S> {
     fn eq(&self, other: &Self) -> bool {
         self.round == other.round && self.certificate == other.certificate
@@ -1309,6 +1351,12 @@ pub struct Finalize<S: SigningScheme, D: Digest> {
     pub vote: Vote<S>,
 }
 
+impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+}
+
 impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
@@ -1375,12 +1423,6 @@ impl<S: SigningScheme, D: Digest> Attributable for Finalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Finalize<S, D> {
-    pub fn round(&self) -> Round {
-        self.proposal.round
-    }
-}
-
 impl<S: SigningScheme, D: Digest> Epochable for Finalize<S, D> {
     type Epoch = Epoch;
 
@@ -1402,6 +1444,32 @@ impl<S: SigningScheme, D: Digest> Viewable for Finalize<S, D> {
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+    pub fn from_finalizes(signing: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
+        if finalizes.is_empty() {
+            return None;
+        }
+
+        let proposal = finalizes[0].proposal.clone();
+
+        if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
+            return None;
+        }
+
+        let finalization_certificate =
+            signing.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
+
+        Some(Finalization {
+            proposal,
+            certificate: finalization_certificate,
+        })
+    }
+
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
 }
 
 impl<S: SigningScheme, D: Digest> PartialEq for Finalization<S, D> {
@@ -1454,12 +1522,6 @@ impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
             proposal,
             certificate,
         })
-    }
-}
-
-impl<S: SigningScheme, D: Digest> Finalization<S, D> {
-    pub fn round(&self) -> Round {
-        self.proposal.round
     }
 }
 
