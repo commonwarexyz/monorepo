@@ -162,6 +162,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// Spawned tasks consume the context used to create them. This ensures that context cannot
     /// be shared between tasks and that a task's context always comes from somewhere.
+    ///
+    /// When context passes through [`Spawner::spawn`], the spawn configuration is reset to the default.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
