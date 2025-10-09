@@ -1128,17 +1128,16 @@ where
 {
     type Output = F::Output;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let executor = this.executor();
-
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        // If the current time is before the deadline, we need to wait
+        let executor = self.executor();
         {
             let current_time = *executor.time.lock().unwrap();
-            if current_time < this.time {
-                if !this.registered {
-                    this.registered = true;
+            if current_time < self.time {
+                if !self.registered {
+                    self.registered = true;
                     executor.sleeping.lock().unwrap().push(Alarm {
-                        time: this.time,
+                        time: self.time,
                         waker: cx.waker().clone(),
                     });
                 }
@@ -1146,22 +1145,22 @@ where
             }
         }
 
+        // Poll the future
         let poll_result = {
-            let future = this
+            let future = self
                 .future
                 .as_mut()
                 .expect("future already polled at scheduled time");
             future.as_mut().poll(cx)
         };
-
         match poll_result {
             Poll::Ready(value) => {
-                this.future = None;
+                self.future = None;
                 Poll::Ready(value)
             }
             Poll::Pending => panic!(
                 "future not ready when polled at scheduled time {:?}",
-                this.time
+                self.time
             ),
         }
     }
