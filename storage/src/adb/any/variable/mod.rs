@@ -369,17 +369,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
@@ -443,16 +441,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
 
         match self.locations.read(*loc).await {
             Ok(offset) => {
@@ -902,10 +898,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
+    use rand::rngs::OsRng;
     use std::collections::HashMap;
 
     const PAGE_SIZE: usize = 77;
@@ -1644,6 +1641,78 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
             assert_ne!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_get_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let mut rng = OsRng;
+
+            // Test getting from empty database
+            let result = db.get_loc(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            db.update(Digest::random(&mut rng), vec![10]).await.unwrap();
+            db.update(Digest::random(&mut rng), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut rng), vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations succeeds
+            assert!(db.get_loc(Location::new_unchecked(0)).await.unwrap().is_some());
+            assert!(db.get_loc(Location::new_unchecked(1)).await.unwrap().is_some());
+            assert!(db.get_loc(Location::new_unchecked(2)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary 
+            let op_count = *db.op_count();
+            let result = db.get_loc(Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_get_from_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let mut rng = OsRng;
+
+            let key = Digest::random(&mut rng);
+
+            // Test getting from empty database
+            let result = db.get_from_loc(&key, Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            db.update(key, vec![10]).await.unwrap();
+            db.update(Digest::random(&mut rng), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut rng), vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations succeeds
+            assert!(db.get_from_loc(&key, Location::new_unchecked(0)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary
+            let op_count = *db.op_count();
+            let result = db.get_from_loc(&key, Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
 
             db.destroy().await.unwrap();
         });

@@ -337,17 +337,15 @@ impl<
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
@@ -1741,6 +1739,50 @@ pub(super) mod test {
                     &root_hash
                 ));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_db_get_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test getting from empty database
+            let result = db.get_loc(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            let mut rng = OsRng;
+            let key1 = Digest::random(&mut rng);
+            let key2 = Digest::random(&mut rng);
+            let key3 = Digest::random(&mut rng);
+            let val1 = Digest::random(&mut rng);
+            let val2 = Digest::random(&mut rng);
+            let val3 = Digest::random(&mut rng);
+            
+            db.update(key1, val1).await.unwrap();
+            db.update(key2, val2).await.unwrap();
+            db.update(key3, val3).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Test getting valid locations succeeds (only check if not pruned)
+            let inactivity_floor = *db.inactivity_floor_loc();
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor)).await.unwrap().is_some());
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor + 1)).await.unwrap().is_some());
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor + 2)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary
+            let op_count = *db.op_count();
+            let result = db.get_loc(Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
 
             db.destroy().await.unwrap();
         });
