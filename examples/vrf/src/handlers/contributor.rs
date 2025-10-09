@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
 use rand_core::CryptoRngCore;
@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
 pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
     crypto: C,
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
@@ -59,7 +59,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 crypto,
                 dkg_phase_timeout,
                 arbiter,
@@ -451,7 +451,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        self.context.spawn_ref()(self.run(sender, receiver));
+        spawn_cell!(self.context, self.run(sender, receiver).await);
     }
 
     async fn run(

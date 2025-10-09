@@ -960,10 +960,7 @@ mod tests {
                 );
             }
             Ok(_) => panic!("Expected error but got Ok"),
-            Err(e) => panic!(
-                "Expected Invalid error for pruned_bits overflow, got: {:?}",
-                e
-            ),
+            Err(e) => panic!("Expected Invalid error for pruned_bits overflow, got: {e:?}"),
         }
     }
 
@@ -1000,10 +997,7 @@ mod tests {
                 );
             }
             Ok(_) => panic!("Expected error but got Ok"),
-            Err(e) => panic!(
-                "Expected Invalid error for total length overflow, got: {:?}",
-                e
-            ),
+            Err(e) => panic!("Expected Invalid error for total length overflow, got: {e:?}"),
         }
     }
 }

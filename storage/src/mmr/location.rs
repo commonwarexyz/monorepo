@@ -6,16 +6,85 @@ use core::{
 };
 use thiserror::Error;
 
+/// Maximum valid [Location] value that can exist in a valid MMR.
+///
+/// This limit exists because the total MMR size (number of nodes) must be representable in a u64
+/// with at least one leading zero bit for validity checking. The MMR size for N leaves is:
+///
+/// ```text
+/// MMR_size = 2*N - popcount(N)
+/// ```
+///
+/// where `popcount(N)` is the number of set bits in N (the number of binary trees in the MMR forest).
+///
+/// The worst case occurs when N is a power of 2 (popcount = 1), giving `MMR_size = 2*N - 1`.
+///
+/// For validity, we require `MMR_size < 2^63` (top bit clear), which gives us:
+///
+/// ```text
+/// 2*N - 1 < 2^63
+/// 2*N < 2^63 + 1
+/// N ≤ 2^62
+/// ```
+///
+/// Therefore, the maximum number of leaves is `2^62`, and the maximum location (0-indexed) is `2^62 - 1`.
+///
+/// ## Verification
+///
+/// For `N = 2^62` leaves (worst case):
+/// - `MMR_size = 2 * 2^62 - 1 = 2^63 - 1 = 0x7FFF_FFFF_FFFF_FFFF` ✓
+/// - Leading zeros: 1 ✓
+///
+/// For `N = 2^62 + 1` leaves:
+/// - `2 * N = 2^63 + 2` ✗ (exceeds maximum valid MMR size)
+pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
+
 /// A [Location] is an index into an MMR's _leaves_.
 /// This is in contrast to a [Position], which is an index into an MMR's _nodes_.
+///
+/// # Limits
+///
+/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
+/// can be safely converted to [Position]. Values beyond this are considered invalid.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
 
 impl Location {
-    /// Return a new [Location] from a raw `u64`.
+    /// Create a new [Location] from a raw `u64` without validation.
+    ///
+    /// This is an internal constructor that assumes the value is valid. For creating
+    /// locations from external or untrusted sources, use [Location::new].
     #[inline]
-    pub const fn new(loc: u64) -> Self {
+    pub(crate) const fn new_unchecked(loc: u64) -> Self {
         Self(loc)
+    }
+
+    /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
+    ///
+    /// Returns `None` if `loc > MAX_LOCATION`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_storage::mmr::{Location, MAX_LOCATION};
+    ///
+    /// let loc = Location::new(100).unwrap();
+    /// assert_eq!(*loc, 100);
+    ///
+    /// // Values at MAX_LOCATION are valid
+    /// assert!(Location::new(MAX_LOCATION).is_some());
+    ///
+    /// // Values exceeding MAX_LOCATION return None
+    /// assert!(Location::new(MAX_LOCATION + 1).is_none());
+    /// assert!(Location::new(u64::MAX).is_none());
+    /// ```
+    #[inline]
+    pub const fn new(loc: u64) -> Option<Self> {
+        if loc > MAX_LOCATION {
+            None
+        } else {
+            Some(Self(loc))
+        }
     }
 
     /// Return the underlying `u64` value.
@@ -24,11 +93,23 @@ impl Location {
         self.0
     }
 
-    /// Return `self + rhs` returning `None` on overflow.
+    /// Returns `true` iff this location can be safely converted to a [Position].
+    #[inline]
+    pub const fn is_valid(self) -> bool {
+        self.0 <= MAX_LOCATION
+    }
+
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_LOCATION].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => {
+                if value <= MAX_LOCATION {
+                    Some(Self(value))
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     }
@@ -42,10 +123,15 @@ impl Location {
         }
     }
 
-    /// Return `self + rhs` saturating at `u64::MAX`.
+    /// Return `self + rhs` saturating at [MAX_LOCATION].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
-        Self(self.0.saturating_add(rhs))
+        let result = self.0.saturating_add(rhs);
+        if result > MAX_LOCATION {
+            Self(MAX_LOCATION)
+        } else {
+            Self(result)
+        }
     }
 
     /// Return `self - rhs` saturating at zero.
@@ -64,14 +150,14 @@ impl fmt::Display for Location {
 impl From<u64> for Location {
     #[inline]
     fn from(value: u64) -> Self {
-        Self::new(value)
+        Self::new_unchecked(value)
     }
 }
 
 impl From<usize> for Location {
     #[inline]
     fn from(value: usize) -> Self {
-        Self::new(value as u64)
+        Self::new_unchecked(value as u64)
     }
 }
 
@@ -274,29 +360,29 @@ impl LocationRangeExt for Range<Location> {
 
 #[cfg(test)]
 mod tests {
-    use super::Location;
+    use super::{Location, MAX_LOCATION};
     use crate::mmr::position::Position;
 
     // Test that the [Location::try_from] function returns the correct location for leaf positions.
     #[test]
     fn test_try_from_position() {
         const CASES: &[(Position, Location)] = &[
-            (Position::new(0), Location::new(0)),
-            (Position::new(1), Location::new(1)),
-            (Position::new(3), Location::new(2)),
-            (Position::new(4), Location::new(3)),
-            (Position::new(7), Location::new(4)),
-            (Position::new(8), Location::new(5)),
-            (Position::new(10), Location::new(6)),
-            (Position::new(11), Location::new(7)),
-            (Position::new(15), Location::new(8)),
-            (Position::new(16), Location::new(9)),
-            (Position::new(18), Location::new(10)),
-            (Position::new(19), Location::new(11)),
-            (Position::new(22), Location::new(12)),
-            (Position::new(23), Location::new(13)),
-            (Position::new(25), Location::new(14)),
-            (Position::new(26), Location::new(15)),
+            (Position::new(0), Location::new_unchecked(0)),
+            (Position::new(1), Location::new_unchecked(1)),
+            (Position::new(3), Location::new_unchecked(2)),
+            (Position::new(4), Location::new_unchecked(3)),
+            (Position::new(7), Location::new_unchecked(4)),
+            (Position::new(8), Location::new_unchecked(5)),
+            (Position::new(10), Location::new_unchecked(6)),
+            (Position::new(11), Location::new_unchecked(7)),
+            (Position::new(15), Location::new_unchecked(8)),
+            (Position::new(16), Location::new_unchecked(9)),
+            (Position::new(18), Location::new_unchecked(10)),
+            (Position::new(19), Location::new_unchecked(11)),
+            (Position::new(22), Location::new_unchecked(12)),
+            (Position::new(23), Location::new_unchecked(13)),
+            (Position::new(25), Location::new_unchecked(14)),
+            (Position::new(26), Location::new_unchecked(15)),
         ];
         for (pos, expected_loc) in CASES {
             let loc = Location::try_from(*pos).expect("should map to a leaf location");
@@ -332,55 +418,79 @@ mod tests {
 
     #[test]
     fn test_checked_add() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.checked_add(5).unwrap(), 15);
-        assert!(Location::new(u64::MAX).checked_add(1).is_none());
+
+        // Overflow returns None
+        assert!(Location::new_unchecked(u64::MAX).checked_add(1).is_none());
+
+        // Exceeding MAX_LOCATION returns None
+        assert!(Location::new_unchecked(MAX_LOCATION)
+            .checked_add(1)
+            .is_none());
+
+        // At MAX_LOCATION is OK
+        let loc = Location::new_unchecked(MAX_LOCATION - 10);
+        assert_eq!(loc.checked_add(10).unwrap(), MAX_LOCATION);
     }
 
     #[test]
     fn test_checked_sub() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.checked_sub(5).unwrap(), 5);
         assert!(loc.checked_sub(11).is_none());
     }
 
     #[test]
     fn test_saturating_add() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.saturating_add(5), 15);
-        assert_eq!(Location::new(u64::MAX).saturating_add(1), u64::MAX);
+
+        // Saturates at MAX_LOCATION, not u64::MAX
+        assert_eq!(
+            Location::new_unchecked(u64::MAX).saturating_add(1),
+            MAX_LOCATION
+        );
+        assert_eq!(
+            Location::new_unchecked(MAX_LOCATION).saturating_add(1),
+            MAX_LOCATION
+        );
+        assert_eq!(
+            Location::new_unchecked(MAX_LOCATION).saturating_add(1000),
+            MAX_LOCATION
+        );
     }
 
     #[test]
     fn test_saturating_sub() {
-        let loc = Location::new(10);
+        let loc = Location::new_unchecked(10);
         assert_eq!(loc.saturating_sub(5), 5);
-        assert_eq!(Location::new(0).saturating_sub(1), 0);
+        assert_eq!(Location::new_unchecked(0).saturating_sub(1), 0);
     }
 
     #[test]
     fn test_display() {
-        let location = Location::new(42);
+        let location = Location::new_unchecked(42);
         assert_eq!(location.to_string(), "Location(42)");
     }
 
     #[test]
     fn test_add() {
-        let loc1 = Location::new(10);
-        let loc2 = Location::new(5);
+        let loc1 = Location::new_unchecked(10);
+        let loc2 = Location::new_unchecked(5);
         assert_eq!((loc1 + loc2), 15);
     }
 
     #[test]
     fn test_sub() {
-        let loc1 = Location::new(10);
-        let loc2 = Location::new(3);
+        let loc1 = Location::new_unchecked(10);
+        let loc2 = Location::new_unchecked(3);
         assert_eq!((loc1 - loc2), 7);
     }
 
     #[test]
     fn test_comparison_with_u64() {
-        let loc = Location::new(42);
+        let loc = Location::new_unchecked(42);
 
         // Test equality
         assert_eq!(loc, 42u64);
@@ -399,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_assignment_with_u64() {
-        let mut loc = Location::new(10);
+        let mut loc = Location::new_unchecked(10);
 
         // Test add assignment
         loc += 5;
@@ -408,5 +518,54 @@ mod tests {
         // Test sub assignment
         loc -= 3;
         assert_eq!(loc, 12u64);
+    }
+
+    #[test]
+    fn test_new() {
+        // Valid locations
+        assert!(Location::new(0).is_some());
+        assert!(Location::new(1000).is_some());
+        assert!(Location::new(MAX_LOCATION).is_some());
+
+        // Invalid locations (too large)
+        assert!(Location::new(MAX_LOCATION + 1).is_none());
+        assert!(Location::new(u64::MAX).is_none());
+    }
+
+    #[test]
+    fn test_is_valid() {
+        assert!(Location::new_unchecked(0).is_valid());
+        assert!(Location::new_unchecked(1000).is_valid());
+        assert!(Location::new_unchecked(MAX_LOCATION).is_valid());
+        assert!(Location::new_unchecked(MAX_LOCATION).is_valid());
+        assert!(!Location::new_unchecked(u64::MAX).is_valid());
+    }
+
+    #[test]
+    fn test_max_location_boundary() {
+        // MAX_LOCATION should convert successfully
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
+        assert!(max_loc.is_valid());
+        let pos = Position::try_from(max_loc).unwrap();
+        // Verify the position value
+        // For MAX_LOCATION = 2^62 - 1 = 0x3FFFFFFFFFFFFFFF, popcount = 62
+        // Position = 2 * (2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
+        let expected = (1u64 << 63) - 64;
+        assert_eq!(*pos, expected);
+    }
+
+    #[test]
+    fn test_overflow_location_returns_error() {
+        // MAX_LOCATION + 1 should return error
+        let over_loc = Location::new_unchecked(MAX_LOCATION + 1);
+        assert!(Position::try_from(over_loc).is_err());
+
+        // Verify the error message
+        match Position::try_from(over_loc) {
+            Err(crate::mmr::Error::LocationOverflow(loc)) => {
+                assert_eq!(loc, over_loc);
+            }
+            _ => panic!("expected LocationOverflow error"),
+        }
     }
 }

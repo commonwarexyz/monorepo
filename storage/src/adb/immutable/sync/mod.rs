@@ -126,7 +126,9 @@ where
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
             if size > range.end {
-                return Err(crate::adb::Error::UnexpectedData(Location::new(size)));
+                return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(
+                    size,
+                )));
             }
 
             Ok(journal::Journal::new(
@@ -409,7 +411,7 @@ mod tests {
             assert_eq!(got_db.root(&mut hasher), target_root);
             assert_eq!(
                 got_db.get_metadata().await.unwrap(),
-                Some((Location::new(0), Some(Sha256::fill(1))))
+                Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
             );
 
             got_db.destroy().await.unwrap();
@@ -608,7 +610,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new(31)..Location::new(31),
+                    range: Location::new_unchecked(31)..Location::new_unchecked(31),
                 },
                 context,
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
@@ -622,8 +624,8 @@ mod tests {
                     lower_bound_pos,
                     upper_bound_pos,
                 })) => {
-                    assert_eq!(lower_bound_pos, Location::new(31));
-                    assert_eq!(upper_bound_pos, Location::new(31));
+                    assert_eq!(lower_bound_pos, Location::new_unchecked(31));
+                    assert_eq!(upper_bound_pos, Location::new_unchecked(31));
                 }
                 _ => panic!("Expected InvalidTarget error"),
             }
@@ -814,7 +816,7 @@ mod tests {
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
 
-            target_db.prune(Location::new(10)).await.unwrap();
+            target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -945,7 +947,7 @@ mod tests {
             apply_ops(&mut target_db, more_ops.clone()).await;
             target_db.commit(None).await.unwrap();
 
-            target_db.prune(Location::new(10)).await.unwrap();
+            target_db.prune(Location::new_unchecked(10)).await.unwrap();
             target_db.commit(None).await.unwrap();
 
             // Capture final target state

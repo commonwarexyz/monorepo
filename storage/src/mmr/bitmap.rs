@@ -130,7 +130,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = Position::from(Location::new(pruned_chunks as u64));
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -186,7 +187,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = Position::from(Location::new(self.bitmap.pruned_chunks() as u64));
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        let mmr_size =
+            Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -240,8 +243,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Update authenticated length
         self.authenticated_len = self.bitmap.chunks_len() - 1;
 
-        // Update MMR
-        let mmr_pos = Position::from(Location::new(chunk as u64));
+        // This will never panic because chunk is always less than MAX_LOCATION.
+        let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -315,10 +318,10 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk| Location::new((chunk + pruned_chunks) as u64))
+            .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
             .collect();
         for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
-            chunks.push(Location::new((i + pruned_chunks) as u64));
+            chunks.push(Location::new_unchecked((i + pruned_chunks) as u64));
         }
 
         chunks
@@ -342,7 +345,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk| {
-                let pos = Position::from(Location::new((*chunk + pruned_chunks) as u64));
+                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
+                let pos = Position::try_from(loc).expect("invalid location");
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
@@ -442,7 +446,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             ));
         }
 
-        let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
+        let range = Location::new_unchecked(chunk_loc as u64)
+            ..Location::new_unchecked((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = Position::new(self.len());
         if next_bit == 0 {
@@ -474,8 +479,11 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         }
 
         let leaves = PrunableBitMap::<N>::unpruned_chunk(bit_len);
+        // The chunk index should always be < MAX_LOCATION so this should never fail.
+        let size = Position::try_from(Location::new_unchecked(leaves as u64))
+            .expect("chunk_loc returned invalid location");
         let mut mmr_proof = Proof::<H::Digest> {
-            size: Position::from(Location::from(leaves)),
+            size,
             digests: proof.digests.clone(),
         };
 
@@ -484,7 +492,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             return mmr_proof.verify_element_inclusion(
                 hasher,
                 chunk,
-                Location::new(loc as u64),
+                Location::new_unchecked(loc as u64),
                 root,
             );
         }
@@ -519,14 +527,15 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(loc as u64))
-        {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
-        };
+        let mmr_root =
+            match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new_unchecked(loc as u64))
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    debug!(error = ?error, "invalid proof input");
+                    return false;
+                }
+            };
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
@@ -597,8 +606,9 @@ mod tests {
 
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
         pub(crate) fn leaf_pos(bit: u64) -> Position {
-            let chunk_loc = PrunableBitMap::<N>::unpruned_chunk(bit);
-            Position::from(Location::new(chunk_loc as u64))
+            let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
+            let chunk = Location::new_unchecked(chunk as u64);
+            Position::try_from(chunk).expect("chunk should never overflow MAX_LOCATION")
         }
     }
 

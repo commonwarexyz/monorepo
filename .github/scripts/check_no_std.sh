@@ -8,11 +8,16 @@ no_std_packages=(
   commonware-storage
 )
 
-target="thumbv7em-none-eabihf"
+target="riscv32imac-unknown-none-elf"
+image="ghcr.io/commonwarexyz/monorepo/rust-riscv32imac-cross@sha256:652f5ff21c943935bc1caf7cf0c65b38127381c66b423f70f86dc7785d93ce85"
 base_rustflags="${RUSTFLAGS:-}"
 
 for package in "${no_std_packages[@]}"; do
-  build_cmd=(cargo build -p "$package" --no-default-features --target "$target" --release)
+  build_cmd=(docker run \
+    --rm \
+    -v `pwd`:/workdir \
+    -w="/workdir" \
+    "$image" cargo +nightly build -p "$package" -Zbuild-std=core,alloc --no-default-features --target "$target" --release)
   pretty_cmd="${build_cmd[*]}"
   if [ -n "$CI" ]; then
     echo "::group::${pretty_cmd}"

@@ -11,7 +11,9 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -23,7 +25,7 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
@@ -80,7 +82,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the directory
         let directory = Directory::init(
-            context.clone(),
+            context.with_label("directory"),
             cfg.bootstrappers,
             myself,
             directory_cfg,
@@ -98,7 +100,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -113,7 +115,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {
@@ -353,9 +355,9 @@ mod tests {
         let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle, _) = Actor::new(runner_context.clone(), cfg_to_clone);
+        let (actor, mailbox, oracle, _) = Actor::new(runner_context, cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        runner_context.spawn(|_| actor.run());
+        actor.start();
 
         TestHarness {
             mailbox,

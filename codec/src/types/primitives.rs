@@ -71,7 +71,7 @@ impl Write for usize {
 }
 
 impl Read for usize {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
