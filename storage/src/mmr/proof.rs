@@ -220,10 +220,10 @@ impl<D: Digest> Proof<D> {
             let mut digests = Vec::with_capacity(required.len());
             for req_pos in required {
                 // There must exist a digest for each required position (by
-                // construction of `node_digests`)
-                let digest = node_digests
-                    .get(req_pos)
-                    .expect("missing digest for required position");
+                // construction of `node_digests`). If missing, the proof is malformed.
+                let Some(digest) = node_digests.get(req_pos) else {
+                    return false;
+                };
                 digests.push(*digest);
             }
             let proof = Proof {
@@ -506,10 +506,10 @@ pub(crate) fn nodes_required_for_range_proof(
         }
     }
     let Some(start_tree_with_element) = start_tree_with_element else {
-        panic!("invalid range: start tree missing");
+        return Err(Error::InvalidRange);
     };
     let Some(end_tree_with_element) = end_tree_with_element else {
-        panic!("invalid range: end tree missing");
+        return Err(Error::InvalidRange);
     };
 
     // Include the positions of any left-siblings of each node on the path from peak to
