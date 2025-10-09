@@ -111,6 +111,10 @@ pub enum Error {
     RootMismatch,
     #[error("element pruned: {0}")]
     ElementPruned(Position),
+    #[error("position is not a leaf: {0}")]
+    PositionNotLeaf(Position),
+    #[error("invalid position: {0}")]
+    InvalidPosition(Position),
     #[error("missing digest: {0}")]
     MissingDigest(Position),
     #[error("invalid proof length")]

@@ -468,7 +468,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                 (pos, &self.bitmap[*chunk_index])
             })
             .collect::<Vec<_>>();
-        self.mmr.update_leaf_batched(hasher, &updates);
+        self.mmr.update_leaf_batched(hasher, &updates)?;
         self.dirty_chunks.clear();
         self.mmr.sync(hasher);
 

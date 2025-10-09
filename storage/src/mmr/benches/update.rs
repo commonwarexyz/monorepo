@@ -93,7 +93,7 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (pos, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, pos, &element);
+                                        mmr.update_leaf(&mut h, pos, &element).unwrap();
                                     }
                                 }
                                 _ => {
@@ -102,7 +102,7 @@ fn bench_update(c: &mut Criterion) {
                                         Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    mmr.update_leaf_batched(&mut h, &updates);
+                                    mmr.update_leaf_batched(&mut h, &updates).unwrap();
                                 }
                             }
                             mmr.sync(&mut h);
