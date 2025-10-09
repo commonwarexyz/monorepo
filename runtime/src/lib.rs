@@ -142,8 +142,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of [`Spawner`] configured to spawn new tasks on a shared task pool.
     ///
     /// For blocking, short-lived tasks set `blocking` to `true`. This instructs runtimes
-    /// to spawn the task in an isolated pool to avoid starving async tasks in the default
-    /// work-stealing pool. For long-running tasks, see [`Spawner::dedicated`].
+    /// to spawn the task in an isolated thread pool to avoid starving async tasks in the default
+    /// work-stealing thread pool. For long-running tasks, see [`Spawner::dedicated`].
     ///
     /// Non-blocking, shared tasks are the default behavior.
     fn shared(self, blocking: bool) -> Self;
