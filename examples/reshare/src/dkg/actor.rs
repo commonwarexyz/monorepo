@@ -13,7 +13,7 @@ use commonware_cryptography::{
     Digestible, Hasher, PrivateKey,
 };
 use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use rand_core::CryptoRngCore;
 use std::cmp::Ordering;
@@ -25,7 +25,7 @@ where
     C: PrivateKey,
     V: Variant,
 {
-    context: E,
+    context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     contributors: Vec<C::PublicKey>,
@@ -51,7 +51,7 @@ where
         let (sender, mailbox) = mpsc::channel(mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox,
                 signer,
                 contributors,
@@ -71,7 +71,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context.spawn_ref()(async move {
+        spawn_cell!(self.context, async move {
             // Start a muxer for the physical channel used by DKG/reshare
             let (mux, mut dkg_mux) =
                 Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
@@ -162,6 +162,6 @@ where
             }
 
             info!("mailbox closed, exiting.");
-        })
+        }.await)
     }
 }
