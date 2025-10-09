@@ -98,7 +98,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     /// # Warning
     ///
     /// Panics if any of the grafted digests are missing from the MMR.
-    pub async fn load_grafted_digests(
+    pub(crate) async fn load_grafted_digests(
         &mut self,
         leaves: &[Location],
         mmr: &impl StorageTrait<H::Digest>,
