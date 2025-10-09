@@ -163,6 +163,14 @@ pub struct Config {
     /// This is necessary when testing an application that coordinates with some external
     /// process that doesn't rely on the same runtime (often the case for integrating with
     /// existing codebases).
+    ///
+    /// Note, this does not mean that the passage of time is "actual". Time will drift as a function
+    /// of how long it takes to process tasks in a given iteration.
+    ///
+    /// # Warning
+    ///
+    /// When enabled, this disables stall detection and the runtime will wait indefinitely for pending
+    /// tasks to complete.
     realtime: bool,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
