@@ -141,9 +141,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Create a new instance of [`Spawner`] configured to spawn new tasks on a shared task pool.
     ///
-    /// If `blocking` is true and the runtime supports it, the task should be spawned
-    /// in a standalone pool to avoid starving async tasks. For long-running
-    /// tasks that don't yield, see [`Spawner::dedicated`].
+    /// For blocking, short-lived tasks set `blocking` to `true`. This instructs runtimes
+    /// to spawn the task in an isolated pool to avoid starving async tasks in the default
+    /// work-stealing pool. For long-running tasks, see [`Spawner::dedicated`].
     ///
     /// Non-blocking, shared tasks are the default behavior.
     fn shared(self, blocking: bool) -> Self;
@@ -163,7 +163,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Spawned tasks consume the context used to create them. This ensures that context cannot
     /// be shared between tasks and that a task's context always comes from somewhere.
     ///
-    /// When context passes through [`Spawner::spawn`], the spawn configuration is reset to the default.
+    /// When context passes through [`Spawner::spawn`], the spawn configuration is reset to the default
+    /// (i.e. non-blocking, shared tasks) so that spawned tasks don't need to sanitize the context before use (they
+    /// won't know how they were spawned).
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
