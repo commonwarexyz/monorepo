@@ -337,7 +337,7 @@ impl<
                             self.cache_verified(round, block.commitment(), block).await;
                         }
                         Message::Notarization { notarization } => {
-                            let round = notarization.proposal.round;
+                            let round = notarization.round();
                             let commitment = notarization.proposal.payload;
 
                             // Store notarization by view
@@ -354,7 +354,7 @@ impl<
                         }
                         Message::Finalization { finalization } => {
                             // Cache finalization by round
-                            let round = finalization.proposal.round;
+                            let round = finalization.round();
                             let commitment = finalization.proposal.payload;
                             self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
@@ -467,7 +467,7 @@ impl<
                                 self.cache.prune(prune_round).await;
 
                                 // Update the last processed round
-                                let round = finalization.proposal.round;
+                                let round = finalization.round();
                                 self.last_processed_round = round;
 
                                 // Cancel useless requests
@@ -658,7 +658,7 @@ impl<
                                     };
 
                                     // Validation
-                                    if notarization.proposal.round != round
+                                    if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
                                         || !notarization.verify(&mut self.context, &signing, &self.namespace)
                                     {

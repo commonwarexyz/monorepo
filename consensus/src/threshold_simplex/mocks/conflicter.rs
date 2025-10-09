@@ -56,7 +56,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflict
                     // Notarize random digest
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
-                        Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
+                        Proposal::new(notarize.round(), notarize.proposal.parent, payload);
                     let n = Notarize::<S, _>::sign(&self.signing, &self.namespace, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -71,7 +71,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflict
                     // Finalize random digest
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
-                        Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
+                        Proposal::new(finalize.round(), finalize.proposal.parent, payload);
                     let f = Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

@@ -56,7 +56,7 @@ impl<E: Spawner, S: SigningScheme, H: Hasher> Nuller<E, S, H> {
                     let n = Nullify::sign::<H::Digest>(
                         &self.signing,
                         &self.namespace,
-                        notarize.proposal.round,
+                        notarize.round(),
                     );
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

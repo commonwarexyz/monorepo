@@ -1040,6 +1040,12 @@ impl<S: SigningScheme, D: Digest> Attributable for Notarize<S, D> {
     }
 }
 
+impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+}
+
 impl<S: SigningScheme, D: Digest> Epochable for Notarize<S, D> {
     type Epoch = Epoch;
 
@@ -1113,6 +1119,12 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
             proposal,
             certificate,
         })
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
     }
 }
 
@@ -1363,6 +1375,12 @@ impl<S: SigningScheme, D: Digest> Attributable for Finalize<S, D> {
     }
 }
 
+impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+}
+
 impl<S: SigningScheme, D: Digest> Epochable for Finalize<S, D> {
     type Epoch = Epoch;
 
@@ -1436,6 +1454,12 @@ impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
             proposal,
             certificate,
         })
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+    pub fn round(&self) -> Round {
+        self.proposal.round
     }
 }
 
@@ -1978,8 +2002,7 @@ impl<S: SigningScheme, D: Digest> Hash for ConflictingNotarize<S, D> {
 impl<S: SigningScheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
-        assert_eq!(notarize_1.epoch(), notarize_2.epoch());
-        assert_eq!(notarize_1.view(), notarize_2.view());
+        assert_eq!(notarize_1.round(), notarize_2.round());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
 
         ConflictingNotarize {
@@ -2030,9 +2053,7 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
         let notarize_1 = Notarize::read(reader)?;
         let notarize_2 = Notarize::read(reader)?;
 
-        if notarize_1.signer() != notarize_2.signer()
-            || notarize_1.proposal.round != notarize_2.proposal.round
-        {
+        if notarize_1.signer() != notarize_2.signer() || notarize_1.round() != notarize_2.round() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingNotarize",
                 "invalid conflicting notarize",
@@ -2076,8 +2097,7 @@ impl<S: SigningScheme, D: Digest> Hash for ConflictingFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
-        assert_eq!(finalize_1.epoch(), finalize_2.epoch());
-        assert_eq!(finalize_1.view(), finalize_2.view());
+        assert_eq!(finalize_1.round(), finalize_2.round());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
 
         ConflictingFinalize {
@@ -2128,9 +2148,7 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
         let finalize_1 = Finalize::read(reader)?;
         let finalize_2 = Finalize::read(reader)?;
 
-        if finalize_1.signer() != finalize_2.signer()
-            || finalize_1.proposal.round != finalize_2.proposal.round
-        {
+        if finalize_1.signer() != finalize_2.signer() || finalize_1.round() != finalize_2.round() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingFinalize",
                 "invalid conflicting finalize",
@@ -2175,8 +2193,7 @@ impl<S: SigningScheme, D: Digest> Hash for NullifyFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
-        assert_eq!(nullify.epoch(), finalize.epoch());
-        assert_eq!(nullify.view(), finalize.view());
+        assert_eq!(nullify.round, finalize.round());
         assert_eq!(nullify.signer(), finalize.signer());
 
         NullifyFinalize { nullify, finalize }
@@ -2224,7 +2241,7 @@ impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
         let nullify = Nullify::read(reader)?;
         let finalize = Finalize::read(reader)?;
 
-        if nullify.signer() != finalize.signer() || nullify.round != finalize.proposal.round {
+        if nullify.signer() != finalize.signer() || nullify.round != finalize.round() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::NullifyFinalize",
                 "mismatched signatures",
