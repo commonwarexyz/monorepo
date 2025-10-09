@@ -10,7 +10,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::quorum_from_slice;
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
     ops::Deref,
@@ -55,6 +55,7 @@ pub trait Attributable {
 }
 
 /// Identifies the context in which a vote or certificate is produced.
+#[derive(Copy, Clone)]
 pub enum VoteContext<'a, D: Digest> {
     Notarize { proposal: &'a Proposal<D> },
     Nullify { round: Round },
@@ -161,7 +162,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn verify_votes<R, D, I>(
         &self,
-        rng: &mut R,
+        _rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
@@ -169,7 +170,21 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>;
+        I: IntoIterator<Item = Vote<Self>>,
+    {
+        let mut invalid = BTreeSet::new();
+
+        let verified = votes.into_iter().filter_map(|vote| {
+            if self.verify_vote(namespace, context, &vote) {
+                Some(vote)
+            } else {
+                invalid.insert(vote.signer);
+                None
+            }
+        });
+
+        VoteVerification::new(verified.collect(), invalid.into_iter().collect())
+    }
 
     fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
