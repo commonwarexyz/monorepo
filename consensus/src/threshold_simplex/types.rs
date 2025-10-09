@@ -218,8 +218,9 @@ pub struct Participants<P: PublicKey + Eq + Hash> {
 
 impl<P: PublicKey + Eq + Hash> Participants<P> {
     /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Vec<P>) -> Self {
+    pub fn new(mut keys: Vec<P>) -> Self {
         let quorum = quorum_from_slice(&keys);
+        keys.sort();
         let index_by_key = keys
             .iter()
             .enumerate()
