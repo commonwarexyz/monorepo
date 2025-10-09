@@ -236,7 +236,7 @@ impl<
 
     pub(crate) fn get_signing_scheme(&mut self, epoch: Epoch) -> Option<S> {
         if let Some(cache) = self.caches.get(&epoch) {
-            return Some(cache.signing.clone());
+            Some(cache.signing.clone())
         } else {
             self.signing_provider.for_epoch(epoch)
         }
