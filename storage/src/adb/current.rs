@@ -1,7 +1,7 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, and also whether that value is the _current_ value associated with it. Its
 //! implementation is based on an [Any] authenticated database combined with an authenticated
-//! [MerkleizedBitMap] over the activity status of each operation. The two structures are "grafted" together
+//! [BitMap] over the activity status of each operation. The two structures are "grafted" together
 //! to minimize proof sizes.
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
     },
     index::{Index as _, Unordered as Index},
     mmr::{
-        bitmap::MerkleizedBitMap,
+        bitmap::BitMap,
         grafting::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
@@ -86,7 +86,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: MerkleizedBitMap<H, N>,
+    pub status: BitMap<H, N>,
 
     /// The location of the last commit operation.
     pub last_commit_loc: Option<Location>,
@@ -154,7 +154,7 @@ impl<
 
         let context = context.with_label("adb::current");
         let cloned_pool = cfg.thread_pool.clone();
-        let mut status = MerkleizedBitMap::restore_pruned(
+        let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
             cloned_pool,
@@ -250,7 +250,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
@@ -416,7 +416,7 @@ impl<
         hasher.inner().update(last_chunk);
         let last_chunk_digest = hasher.inner().finalize();
 
-        Ok(MerkleizedBitMap::<H, N>::partial_chunk_root(
+        Ok(BitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
             next_bit,
@@ -466,7 +466,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = BitMap::<H, N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -513,14 +513,14 @@ impl<
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk_loc = *start_loc / BitMap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
             Location::new(start_chunk_loc),
             chunk_vec,
         );
 
-        let next_bit = *op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
         }
@@ -542,7 +542,7 @@ impl<
             }
         };
 
-        let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
+        let reconstructed_root = BitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
             next_bit,
@@ -610,7 +610,7 @@ impl<
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !MerkleizedBitMap::<H, N>::get_bit_from_chunk(&info.chunk, *info.loc) {
+        if !BitMap::<H, N>::get_bit_from_chunk(&info.chunk, *info.loc) {
             debug!(
                 loc = ?info.loc,
                 "proof verification failed, operation is inactive"
@@ -618,7 +618,7 @@ impl<
             return false;
         }
 
-        let num = *info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let num = *info.loc / BitMap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
             Location::new(num),
@@ -626,7 +626,7 @@ impl<
         );
         let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
 
-        let next_bit = *op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
             return proof.verify_element_inclusion(&mut verifier, &element, info.loc, root);
         }
@@ -643,8 +643,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if *info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
-            == *op_count / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
+        if *info.loc / BitMap::<H, N>::CHUNK_SIZE_BITS
+            == *op_count / BitMap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -662,12 +662,8 @@ impl<
             }
         };
 
-        let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
-            hasher,
-            &mmr_root,
-            next_bit,
-            &last_chunk_digest,
-        );
+        let reconstructed_root =
+            BitMap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
         reconstructed_root == *root
     }
@@ -680,7 +676,7 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        MerkleizedBitMap::<H, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        BitMap::<H, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -930,8 +926,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(*active_loc),
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(*info.loc)
+                BitMap::<Sha256, 32>::leaf_pos(*active_loc),
+                BitMap::<Sha256, 32>::leaf_pos(*info.loc)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
