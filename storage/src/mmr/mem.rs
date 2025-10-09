@@ -404,10 +404,6 @@ impl<H: CHasher> Mmr<H> {
         }
 
         for (pos, element) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
-            }
-
             // Update the digest of the leaf node and mark its ancestors as dirty.
             let digest = hasher.leaf_digest(*pos, element.as_ref());
             let index = self.pos_to_index(*pos);
