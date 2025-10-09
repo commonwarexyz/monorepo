@@ -119,6 +119,8 @@ pub enum Error {
     InvalidSize(u64),
     #[error("empty")]
     Empty,
+    #[error("pruned chunks causes u64 overflow")]
+    PrunedChunksOverflow,
     #[error("location {0} > MAX_LOCATION")]
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]

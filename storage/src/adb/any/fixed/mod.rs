@@ -729,7 +729,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{bitmap::Bitmap, mem::Mmr as MemMmr, StandardHasher as Standard},
+        mmr::{bitmap::BitMap, mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -1369,9 +1369,9 @@ pub(super) mod test {
             // Close the db, then replay its operations with a bitmap.
             db.close().await.unwrap();
             // Initialize the bitmap based on the current db's inactivity floor.
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             for _ in 0..*inactivity_floor_loc {
-                bitmap.append(false);
+                bitmap.push(false);
             }
             bitmap.sync(&mut hasher).await.unwrap();
 
@@ -1389,7 +1389,7 @@ pub(super) mod test {
                 &log,
                 &mut snapshot,
                 |append, loc| {
-                    bitmap.append(append);
+                    bitmap.push(append);
                     if let Some(loc) = loc {
                         bitmap.set_bit(*loc, false);
                     }
@@ -1411,7 +1411,7 @@ pub(super) mod test {
 
             // Check the bitmap state matches that of the snapshot.
             let items = db.log.size().await.unwrap();
-            assert_eq!(bitmap.bit_count(), items);
+            assert_eq!(bitmap.len(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in *db.inactivity_floor_loc..items {
