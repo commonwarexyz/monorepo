@@ -264,6 +264,7 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     cycle: Duration,
+    realtime: bool,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -280,6 +281,7 @@ pub struct Executor {
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
 pub struct Checkpoint {
     cycle: Duration,
+    realtime: bool,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
@@ -462,6 +464,12 @@ impl Runner {
             // duration can be set to 1ns).
             let mut current;
             {
+                // If realtime is enabled, sleep for the cycle duration
+                if executor.realtime {
+                    std::thread::sleep(executor.cycle);
+                }
+
+                // Update time
                 let mut time = executor.time.lock().unwrap();
                 *time = time
                     .checked_add(executor.cycle)
@@ -482,6 +490,12 @@ impl Runner {
                     }
                 }
                 if let Some(skip_time) = skip {
+                    // If realtime is enabled, sleep for the cycle duration
+                    if executor.realtime {
+                        std::thread::sleep(executor.cycle);
+                    }
+
+                    // Update time
                     {
                         let mut time = executor.time.lock().unwrap();
                         *time = skip_time;
@@ -506,7 +520,7 @@ impl Runner {
 
             // If there are no tasks to run after advancing time, the executor is stalled
             // and will never finish.
-            if executor.tasks.ready() == 0 {
+            if !executor.realtime && executor.tasks.ready() == 0 {
                 panic!("runtime stalled");
             }
             iter += 1;
@@ -540,6 +554,7 @@ impl Runner {
         // Construct a checkpoint that can be used to restart the runtime
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
+            realtime: executor.realtime,
             deadline: executor.deadline,
             auditor: executor.auditor,
             rng: executor.rng,
@@ -757,6 +772,7 @@ impl Context {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
+            realtime: cfg.realtime,
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
@@ -810,6 +826,7 @@ impl Context {
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
+            realtime: checkpoint.realtime,
             deadline: checkpoint.deadline,
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
@@ -1393,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "runtime timeout")]
+    #[should_panic(expected = "runtime stalled")]
     fn test_external_simulated() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
