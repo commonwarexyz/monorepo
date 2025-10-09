@@ -221,7 +221,7 @@ impl<D: Digest> Proof<D> {
             let mut digests = Vec::with_capacity(required.len());
             for req_pos in required {
                 // There must exist a digest for each required position (by
-                // construction of `node_digests`).
+                // construction of `node_digests`)
                 let Some(digest) = node_digests.get(req_pos) else {
                     return false;
                 };
