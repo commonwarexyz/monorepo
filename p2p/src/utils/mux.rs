@@ -12,7 +12,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -48,7 +48,7 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
-    context: E,
+    context: ContextCell<E>,
     sender: S,
     receiver: R,
     mailbox_size: usize,
@@ -62,7 +62,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
         let (control_tx, control_rx) = mpsc::unbounded();
         let mux = Self {
-            context,
+            context: ContextCell::new(context),
             sender,
             receiver,
             mailbox_size,
@@ -80,7 +80,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.
@@ -298,7 +298,7 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner>(
+    async fn create_peer<E: Spawner + Metrics>(
         context: &E,
         oracle: &mut Oracle<Pk>,
         seed: u64,
@@ -308,7 +308,7 @@ mod tests {
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
-        let (mux, handle) = Muxer::new(context.clone(), sender, receiver, CAPACITY);
+        let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }

@@ -12,7 +12,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -26,7 +26,7 @@ pub struct Actor<
     I: Stream,
     C: PublicKey,
 > {
-    context: E,
+    context: ContextCell<E>,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
@@ -77,7 +77,7 @@ impl<
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -100,7 +100,7 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
+        spawn_cell!(self.context, self.run(tracker, router).await)
     }
 
     async fn run(

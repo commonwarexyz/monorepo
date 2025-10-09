@@ -69,7 +69,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     );
 
     // Initialize the base journal to see what existing data we have
-    let mut journal = VJournal::init(context.clone(), cfg.clone()).await?;
+    let mut journal = VJournal::init(context.with_label("journal"), cfg.clone()).await?;
 
     let last_section = journal.blobs.last_key_value().map(|(&s, _)| s);
 
