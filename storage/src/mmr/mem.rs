@@ -399,7 +399,8 @@ impl<H: CHasher> Mmr<H> {
 
         #[cfg(feature = "std")]
         if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            return self.update_leaf_parallel(hasher, updates);
+            self.update_leaf_parallel(hasher, updates);
+            return Ok(());
         }
 
         for (pos, element) in updates {
@@ -446,10 +447,6 @@ impl<H: CHasher> Mmr<H> {
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
     ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    ///
     /// # Panics
     ///
     /// Panics if `self.pool` is None.
@@ -458,13 +455,7 @@ impl<H: CHasher> Mmr<H> {
         &mut self,
         hasher: &mut impl Hasher<H>,
         updates: &[(Position, T)],
-    ) -> Result<(), Error> {
-        for (pos, _) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
-            }
-        }
-
+    ) {
         let pool = self
             .thread_pool
             .as_ref()
@@ -488,8 +479,6 @@ impl<H: CHasher> Mmr<H> {
                 self.mark_dirty(pos);
             }
         });
-
-        Ok(())
     }
 
     /// Returns whether there are pending updates.
