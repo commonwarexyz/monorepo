@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-reshare.svg)](https://crates.io/crates/commonware-reshare)
 
-Key reshare amongst untrusted participants over a replicated log.
+Key reshare and consensus reconfiguration amongst untrusted participants over a replicated log.
 
 ## Setup
 

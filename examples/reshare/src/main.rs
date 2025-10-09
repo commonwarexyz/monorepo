@@ -45,12 +45,16 @@ pub enum Subcommands {
 #[derive(Args)]
 pub struct SetupArgs {
     /// The number of peers in the network.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 6)]
     num_peers: u32,
 
     /// The number of bootstrappers in the network.
     #[arg(long, default_value_t = 2)]
     num_bootstrappers: usize,
+
+    /// The number of participants per epoch.
+    #[arg(long, default_value_t = 4)]
+    num_participants_per_epoch: u32,
 
     /// The directory to store the generated participant configurations.
     #[arg(long, default_value = "./data")]
