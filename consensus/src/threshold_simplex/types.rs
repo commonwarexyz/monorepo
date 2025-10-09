@@ -1703,10 +1703,10 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
 ///
 /// # Warning
 ///
-/// After collecting `t` [PartialSignature]s for the same [Activity], an attacker can derive
-/// the [PartialSignature] for the `n-t` remaining participants.
+/// After collecting `t` partial-signatures for the same [Activity], an attacker can derive
+/// the partial-signatures for the `n-t` remaining participants.
 ///
-/// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
+/// For this reason, it is not sound to use partial-signatures-backed [Activity] to reward participants
 /// for their contributions (as an attacker, for example, could forge contributions from offline participants).
 #[derive(Clone, Debug)]
 pub enum Activity<S: SigningScheme, D: Digest> {
