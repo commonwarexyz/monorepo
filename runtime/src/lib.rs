@@ -273,9 +273,9 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// # Panics
     ///
     /// Panics if `future` is not ready when it is polled at `deadline`.
-    fn poll_at<F, T>(
+    fn await_at<F, T>(
         &self,
-        deadline: SystemTime,
+        delay: Duration,
         future: F,
     ) -> impl Future<Output = T> + Send + 'static
     where

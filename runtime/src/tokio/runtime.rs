@@ -558,9 +558,9 @@ impl Clock for Context {
         tokio::time::sleep_until(target_instant)
     }
 
-    fn poll_at<F, T>(
+    fn await_at<F, T>(
         &self,
-        _deadline: SystemTime,
+        _delay: Duration,
         future: F,
     ) -> impl Future<Output = T> + Send + 'static
     where

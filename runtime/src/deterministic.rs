@@ -1060,14 +1060,14 @@ impl Sleeper {
     }
 }
 
-struct Poller<F> {
+struct Awaiter<F> {
     executor: Weak<Executor>,
     time: SystemTime,
     future: Option<Pin<Box<F>>>,
     registered: bool,
 }
 
-impl<F> Poller<F> {
+impl<F> Awaiter<F> {
     /// Upgrade Weak reference to [Executor].
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
@@ -1122,7 +1122,7 @@ impl Future for Sleeper {
     }
 }
 
-impl<F> Future for Poller<F>
+impl<F> Future for Awaiter<F>
 where
     F: Future + Send + 'static,
 {
@@ -1188,16 +1188,16 @@ impl Clock for Context {
         }
     }
 
-    fn poll_at<F, T>(
-        &self,
-        deadline: SystemTime,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'static
+    fn await_at<F, T>(&self, delay: Duration, future: F) -> impl Future<Output = T> + Send + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        Poller {
+        let deadline = self
+            .current()
+            .checked_add(delay)
+            .expect("overflow when setting wake time");
+        Awaiter {
             executor: self.executor.clone(),
             time: deadline,
             future: Some(Box::pin(future)),
@@ -1575,17 +1575,9 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            let first_deadline = context
-                .current()
-                .checked_add(first_wait)
-                .expect("first deadline overflowed");
-            context.poll_at(first_deadline, first_rx).await.unwrap();
+            context.await_at(first_wait * 2, first_rx).await.unwrap();
             println!("first task finished");
-            let second_deadline = context
-                .current()
-                .checked_add(second_wait)
-                .expect("second deadline overflowed");
-            context.poll_at(second_deadline, second_rx).await.unwrap();
+            context.await_at(second_wait * 2, second_rx).await.unwrap();
             println!("second task finished");
 
             context.auditor().state()
