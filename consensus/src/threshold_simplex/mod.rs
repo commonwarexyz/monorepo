@@ -760,6 +760,7 @@ mod tests {
             mocks::fixtures::bls_threshold_fixture::<V, _>(&mut rng, n);
 
         loop {
+            let rng = rng.clone();
             let schemes = schemes.clone();
             let validators = validators.clone();
             let signing_schemes = signing_schemes.clone();
@@ -806,10 +807,7 @@ mod tests {
                         participants: validators.clone(),
                         signing: signing_schemes[idx].clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(
-                        context.with_label("reporter"),
-                        reporter_config,
-                    );
+                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
