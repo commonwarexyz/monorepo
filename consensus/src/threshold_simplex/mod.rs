@@ -166,7 +166,6 @@
 
 use crate::types::View;
 
-pub mod signing_scheme;
 pub mod types;
 
 use types::SigningScheme;
@@ -179,6 +178,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
+        pub mod signing_scheme;
     }
 }
 
