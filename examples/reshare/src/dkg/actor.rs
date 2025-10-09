@@ -15,6 +15,7 @@ use commonware_cryptography::{
 use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use rand_core::CryptoRngCore;
 use std::cmp::Ordering;
 use tracing::info;
@@ -28,7 +29,7 @@ where
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
-    contributors: Vec<C::PublicKey>,
+    num_participants_per_epoch: usize,
 }
 
 impl<E, H, C, V> Actor<E, H, C, V>
@@ -42,19 +43,16 @@ where
     pub fn new(
         context: E,
         signer: C,
-        mut contributors: Vec<C::PublicKey>,
+        num_participants_per_epoch: usize,
         mailbox_size: usize,
     ) -> (Self, Mailbox<H, C, V>) {
-        // Sort the list of contributors to ensure everyone agrees on ordering.
-        contributors.sort();
-
         let (sender, mailbox) = mpsc::channel(mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
                 mailbox,
                 signer,
-                contributors,
+                num_participants_per_epoch,
             },
             Mailbox::new(sender),
         )
@@ -64,8 +62,10 @@ where
     pub fn start(
         mut self,
         initial_public: Public<V>,
-        initial_share: Share,
-        mut orchestrator: impl Reporter<Activity = EpochTransition<V, H>>,
+        initial_share: Option<Share>,
+        mut active_participants: Vec<C::PublicKey>,
+        mut inactive_participants: Vec<C::PublicKey>,
+        mut orchestrator: impl Reporter<Activity = EpochTransition<V, H, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -77,15 +77,40 @@ where
                 Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
             mux.start();
 
+            // Collect all contributors (active + inactive.)
+            let mut all_participants = active_participants
+                .iter()
+                .chain(inactive_participants.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+
+            // Sort participants to ensure everyone agrees on ordering.
+            all_participants.sort();
+            active_participants.sort();
+
+            if inactive_participants.len() < self.num_participants_per_epoch {
+                // Choose some random active participants to also be players if there are not enough.
+                let mut rng = StdRng::seed_from_u64(0);
+                let dealer_players = active_participants
+                    .choose_multiple(&mut rng, self.num_participants_per_epoch - inactive_participants.len())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                inactive_participants.extend_from_slice(dealer_players.as_slice());
+            } else if inactive_participants.len() > self.num_participants_per_epoch {
+                // Truncate the number of players if there are too many.
+                inactive_participants.truncate(self.num_participants_per_epoch);
+            }
+            inactive_participants.sort();
+
             // Initialize the DKG manager for the first round.
             let mut manager = DkgManager::init(
                 &mut self.context,
-                0, // TODO: Pick up on last epoch from storage.
+                0,
                 initial_public,
-                Some(initial_share),
+                initial_share,
                 &mut self.signer,
-                &self.contributors,
-                &self.contributors,
+                active_participants,
+                inactive_participants,
                 &mut dkg_mux,
             )
             .await;
@@ -111,18 +136,28 @@ where
 
                         // Attempt to transition epochs.
                         if let Some(epoch) = is_last_block_in_epoch(block.height) {
-                            let RoundResult::Output(Output { public, share }) = manager.finalize(epoch).await else {
-                                unimplemented!();
+                            let (next_participants, public, share) = match manager.finalize(epoch).await {
+                                (next_participants, RoundResult::Output(Output { public, share })) => (next_participants, public, Some(share)),
+                                (next_participants, RoundResult::Polynomial(public)) => (next_participants, public, None),
                             };
 
                             info!(epoch, "finalized epoch's reshare; instructing reconfiguration after reshare.");
                             let next_epoch = epoch + 1;
 
-                            let transition: EpochTransition<V, H> = EpochTransition {
+                            // Pseudorandomly select some random players to receive shares for the next epoch.
+                            let mut rng = StdRng::seed_from_u64(epoch);
+                            let mut next_players = all_participants
+                                .choose_multiple(&mut rng, self.num_participants_per_epoch)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            next_players.sort();
+
+                            let transition: EpochTransition<V, H, C::PublicKey> = EpochTransition {
                                 epoch: next_epoch,
                                 seed: block.digest(),
                                 poly: public.clone(),
                                 share: share.clone(),
+                                participants: next_participants.clone(),
                             };
                             orchestrator.report(transition).await;
 
@@ -131,10 +166,10 @@ where
                                 &mut self.context,
                                 next_epoch,
                                 public,
-                                Some(share),
+                                share,
                                 &mut self.signer,
-                                &self.contributors,
-                                &self.contributors,
+                                next_participants,
+                                next_players,
                                 &mut dkg_mux,
                             )
                             .await;
