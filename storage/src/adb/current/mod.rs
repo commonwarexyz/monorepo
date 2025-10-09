@@ -1,8 +1,8 @@
 //! Authenticated databases (ADBs) that provide succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it. The
-//! implementations are based on an [crate::adb::any::fixed::Any] authenticated database combined
-//! with an authenticated [BitMap] over the activity status of each operation. The two structures
-//! are "grafted" together to minimize proof sizes.
+//! implementations are based on a [crate::adb::any::fixed] authenticated database combined with an
+//! authenticated [BitMap] over the activity status of each operation. The two structures are
+//! "grafted" together to minimize proof sizes.
 
 use crate::{
     mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof},
