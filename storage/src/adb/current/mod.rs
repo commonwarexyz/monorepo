@@ -57,7 +57,7 @@ pub struct Config<T: Translator> {
 
 /// The information required to verify a key value proof.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()> + Clone, const N: usize> {
+pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
     /// The key whose value is being proven.
     pub key: K,
 
@@ -71,19 +71,15 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()> + Clone, const N:
     pub chunk: [u8; N],
 }
 
-fn verify_key_value_proof<H, K, V, const N: usize>(
+fn verify_key_value_proof<H: CHasher, const N: usize>(
     hasher: &mut H,
     proof: &Proof<H::Digest>,
-    info: &KeyValueProofInfo<K, V, N>,
+    loc: Location,
+    chunk: &[u8; N],
     root: &H::Digest,
     element: &[u8],
     grafting_height: u32,
-) -> bool
-where
-    H: CHasher,
-    K: Array,
-    V: CodecFixed<Cfg = ()> + Clone,
-{
+) -> bool {
     let Ok(op_count) = Location::try_from(proof.size) else {
         debug!("verification failed, invalid proof size");
         return false;
@@ -91,24 +87,21 @@ where
 
     // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
     // the operation is indeed active).
-    if !BitMap::<H, N>::get_bit_from_chunk(&info.chunk, *info.loc) {
+    if !BitMap::<H, N>::get_bit_from_chunk(chunk, *loc) {
         debug!(
-            loc = ?info.loc,
+            loc = ?loc,
             "proof verification failed, operation is inactive"
         );
         return false;
     }
 
-    let num = *info.loc / BitMap::<H, N>::CHUNK_SIZE_BITS;
-    let mut verifier = Verifier::<H>::new(
-        grafting_height,
-        Location::new_unchecked(num),
-        vec![&info.chunk],
-    );
+    let num = *loc / BitMap::<H, N>::CHUNK_SIZE_BITS;
+    let mut verifier =
+        Verifier::<H>::new(grafting_height, Location::new_unchecked(num), vec![chunk]);
 
     let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
     if next_bit == 0 {
-        return proof.verify_element_inclusion(&mut verifier, element, info.loc, root);
+        return proof.verify_element_inclusion(&mut verifier, element, loc, root);
     }
 
     // The proof must contain the partial chunk digest as its last hash.
@@ -121,10 +114,9 @@ where
     let last_chunk_digest = proof.digests.pop().unwrap();
 
     // If the proof is over an operation in the partial chunk, we need to verify the last chunk
-    // digest from the proof matches the digest of info.chunk, since these bits are not part of
-    // the mmr.
-    if *info.loc / BitMap::<H, N>::CHUNK_SIZE_BITS == *op_count / BitMap::<H, N>::CHUNK_SIZE_BITS {
-        let expected_last_chunk_digest = verifier.digest(&info.chunk);
+    // digest from the proof matches the digest of chunk, since these bits are not part of the mmr.
+    if *loc / BitMap::<H, N>::CHUNK_SIZE_BITS == *op_count / BitMap::<H, N>::CHUNK_SIZE_BITS {
+        let expected_last_chunk_digest = verifier.digest(chunk);
         if last_chunk_digest != expected_last_chunk_digest {
             debug!("last chunk digest does not match expected value");
             return false;
@@ -132,7 +124,7 @@ where
     }
 
     // Reconstruct the MMR root.
-    let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], info.loc) {
+    let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], loc) {
         Ok(root) => root,
         Err(error) => {
             debug!(error = ?error, "invalid proof input");
