@@ -212,7 +212,6 @@ pub struct Op {
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
-#[allow(clippy::type_complexity)]
 fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
     match work_id {
@@ -245,7 +244,6 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
     // and the buffer used for the operation.
-    #[allow(clippy::type_complexity)]
     let mut waiters = Waiters::with_capacity(cfg.size as usize);
 
     loop {
@@ -363,7 +361,6 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 /// Process `ring` completions until all pending operations are complete or
 /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
 /// indefinitely.
-#[allow(clippy::type_complexity)]
 fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
     // When op_timeout is set, each operation uses 2 SQ entries
     // (op + linked timeout).
