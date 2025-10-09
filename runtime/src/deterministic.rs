@@ -1217,6 +1217,7 @@ mod tests {
     use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
     use commonware_macros::test_traced;
     use futures::{channel::oneshot, future::pending, task::noop_waker};
+    use rand::Rng;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1471,6 +1472,54 @@ mod tests {
         executor.start(|_| async move {
             rx.await.unwrap();
         });
+    }
+
+    fn external_realtime_variable(seed: u64) -> String {
+        // Initialize runtime
+        let cfg = Config::default().with_realtime(true);
+        let executor = deterministic::Runner::new(cfg);
+
+        // Create a deterministic ordering of tasks with variable latency
+        let mut rng = StdRng::seed_from_u64(seed);
+        let (first_tx, first_rx) = oneshot::channel();
+        let first_wait = rng.gen_range(100..1000);
+        let (second_tx, second_rx) = oneshot::channel();
+        let second_wait = rng.gen_range(100..1000);
+
+        // Create a thread that waits for 1 second
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(first_wait));
+            first_tx.send(()).unwrap();
+        });
+
+        // Create a thread
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(second_wait));
+            second_tx.send(()).unwrap();
+        });
+
+        // Start runtime
+        executor.start(|context| async move {
+            first_rx.await.unwrap();
+            println!("first task finished");
+            second_rx.await.unwrap();
+            println!("second task finished");
+
+            context.auditor().state()
+        })
+    }
+
+    #[test]
+    fn test_external_realtime_variable() {
+        let mut past_state = None;
+        for i in 0..10 {
+            let state = external_realtime_variable(i);
+            if let Some(past_state) = &past_state {
+                assert_eq!(state, *past_state);
+            } else {
+                past_state = Some(state);
+            }
+        }
     }
 
     #[test]
