@@ -167,17 +167,15 @@ pub struct Config {
 
     /// Observe the actual passage of time rather than simulating it.
     ///
-    /// This is necessary when testing an application that coordinates with some external
-    /// process that doesn't rely on the same runtime (often the case for integrating with
-    /// existing codebases).
+    /// When testing an application that coordinates with some external process, it can appear to
+    /// the runtime that progress has stalled (i.e. no pending tasks can make progress because it is
+    /// waiting on an event unknown to the runtime). When enabled, `realtime` disables time simulation
+    /// and runtime stall detection to provide external processes with time to perform useful work (without
+    /// permitting the managed tasks to run far ahead).
     ///
-    /// Note, this does not mean that the passage of time is "actual". Time will drift as a function
-    /// of how long it takes to process tasks in a given iteration.
-    ///
-    /// # Warning
-    ///
-    /// When enabled, this disables stall detection and the runtime will wait indefinitely for pending
-    /// tasks to complete.
+    /// To maintain determinism in this case, the runtime still advances time by [Config::cycle] after
+    /// each iteration of the event loop (rather than just observing the current time). This means that time
+    /// could drift from elapsed time as a function of how long it takes to process tasks in a given iteration.
     realtime: bool,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
