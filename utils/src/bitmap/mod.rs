@@ -230,8 +230,7 @@ impl<const N: usize> BitMap<N> {
         }
 
         // Remove the last chunk if it's now empty
-        let pos_in_chunk = self.len % Self::CHUNK_SIZE_BITS;
-        if pos_in_chunk == 0 && !self.chunks.is_empty() {
+        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             self.chunks.pop_back();
         }
 
@@ -652,10 +651,6 @@ impl<const N: usize> Read for BitMap<N> {
         let len = u64::read(buf)?;
         if len > *max_len {
             return Err(CodecError::InvalidLength(len as usize));
-        }
-
-        if len == 0 {
-            return Ok(Self::new());
         }
 
         // Calculate how many chunks we need to read
