@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{Config, Current},
+    adb::current::{unordered::Current, Config}, // TODO: test ordered as well
     mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher as Standard},
     translator::TwoCap,
 };
@@ -194,7 +194,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
                                 hasher.inner(),
                                 &proof,
-                                &info,
+                                info.clone(),
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");

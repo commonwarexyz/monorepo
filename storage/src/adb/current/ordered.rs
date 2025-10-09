@@ -34,7 +34,7 @@ use tracing::info;
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Clone,
+    V: CodecFixed<Cfg = ()>,
     H: CHasher,
     T: Translator,
     const N: usize,
@@ -58,7 +58,7 @@ pub struct Current<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()> + Clone,
+        V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
         const N: usize,
@@ -557,16 +557,23 @@ impl<
     pub fn verify_key_value_proof(
         hasher: &mut H,
         proof: &Proof<H::Digest>,
-        info: &KeyValueProofInfo<K, V, N>,
+        info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(ref next_key) = info.next_key else {
+        let Some(next_key) = info.next_key else {
             // Invalid proof, no next_key value is set.
             return false;
         };
-        let element =
-            Operation::Update(info.key.clone(), info.value.clone(), next_key.clone()).encode();
-        super::verify_key_value_proof(hasher, Self::grafting_height(), proof, info, root, &element)
+        let element = Operation::Update(info.key, info.value, next_key).encode();
+        super::verify_key_value_proof(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            info.loc,
+            &info.chunk,
+            root,
+            &element,
+        )
     }
 
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
@@ -575,10 +582,10 @@ impl<
         hasher: &mut H,
         proof: &Proof<H::Digest>,
         key: &K,
-        info: &KeyValueProofInfo<K, V, N>,
+        info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(ref next_key) = info.next_key else {
+        let Some(next_key) = info.next_key else {
             // Invalid proof, no next_key value is set.
             return false;
         };
@@ -586,24 +593,31 @@ impl<
             // The provided `key` is in the DB if it matches the start of the span.
             return false;
         }
-        if *next_key <= info.key {
+        if *next_key <= *info.key {
             // This proof corresponds to the "cycle-around" span.
-            if *key >= *next_key && *key <= info.key {
+            if *key >= next_key && *key <= info.key {
                 // `key` falls outside of the span.
                 return false;
             }
         } else {
             // This is a normal span, verify excluded key is in its range.
-            if *key <= info.key || key >= next_key {
+            if *key <= info.key || *key >= next_key {
                 // `key` falls outside of the span.
                 return false;
             }
         }
 
-        let element =
-            Operation::Update(info.key.clone(), info.value.clone(), next_key.clone()).encode();
+        let element = Operation::Update(info.key, info.value, next_key).encode();
 
-        super::verify_key_value_proof(hasher, Self::grafting_height(), proof, info, root, &element)
+        super::verify_key_value_proof(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            info.loc,
+            &info.chunk,
+            root,
+            &element,
+        )
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -810,9 +824,9 @@ pub mod test {
             assert!(CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &info,
+                info.clone(),
                 &root,
-            ),);
+            ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
@@ -821,7 +835,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &bad_info,
+                bad_info,
                 &root,
             ));
 
@@ -831,14 +845,14 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &bad_info,
+                bad_info.clone(),
                 &root,
             ));
             bad_info.next_key = Some(Sha256::fill(0x02));
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &bad_info,
+                bad_info,
                 &root,
             ));
 
@@ -851,9 +865,9 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &info,
+                info.clone(),
                 &root,
-            ),);
+            ));
 
             // Create a proof of the now-inactive operation.
             let proof_inactive = db
@@ -872,9 +886,9 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &proof_inactive_info,
+                proof_inactive_info.clone(),
                 &root,
-            ),);
+            ));
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
@@ -891,9 +905,9 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &proof_inactive_info,
+                proof_inactive_info,
                 &root,
-            ),);
+            ));
 
             // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make it look
             // like the operation is active by flipping its corresponding bit to 1. This should not
@@ -910,9 +924,9 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &info_with_modified_chunk,
+                info_with_modified_chunk,
                 &root,
-            ),);
+            ));
 
             db.destroy().await.unwrap();
         });
@@ -1027,7 +1041,7 @@ pub mod test {
                 assert!(CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &info,
+                    info.clone(),
                     &root
                 ));
                 // Proof should fail against the wrong value.
@@ -1037,7 +1051,7 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &bad_info,
+                    bad_info.clone(),
                     &root
                 ));
                 // Proof should fail against the wrong key.
@@ -1047,7 +1061,7 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &bad_info,
+                    bad_info,
                     &root
                 ));
                 // Proof should fail against the wrong root.
@@ -1055,9 +1069,9 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &info,
+                    info,
                     &wrong_root,
-                ),);
+                ));
             }
 
             db.destroy().await.unwrap();
@@ -1124,12 +1138,17 @@ pub mod test {
                 assert_eq!(info.value, v);
                 assert!(info.next_key.is_some());
                 assert!(
-                    CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &info, &root),
+                    CurrentTest::verify_key_value_proof(
+                        hasher.inner(),
+                        &proof,
+                        info.clone(),
+                        &root
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &old_info, &root),
+                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
@@ -1341,14 +1360,14 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &greater_key,
-                &info,
+                info.clone(),
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
-                &info,
+                info.clone(),
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
@@ -1356,7 +1375,7 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &k,
-                &info,
+                info,
                 &root,
             ));
 
@@ -1379,7 +1398,7 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &greater_key,
-                &info,
+                info,
                 &root,
             ));
 
@@ -1391,7 +1410,7 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &lesser_key,
-                &info,
+                info,
                 &root,
             ));
 
@@ -1404,7 +1423,7 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &middle_key,
-                &info,
+                info.clone(),
                 &root,
             ));
 
@@ -1413,7 +1432,7 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &conflicting_middle_key,
-                &info,
+                info.clone(),
                 &root,
             ));
 
@@ -1422,14 +1441,14 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &greater_key,
-                &info,
+                info.clone(),
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
-                &info,
+                info,
                 &root,
             ));
         });
