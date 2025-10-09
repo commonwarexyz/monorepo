@@ -283,6 +283,80 @@ pub struct Executor {
     panicker: Panicker,
 }
 
+impl Executor {
+    /// Advance simulated time by [Config::cycle].
+    ///
+    /// If we are operating in [Config::realtime], we will sleep for [Config::cycle].
+    fn advance_time(&self) -> SystemTime {
+        if self.realtime {
+            std::thread::sleep(self.cycle);
+        }
+
+        let mut time = self.time.lock().unwrap();
+        *time = time
+            .checked_add(self.cycle)
+            .expect("executor time overflowed");
+        let now = *time;
+        trace!(now = now.epoch_millis(), "time advanced");
+        now
+    }
+
+    /// When idle, jump directly to the next actionable time.
+    ///
+    /// If we are operating in [Config::realtime], we will never skip ahead (to ensure
+    /// we poll all pending tasks every [Config::cycle]).
+    fn skip_idle_time(&self, current: SystemTime) -> SystemTime {
+        if self.realtime || self.tasks.ready() != 0 {
+            return current;
+        }
+
+        let mut skip_until = None;
+        {
+            let sleeping = self.sleeping.lock().unwrap();
+            if let Some(next) = sleeping.peek() {
+                if next.time > current {
+                    skip_until = Some(next.time);
+                }
+            }
+        }
+
+        if let Some(deadline) = skip_until {
+            let mut time = self.time.lock().unwrap();
+            *time = deadline;
+            let now = *time;
+            trace!(now = now.epoch_millis(), "time skipped");
+            now
+        } else {
+            current
+        }
+    }
+
+    /// Wake any sleepers whose deadlines have elapsed.
+    fn wake_ready_sleepers(&self, current: SystemTime) {
+        let mut sleeping = self.sleeping.lock().unwrap();
+        while let Some(next) = sleeping.peek() {
+            if next.time <= current {
+                let sleeper = sleeping.pop().unwrap();
+                sleeper.waker.wake();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Ensure the runtime is making progress.
+    ///
+    /// If we are operating in [Config::realtime], we will always try to keep making
+    /// progress after the passage of time by polling all pending tasks.
+    fn assert_liveness(&self) {
+        if self.realtime || self.tasks.ready() != 0 {
+            return;
+        }
+
+        panic!("runtime stalled");
+    }
+}
+
 /// An artifact that can be used to recover the state of the runtime.
 ///
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
@@ -468,66 +542,15 @@ impl Runner {
                 break output;
             }
 
-            // Advance time by cycle
-            //
-            // This approach prevents starvation if some task never yields (to approximate this,
-            // duration can be set to 1ns).
-            let mut current;
-            {
-                // If realtime is enabled, sleep for the cycle duration
-                if executor.realtime {
-                    std::thread::sleep(executor.cycle);
-                }
+            // Advance time (skipping ahead if no tasks are ready yet)
+            let mut current = executor.advance_time();
+            current = executor.skip_idle_time(current);
 
-                // Update time
-                let mut time = executor.time.lock().unwrap();
-                *time = time
-                    .checked_add(executor.cycle)
-                    .expect("executor time overflowed");
-                current = *time;
-            }
-            trace!(now = current.epoch_millis(), "time advanced");
+            // Wake sleepers and ensure we continue to make progress
+            executor.wake_ready_sleepers(current);
+            executor.assert_liveness();
 
-            // Skip time if there is nothing to do
-            if !executor.realtime && executor.tasks.ready() == 0 {
-                let mut skip = None;
-                {
-                    let sleeping = executor.sleeping.lock().unwrap();
-                    if let Some(next) = sleeping.peek() {
-                        if next.time > current {
-                            skip = Some(next.time);
-                        }
-                    }
-                }
-                if let Some(skip_time) = skip {
-                    // Update time
-                    {
-                        let mut time = executor.time.lock().unwrap();
-                        *time = skip_time;
-                        current = *time;
-                    }
-                    trace!(now = current.epoch_millis(), "time skipped");
-                }
-            }
-
-            // Wake all sleeping tasks that are ready
-            {
-                let mut sleeping = executor.sleeping.lock().unwrap();
-                while let Some(next) = sleeping.peek() {
-                    if next.time <= current {
-                        let sleeper = sleeping.pop().unwrap();
-                        sleeper.waker.wake();
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            // If there are no tasks to run after advancing time, the executor is stalled
-            // and will never finish.
-            if !executor.realtime && executor.tasks.ready() == 0 {
-                panic!("runtime stalled");
-            }
+            // Record that we completed another iteration of the event loop.
             executor.metrics.iterations.inc();
         };
 
