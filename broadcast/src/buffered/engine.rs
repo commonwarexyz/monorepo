@@ -8,8 +8,9 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::status::{CounterExt, Status},
-    Clock, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -51,7 +52,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: E,
+    context: ContextCell<E>,
 
     ////////////////////////////////////////
     // Configuration
@@ -116,10 +117,12 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
+
+        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
-            context,
+            context: ContextCell::new(context),
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
@@ -140,7 +143,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.

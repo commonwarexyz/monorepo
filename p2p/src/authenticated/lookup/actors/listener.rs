@@ -7,18 +7,13 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{
-    concurrency::Limiter,
-    net::{Subnet, SubnetMask},
-    IpAddrExt,
-};
+use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::{
-    clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
+use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -47,14 +42,13 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: ContextCell<E>,
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     handshake_limiter: Limiter,
-    ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
-    subnet_rate_limiter:
-        RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
+    allowed_handshake_rate_per_ip: Quota,
+    allowed_handshake_rate_per_subnet: Quota,
     registered_ips: HashSet<IpAddr>,
     mailbox: mpsc::Receiver<HashSet<IpAddr>>,
     handshakes_blocked: Counter,
@@ -94,19 +88,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         );
 
         Self {
-            context: context.clone(),
+            context: ContextCell::new(context),
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
-            ip_rate_limiter: RateLimiter::hashmap_with_clock(
-                cfg.allowed_handshake_rate_per_ip,
-                &context,
-            ),
-            subnet_rate_limiter: RateLimiter::hashmap_with_clock(
-                cfg.allowed_handshake_rate_per_subnet,
-                &context,
-            ),
+            allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
+            allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
             registered_ips: HashSet::new(),
             mailbox,
             handshakes_blocked,
@@ -161,7 +149,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, supervisor))
+        spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
     #[allow(clippy::type_complexity)]
@@ -170,6 +158,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        // Setup the rate limiters
+        let ip_rate_limiter =
+            RateLimiter::hashmap_with_clock(self.allowed_handshake_rate_per_ip, &self.context);
+        let subnet_rate_limiter =
+            RateLimiter::hashmap_with_clock(self.allowed_handshake_rate_per_subnet, &self.context);
+
         // Start listening for incoming connections
         let mut listener = self
             .context
@@ -209,14 +203,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
                     // Cleanup the rate limiters periodically
                     if accepted > CLEANUP_INTERVAL {
-                        self.ip_rate_limiter.shrink_to_fit();
-                        self.subnet_rate_limiter.shrink_to_fit();
+                        ip_rate_limiter.shrink_to_fit();
+                        subnet_rate_limiter.shrink_to_fit();
                         accepted = 0;
                     }
                     accepted += 1;
 
                     // Check whether the IP (and subnet) exceeds its rate limit
-                    let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
+                    let ip_limited = if ip_rate_limiter.check_key(&ip).is_err() {
                         self.handshakes_ip_rate_limited.inc();
                         debug!(?address, "ip exceeded handshake rate limit");
                         true
@@ -224,7 +218,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         false
                     };
                     let subnet = ip.subnet(&SUBNET_MASK);
-                    let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                    let subnet_limited = if subnet_rate_limiter.check_key(&subnet).is_err() {
                         self.handshakes_subnet_rate_limited.inc();
                         debug!(?address, "subnet exceeded handshake rate limit");
                         true
@@ -252,7 +246,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         let supervisor = supervisor.clone();
                         move |context| async move {
                             Self::handshake(
-                                context, address, stream_cfg, sink, stream, tracker, supervisor,
+                                context.into(), address, stream_cfg, sink, stream, tracker, supervisor,
                             )
                             .await;
 

@@ -81,8 +81,10 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
-/// Empty error if the requested range is empty.
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -95,19 +97,17 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 ///
 /// # Errors
 ///
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
-/// Empty error if the requested range is empty.
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `range` > `size`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: Position,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    if range.is_empty() {
-        return Err(Error::Empty);
-    }
-
     // Get the positions of all nodes needed to generate the proof.
-    let positions = proof::nodes_required_for_range_proof(size, range);
+    let positions = proof::nodes_required_for_range_proof(size, range)?;
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
@@ -131,7 +131,10 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 ///
 /// # Errors
 ///
-/// Returns Empty error if the requested locations are empty.
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if locations is empty
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     locations: &[Location],
@@ -143,7 +146,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 
     // Collect all required node positions
     let size = mmr.size();
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations)?;
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
@@ -193,8 +196,8 @@ mod tests {
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
-            let mut range_start = Location::new(0);
-            let mut range_end = Location::new(49);
+            let mut range_start = Location::new_unchecked(0);
+            let mut range_end = Location::new_unchecked(49);
             while range_start < range_end {
                 let range = range_start..range_end;
                 let range_proof = mmr.range_proof(range.clone()).unwrap();

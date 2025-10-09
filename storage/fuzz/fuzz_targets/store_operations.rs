@@ -105,7 +105,7 @@ struct FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         log_journal_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = store.op_count();
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
-                        let _ = store.get_loc(Location::new(loc)).await;
+                        let _ = store.get_loc(Location::new(loc).unwrap()).await;
                     }
                 }
 

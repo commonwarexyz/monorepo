@@ -7,8 +7,12 @@ use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 pub struct Label {
     /// The name of the task.
     name: String,
-    /// The type of task.
-    task: Task,
+    /// The type of task (root, async, or blocking).
+    kind: Kind,
+    /// Whether the task is supervised by a parent.
+    supervision: Supervision,
+    /// Whether the task runs on a dedicated thread or the shared runtime.
+    mode: Mode,
 }
 
 impl Label {
@@ -16,31 +20,29 @@ impl Label {
     pub fn root() -> Self {
         Self {
             name: String::new(),
-            task: Task::Root,
+            kind: Kind::Root,
+            supervision: Supervision::Detached,
+            mode: Mode::Shared,
         }
     }
 
     /// Create a new label for a future task.
-    pub fn future(name: String) -> Self {
+    pub fn task(name: String, supervised: bool, dedicated: bool, blocking: bool) -> Self {
         Self {
             name,
-            task: Task::Future,
-        }
-    }
-
-    /// Create a new label for a blocking task spawned in a shared thread pool.
-    pub fn blocking_shared(name: String) -> Self {
-        Self {
-            name,
-            task: Task::BlockingShared,
-        }
-    }
-
-    /// Create a new label for a blocking task spawned on a dedicated thread.
-    pub fn blocking_dedicated(name: String) -> Self {
-        Self {
-            name,
-            task: Task::BlockingDedicated,
+            kind: Kind::Task,
+            supervision: if supervised {
+                Supervision::Supervised
+            } else {
+                Supervision::Detached
+            },
+            mode: if dedicated {
+                Mode::Dedicated
+            } else if blocking {
+                Mode::SharedBlocking
+            } else {
+                Mode::Shared
+            },
         }
     }
 
@@ -52,13 +54,29 @@ impl Label {
 
 /// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Task {
+pub enum Kind {
     /// The root task.
     Root,
     /// An async task.
-    Future,
-    /// A blocking task spawned in a shared thread pool.
-    BlockingShared,
-    /// A blocking task spawned on a dedicated thread.
-    BlockingDedicated,
+    Task,
+}
+
+/// Metric label describing whether a task is supervised by its parent.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Supervision {
+    /// Task is supervised and will be aborted with its parent.
+    Supervised,
+    /// Task is detached from parent supervision.
+    Detached,
+}
+
+/// Metric label describing whether a task runs on a dedicated thread.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Mode {
+    /// Task runs on the shared runtime.
+    Shared,
+    /// Task runs on a shared runtime but is blocking.
+    SharedBlocking,
+    /// Task runs on a dedicated thread.
+    Dedicated,
 }

@@ -171,9 +171,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.clone(), indexer_cfg, indexer, stream, sink)
-            .await
-            .expect("Failed to upgrade connection with indexer");
+        let indexer = dial(
+            context.with_label("dialer"),
+            indexer_cfg,
+            indexer,
+            stream,
+            sink,
+        )
+        .await
+        .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =

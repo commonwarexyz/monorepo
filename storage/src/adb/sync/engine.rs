@@ -238,7 +238,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::adb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end,
+                Location::new_unchecked(log_size)..self.target.range.end,
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -546,7 +546,7 @@ mod tests {
         // Test adding requests
         let fut = Box::pin(async {
             IndexedFetchResult {
-                start_loc: Location::new(0),
+                start_loc: Location::new_unchecked(0),
                 result: Ok(FetchResult {
                     proof: Proof {
                         size: Position::new(0),
@@ -557,12 +557,12 @@ mod tests {
                 }),
             }
         });
-        requests.add(Location::new(10), fut);
+        requests.add(Location::new_unchecked(10), fut);
         assert_eq!(requests.len(), 1);
-        assert!(requests.locations().contains(&Location::new(10)));
+        assert!(requests.locations().contains(&Location::new_unchecked(10)));
 
         // Test removing requests
-        requests.remove(Location::new(10));
-        assert!(!requests.locations().contains(&Location::new(10)));
+        requests.remove(Location::new_unchecked(10));
+        assert!(!requests.locations().contains(&Location::new_unchecked(10)));
     }
 }
