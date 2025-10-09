@@ -11,8 +11,8 @@ pub struct Label {
     kind: Kind,
     /// Whether the task is supervised by a parent.
     supervision: Supervision,
-    /// Whether the task runs on a dedicated thread.
-    schedule: Schedule,
+    /// Whether the task runs on a dedicated thread or the shared runtime.
+    mode: Mode,
 }
 
 impl Label {
@@ -22,38 +22,26 @@ impl Label {
             name: String::new(),
             kind: Kind::Root,
             supervision: Supervision::Detached,
-            schedule: Schedule::Shared,
+            mode: Mode::Shared,
         }
     }
 
     /// Create a new label for a future task.
-    pub fn future(name: String, supervised: bool, dedicated: bool) -> Self {
+    pub fn task(name: String, supervised: bool, dedicated: bool, blocking: bool) -> Self {
         Self {
             name,
-            kind: Kind::Future,
+            kind: Kind::Task,
             supervision: if supervised {
                 Supervision::Supervised
             } else {
                 Supervision::Detached
             },
-            schedule: if dedicated {
-                Schedule::Dedicated
+            mode: if dedicated {
+                Mode::Dedicated
+            } else if blocking {
+                Mode::SharedBlocking
             } else {
-                Schedule::Shared
-            },
-        }
-    }
-
-    /// Create a new label for a blocking task.
-    pub fn blocking(name: String, dedicated: bool) -> Self {
-        Self {
-            name,
-            kind: Kind::Blocking,
-            supervision: Supervision::Detached,
-            schedule: if dedicated {
-                Schedule::Dedicated
-            } else {
-                Schedule::Shared
+                Mode::Shared
             },
         }
     }
@@ -70,9 +58,7 @@ pub enum Kind {
     /// The root task.
     Root,
     /// An async task.
-    Future,
-    /// A blocking task.
-    Blocking,
+    Task,
 }
 
 /// Metric label describing whether a task is supervised by its parent.
@@ -86,9 +72,11 @@ pub enum Supervision {
 
 /// Metric label describing whether a task runs on a dedicated thread.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Schedule {
+pub enum Mode {
     /// Task runs on the shared runtime.
     Shared,
+    /// Task runs on a shared runtime but is blocking.
+    SharedBlocking,
     /// Task runs on a dedicated thread.
     Dedicated,
 }

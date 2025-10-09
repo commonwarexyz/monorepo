@@ -24,11 +24,18 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
+/// The mode of a task.
+#[derive(Copy, Clone, Debug)]
+enum Mode {
+    Dedicated,
+    Shared(bool),
+}
+
 /// Configuration that determines how a task is spawned.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Model {
     supervised: bool,
-    dedicated: bool,
+    mode: Mode,
 }
 
 impl Default for Model {
@@ -36,7 +43,7 @@ impl Default for Model {
         Self {
             // Default to supervised tasks like UNIX (and **unlike tokio**)
             supervised: true,
-            dedicated: false,
+            mode: Mode::Shared(false),
         }
     }
 }
@@ -56,13 +63,13 @@ impl Model {
 
     /// Return a new configuration that requests a dedicated thread.
     pub(crate) fn dedicated(mut self) -> Self {
-        self.dedicated = true;
+        self.mode = Mode::Dedicated;
         self
     }
 
     /// Return a new configuration that requests shared runtime scheduling.
-    pub(crate) fn shared(mut self) -> Self {
-        self.dedicated = false;
+    pub(crate) fn shared(mut self, blocking: bool) -> Self {
+        self.mode = Mode::Shared(blocking);
         self
     }
 
@@ -73,7 +80,12 @@ impl Model {
 
     /// Returns `true` when the task should run on a dedicated thread.
     pub(crate) fn is_dedicated(&self) -> bool {
-        self.dedicated
+        matches!(self.mode, Mode::Dedicated)
+    }
+
+    /// Returns `true` when the task is shared but is blocking.
+    pub(crate) fn is_blocking(&self) -> bool {
+        matches!(self.mode, Mode::Shared(true))
     }
 }
 
@@ -113,7 +125,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
 pub type ThreadPool = Arc<RThreadPool>;
 
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
@@ -133,7 +145,7 @@ pub fn create_pool<S: Spawner + Metrics>(
             context
                 .with_label("rayon-thread")
                 .dedicated()
-                .spawn_blocking(move |_| thread.run());
+                .spawn(move |_| async move { thread.run() });
             Ok(())
         })
         .build()?;

@@ -125,9 +125,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of `Spawner` configured to spawn new tasks supervised by the current
     /// context.
     ///
-    /// Any async task spawned from this context will be aborted automatically if the current task
-    /// completes or is cancelled. Only async tasks can be spawned as supervised, since blocking tasks
-    /// cannot be aborted and therefore can't support parent-child relationships.
+    /// Any task spawned from this context will be aborted automatically if the current task
+    /// completes or is cancelled. Note, a task can only be aborted if it yields (i.e. blocking tasks
+    /// that never yield can never be aborted).
     ///
     /// This is the default behavior, tasks spawned from supervised contexts exit when their parent finishes
     /// (either through completion or abortion).
@@ -142,8 +142,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
     /// executor.
     ///
-    /// This is the default behavior.
-    fn shared(self) -> Self;
+    /// If `blocking` is true and the runtime supports it, the task should be spawned
+    /// in a dedicated thread pool to avoid monopolizing work-stealing worker threads. For long-running
+    /// tasks that don't yield, see [`Spawner::dedicated`].
+    ///
+    /// Non-blocking, shared tasks are the default behavior.
+    fn shared(self, blocking: bool) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
     ///
@@ -163,31 +167,6 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    /// Enqueue a blocking task to be executed.
-    ///
-    /// This method is designed for synchronous, potentially long-running operations. Combine it
-    /// with [`Spawner::dedicated`] when you need a dedicated thread (tasks that are expected to run
-    /// indefinitely), otherwise the task executes in a shared thread (tasks that are expected to
-    /// finish on their own).
-    ///
-    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
-    /// result.
-    ///
-    /// # Motivation
-    ///
-    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
-    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
-    /// of said runtimes.
-    ///
-    /// # Warning
-    ///
-    /// Blocking tasks cannot be aborted or supervised. Calling this method with [`Spawner::supervised`]
-    /// is a no-op.
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and waits for all outstanding tasks
@@ -572,11 +551,18 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort<R: Runner>(runner: R)
+    fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
+            let context = if dedicated {
+                assert!(!blocking);
+                context.dedicated()
+            } else {
+                context.shared(blocking)
+            };
+
             let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -1563,10 +1549,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            let handle = context.spawn_blocking(|_| 42);
+            let handle = context.spawn(|_| async move { 42 });
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
@@ -1580,10 +1566,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            context.clone().spawn_blocking(|_| {
+            context.clone().spawn(|_| async move {
                 panic!("blocking task panicked");
             });
 
@@ -1602,10 +1588,10 @@ mod tests {
             let context = if dedicated {
                 context.dedicated()
             } else {
-                context.shared()
+                context.shared(true)
             };
 
-            let handle = context.clone().spawn_blocking(|_| {
+            let handle = context.clone().spawn(|_| async move {
                 panic!("blocking task panicked");
             });
             handle.await
@@ -1618,54 +1604,8 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.supervised().spawn_blocking(|_| {});
+            let handle = context.shared(true).spawn(|_| async move {});
             let _ = handle.await;
-        });
-    }
-
-    fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|context| async move {
-            // Create task
-            let (sender, mut receiver) = oneshot::channel();
-
-            let context = if dedicated {
-                context.dedicated()
-            } else {
-                context.shared()
-            };
-
-            let handle = context.spawn_blocking(move |_| {
-                // Wait for abort to be called
-                loop {
-                    if receiver.try_recv().is_ok() {
-                        break;
-                    }
-                }
-
-                // Perform a long-running operation
-                let mut count = 0;
-                loop {
-                    count += 1;
-                    if count >= 100_000_000 {
-                        break;
-                    }
-                }
-                count
-            });
-
-            // Abort the task
-            //
-            // If there was an `.await` prior to sending a message over the oneshot, this test
-            // could deadlock (depending on the runtime implementation) because the blocking task
-            // would never yield (preventing send from being called).
-            handle.abort();
-            sender.send(()).unwrap();
-
-            // Wait for the task to complete
-            assert!(matches!(handle.await, Ok(100_000_000)));
         });
     }
 
@@ -1893,7 +1833,7 @@ mod tests {
     #[test]
     fn test_deterministic_spawn_abort() {
         let executor = deterministic::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
@@ -2094,9 +2034,9 @@ mod tests {
 
     #[test]
     fn test_deterministic_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = deterministic::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 
@@ -2164,7 +2104,7 @@ mod tests {
     #[test]
     fn test_tokio_spawn_abort() {
         let executor = tokio::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
@@ -2365,9 +2305,9 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = tokio::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 

@@ -402,8 +402,8 @@ impl crate::Spawner for Context {
         self
     }
 
-    fn shared(mut self) -> Self {
-        self.model = self.model.shared();
+    fn shared(mut self, blocking: bool) -> Self {
+        self.model = self.model.shared(blocking);
         self
     }
 
@@ -414,7 +414,7 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
+        let (_, metric) = spawn_metrics!(self, task);
 
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.model.is_supervised() {
@@ -426,6 +426,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.model.is_dedicated();
+        let blocking = self.model.is_blocking();
         self.model = Model::default();
 
         // Give spawned task its own empty children list
@@ -434,11 +435,22 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
         if dedicated {
-            let runtime_handle = executor.runtime.handle().clone();
-            thread::spawn(move || {
-                runtime_handle.block_on(f);
+            thread::spawn({
+                // Ensure the task can access the tokio runtime
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
+            });
+        } else if blocking {
+            executor.runtime.spawn_blocking({
+                // Ensure the task can access the tokio runtime
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
             });
         } else {
             executor.runtime.spawn(f);
@@ -449,29 +461,6 @@ impl crate::Spawner for Context {
             parent_children.lock().unwrap().push(aborter);
         }
 
-        handle
-    }
-
-    fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        let dedicated = self.model.is_dedicated();
-        self.model = Model::default();
-
-        // Spawn the blocking task
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
-        if dedicated {
-            thread::spawn(f);
-        } else {
-            executor.runtime.spawn_blocking(f);
-        }
         handle
     }
 

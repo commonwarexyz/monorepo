@@ -105,8 +105,8 @@ where
         Self::Present(self.into().dedicated())
     }
 
-    fn shared(self) -> Self {
-        Self::Present(self.into().shared())
+    fn shared(self, blocking: bool) -> Self {
+        Self::Present(self.into().shared(blocking))
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
@@ -116,15 +116,6 @@ where
         T: Send + 'static,
     {
         self.into().spawn(move |context| f(Self::Present(context)))
-    }
-
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.into()
-            .spawn_blocking(move |context| f(Self::Present(context)))
     }
 
     fn stop(
