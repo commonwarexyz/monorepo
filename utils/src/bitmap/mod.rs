@@ -28,20 +28,15 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
-    /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
-    /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
-    /// higher order bits in the bit ordering.
+    /// The bitmap itself, in chunks of size N bytes. Within each byte, lowest order bits are
+    /// treated as coming before higher order bits in the bit ordering.
     ///
-    /// Invariant: All bits in the last chunk >= `self.next_bit` are 0.
+    /// Invariant: `chunks.len() == len.div_ceil(CHUNK_SIZE_BITS)`
+    /// Invariant: All bits at index `i` where `i >= len` must be 0.
     chunks: VecDeque<[u8; N]>,
 
-    /// The position within the last chunk where the next bit is to be appended.
-    ///
-    /// Invariant: If chunks.is_empty(), then next_bit == 0.
-    /// Invariant: If !chunks.is_empty(), then next_bit is in range [1, N * 8].
-    /// If next_bit == N * 8, then the last chunk is full and a new chunk will be added when the
-    /// next bit is added.
-    next_bit: u64,
+    /// The total number of bits stored in the bitmap.
+    len: u64,
 }
 
 impl<const N: usize> BitMap<N> {
@@ -62,9 +57,10 @@ impl<const N: usize> BitMap<N> {
     pub fn new() -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
         Self {
             chunks: VecDeque::new(),
-            next_bit: 0,
+            len: 0,
         }
     }
 
@@ -72,9 +68,10 @@ impl<const N: usize> BitMap<N> {
     pub fn with_capacity(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
         Self {
             chunks: VecDeque::with_capacity(size.div_ceil(Self::CHUNK_SIZE_BITS) as usize),
-            next_bit: 0,
+            len: 0,
         }
     }
 
@@ -82,6 +79,7 @@ impl<const N: usize> BitMap<N> {
     pub fn zeroes(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
         if size == 0 {
             return Self::new();
         }
@@ -90,14 +88,14 @@ impl<const N: usize> BitMap<N> {
         for _ in 0..num_chunks {
             chunks.push_back(Self::EMPTY_CHUNK);
         }
-        let next_bit = size - (num_chunks as u64 - 1) * Self::CHUNK_SIZE_BITS;
-        Self { chunks, next_bit }
+        Self { chunks, len: size }
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 1.
     pub fn ones(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
         if size == 0 {
             return Self::new();
         }
@@ -106,8 +104,7 @@ impl<const N: usize> BitMap<N> {
         for _ in 0..num_chunks {
             chunks.push_back(Self::FULL_CHUNK);
         }
-        let next_bit = size - (num_chunks as u64 - 1) * Self::CHUNK_SIZE_BITS;
-        let mut result = Self { chunks, next_bit };
+        let mut result = Self { chunks, len: size };
         // Clear trailing bits to maintain invariant
         result.clear_trailing_bits();
         result
@@ -118,11 +115,7 @@ impl<const N: usize> BitMap<N> {
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
     pub fn len(&self) -> u64 {
-        if self.chunks.is_empty() {
-            0
-        } else {
-            ((self.chunks.len() as u64 - 1) * Self::CHUNK_SIZE_BITS) + self.next_bit
-        }
+        self.len
     }
 
     /// Returns true if the bitmap is empty.
@@ -195,7 +188,9 @@ impl<const N: usize> BitMap<N> {
     /// Panics if bitmap is empty.
     #[inline]
     fn last_chunk(&self) -> (&[u8; N], u64) {
-        (self.chunks.back().unwrap(), self.next_bit)
+        let rem = self.len % Self::CHUNK_SIZE_BITS;
+        let bits_in_last_chunk = if rem == 0 { Self::CHUNK_SIZE_BITS } else { rem };
+        (self.chunks.back().unwrap(), bits_in_last_chunk)
     }
 
     /* Setters */
@@ -203,19 +198,18 @@ impl<const N: usize> BitMap<N> {
     /// Add a single bit to the bitmap.
     pub fn push(&mut self, bit: bool) {
         // Check if we need a new chunk
-        if self.chunks.is_empty() || self.next_bit == Self::CHUNK_SIZE_BITS {
+        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             self.chunks.push_back(Self::EMPTY_CHUNK);
-            self.next_bit = 0;
         }
 
-        // Now append to the last chunk
-        let chunk_byte = (self.next_bit / 8) as usize;
-        let last_chunk = self.chunks.back_mut().unwrap();
+        // Append to the last chunk
         if bit {
-            last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
+            let last_chunk = self.chunks.back_mut().unwrap();
+            let chunk_byte = Self::chunk_byte_offset(self.len);
+            last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(self.len);
         }
-        // If bit is false, just advance the next_bit -- the bit is already 0
-        self.next_bit += 1;
+        // If bit is false, just advance len -- the bit is already 0
+        self.len += 1;
     }
 
     /// Remove and return the last bit from the bitmap.
@@ -226,31 +220,28 @@ impl<const N: usize> BitMap<N> {
     pub fn pop(&mut self) -> bool {
         assert!(!self.is_empty(), "Cannot pop from empty bitmap");
 
-        if self.next_bit == 1 {
-            // We're removing the last bit from this chunk
-            let bit = Self::get_from_chunk(self.chunks.back().unwrap(), 0);
-            self.chunks.pop_back();
+        // Get the bit value at the last position
+        let last_bit_pos = self.len - 1;
+        let bit = Self::get_from_chunk(self.chunks.back().unwrap(), last_bit_pos);
 
-            // Set next_bit to the end of the previous chunk (if any)
-            self.next_bit = if self.chunks.is_empty() {
-                0
-            } else {
-                Self::CHUNK_SIZE_BITS
-            };
+        // Decrement length
+        self.len -= 1;
 
-            bit
-        } else {
-            // Normal case: just decrement next_bit
-            self.next_bit -= 1;
-            let bit = Self::get_from_chunk(self.chunks.back().unwrap(), self.next_bit);
-
-            // Clear trailing bits to maintain invariant
-            if bit {
-                assert!(self.clear_trailing_bits());
-            }
-
-            bit
+        // Clear the bit we just popped to maintain invariant (if it was 1)
+        if bit {
+            let pos_in_chunk = last_bit_pos % Self::CHUNK_SIZE_BITS;
+            let chunk_byte = (pos_in_chunk / 8) as usize;
+            let mask = Self::chunk_byte_bitmask(last_bit_pos);
+            self.chunks.back_mut().unwrap()[chunk_byte] &= !mask;
         }
+
+        // Remove the last chunk if it's now empty
+        let pos_in_chunk = self.len % Self::CHUNK_SIZE_BITS;
+        if pos_in_chunk == 0 && !self.chunks.is_empty() {
+            self.chunks.pop_back();
+        }
+
+        bit
     }
 
     /// Flips the given bit.
@@ -318,58 +309,57 @@ impl<const N: usize> BitMap<N> {
     //
     // # Warning
     //
-    // Panics if self.next_bit is not byte aligned.
+    // Panics if self.len is not byte aligned.
     fn push_byte(&mut self, byte: u8) {
         assert!(
-            self.next_bit.is_multiple_of(8),
+            self.len.is_multiple_of(8),
             "cannot add byte when not byte aligned"
         );
 
         // Check if we need a new chunk
-        if self.chunks.is_empty() || self.next_bit == Self::CHUNK_SIZE_BITS {
+        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             self.chunks.push_back(Self::EMPTY_CHUNK);
-            self.next_bit = 0;
         }
 
-        let chunk_byte = (self.next_bit / 8) as usize;
+        let chunk_byte = Self::chunk_byte_offset(self.len);
         self.chunks.back_mut().unwrap()[chunk_byte] = byte;
-        self.next_bit += 8;
+        self.len += 8;
     }
 
     /// Add a chunk of bits to the bitmap.
     ///
     /// # Warning
     ///
-    /// Panics if self.next_bit is not chunk aligned.
+    /// Panics if self.len is not chunk aligned.
     pub(super) fn push_chunk(&mut self, chunk: &[u8; N]) {
         assert!(
-            self.chunks.is_empty() || self.next_bit == Self::CHUNK_SIZE_BITS,
+            self.len.is_multiple_of(Self::CHUNK_SIZE_BITS),
             "cannot add chunk when not chunk aligned"
         );
         self.chunks.push_back(*chunk);
-        self.next_bit = Self::CHUNK_SIZE_BITS;
+        self.len += Self::CHUNK_SIZE_BITS;
     }
 
     /* Invariant Maintenance */
 
-    /// Clear all bits in the last chunk that are >= self.next_bit to maintain the invariant.
+    /// Clear all bits in the last chunk that are >= self.len to maintain the invariant.
     /// Returns true if any bits were flipped from 1 to 0.
     fn clear_trailing_bits(&mut self) -> bool {
         if self.chunks.is_empty() {
             return false;
         }
 
-        let next_bit = self.next_bit;
-        let mut flipped_any = false;
-        let last_chunk = self.chunks.back_mut().unwrap();
-
-        if next_bit == Self::CHUNK_SIZE_BITS {
+        let pos_in_chunk = self.len % Self::CHUNK_SIZE_BITS;
+        if pos_in_chunk == 0 {
             // Chunk is full -- there are no trailing bits to clear.
             return false;
         }
 
+        let mut flipped_any = false;
+        let last_chunk = self.chunks.back_mut().unwrap();
+
         // Clear whole bytes after the last valid bit
-        let last_byte_index = ((next_bit - 1) / 8) as usize;
+        let last_byte_index = ((pos_in_chunk - 1) / 8) as usize;
         for byte in last_chunk.iter_mut().skip(last_byte_index + 1) {
             if *byte != 0 {
                 flipped_any = true;
@@ -378,7 +368,7 @@ impl<const N: usize> BitMap<N> {
         }
 
         // Clear the trailing bits in the last partial byte
-        let bits_in_last_byte = next_bit % 8;
+        let bits_in_last_byte = pos_in_chunk % 8;
         if bits_in_last_byte != 0 {
             let mask = (1u8 << bits_in_last_byte) - 1;
             let old_byte = last_chunk[last_byte_index];
@@ -396,9 +386,6 @@ impl<const N: usize> BitMap<N> {
 
     /// Remove the first `chunks` chunks from the bitmap.
     ///
-    /// If all chunks are pruned, a new empty chunk is added to maintain the invariant that the
-    /// bitmap always has at least one chunk.
-    ///
     /// # Warning
     ///
     /// Panics if trying to prune more chunks than exist.
@@ -409,10 +396,9 @@ impl<const N: usize> BitMap<N> {
             self.chunks.len()
         );
         self.chunks.drain(..chunks);
-        // If we removed all chunks, reset next_bit to 0
-        if self.chunks.is_empty() {
-            self.next_bit = 0;
-        }
+        // Update len to reflect the removed chunks
+        let bits_removed = (chunks as u64) * Self::CHUNK_SIZE_BITS;
+        self.len = self.len.saturating_sub(bits_removed);
     }
 
     /* Counting */
@@ -680,7 +666,6 @@ impl<const N: usize> Read for BitMap<N> {
 
         // Calculate how many chunks we need to read
         let num_chunks = len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
-        let next_bit = len - (num_chunks as u64 - 1) * Self::CHUNK_SIZE_BITS;
 
         // Parse chunks
         let mut chunks = VecDeque::with_capacity(num_chunks);
@@ -691,7 +676,7 @@ impl<const N: usize> Read for BitMap<N> {
             chunks.push_back(chunk);
         }
 
-        let mut result = BitMap { chunks, next_bit };
+        let mut result = BitMap { chunks, len };
 
         // Verify trailing bits are zero (maintain invariant)
         if result.clear_trailing_bits() {
