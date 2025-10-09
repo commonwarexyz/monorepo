@@ -22,19 +22,17 @@ impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
     /// * `participants` - ordered validator set used for verification.
-    /// * `signer_index` - index of the local validator in the participant set.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(participants: Vec<PublicKey>, signer_index: u32, private_key: PrivateKey) -> Self {
-        assert!(
-            (signer_index as usize) < participants.len(),
-            "signer index {} is out of bounds for validator set of size {}",
-            signer_index,
-            participants.len()
-        );
+    pub fn new(participants: Vec<PublicKey>, private_key: PrivateKey) -> Self {
+        let participants = Participants::from(participants);
+
+        let signer = participants
+            .signer_index(&private_key.public_key())
+            .map(|index| (index, private_key));
 
         Self {
-            participants: participants.into(),
-            signer: Some((signer_index, private_key)),
+            participants,
+            signer,
         }
     }
 
