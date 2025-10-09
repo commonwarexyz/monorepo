@@ -209,10 +209,10 @@ impl<const N: usize> BitMap<N> {
         }
 
         // Now append to the last chunk
-        let chunk_byte = self.next_bit / 8;
+        let chunk_byte = (self.next_bit / 8) as usize;
         let last_chunk = self.chunks.back_mut().unwrap();
         if bit {
-            last_chunk[chunk_byte as usize] |= Self::chunk_byte_bitmask(self.next_bit);
+            last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
         }
         // If bit is false, just advance the next_bit -- the bit is already 0
         self.next_bit += 1;
@@ -331,8 +331,8 @@ impl<const N: usize> BitMap<N> {
             self.next_bit = 0;
         }
 
-        let chunk_byte = self.next_bit / 8;
-        self.chunks.back_mut().unwrap()[chunk_byte as usize] = byte;
+        let chunk_byte = (self.next_bit / 8) as usize;
+        self.chunks.back_mut().unwrap()[chunk_byte] = byte;
         self.next_bit += 8;
     }
 
