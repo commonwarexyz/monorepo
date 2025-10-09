@@ -1,6 +1,6 @@
 use super::{Mailbox, Message};
 use crate::{
-    dkg::DkgManager,
+    dkg::{manager::RoundResult, DkgManager},
     orchestrator::EpochTransition,
     utils::{is_last_block_in_epoch, BLOCKS_PER_EPOCH},
 };
@@ -82,8 +82,9 @@ where
                 &mut self.context,
                 0, // TODO: Pick up on last epoch from storage.
                 initial_public,
-                initial_share,
+                Some(initial_share),
                 &mut self.signer,
+                &self.contributors,
                 &self.contributors,
                 &mut dkg_mux,
             )
@@ -110,7 +111,9 @@ where
 
                         // Attempt to transition epochs.
                         if let Some(epoch) = is_last_block_in_epoch(block.height) {
-                            let Output { public, share } = manager.finalize(epoch).await;
+                            let RoundResult::Output(Output { public, share }) = manager.finalize(epoch).await else {
+                                unimplemented!();
+                            };
 
                             info!(epoch, "finalized epoch's reshare; instructing reconfiguration after reshare.");
                             let next_epoch = epoch + 1;
@@ -128,8 +131,9 @@ where
                                 &mut self.context,
                                 next_epoch,
                                 public,
-                                share,
+                                Some(share),
                                 &mut self.signer,
+                                &self.contributors,
                                 &self.contributors,
                                 &mut dkg_mux,
                             )

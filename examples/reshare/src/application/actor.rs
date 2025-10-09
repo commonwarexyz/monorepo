@@ -1,7 +1,7 @@
 use crate::{
     application::{types::genesis_block, Block, Mailbox, Message},
     dkg,
-    utils::{get_last_height, height_in_epoch},
+    utils::{get_last_height, height_in_epoch, BLOCKS_PER_EPOCH},
 };
 use commonware_consensus::{marshal, types::Round};
 use commonware_cryptography::{
@@ -217,7 +217,11 @@ where
                     marshal.broadcast(block).await;
                 }
                 Message::Finalized { block } => {
-                    info!(height = block.height, "finalized block");
+                    info!(
+                        height = block.height,
+                        epoch = block.height / BLOCKS_PER_EPOCH,
+                        "finalized block"
+                    );
                 }
             }
         }
