@@ -78,7 +78,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
 
     info!(
         public_key = %config.p2p_key.public_key(),
-        share = %config.share,
+        share = ?config.share,
         ?polynomial,
         "Loaded participant configuration"
     );
@@ -97,7 +97,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let (mut network, mut oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
     // Register all possible peers
-    oracle.register(0, peer_config.peers.clone()).await;
+    oracle.register(0, peer_config.all_peers()).await;
 
     let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
     let pending = network.register(PENDING_CHANNEL, pending_limit, MESSAGE_BACKLOG);
@@ -123,7 +123,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let (dkg, dkg_mailbox) = dkg::Actor::new(
         context.with_label("dkg"),
         config.p2p_key.clone(),
-        peer_config.peers.clone(),
+        peer_config.num_participants_per_epoch as usize,
         MAILBOX_SIZE,
     );
 
@@ -175,7 +175,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
             application: application_mailbox.clone(),
             marshal: marshal_mailbox.clone(),
             namespace: NAMESPACE.to_vec(),
-            validators: peer_config.peers.clone(),
+            validators: peer_config.all_peers(),
             muxer_size: MAILBOX_SIZE,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: "consensus".to_string(),
@@ -183,11 +183,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     );
 
     // Create a static resolver for backfill
-    let supervisor = Supervisor::<V, _>::new(
-        polynomial.clone(),
-        peer_config.peers.clone(),
-        config.share.clone(),
-    );
+    let supervisor = Supervisor::<V, _>::new(polynomial.clone(), peer_config.all_peers(), None);
     let resolver_cfg = p2p_resolver::Config {
         public_key: config.p2p_key.public_key(),
         coordinator: supervisor.clone(),
@@ -210,14 +206,22 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let dkg_handle = dkg.start(
         polynomial.clone(),
         config.share.clone(),
+        peer_config.active.clone(),
+        peer_config.inactive,
         orchestrator_mailbox,
         dkg_channel,
     );
     let application_handle = application.start(marshal_mailbox, dkg_mailbox);
     let buffer_handle = buffer.start(broadcaster);
     let marshal_handle = marshal.start(finalized_reporter, buffered_mailbox, p2p_resolver);
-    let orchestrator_handle =
-        orchestrator.start(pending, recovered, resolver, polynomial, config.share);
+    let orchestrator_handle = orchestrator.start(
+        pending,
+        recovered,
+        resolver,
+        peer_config.active,
+        polynomial,
+        config.share,
+    );
 
     if let Err(e) = try_join_all(vec![
         p2p_handle,

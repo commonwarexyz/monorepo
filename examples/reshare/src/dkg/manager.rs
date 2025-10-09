@@ -54,7 +54,7 @@ where
     previous: RoundResult<V>,
 
     /// The players in the round.
-    players: &'ctx [P::PublicKey],
+    players: Vec<P::PublicKey>,
 
     /// The outbound communication channel for peers.
     sender: SubSender<S>,
@@ -107,14 +107,15 @@ where
     ///
     /// Panics if the signer is not in the list of contributors or if the sub-channel for the current
     /// epoch could not be registered.
+    #[allow(clippy::too_many_arguments)]
     pub async fn init<E: CryptoRngCore>(
         context: &mut E,
         epoch: Epoch,
         public: Public<V>,
         share: Option<group::Share>,
         signer: &'ctx mut P,
-        dealers: &'ctx [P::PublicKey],
-        players: &'ctx [P::PublicKey],
+        dealers: Vec<P::PublicKey>,
+        players: Vec<P::PublicKey>,
         mux: &'ctx mut MuxHandle<S, R>,
     ) -> Self {
         let dealer_meta = share.as_ref().map(|share| {
@@ -130,14 +131,8 @@ where
         });
         let player = players
             .iter()
-            .find(|p| **p == signer.public_key())
-            .is_some()
-            .then(|| {
-                let signer_index = players
-                    .iter()
-                    .position(|pk| pk == &signer.public_key())
-                    .expect("signer must be in contributors")
-                    as u32;
+            .position(|p| p == &signer.public_key())
+            .map(|signer_index| {
                 let player = Player::new(
                     signer.public_key(),
                     Some(public.clone()),
@@ -146,7 +141,7 @@ where
                     CONCURRENCY,
                 );
 
-                (signer_index, player)
+                (signer_index as u32, player)
             });
         let arbiter = Arbiter::new(
             Some(public.clone()),
@@ -210,7 +205,7 @@ where
                         signer_index,
                         round,
                         &self.signer.public_key(),
-                        &commitment,
+                        commitment,
                     );
                     acks.insert(signer_index, ack);
                     continue;
@@ -409,13 +404,13 @@ where
     }
 
     /// Finalize the DKG/reshare round, returning the [Output].
-    pub async fn finalize(self, round: u64) -> RoundResult<V> {
+    pub async fn finalize(self, round: u64) -> (Vec<P::PublicKey>, RoundResult<V>) {
         let (result, disqualified) = self.arbiter.finalize();
         let result = match result {
             Ok(output) => output,
             Err(e) => {
                 error!(error = ?e, "failed to finalize arbiter; aborting round");
-                return self.previous;
+                return (self.players, self.previous);
             }
         };
 
@@ -441,7 +436,7 @@ where
                     Ok(output) => output,
                     Err(e) => {
                         error!(error = ?e, "failed to finalize player; aborting round");
-                        return self.previous;
+                        return (self.players, self.previous);
                     }
                 };
 
@@ -453,9 +448,9 @@ where
                     "finalized DKG/reshare round"
                 );
 
-                RoundResult::Output(output)
+                (self.players, RoundResult::Output(output))
             }
-            None => RoundResult::Polynomial(result.public),
+            None => (self.players, RoundResult::Polynomial(result.public)),
         }
     }
 

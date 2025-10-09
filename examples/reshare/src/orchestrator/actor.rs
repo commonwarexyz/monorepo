@@ -61,7 +61,7 @@ where
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
     context: ContextCell<tokio::Context>,
-    mailbox: mpsc::Receiver<EpochTransition<V, H>>,
+    mailbox: mpsc::Receiver<EpochTransition<V, H, C::PublicKey>>,
     signer: C,
     application: A,
 
@@ -84,7 +84,10 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    pub fn new(context: tokio::Context, config: Config<V, C, H, A>) -> (Self, Mailbox<V, H>) {
+    pub fn new(
+        context: tokio::Context,
+        config: Config<V, C, H, A>,
+    ) -> (Self, Mailbox<V, H, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         (
@@ -120,13 +123,21 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        initial_participants: Vec<C::PublicKey>,
         initial_poly: Public<V>,
-        initial_share: group::Share,
+        initial_share: Option<group::Share>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending, recovered, resolver, initial_poly, initial_share,)
-                .await
+            self.run(
+                pending,
+                recovered,
+                resolver,
+                initial_participants,
+                initial_poly,
+                initial_share
+            )
+            .await
         )
     }
 
@@ -144,8 +155,9 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        initial_participants: Vec<C::PublicKey>,
         initial_poly: Public<V>,
-        initial_share: group::Share,
+        initial_share: Option<group::Share>,
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut pending_mux) = Muxer::new(
@@ -193,6 +205,7 @@ where
             initial_seed,
             initial_poly,
             initial_share,
+            initial_participants,
             &mut metadata,
             &mut pending_mux,
             &mut recovered_mux,
@@ -212,6 +225,7 @@ where
                 transition.seed,
                 transition.poly,
                 transition.share,
+                transition.participants,
                 &mut metadata,
                 &mut pending_mux,
                 &mut recovered_mux,
@@ -227,7 +241,8 @@ where
         epoch: Epoch,
         seed: H::Digest,
         polynomial: Public<V>,
-        share: group::Share,
+        share: Option<group::Share>,
+        participants: Vec<C::PublicKey>,
         metadata: &mut Metadata<ContextCell<tokio::Context>, FixedBytes<1>, (Epoch, H::Digest)>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
@@ -250,8 +265,7 @@ where
             engine.abort();
         }
 
-        let supervisor =
-            Supervisor::<V, C::PublicKey>::new(polynomial, self.validators.clone(), share);
+        let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants, share);
         let engine = threshold_simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             threshold_simplex::Config {

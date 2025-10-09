@@ -32,14 +32,14 @@ pub struct ParticipantConfig {
     /// The bootstrapper node identities.
     #[serde(with = "serde_peer_map")]
     pub bootstrappers: HashMap<PublicKey, SocketAddr>,
-    /// The polynomial commitment for the DKG.
+    /// The group polynomial.
     pub raw_polynomial: String,
     /// The validator's p2p private key.
     #[serde(with = "serde_hex")]
     pub p2p_key: PrivateKey,
-    /// The validator's share of the DKG secret.
+    /// The validator's share, if active in the first epoch.
     #[serde(with = "serde_hex")]
-    pub share: Share,
+    pub share: Option<Share>,
 }
 
 impl ParticipantConfig {
@@ -53,14 +53,27 @@ impl ParticipantConfig {
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfig {
-    /// All peer public keys.
+    /// The number of participants per epoch.
+    pub num_participants_per_epoch: u32,
+    /// All active peer public keys.
     #[serde(with = "serde_hex_vec")]
-    pub peers: Vec<PublicKey>,
+    pub active: Vec<PublicKey>,
+    /// All inactive peer public keys.
+    #[serde(with = "serde_hex_vec")]
+    pub inactive: Vec<PublicKey>,
 }
 
 impl PeerConfig {
     pub fn threshold(&self) -> u32 {
-        quorum(self.peers.len() as u32)
+        quorum(self.num_participants_per_epoch)
+    }
+
+    pub fn all_peers(&self) -> Vec<PublicKey> {
+        self.active
+            .iter()
+            .chain(self.inactive.iter())
+            .cloned()
+            .collect()
     }
 }
 
@@ -73,7 +86,8 @@ pub fn run(args: super::SetupArgs) {
 
     fs::create_dir_all(&args.datadir).unwrap();
 
-    let (polynomial, identities) = generate_identities(args.num_peers);
+    let (polynomial, identities) =
+        generate_identities(args.num_peers, args.num_participants_per_epoch);
     let configs = generate_configs(&args, &polynomial, &identities);
 
     println!("\nTo start the validators, run the following command:");
@@ -92,11 +106,18 @@ pub fn run(args: super::SetupArgs) {
 }
 
 /// Generate shares, ed25519 private keys, and a commitment for a given number of participants.
-fn generate_identities(num_peers: u32) -> (Public<MinSig>, Vec<(PrivateKey, Share)>) {
+fn generate_identities(
+    num_peers: u32,
+    num_participants_per_epoch: u32,
+) -> (Public<MinSig>, Vec<(PrivateKey, Option<Share>)>) {
     // Generate consensus key
-    let threshold = quorum(num_peers);
+    let threshold = quorum(num_participants_per_epoch);
     let (polynomial, shares) =
-        ops::generate_shares::<_, MinSig>(&mut OsRng, None, num_peers, threshold);
+        ops::generate_shares::<_, MinSig>(&mut OsRng, None, num_participants_per_epoch, threshold);
+
+    // Assign shares to peers (those not participating in the first epoch get no share.)
+    let mut shares = shares.into_iter().map(Some).collect::<Vec<_>>();
+    shares.resize(num_peers as usize, None);
 
     info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
 
@@ -116,7 +137,7 @@ fn generate_identities(num_peers: u32) -> (Public<MinSig>, Vec<(PrivateKey, Shar
 fn generate_configs(
     args: &super::SetupArgs,
     polynomial: &Public<MinSig>,
-    identities: &[(PrivateKey, Share)],
+    identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
     let bootstrappers = identities
         .iter()
@@ -149,8 +170,15 @@ fn generate_configs(
     info!("wrote participant configurations");
 
     let peers = PeerConfig {
-        peers: identities
+        num_participants_per_epoch: args.num_participants_per_epoch,
+        active: identities
             .iter()
+            .filter(|(_, share)| share.is_some())
+            .map(|(signer, _)| signer.public_key())
+            .collect(),
+        inactive: identities
+            .iter()
+            .filter(|(_, share)| share.is_none())
             .map(|(signer, _)| signer.public_key())
             .collect(),
     };
