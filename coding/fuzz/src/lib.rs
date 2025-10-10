@@ -39,8 +39,8 @@ pub struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let min = u.int_in_range(1..=((1 << 10) - 1))?;
-        let recovery = u.int_in_range(min..=((1 << 10) - 1))?;
+        let min = u.int_in_range(1..=512)?;
+        let recovery = u.int_in_range(min..=512)?;
         let to_use = u.int_in_range(min..=min + recovery)?;
         let data = u.arbitrary::<Vec<u8>>()?;
         let shuffle = Shuffle::arbitrary(u, (min + recovery) as usize)?;
