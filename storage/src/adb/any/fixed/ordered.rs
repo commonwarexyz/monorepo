@@ -249,9 +249,8 @@ impl<
         Ok(None)
     }
 
-    /// Find the previous key to `key` in the snapshot and update its location to `new_loc`,
-    /// returning an UpdateLocResult indicating the specific outcome. Do not call this method on an
-    /// empty snapshot.
+    /// Finds the previous key to `key` in the snapshot for cases where the previous key does not
+    /// share the same translated key, returning an UpdateLocResult indicating the specific outcome.
     ///
     /// # Panics
     ///
