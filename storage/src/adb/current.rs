@@ -727,6 +727,7 @@ impl<
 
         let (last_chunk, next_bit) = self.status.last_chunk();
         if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
+            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
