@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    AwaitAtExt, Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1575,9 +1575,9 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            context.await_at(first_wait * 2, first_rx).await.unwrap();
+            first_rx.await_at(&context, first_wait * 2).await.unwrap();
             println!("first task finished");
-            context.await_at(second_wait * 2, second_rx).await.unwrap();
+            second_rx.await_at(&context, second_wait * 2).await.unwrap();
             println!("second task finished");
 
             context.auditor().state()
