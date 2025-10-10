@@ -313,15 +313,13 @@ impl<
     ///
     /// # Warning
     ///
-    /// Panics if the location does not reference an update operation. This should never happen
-    /// unless the snapshot is buggy, or this method is being used to look up an operation
-    /// independent of the snapshot contents.
+    /// Returns [Error::UnexpectedData] if the location does not reference an update operation.
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
     ) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(*loc).await? else {
-            panic!("location does not reference update operation. loc={loc}");
+            return Err(Error::UnexpectedData(loc));
         };
 
         Ok((k, v))
@@ -337,17 +335,15 @@ impl<
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
@@ -644,14 +640,16 @@ impl<
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let target_prune_pos = Position::try_from(target_prune_loc)?;
 
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if target_prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondInactivityFloor(
+                target_prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
             return Ok(());
@@ -1741,6 +1739,83 @@ pub(super) mod test {
                     &root_hash
                 ));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_db_get_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test getting from empty database
+            let result = db.get_loc(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
+            let val1 = Digest::random(&mut context);
+            let val2 = Digest::random(&mut context);
+            let val3 = Digest::random(&mut context);
+
+            db.update(key1, val1).await.unwrap();
+            db.update(key2, val2).await.unwrap();
+            db.update(key3, val3).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Test getting valid locations succeeds (only check if not pruned)
+            let inactivity_floor = *db.inactivity_floor_loc();
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor)).await.unwrap().is_some());
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor + 1)).await.unwrap().is_some());
+                assert!(db.get_loc(Location::new_unchecked(inactivity_floor + 2)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary
+            let op_count = *db.op_count();
+            let result = db.get_loc(Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_db_prune_beyond_inactivity_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Add some operations
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
+            let val1 = Digest::random(&mut context);
+            let val2 = Digest::random(&mut context);
+            let val3 = Digest::random(&mut context);
+
+            db.update(key1, val1).await.unwrap();
+            db.update(key2, val2).await.unwrap();
+            db.update(key3, val3).await.unwrap();
+            db.commit().await.unwrap();
+
+            // inactivity_floor should be at some location < op_count
+            let inactivity_floor = db.inactivity_floor_loc();
+            let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
+
+            // Try to prune beyond the inactivity floor
+            let result = db.prune(beyond_floor).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor)) 
+                    if loc == beyond_floor && floor == inactivity_floor)
+            );
 
             db.destroy().await.unwrap();
         });
