@@ -121,12 +121,11 @@ impl<H: CHasher> Mmr<H> {
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
     pub fn init(config: Config<H>) -> Result<Self, Error> {
         // Validate that the total size is valid
-        let total_size = (*config.pruned_to_pos).checked_add(config.nodes.len() as u64);
-        let Some(size) = total_size else {
+        let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !PeakIterator::check_validity(Position::new(size)) {
-            return Err(Error::InvalidSize(size));
+        if !PeakIterator::check_validity(size) {
+            return Err(Error::InvalidSize(*size));
         }
 
         // Validate and populate pinned nodes
