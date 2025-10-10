@@ -157,7 +157,6 @@ fn fuzz(data: FuzzInput) {
                     match expected_state.get(key) {
                         Some(Some(expected_value)) => {
                             // Key should exist with this value
-                            assert!(result.is_some(), "Expected value for key {key:?}");
                             let v = result.expect("get should not fail");
                             let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
@@ -184,9 +183,7 @@ fn fuzz(data: FuzzInput) {
                 AdbOperation::GetSpan { key } => {
                     let k = Key::new(*key);
                     let result = adb.get_span(&k).await.expect("get should not fail");
-                    if result.is_none() {
-                        assert!(adb.is_empty(), "db should be empty if span is empty");
-                    }
+                    assert_eq!(result.is_some(), !adb.is_empty(), "span should be empty only if db is empty");
                 }
             }
         }
