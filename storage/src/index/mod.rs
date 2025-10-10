@@ -885,12 +885,9 @@ mod tests {
                 let mut index = index_clone.lock().unwrap();
                 let mut updated = false;
                 if let Some(mut cursor) = index.get_mut(b"test_key2") {
-                    while let Some(value) = cursor.next() {
-                        if *value == 200 {
-                            cursor.update(250);
-                            updated = true;
-                            break;
-                        }
+                    if cursor.find(|&value| value == 200) {
+                        cursor.update(250);
+                        updated = true;
                     }
                 }
                 updated

@@ -674,13 +674,9 @@ where
             return;
         };
 
-        // Iterate over conflicts in the snapshot.
-        while let Some(loc) = cursor.next() {
-            if *loc == old_loc {
-                // Update the cursor with the new location for this key.
-                cursor.update(new_loc);
-                return;
-            }
+        // Find the location in the snapshot and update it.
+        if cursor.find(|&loc| loc == old_loc) {
+            cursor.update(new_loc);
         }
     }
 
@@ -690,13 +686,9 @@ where
             return;
         };
 
-        // Iterate over conflicts in the snapshot.
-        while let Some(loc) = cursor.next() {
-            if *loc == old_loc {
-                // Delete the element from the cursor.
-                cursor.delete();
-                return;
-            }
+        // Find the key in the snapshot and delete it.
+        if cursor.find(|&loc| loc == old_loc) {
+            cursor.delete();
         }
     }
 
@@ -720,20 +712,17 @@ where
 
         let new_loc = self.log_size;
 
-        // Iterate over all conflicting keys in the snapshot.
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                // Update the location of the operation in the snapshot.
-                cursor.update(new_loc);
-                drop(cursor);
+        if cursor.find(|&loc| loc == old_loc) {
+            // Update the location of the operation in the snapshot.
+            cursor.update(new_loc);
+            drop(cursor);
 
-                self.apply_op(op).await?;
-                return Ok(Some(old_loc));
-            }
+            self.apply_op(op).await?;
+            Ok(Some(old_loc))
+        } else {
+            // The operation is not active, so this is a no-op.
+            Ok(None)
         }
-
-        // The operation is not active, so this is a no-op.
-        Ok(None)
     }
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
