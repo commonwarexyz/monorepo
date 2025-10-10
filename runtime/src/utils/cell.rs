@@ -170,7 +170,12 @@ where
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         self.as_ref().sleep_until(deadline)
     }
+}
 
+impl<C> crate::External for Cell<C>
+where
+    C: crate::External,
+{
     fn constrain<'a, F, T>(
         &'a self,
         range: Range<Duration>,

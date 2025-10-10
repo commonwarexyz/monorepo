@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, External, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1255,7 +1255,9 @@ impl Clock for Context {
             registered: false,
         }
     }
+}
 
+impl External for Context {
     fn constrain<'a, F, T>(
         &'a self,
         range: Range<Duration>,

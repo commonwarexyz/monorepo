@@ -265,24 +265,6 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
-    /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
-    ///
-    /// The returned future is always polled immediately so that it can register any wakers. If it
-    /// completes before the sampled delay expires, the runtime holds the result until then. Once
-    /// the delay passes, the runtime continues polling until the future is ready without yielding
-    /// `Poll::Pending` again.
-    fn constrain<'a, F, T>(
-        &'a self,
-        _range: Range<Duration>,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'a
-    where
-        F: Future<Output = T> + Send + 'a,
-        T: Send + 'a,
-    {
-        future
-    }
-
     /// Await a future with a timeout, returning `Error::Timeout` if it expires.
     ///
     /// # Examples
@@ -325,23 +307,43 @@ pub trait Clock: Clone + Send + Sync + 'static {
     }
 }
 
+pub trait External: Clock + Clone + Send + Sync + 'static {
+    /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
+    ///
+    /// The returned future is always polled immediately so that it can register any wakers. If it
+    /// completes before the sampled delay expires, the runtime holds the result until then. Once
+    /// the delay passes, the runtime continues polling until the future is ready without yielding
+    /// `Poll::Pending` again.
+    fn constrain<'a, F, T>(
+        &'a self,
+        _range: Range<Duration>,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        future
+    }
+}
+
 /// Extension trait that adds deadline-aware awaiting to [`Future`] values.
 ///
 /// This inverts the call-site of [`Clock::constrain`] by letting the future itself request how the
 /// runtime should delay completion relative to the clock.
 pub trait FutureExt: Future + Send + Sized {
     /// Delay completion of the future until a random delay sampled from `range` on `clock`.
-    fn constrain<'a, C>(
+    fn constrain<'a, E>(
         self,
-        clock: &'a C,
+        external: &'a E,
         range: Range<Duration>,
     ) -> impl Future<Output = Self::Output> + Send + 'a
     where
-        C: Clock + 'a,
+        E: External + 'a,
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        clock.constrain(range, self)
+        external.constrain(range, self)
     }
 }
 
