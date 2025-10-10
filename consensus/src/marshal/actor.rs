@@ -154,7 +154,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             },
         )
         .await
-        .expect("failed to initialize finalizations by height archive");
+        .expect("finalizations_by_height should initialize");
         info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
 
         // Initialize finalized blocks
@@ -188,7 +188,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             },
         )
         .await
-        .expect("failed to initialize finalized blocks archive");
+        .expect("finalized_blocks should initialize");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Create metrics
@@ -670,10 +670,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: u64) -> Option<B> {
-        match self.finalized_blocks.get(ArchiveID::Index(height)).await {
-            Ok(block) => block,
-            Err(e) => panic!("failed to get block: {e}"),
-        }
+        self.finalized_blocks
+            .get(ArchiveID::Index(height))
+            .await
+            .expect("finalized_blocks should not fail to get block")
     }
 
     /// Get a finalization from the archive by height.
@@ -681,14 +681,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         &self,
         height: u64,
     ) -> Option<Finalization<V, B::Commitment>> {
-        match self
-            .finalizations_by_height
+        self.finalizations_by_height
             .get(ArchiveID::Index(height))
             .await
-        {
-            Ok(finalization) => finalization,
-            Err(e) => panic!("failed to get finalization: {e}"),
-        }
+            .expect("finalizations_by_height should not fail to get finalization")
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
@@ -769,9 +765,9 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             return Some(block);
         }
         // Check finalized blocks.
-        match self.finalized_blocks.get(ArchiveID::Key(&commitment)).await {
-            Ok(block) => block, // may be None
-            Err(e) => panic!("failed to get block: {e}"),
-        }
+        self.finalized_blocks
+            .get(ArchiveID::Key(&commitment))
+            .await
+            .expect("finalized_blocks should not fail to get block")
     }
 }
