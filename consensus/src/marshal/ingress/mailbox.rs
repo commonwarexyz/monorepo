@@ -46,6 +46,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     }
 }
 
+/// An error indicating that the mailbox is closed because the receiver was dropped.
 #[derive(Debug, thiserror::Error)]
 #[error("mailbox closed")]
 pub struct Closed;
