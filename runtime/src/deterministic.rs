@@ -1389,8 +1389,19 @@ mod tests {
         deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _, Storage,
     };
     use commonware_macros::test_traced;
-    use futures::{channel::oneshot, future::pending, task::noop_waker};
+    use futures::{
+        channel::oneshot,
+        future::pending,
+        task::{noop_waker, waker},
+    };
     use rand::Rng;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+    };
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1495,6 +1506,74 @@ mod tests {
             ..Config::default()
         };
         deterministic::Runner::new(cfg);
+    }
+
+    #[test]
+    fn test_blocker_waits_until_wake() {
+        let blocker = Blocker::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+
+        let thread_blocker = blocker.clone();
+        let thread_started = started.clone();
+        let thread_completed = completed.clone();
+        let handle = thread::spawn(move || {
+            thread_started.store(true, Ordering::SeqCst);
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        });
+
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+
+        assert!(!completed.load(Ordering::SeqCst));
+        waker(blocker.clone()).wake();
+        handle.join().unwrap();
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_handles_pre_wake() {
+        let blocker = Blocker::new();
+        waker(blocker.clone()).wake();
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        thread::spawn(move || {
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        })
+        .join()
+        .unwrap();
+
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_reusable_across_signals() {
+        let blocker = Blocker::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                thread_blocker.wait();
+                thread_completed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        for expected in 1..=2 {
+            waker(blocker.clone()).wake();
+            while completed.load(Ordering::SeqCst) < expected {
+                thread::yield_now();
+            }
+        }
+
+        handle.join().unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
     }
 
     #[test]
