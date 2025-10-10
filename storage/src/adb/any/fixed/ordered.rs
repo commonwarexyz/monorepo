@@ -15,7 +15,10 @@ use crate::{
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     store::{
-        operation::{FixedOperation as OperationTrait, FixedOrdered as Operation},
+        operation::{
+            FixedOperation as OperationTrait, FixedOrdered as Operation,
+            OrderedKeyData as KeyData,
+        },
         Db,
     },
     translator::Translator,
@@ -27,17 +30,6 @@ use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
 use tracing::info;
-
-/// Data about a key that exists in the snapshot.
-#[derive(Debug, PartialEq)]
-pub struct KeyData<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
-    /// The key that exists in the snapshot.
-    pub key: K,
-    /// The value of the key in the database.
-    pub value: V,
-    /// The next-key of the key in the database.
-    pub next_key: K,
-}
 
 /// The return type of the `Any::update_loc` method.
 enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
@@ -156,9 +148,9 @@ impl<
                         Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
                     callback(false, old_loc);
                 }
-                Operation::Update(key, _, _) => {
+                Operation::Update(data) => {
                     let old_loc =
-                        Any::<E, K, V, H, T>::replay_update(snapshot, log, &key, loc).await?;
+                        Any::<E, K, V, H, T>::replay_update(snapshot, log, &data.key, loc).await?;
                     callback(true, old_loc);
                 }
                 Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
@@ -367,15 +359,11 @@ impl<
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
     ) -> Result<KeyData<K, V>, Error> {
-        let Operation::Update(key, value, next_key) = log.read(*loc).await? else {
+        let Operation::Update(data) = log.read(*loc).await? else {
             unreachable!("location does not reference update operation. loc={loc}");
         };
 
-        Ok(KeyData {
-            key,
-            value,
-            next_key,
-        })
+        Ok(data)
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -525,20 +513,36 @@ impl<
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = Operation::Update(key.clone(), value, key);
+            let op = Operation::Update(KeyData {
+                key: key.clone(),
+                value,
+                next_key: key,
+            });
             callback(None);
             self.apply_op(op).await?;
             return Ok(());
         }
         let res = self.update_loc(&key, next_loc, callback).await?;
         let op = match res {
-            UpdateLocResult::Exists(next_key) => Operation::Update(key, value, next_key),
+            UpdateLocResult::Exists(next_key) => Operation::Update(KeyData {
+                key,
+                value,
+                next_key,
+            }),
             UpdateLocResult::NotExists(prev_data) => {
-                self.apply_op(Operation::Update(key.clone(), value, prev_data.next_key))
+                self.apply_op(Operation::Update(KeyData {
+                    key: key.clone(),
+                    value,
+                    next_key: prev_data.next_key,
+                }))
                     .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
-                Operation::Update(prev_data.key, prev_data.value, key)
+                Operation::Update(KeyData {
+                    key: prev_data.key,
+                    value: prev_data.value,
+                    next_key: key,
+                })
             }
         };
 
@@ -634,7 +638,11 @@ impl<
         callback(true, Some(prev_key.0));
         self.update_known_loc(&prev_key.1, prev_key.0, loc).await?;
 
-        self.apply_op(Operation::Update(prev_key.1, prev_key.2, next_key))
+        self.apply_op(Operation::Update(KeyData {
+            key: prev_key.1,
+            value: prev_key.2,
+            next_key,
+        }))
             .await?;
         self.steps += 1;
 
@@ -1037,7 +1045,11 @@ mod test {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value, next_key));
+                ops.push(Operation::Update(KeyData {
+                    key,
+                    value,
+                    next_key,
+                }));
                 prev_key = key;
             }
         }
@@ -1048,8 +1060,8 @@ mod test {
     async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value, _) => {
-                    db.update(key, value).await.unwrap();
+                Operation::Update(data) => {
+                    db.update(data.key, data.value).await.unwrap();
                 }
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
@@ -1751,11 +1763,11 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(
-                Sha256::hash(b"key1"),
-                Sha256::hash(b"value1"),
-                Sha256::hash(b"key2"),
-            );
+            let changed_op = Operation::Update(KeyData {
+                key: Sha256::hash(b"key1"),
+                value: Sha256::hash(b"value1"),
+                next_key: Sha256::hash(b"key2"),
+            });
             {
                 let mut ops = ops.clone();
                 ops[0] = changed_op.clone();

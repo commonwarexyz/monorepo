@@ -17,6 +17,17 @@ use std::{
 };
 use thiserror::Error;
 
+/// Data about a key in an ordered database, including its value and next key.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderedKeyData<K: Array + Ord, V: CodecFixed> {
+    /// The key that exists in the snapshot.
+    pub key: K,
+    /// The value of the key in the database.
+    pub value: V,
+    /// The next-key of the key in the database.
+    pub next_key: K,
+}
+
 // Context byte prefixes for identifying the operation type.
 const DELETE_CONTEXT: u8 = 0;
 const UPDATE_CONTEXT: u8 = 1;
@@ -81,7 +92,7 @@ pub trait FixedOperation: Read<Cfg = ()> + Write + FixedSize + Sized {
 /// An operation applied to an authenticated database with a fixed size value that supports
 /// exclusion proofs over ordered keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum FixedOrdered<K: Array, V: CodecFixed> {
+pub enum FixedOrdered<K: Array + Ord, V: CodecFixed> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -91,7 +102,7 @@ pub enum FixedOrdered<K: Array, V: CodecFixed> {
     /// the key is the lexicographically-last active key, then next-key is the
     /// lexicographically-first of all active keys (in a DB with only one key, this means its
     /// next-key is itself)
-    Update(K, V, K),
+    Update(OrderedKeyData<K, V>),
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
@@ -185,11 +196,11 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> FixedSize for FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed> FixedSize for FixedOrdered<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE + K::SIZE;
 }
 
-impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
     type Key = K;
     type Value = V;
 
@@ -208,7 +219,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
 
         match self {
             FixedOrdered::Delete(key) => Some(key),
-            FixedOrdered::Update(key, _, _) => Some(key),
+            FixedOrdered::Update(data) => Some(&data.key),
             FixedOrdered::CommitFloor(_) => None,
         }
     }
@@ -221,7 +232,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
 
         match self {
             FixedOrdered::Delete(_) => None,
-            FixedOrdered::Update(_, value, _) => Some(value),
+            FixedOrdered::Update(data) => Some(&data.value),
             FixedOrdered::CommitFloor(_) => None,
         }
     }
@@ -234,7 +245,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
 
         match self {
             FixedOrdered::Delete(_) => None,
-            FixedOrdered::Update(_, value, _) => Some(value),
+            FixedOrdered::Update(data) => Some(data.value),
             FixedOrdered::CommitFloor(_) => None,
         }
     }
@@ -278,7 +289,7 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed> FixedOrdered<K, V> {
     // For a compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
@@ -367,7 +378,7 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Write for FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed> Write for FixedOrdered<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             FixedOrdered::Delete(k) => {
@@ -376,11 +387,11 @@ impl<K: Array, V: CodecFixed> Write for FixedOrdered<K, V> {
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - K::SIZE);
             }
-            FixedOrdered::Update(k, v, next_k) => {
+            FixedOrdered::Update(data) => {
                 UPDATE_CONTEXT.write(buf);
-                k.write(buf);
-                v.write(buf);
-                next_k.write(buf);
+                data.key.write(buf);
+                data.value.write(buf);
+                data.next_key.write(buf);
             }
             FixedOrdered::CommitFloor(floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
@@ -482,7 +493,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Read for FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed> Read for FixedOrdered<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -493,7 +504,11 @@ impl<K: Array, V: CodecFixed> Read for FixedOrdered<K, V> {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 let next_key = K::read(buf)?;
-                Ok(Self::Update(key, value, next_key))
+                Ok(Self::Update(OrderedKeyData {
+                    key,
+                    value,
+                    next_key,
+                }))
             }
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
@@ -592,15 +607,15 @@ impl<K: Array, V: CodecFixed> Display for Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Display for FixedOrdered<K, V> {
+impl<K: Array + Ord, V: CodecFixed> Display for FixedOrdered<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FixedOrdered::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            FixedOrdered::Update(key, value, next_key) => {
+            FixedOrdered::Update(data) => {
                 write!(
                     f,
-                    "[key:{key} next_key:{next_key} value:{}]",
-                    hex(&value.encode())
+                    "[key:{} next_key:{} value:{}]",
+                    data.key, data.next_key, hex(&data.value.encode())
                 )
             }
             FixedOrdered::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
@@ -656,7 +671,11 @@ mod tests {
         let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.key());
 
-        let update_op = FixedOrdered::Update(key.clone(), value.clone(), key.clone());
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
         assert_eq!(&key, update_op.key().unwrap());
 
         let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
@@ -680,7 +699,11 @@ mod tests {
         let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.value());
 
-        let update_op = FixedOrdered::Update(key.clone(), value.clone(), key.clone());
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
         assert_eq!(&value, update_op.value().unwrap());
 
         let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
@@ -744,7 +767,11 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedOrdered::Update(key.clone(), value.clone(), key.clone());
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
         assert_eq!(&key, update_op.key().unwrap());
         assert_eq!(&value, update_op.value().unwrap());
 
@@ -820,7 +847,11 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(5678);
         let key2 = U64::new(999);
-        let update_op = FixedOrdered::Update(key, value, key2);
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key,
+            value,
+            next_key: key2,
+        });
 
         let encoded = update_op.encode();
         assert_eq!(encoded.len(), FixedOrdered::<U64, U64>::SIZE);
