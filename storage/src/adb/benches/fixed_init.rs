@@ -123,10 +123,10 @@ fn bench_fixed_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
-            for db_type in ["unordered", "ordered"] {
+            for variant in ["unordered", "ordered"] {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    if db_type == "unordered" {
+                    if variant == "unordered" {
                         let db = get_unordered_any(ctx.clone()).await;
                         gen_random_kv(db, elements, operations).await;
                     } else {
@@ -142,7 +142,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                         module_path!(),
                         elements,
                         operations,
-                        db_type,
+                        variant,
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
@@ -152,7 +152,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let any_cfg = any_cfg(pool);
                             let start = Instant::now();
                             for _ in 0..iters {
-                                if db_type == "unordered" {
+                                if variant == "unordered" {
                                     let db =
                                         UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                                     assert_ne!(db.op_count(), 0);
@@ -175,7 +175,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                     let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                     let any_cfg = any_cfg(pool);
                     // Clean up the database after the benchmark.
-                    if db_type == "unordered" {
+                    if variant == "unordered" {
                         let db = UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                         db.destroy().await.unwrap();
                     } else {
