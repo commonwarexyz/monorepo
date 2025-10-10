@@ -140,8 +140,7 @@ impl<H: CHasher> Mmr<H> {
         }
 
         // Check for too many pinned nodes
-        let actual = config.pinned_nodes.len();
-        if actual != expected_pinned_nodes {
+        if config.pinned_nodes.len() != expected_pinned_nodes {
             return Err(Error::InvalidPinnedNodes);
         }
 
