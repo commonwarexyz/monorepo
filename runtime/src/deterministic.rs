@@ -1193,7 +1193,6 @@ where
             }
             return Poll::Pending;
         }
-        *this.registered = false;
 
         if let Some(value) = this.ready.take() {
             return Poll::Ready(value);
