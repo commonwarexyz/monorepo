@@ -1174,22 +1174,15 @@ where
                 // value is cached and only released after the clock reaches `self.target`.
                 let waker = noop_waker();
                 let mut cx_noop = task::Context::from_waker(&waker);
-                match future.as_mut().poll(&mut cx_noop) {
-                    Poll::Ready(value) => {
-                        *this.future = None;
-                        *this.ready = Some(value);
-                    }
-                    Poll::Pending => {}
+                if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
+                    *this.future = None;
+                    *this.ready = Some(value);
                 }
             }
         }
 
         let executor = this.executor.upgrade().expect("executor already dropped");
         let current_time = *executor.time.lock().unwrap();
-        if *this.registered && current_time >= *this.target {
-            *this.registered = false;
-        }
-
         if current_time < *this.target {
             if !*this.registered {
                 *this.registered = true;
@@ -1200,36 +1193,45 @@ where
             }
             return Poll::Pending;
         }
+        *this.registered = false;
 
         if let Some(value) = this.ready.take() {
             return Poll::Ready(value);
         }
 
-        if let Some(future) = this.future.as_mut() {
-            match future.as_mut().poll(cx) {
+        let mut poll_future = |cx: &mut task::Context<'_>| -> Poll<F::Output> {
+            let poll = {
+                let future = this
+                    .future
+                    .as_mut()
+                    .expect("future already polled at scheduled time");
+                future.as_mut().poll(cx)
+            };
+
+            match poll {
                 Poll::Ready(value) => {
                     *this.future = None;
-                    return Poll::Ready(value);
+                    Poll::Ready(value)
                 }
-                Poll::Pending => {}
+                Poll::Pending => Poll::Pending,
             }
-        }
+        };
 
         // After the delay passes, block the runtime thread until the future reports ready.
-        let blocker = Blocker::new();
+        let mut blocker: Option<Arc<Blocker>> = None;
         loop {
-            let future = this
-                .future
-                .as_mut()
-                .expect("future already polled at scheduled time");
-            let waker = waker(blocker.clone());
-            let mut cx_block = task::Context::from_waker(&waker);
-            match future.as_mut().poll(&mut cx_block) {
-                Poll::Ready(value) => {
-                    *this.future = None;
-                    break Poll::Ready(value);
+            if let Some(blocker) = blocker.as_ref() {
+                let waker = waker(blocker.clone());
+                let mut cx_block = task::Context::from_waker(&waker);
+                match poll_future(&mut cx_block) {
+                    Poll::Ready(value) => break Poll::Ready(value),
+                    Poll::Pending => blocker.wait(),
                 }
-                Poll::Pending => blocker.wait(),
+            } else {
+                match poll_future(cx) {
+                    Poll::Ready(value) => break Poll::Ready(value),
+                    Poll::Pending => blocker = Some(Blocker::new()),
+                }
             }
         }
     }
