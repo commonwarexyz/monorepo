@@ -95,7 +95,7 @@ enum NetworkState {
             discovery::Sender<ed25519::PublicKey>,
             discovery::Receiver<ed25519::PublicKey>,
         ),
-        oracle: discovery::Oracle<deterministic::Context, ed25519::PublicKey>,
+        oracle: discovery::Oracle<ed25519::PublicKey>,
     },
     Lookup {
         handle: Option<Handle<()>>,
@@ -103,7 +103,7 @@ enum NetworkState {
             lookup::Sender<ed25519::PublicKey>,
             lookup::Receiver<ed25519::PublicKey>,
         ),
-        oracle: lookup::Oracle<deterministic::Context, ed25519::PublicKey>,
+        oracle: lookup::Oracle<ed25519::PublicKey>,
     },
 }
 
@@ -138,8 +138,6 @@ fn fuzz(input: FuzzInput) {
         let addresses = peers.iter().map(|p| p.public_key.clone()).collect::<Vec<_>>();
 
         let mut networks: HashMap<u8, NetworkState> = HashMap::new();
-        // Remove unused waiters variable
-        // let mut waiters: Vec<Handle<()>> = Vec::new();
 
         for (peer_idx, peer) in peers.iter().enumerate() {
             let peer_idx_u8 = peer_idx as u8;
@@ -155,7 +153,7 @@ fn fuzz(input: FuzzInput) {
                         ));
                     }
 
-                    let mut config = discovery::Config::aggressive(
+                    let mut config = discovery::Config::recommended(
                         peer.private_key.clone(),
                         b"fuzz_namespace",
                         peer.address,
