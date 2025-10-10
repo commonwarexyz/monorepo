@@ -173,3 +173,17 @@ path = "fuzz_targets/proofs_malleability.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "verify_proof"
+path = "fuzz_targets/verify_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range_proof"
+path = "fuzz_targets/range_proof.rs"
+test = false
+doc = false
+bench = false
