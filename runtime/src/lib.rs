@@ -308,16 +308,14 @@ pub trait Clock: Clone + Send + Sync + 'static {
 }
 
 /// Interface that runtimes can implement to constrain the latency a future
-/// may take to execute. This is particularly useful when injecting variable duration
-/// tasks into [crate::deterministic].
+/// takes to execute.
 pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-    /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
+    /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
+    /// the future is not yet ready at the desired time of completion, the runtime will block until
+    /// the future is ready.
     ///
-    /// Deterministic runtimes use this hook to ensure interactions with external systems cannot
-    /// advance faster than the simulated clock. The returned future is always polled immediately so
-    /// that it can register any wakers. If it completes before the sampled delay expires, the
-    /// runtime holds the result until then. Once the delay passes, the runtime continues polling
-    /// until the future is ready without yielding `Poll::Pending` again.
+    /// In [crate::deterministic], this is used to ensure interactions with external systems can
+    /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
     fn constrain<'a, F, T>(
         &'a self,
         future: F,
@@ -331,12 +329,12 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     }
 }
 
-/// Extension trait that adds deadline-aware awaiting to [`Future`] values.
+/// Extension trait that makes it more ergonomic to use [Pacer].
 ///
-/// This inverts the call-site of [`Clock::constrain`] by letting the future itself request how the
+/// This inverts the call-site of [`Pacer::constrain`] by letting the future itself request how the
 /// runtime should delay completion relative to the clock.
 pub trait FutureExt: Future + Send + Sized {
-    /// Delay completion of the future until a random delay sampled from `range` on `clock`.
+    /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
     fn constrain<'a, E>(
         self,
         pacer: &'a E,
