@@ -527,7 +527,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             if new_size < self.pruned_to_pos {
                 return Err(Error::ElementPruned(new_size));
             }
-            if PeakIterator::check_validity(new_size) {
+            if new_size.is_valid_size() {
                 leaves_to_pop -= 1;
             }
         }

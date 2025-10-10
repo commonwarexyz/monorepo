@@ -51,6 +51,49 @@ impl Position {
     pub const fn saturating_sub(self, rhs: u64) -> Self {
         Self(self.0.saturating_sub(rhs))
     }
+
+    /// Returns whether this is a valid MMR size.
+    ///
+    /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
+    /// MMR of the given size have strictly decreasing height, which is a necessary condition for
+    /// MMR validity.
+    #[inline]
+    pub const fn is_valid_size(self) -> bool {
+        if self.0 == 0 {
+            return true;
+        }
+        let leading_zeros = self.0.leading_zeros();
+        if leading_zeros == 0 {
+            // size overflow
+            return false;
+        }
+        let start = u64::MAX >> leading_zeros;
+        let mut two_h = 1 << start.trailing_ones();
+        let mut node_pos = match start.checked_sub(1) {
+            Some(pos) => pos,
+            None => return false, // start should be greater than 0 since we check size != 0 above
+        };
+        while two_h > 1 {
+            if node_pos < self.0 {
+                if two_h == 2 {
+                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
+                    // invalid.
+                    return node_pos == self.0 - 1;
+                }
+                // move to the right sibling
+                node_pos += two_h - 1;
+                if node_pos < self.0 {
+                    // If the right sibling is in the MMR, then it is invalid.
+                    return false;
+                }
+                continue;
+            }
+            // descend to the left child
+            two_h >>= 1;
+            node_pos -= two_h;
+        }
+        true
+    }
 }
 
 impl fmt::Display for Position {

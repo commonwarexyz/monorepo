@@ -142,7 +142,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             #[cfg(feature = "std")]
             debug!(size = ?self.size, "invalid proof size");
             return false;
@@ -178,7 +178,7 @@ impl<D: Digest> Proof<D> {
             return self.size == Position::new(0)
                 && *root == hasher.root(Position::new(0), core::iter::empty());
         }
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             return false;
         }
 
@@ -358,7 +358,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             return Err(ReconstructionError::InvalidSize);
         }
 
