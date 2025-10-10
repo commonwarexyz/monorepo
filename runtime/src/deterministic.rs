@@ -50,12 +50,13 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    ops::Range,
     pin::Pin,
     sync::{Arc, Condvar, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -1092,7 +1093,7 @@ impl ArcWake for Blocker {
 
 struct Awaiter<F: Future> {
     executor: Weak<Executor>,
-    time: SystemTime,
+    target: SystemTime,
     future: Option<Pin<Box<F>>>,
     ready: Option<F::Output>,
     started: bool,
@@ -1168,8 +1169,8 @@ where
             this.started = true;
             if let Some(future) = this.future.as_mut() {
                 // Poll once with a noop waker so the future can register interest or start work
-                // without being able to wake this task before the deadline. Any ready value is
-                // cached and only released after the clock reaches `self.time`.
+                // without being able to wake this task before the sampled delay expires. Any ready
+                // value is cached and only released after the clock reaches `self.target`.
                 let waker = noop_waker();
                 let mut cx_noop = task::Context::from_waker(&waker);
                 match future.as_mut().poll(&mut cx_noop) {
@@ -1184,12 +1185,15 @@ where
 
         let executor = this.executor();
         let current_time = *executor.time.lock().unwrap();
+        if this.registered && current_time >= this.target {
+            this.registered = false;
+        }
 
-        if current_time < this.time {
+        if current_time < this.target {
             if !this.registered {
                 this.registered = true;
                 executor.sleeping.lock().unwrap().push(Alarm {
-                    time: this.time,
+                    time: this.target,
                     waker: cx.waker().clone(),
                 });
             }
@@ -1200,7 +1204,17 @@ where
             return Poll::Ready(value);
         }
 
-        // After the deadline passes, block the runtime thread until the future reports ready.
+        if let Some(future) = this.future.as_mut() {
+            match future.as_mut().poll(cx) {
+                Poll::Ready(value) => {
+                    this.future = None;
+                    return Poll::Ready(value);
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        // After the delay passes, block the runtime thread until the future reports ready.
         let blocker = Blocker::new();
         loop {
             let future = this
@@ -1242,22 +1256,36 @@ impl Clock for Context {
         }
     }
 
-    fn await_at<'a, F, T>(
+    fn constrain<'a, F, T>(
         &'a self,
-        delay: Duration,
+        range: Range<Duration>,
         future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        let deadline = self
-            .current()
+        let Range { start, end } = range;
+        let executor = self.executor();
+        let delay = if start < end {
+            let mut rng = executor.rng.lock().unwrap();
+            rng.gen_range(start..end)
+        } else if start == end {
+            Duration::ZERO
+        } else {
+            panic!("invalid delay range");
+        };
+        let target = executor
+            .time
+            .lock()
+            .unwrap()
             .checked_add(delay)
             .expect("overflow when setting wake time");
+        drop(executor);
+
         Awaiter {
             executor: self.executor.clone(),
-            time: deadline,
+            target,
             future: Some(Box::pin(future)),
             ready: None,
             started: false,
@@ -1350,8 +1378,7 @@ impl crate::Storage for Context {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, reschedule, utils::run_tasks, AwaitAtExt, Blob, Metrics, Runner as _,
-        Storage,
+        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _, Storage,
     };
     use commonware_macros::test_traced;
     use futures::{channel::oneshot, future::pending, task::noop_waker};
@@ -1638,12 +1665,18 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            // Wait for a delay that is before first_wait
-            first_rx.await_at(&context, Duration::ZERO).await.unwrap();
+            // Wait for a delay sampled before the external send occurs.
+            first_rx
+                .constrain(&context, Duration::ZERO..Duration::ZERO)
+                .await
+                .unwrap();
             println!("first task finished");
 
-            // Wait for a delay that is after second_wait
-            second_rx.await_at(&context, second_wait * 2).await.unwrap();
+            // Wait for a delay sampled after the external send occurs.
+            second_rx
+                .constrain(&context, Duration::ZERO..(second_wait * 2))
+                .await
+                .unwrap();
             println!("second task finished");
 
             context.auditor().state()

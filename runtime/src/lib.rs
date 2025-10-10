@@ -29,6 +29,7 @@ use std::{
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
+    ops::Range,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -264,20 +265,15 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
-    /// Keep polling a future until the given `deadline`.
+    /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
     ///
-    /// Deterministic runtimes can use this as a guard-rail when coordinating with external
-    /// processes. The future is polled immediately to allow it to register any wakers, but the
-    /// runtime guarantees it is not considered complete until `delay` has elapsed. If the future is
-    /// still pending at that point, the runtime continues polling with the caller's waker until it
-    /// completes.
-    ///
-    /// # Panics
-    ///
-    /// This function never panics.
-    fn await_at<'a, F, T>(
+    /// The returned future is always polled immediately so that it can register any wakers. If it
+    /// completes before the sampled delay expires, the runtime holds the result until then. Once
+    /// the delay passes, the runtime continues polling until the future is ready without yielding
+    /// `Poll::Pending` again.
+    fn constrain<'a, F, T>(
         &'a self,
-        _delay: Duration,
+        _range: Range<Duration>,
         future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
@@ -331,29 +327,25 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 /// Extension trait that adds deadline-aware awaiting to [`Future`] values.
 ///
-/// This inverts the call-site of [`Clock::await_at`] by letting the future itself be responsible
-/// for specifying how long the runtime should delay before polling it.
-pub trait AwaitAtExt: Future + Send + Sized {
-    /// Delay polling of the future until `delay` has elapsed on `clock`.
-    ///
-    /// Runtimes that do not virtualize or manipulate time can ignore the requested delay by
-    /// returning the future unchanged from [`Clock::await_at`]. Deterministic runtimes can enforce
-    /// the deadline by panicking if the future is still pending when first polled.
-    fn await_at<'a, C>(
+/// This inverts the call-site of [`Clock::constrain`] by letting the future itself request how the
+/// runtime should delay completion relative to the clock.
+pub trait FutureExt: Future + Send + Sized {
+    /// Delay completion of the future until a random delay sampled from `range` on `clock`.
+    fn constrain<'a, C>(
         self,
         clock: &'a C,
-        delay: Duration,
+        range: Range<Duration>,
     ) -> impl Future<Output = Self::Output> + Send + 'a
     where
         C: Clock + 'a,
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        clock.await_at(delay, self)
+        clock.constrain(range, self)
     }
 }
 
-impl<F> AwaitAtExt for F where F: Future + Send {}
+impl<F> FutureExt for F where F: Future + Send {}
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
 pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;

@@ -5,6 +5,7 @@ use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
+    ops::Range,
     time::{Duration, SystemTime},
 };
 
@@ -170,16 +171,16 @@ where
         self.as_ref().sleep_until(deadline)
     }
 
-    fn await_at<'a, F, T>(
+    fn constrain<'a, F, T>(
         &'a self,
-        delay: Duration,
+        range: Range<Duration>,
         future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().await_at(delay, future)
+        self.as_ref().constrain(range, future)
     }
 }
 
