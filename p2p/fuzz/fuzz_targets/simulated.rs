@@ -28,7 +28,7 @@ enum SimulatedOperation {
         channel_id: u8,
     },
     SendMessage {
-        peer_idx: u8,
+            peer_idx: u8,
         channel_id: u8,
         to_idx: u8,
         msg_size: usize,
@@ -58,7 +58,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
         let operations = u.arbitrary()?;
-        let peer_number = u.int_in_range(2..=MAX_PEERS as u32)? as u8;
+        let peer_number = u.int_in_range(2..=MAX_PEERS)? as u8;
         Ok(FuzzInput {
             seed,
             operations,
