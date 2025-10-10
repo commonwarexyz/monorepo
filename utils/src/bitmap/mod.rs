@@ -118,6 +118,12 @@ impl<const N: usize> BitMap<N> {
         self.len() == 0
     }
 
+    /// Returns true if the bitmap length is aligned to a chunk boundary.
+    #[inline]
+    pub fn is_chunk_aligned(&self) -> bool {
+        self.len.is_multiple_of(Self::CHUNK_SIZE_BITS)
+    }
+
     // Get the number of chunks currently in the bitmap.
     fn chunks_len(&self) -> usize {
         self.chunks.len()
@@ -192,7 +198,7 @@ impl<const N: usize> BitMap<N> {
     /// Add a single bit to the bitmap.
     pub fn push(&mut self, bit: bool) {
         // Check if we need a new chunk
-        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        if self.is_chunk_aligned() {
             self.chunks.push_back(Self::EMPTY_CHUNK);
         }
 
@@ -230,7 +236,7 @@ impl<const N: usize> BitMap<N> {
         }
 
         // Remove the last chunk if it's now empty
-        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        if self.is_chunk_aligned() {
             self.chunks.pop_back();
         }
 
@@ -310,7 +316,7 @@ impl<const N: usize> BitMap<N> {
         );
 
         // Check if we need a new chunk
-        if self.len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        if self.is_chunk_aligned() {
             self.chunks.push_back(Self::EMPTY_CHUNK);
         }
 
@@ -326,7 +332,7 @@ impl<const N: usize> BitMap<N> {
     /// Panics if self.len is not chunk aligned.
     pub(super) fn push_chunk(&mut self, chunk: &[u8; N]) {
         assert!(
-            self.len.is_multiple_of(Self::CHUNK_SIZE_BITS),
+            self.is_chunk_aligned(),
             "cannot add chunk when not chunk aligned"
         );
         self.chunks.push_back(*chunk);
@@ -1906,5 +1912,67 @@ mod tests {
         bv.push(true);
         assert_eq!(bv.len(), 1);
         assert!(bv.get(0));
+    }
+
+    #[test]
+    fn test_is_chunk_aligned() {
+        // Empty bitmap is chunk aligned
+        let bv: BitMap<4> = BitMap::new();
+        assert!(bv.is_chunk_aligned());
+
+        // Test with various chunk sizes
+        let mut bv4: BitMap<4> = BitMap::new();
+        assert!(bv4.is_chunk_aligned());
+
+        // Add bits one at a time and check alignment
+        for i in 1..=32 {
+            bv4.push(i % 2 == 0);
+            if i == 32 {
+                assert!(bv4.is_chunk_aligned()); // Exactly one chunk
+            } else {
+                assert!(!bv4.is_chunk_aligned()); // Partial chunk
+            }
+        }
+
+        // Add more bits
+        for i in 33..=64 {
+            bv4.push(i % 2 == 0);
+            if i == 64 {
+                assert!(bv4.is_chunk_aligned()); // Exactly two chunks
+            } else {
+                assert!(!bv4.is_chunk_aligned()); // Partial chunk
+            }
+        }
+
+        // Test with push_chunk
+        let mut bv: BitMap<8> = BitMap::new();
+        assert!(bv.is_chunk_aligned());
+        bv.push_chunk(&[0xFF; 8]);
+        assert!(bv.is_chunk_aligned()); // 64 bits = 1 chunk for N=8
+        bv.push_chunk(&[0xAA; 8]);
+        assert!(bv.is_chunk_aligned()); // 128 bits = 2 chunks
+        bv.push(true);
+        assert!(!bv.is_chunk_aligned()); // 129 bits = partial chunk
+
+        // Test with push_byte
+        let mut bv: BitMap<4> = BitMap::new();
+        for _ in 0..4 {
+            bv.push_byte(0xFF);
+        }
+        assert!(bv.is_chunk_aligned()); // 32 bits = 1 chunk for N=4
+
+        // Test after pop
+        bv.pop();
+        assert!(!bv.is_chunk_aligned()); // 31 bits = partial chunk
+
+        // Test with zeroes and ones constructors
+        let bv_zeroes: BitMap<4> = BitMap::zeroes(64);
+        assert!(bv_zeroes.is_chunk_aligned());
+
+        let bv_ones: BitMap<4> = BitMap::ones(96);
+        assert!(bv_ones.is_chunk_aligned());
+
+        let bv_partial: BitMap<4> = BitMap::zeroes(65);
+        assert!(!bv_partial.is_chunk_aligned());
     }
 }

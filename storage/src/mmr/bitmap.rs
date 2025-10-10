@@ -211,6 +211,12 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         self.len() == 0
     }
 
+    /// Returns true if the bitmap length is aligned to a chunk boundary.
+    #[inline]
+    pub fn is_chunk_aligned(&self) -> bool {
+        self.bitmap.is_chunk_aligned()
+    }
+
     /// Return the number of bits that have been pruned from this bitmap.
     #[inline]
     pub fn pruned_bits(&self) -> u64 {
@@ -221,7 +227,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     #[inline]
     fn complete_chunks(&self) -> usize {
         let chunks_len = self.bitmap.chunks_len();
-        if self.bitmap.len().is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        if self.bitmap.is_chunk_aligned() {
             chunks_len
         } else {
             // Last chunk is partial
@@ -389,8 +395,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         );
         let mmr_root = self.mmr.root(hasher);
 
-        // Either the bitmap is empty or the last chunk is complete (there is no partial chunk to add)
-        if self.bitmap.len().is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        // Check if there's a partial chunk to add
+        if self.is_chunk_aligned() {
             return Ok(mmr_root);
         }
 
@@ -981,6 +987,54 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test_traced]
+    fn test_bitmap_is_chunk_aligned() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = StandardHasher::new();
+            let mut bitmap: BitMap<Sha256, SHA256_SIZE> = BitMap::new();
+
+            // Empty bitmap is chunk aligned
+            assert!(bitmap.is_chunk_aligned());
+
+            // Add a partial chunk
+            bitmap.push(true);
+            assert!(!bitmap.is_chunk_aligned());
+
+            // Fill to chunk boundary
+            for _ in 1..256 {
+                bitmap.push(false);
+            }
+            bitmap.sync(&mut hasher).await.unwrap();
+            assert!(bitmap.is_chunk_aligned());
+
+            // Add full chunk with push_chunk
+            bitmap.push_chunk(&[0xFF; SHA256_SIZE]);
+            bitmap.sync(&mut hasher).await.unwrap();
+            assert!(bitmap.is_chunk_aligned());
+
+            // Add partial chunk
+            bitmap.push(true);
+            bitmap.push(false);
+            assert!(!bitmap.is_chunk_aligned());
+
+            // Test after pruning to chunk boundary
+            bitmap.prune_to_bit(512);
+            assert!(!bitmap.is_chunk_aligned()); // Still have 2 extra bits
+
+            // Build a new bitmap with chunk alignment after pruning
+            let mut bitmap2: BitMap<Sha256, SHA256_SIZE> = BitMap::new();
+            for _ in 0..3 {
+                bitmap2.push_chunk(&[0xAA; SHA256_SIZE]);
+            }
+            bitmap2.sync(&mut hasher).await.unwrap();
+            assert!(bitmap2.is_chunk_aligned());
+
+            bitmap2.prune_to_bit(256);
+            assert!(bitmap2.is_chunk_aligned()); // Still aligned after pruning
+        });
     }
 
     #[test_traced]
