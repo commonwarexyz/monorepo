@@ -249,8 +249,9 @@ impl<
         Ok(None)
     }
 
-    /// Finds the previous key to `key` in the snapshot for cases where the previous key does not
-    /// share the same translated key, returning an UpdateLocResult indicating the specific outcome.
+    /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
+    /// the previous key does not share the same translated key, returning an UpdateLocResult
+    /// indicating the specific outcome.
     ///
     /// # Panics
     ///
