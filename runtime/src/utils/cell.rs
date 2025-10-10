@@ -172,9 +172,9 @@ where
     }
 }
 
-impl<C> crate::External for Cell<C>
+impl<C> crate::Pacer for Cell<C>
 where
-    C: crate::External,
+    C: crate::Pacer,
 {
     fn constrain<'a, F, T>(
         &'a self,

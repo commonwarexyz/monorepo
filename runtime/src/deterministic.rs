@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, External, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Model, Pacer, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1248,7 +1248,7 @@ impl Clock for Context {
     }
 }
 
-impl External for Context {
+impl Pacer for Context {
     fn constrain<'a, F, T>(
         &'a self,
         future: F,

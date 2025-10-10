@@ -307,13 +307,17 @@ pub trait Clock: Clone + Send + Sync + 'static {
     }
 }
 
-pub trait External: Clock + Clone + Send + Sync + 'static {
+/// Interface that runtimes can implement to constrain the latency a future
+/// may take to execute. This is particularly useful when injecting variable duration
+/// tasks into [crate::deterministic].
+pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
     ///
-    /// The returned future is always polled immediately so that it can register any wakers. If it
-    /// completes before the sampled delay expires, the runtime holds the result until then. Once
-    /// the delay passes, the runtime continues polling until the future is ready without yielding
-    /// `Poll::Pending` again.
+    /// Deterministic runtimes use this hook to ensure interactions with external systems cannot
+    /// advance faster than the simulated clock. The returned future is always polled immediately so
+    /// that it can register any wakers. If it completes before the sampled delay expires, the
+    /// runtime holds the result until then. Once the delay passes, the runtime continues polling
+    /// until the future is ready without yielding `Poll::Pending` again.
     fn constrain<'a, F, T>(
         &'a self,
         future: F,
@@ -335,15 +339,15 @@ pub trait FutureExt: Future + Send + Sized {
     /// Delay completion of the future until a random delay sampled from `range` on `clock`.
     fn constrain<'a, E>(
         self,
-        external: &'a E,
+        pacer: &'a E,
         range: Range<Duration>,
     ) -> impl Future<Output = Self::Output> + Send + 'a
     where
-        E: External + 'a,
+        E: Pacer + 'a,
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        external.constrain(self, range)
+        pacer.constrain(self, range)
     }
 }
 
