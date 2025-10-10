@@ -1,3 +1,8 @@
+//! This module exposes the domain-separation helpers plus concrete
+//! [`SigningScheme`](crate::threshold_simplex::types::SigningScheme) implementations:
+//! one backed by BLS12-381 threshold signatures and one backed by Ed25519 quorum
+//! signatures.
+
 use commonware_utils::union;
 
 // Constants for domain separation in signature verification

@@ -1,3 +1,8 @@
+//! Ed25519 quorum signature implementation of the signing scheme abstraction.
+//!
+//! This module batches ordinary Ed25519 signatures from a quorum of participants
+//! and packages them as certificates that satisfy the generic consensus interface.
+
 use crate::threshold_simplex::{
     signing_scheme::{finalize_namespace, notarize_namespace, nullify_namespace},
     types::{Participants, SigningScheme, Vote, VoteContext, VoteVerification},
@@ -12,6 +17,9 @@ use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`SigningScheme`] trait.
+///
+/// The scheme keeps the participant ordering plus (optionally) the local private
+/// key so it can produce votes as well as batch-verify signatures from peers.
 #[derive(Clone, Debug)]
 pub struct Scheme {
     participants: Participants<PublicKey>,
@@ -50,9 +58,13 @@ impl Scheme {
     }
 }
 
+/// Multi-signature certificate formed by collecting Ed25519 signatures plus
+/// their signer indices sorted in ascending order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
+    /// Indices of the validators that contributed signatures (ascending order).
     pub signers: Vec<u32>,
+    /// Ed25519 signatures emitted by the respective validators.
     pub signatures: Vec<Ed25519Signature>,
 }
 

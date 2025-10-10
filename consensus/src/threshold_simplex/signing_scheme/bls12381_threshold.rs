@@ -1,4 +1,9 @@
-//! Signing abstractions for simplex.
+//! BLS12-381 threshold implementation of the signing scheme abstraction.
+//!
+//! Validators contribute partial signatures over both the consensus message and the
+//! per-view seed that feeds leader selection and downstream randomness. Once a quorum
+//! is collected, the partials are aggregated into a certificate under the shared BLS
+//! public identity.
 
 use crate::{
     threshold_simplex::{
@@ -33,6 +38,11 @@ use std::{
     fmt::Debug,
 };
 
+/// Signing scheme state for the BLS threshold flow.
+///
+/// The enum mirrors the roles a node may play: a signer (with its share),
+/// a verifier (with evaluated public polynomial), or an external verifier that
+/// only checks recovered certificates.
 #[derive(Clone, Debug)]
 pub enum Scheme<V: Variant> {
     Signer {
@@ -130,9 +140,12 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
+/// Combined message/seed signature pair emitted by the BLS scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
+    /// Signature over the consensus message (partial or recovered aggregate).
     pub message_signature: V::Signature,
+    /// Signature over the per-view seed (partial or recovered aggregate).
     pub seed_signature: V::Signature,
 }
 
