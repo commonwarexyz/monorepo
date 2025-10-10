@@ -16,7 +16,7 @@ use crate::{
         hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
-    store::{operation::Fixed as Operation, KVStore},
+    store::{operation::Fixed as Operation, Db},
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _, FixedSize};
@@ -663,7 +663,7 @@ impl<
         H: CHasher,
         T: Translator,
         const N: usize,
-    > KVStore<E, K, V, T> for Current<E, K, V, H, T, N>
+    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()

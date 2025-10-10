@@ -23,7 +23,7 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [KVStore::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
 //!
 //! |                               Log State                                            | Inactivity Floor | Uncommitted Ops |
 //! |------------------------------------------------------------------------------------|------------------|-----------------|
@@ -167,7 +167,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait KVStore<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
+pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -811,7 +811,7 @@ where
     }
 }
 
-impl<E, K, V, T> KVStore<E, K, V, T> for Store<E, K, V, T>
+impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

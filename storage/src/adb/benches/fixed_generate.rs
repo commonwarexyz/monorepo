@@ -8,7 +8,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-    store::KVStore,
+    store::Db,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -75,7 +75,7 @@ async fn get_ordered_any(ctx: Context) -> OAnyDb {
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `COMMIT_FREQUENCY` operations, and pruned before returning.
 async fn gen_random_kv<
-    A: KVStore<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
+    A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
 >(
     mut db: A,
     num_elements: u64,

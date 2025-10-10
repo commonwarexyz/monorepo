@@ -16,7 +16,7 @@ use crate::{
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     store::{
         operation::{FixedOperation as OperationTrait, FixedOrdered as Operation},
-        KVStore,
+        Db,
     },
     translator::Translator,
 };
@@ -902,7 +902,7 @@ impl<
         V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
-    > KVStore<E, K, V, T> for Any<E, K, V, H, T>
+    > Db<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
