@@ -170,10 +170,14 @@ where
         self.as_ref().sleep_until(deadline)
     }
 
-    fn await_at<F, T>(&self, delay: Duration, future: F) -> impl Future<Output = T> + Send + 'static
+    fn await_at<'a, F, T>(
+        &'a self,
+        delay: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
     where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
     {
         self.as_ref().await_at(delay, future)
     }

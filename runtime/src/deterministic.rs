@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    AwaitAtExt, Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1124,7 +1124,7 @@ impl Future for Sleeper {
 
 impl<F> Future for Awaiter<F>
 where
-    F: Future + Send + 'static,
+    F: Future + Send,
 {
     type Output = F::Output;
 
@@ -1188,10 +1188,14 @@ impl Clock for Context {
         }
     }
 
-    fn await_at<F, T>(&self, delay: Duration, future: F) -> impl Future<Output = T> + Send + 'static
+    fn await_at<'a, F, T>(
+        &'a self,
+        delay: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
     where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
     {
         let deadline = self
             .current()
@@ -1289,7 +1293,10 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, utils::run_tasks, AwaitAtExt, Blob, Metrics, Runner as _,
+        Storage,
+    };
     use commonware_macros::test_traced;
     use futures::{channel::oneshot, future::pending, task::noop_waker};
     use rand::Rng;

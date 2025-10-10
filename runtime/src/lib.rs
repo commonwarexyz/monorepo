@@ -29,8 +29,6 @@ use std::{
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
-    pin::Pin,
-    task::{Context as TaskContext, Poll as TaskPoll},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -275,14 +273,14 @@ pub trait Clock: Clone + Send + Sync + 'static {
     /// # Panics
     ///
     /// Panics if `future` is not ready when it is polled at `deadline`.
-    fn await_at<F, T>(
-        &self,
+    fn await_at<'a, F, T>(
+        &'a self,
         _delay: Duration,
         future: F,
-    ) -> impl Future<Output = T> + Send + 'static
+    ) -> impl Future<Output = T> + Send + 'a
     where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
     {
         future
     }
@@ -333,89 +331,27 @@ pub trait Clock: Clone + Send + Sync + 'static {
 ///
 /// This inverts the call-site of [`Clock::await_at`] by letting the future itself be responsible
 /// for specifying how long the runtime should delay before polling it.
-pub trait AwaitAtExt: Future + Send + 'static + Sized {
+pub trait AwaitAtExt: Future + Send + Sized {
     /// Delay polling of the future until `delay` has elapsed on `clock`.
     ///
     /// Runtimes that do not virtualize or manipulate time can ignore the requested delay by
     /// returning the future unchanged from [`Clock::await_at`]. Deterministic runtimes can enforce
     /// the deadline by panicking if the future is still pending when first polled.
-    fn await_at<C>(self, clock: &C, delay: Duration) -> DeadlineFuture<C, Self>
+    fn await_at<'a, C>(
+        self,
+        clock: &'a C,
+        delay: Duration,
+    ) -> impl Future<Output = Self::Output> + Send + 'a
     where
-        C: Clock,
-        Self::Output: Send + 'static,
+        C: Clock + 'a,
+        Self: Send + 'a,
+        Self::Output: Send + 'a,
     {
-        DeadlineFuture::new(clock.clone(), self, delay)
+        clock.await_at(delay, self)
     }
 }
 
-impl<F> AwaitAtExt for F where F: Future + Send + 'static {}
-
-/// Future returned by [`AwaitAtExt::await_at`].
-#[must_use = "futures do nothing unless awaited"]
-pub struct DeadlineFuture<C, F>
-where
-    C: Clock,
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    clock: Option<C>,
-    delay: Duration,
-    future: Option<F>,
-    scheduled: Option<Pin<Box<dyn Future<Output = F::Output> + Send + 'static>>>,
-}
-
-impl<C, F> DeadlineFuture<C, F>
-where
-    C: Clock,
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    fn new(clock: C, future: F, delay: Duration) -> Self {
-        Self {
-            clock: Some(clock),
-            delay,
-            future: Some(future),
-            scheduled: None,
-        }
-    }
-}
-
-impl<C, F> Future for DeadlineFuture<C, F>
-where
-    C: Clock,
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> TaskPoll<Self::Output> {
-        // SAFETY: `DeadlineFuture` never moves a scheduled future once it has been created; the
-        // pinned data lives inside `Pin<Box<..>>`, and we only ever replace the `Option` holding it
-        // with `None`, which drops it in place. Accessing the struct mutably therefore does not move
-        // any pinned projection.
-        let this = unsafe { self.as_mut().get_unchecked_mut() };
-        if this.scheduled.is_none() {
-            let clock = this
-                .clock
-                .take()
-                .expect("deadline future already initialized");
-            let future = this.future.take().expect("inner future missing");
-            let scheduled = clock.await_at(this.delay, future);
-            this.scheduled = Some(Box::pin(scheduled));
-        }
-
-        let scheduled = this
-            .scheduled
-            .as_mut()
-            .expect("scheduled future missing")
-            .as_mut();
-        let poll = scheduled.poll(cx);
-        if poll.is_ready() {
-            this.scheduled = None;
-        }
-        poll
-    }
-}
+impl<F> AwaitAtExt for F where F: Future + Send {}
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
 pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
