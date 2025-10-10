@@ -16,8 +16,7 @@ use crate::{
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     store::{
         operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation,
-            OrderedKeyData as KeyData,
+            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
         },
         Db,
     },
@@ -320,7 +319,9 @@ impl<
                 }
             }
 
-            // The key wasn't in the snapshot, so add it to the cursor.
+            // The key wasn't in the snapshot, so add it to the cursor.  Note that since we have not
+            // yet inserted the operation into the log, we need to be careful to prevent lookups
+            // performed by the remained of this function to attempt to retrieve it.
             cursor.insert(next_loc);
             callback(None);
         }
@@ -535,7 +536,7 @@ impl<
                     value,
                     next_key: prev_data.next_key,
                 }))
-                    .await?;
+                .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
                 Operation::Update(KeyData {
@@ -643,7 +644,7 @@ impl<
             value: prev_key.2,
             next_key,
         }))
-            .await?;
+        .await?;
         self.steps += 1;
 
         Ok(())
