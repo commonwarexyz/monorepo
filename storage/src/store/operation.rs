@@ -17,14 +17,14 @@ use std::{
 };
 use thiserror::Error;
 
-/// Data about a key in an ordered database, including its value and next key.
+/// Data about a key in an ordered database or an ordered database operation.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderedKeyData<K: Array + Ord, V: CodecFixed> {
-    /// The key that exists in the snapshot.
+    /// The key that exists in the database or in the database operation.
     pub key: K,
-    /// The value of the key in the database.
+    /// The value of `key` in the database or operation.
     pub value: V,
-    /// The next-key of the key in the database.
+    /// The next-key of `key` in the database or operation.
     pub next_key: K,
 }
 
@@ -615,7 +615,9 @@ impl<K: Array + Ord, V: CodecFixed> Display for FixedOrdered<K, V> {
                 write!(
                     f,
                     "[key:{} next_key:{} value:{}]",
-                    data.key, data.next_key, hex(&data.value.encode())
+                    data.key,
+                    data.next_key,
+                    hex(&data.value.encode())
                 )
             }
             FixedOrdered::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
