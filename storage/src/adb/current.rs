@@ -18,7 +18,7 @@ use crate::{
         hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
-    store::operation::Fixed as Operation,
+    store::{operation::Fixed as Operation, Db},
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _, FixedSize};
@@ -75,7 +75,7 @@ pub struct Config<T: Translator> {
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Clone,
+    V: CodecFixed<Cfg = ()>,
     H: CHasher,
     T: Translator,
     const N: usize,
@@ -115,7 +115,7 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()> + Clone,
+        V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
         const N: usize,
@@ -615,7 +615,7 @@ impl<
     pub fn verify_key_value_proof(
         hasher: &mut H,
         proof: &Proof<H::Digest>,
-        info: &KeyValueProofInfo<K, V, N>,
+        info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
         let Ok(op_count) = Location::try_from(proof.size) else {
@@ -639,7 +639,7 @@ impl<
             Location::new_unchecked(num),
             vec![&info.chunk],
         );
-        let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
+        let element = Operation::Update(info.key, info.value).encode();
 
         let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
@@ -765,10 +765,60 @@ impl<
     }
 }
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+        const N: usize,
+    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
+{
+    fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+        self.any.get(key).await.map_err(Into::into)
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+        self.any.update(key, value).await.map_err(Into::into)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+        self.any.delete(key).await.map(|_| ()).map_err(Into::into)
+    }
+
+    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+        self.commit().await.map_err(Into::into)
+    }
+
+    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+        self.sync().await.map_err(Into::into)
+    }
+
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+        self.prune(target_prune_loc).await.map_err(Into::into)
+    }
+
+    async fn close(self) -> Result<(), crate::store::Error> {
+        self.close().await.map_err(Into::into)
+    }
+
+    async fn destroy(self) -> Result<(), crate::store::Error> {
+        self.destroy().await.map_err(Into::into)
+    }
+}
+
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::translator::TwoCap;
+    use crate::{store::operation::FixedOperation as _, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
@@ -890,7 +940,7 @@ pub mod test {
             assert!(CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &info,
+                info.clone(),
                 &root,
             ),);
 
@@ -901,7 +951,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &bad_info,
+                bad_info,
                 &root,
             ),);
 
@@ -914,7 +964,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
-                &info,
+                info.clone(),
                 &root,
             ),);
 
@@ -934,7 +984,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &proof_inactive_info,
+                proof_inactive_info,
                 &root,
             ),);
 
@@ -953,7 +1003,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &proof_inactive_info,
+                info_with_modified_loc,
                 &root,
             ),);
 
@@ -972,7 +1022,7 @@ pub mod test {
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
-                &info_with_modified_chunk,
+                info_with_modified_chunk,
                 &root,
             ),);
 
@@ -1089,7 +1139,7 @@ pub mod test {
                 assert!(CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &info,
+                    info.clone(),
                     &root
                 ));
                 // Proof should fail against the wrong value.
@@ -1099,7 +1149,7 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &bad_info,
+                    bad_info,
                     &root
                 ));
                 // Proof should fail against the wrong key.
@@ -1109,7 +1159,7 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &bad_info,
+                    bad_info,
                     &root
                 ));
                 // Proof should fail against the wrong root.
@@ -1117,7 +1167,7 @@ pub mod test {
                 assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
-                    &info,
+                    info,
                     &wrong_root,
                 ),);
             }
@@ -1184,15 +1234,20 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &info, &root),
+                    CurrentTest::verify_key_value_proof(
+                        hasher.inner(),
+                        &proof,
+                        info.clone(),
+                        &root
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &old_info, &root),
+                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
                     "proof of update {i} failed to verify"
                 );
-                old_info = info.clone();
+                old_info = info;
             }
 
             db.destroy().await.unwrap();

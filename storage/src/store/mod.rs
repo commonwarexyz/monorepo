@@ -22,11 +22,8 @@
 //!
 //! # Pruning
 //!
-//! The database prunes _inactive_ operations every time [Store::commit] is called. To achieve
-//! this, an _inactivity floor_ is maintained, which is the location at which all operations before
-//! are inactive. At commit-time, the inactivity floor is raised by the number of uncommitted
-//! operations plus 1 for the tailing commit op. During this process, any encountered active
-//! operations are re-applied to the tip of the log.
+//! The database maintains a location before which all operations are inactive, called the
+//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
 //!
 //! |                               Log State                                            | Inactivity Floor | Uncommitted Ops |
 //! |------------------------------------------------------------------------------------|------------------|-----------------|
@@ -110,6 +107,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{Array, NZUsize};
+use core::future::Future;
 use futures::{pin_mut, try_join, StreamExt};
 use std::{
     collections::HashMap,
@@ -132,6 +130,9 @@ pub enum Error {
     /// The requested operation has been pruned.
     #[error("operation pruned")]
     OperationPruned(Location),
+
+    #[error(transparent)]
+    Adb(#[from] crate::adb::Error),
 }
 
 /// Configuration for initializing a [Store] database.
@@ -163,6 +164,52 @@ pub struct Config<T: Translator, C> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+}
+
+/// A trait for any key-value store based on an append-only log of operations.
+pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    fn op_count(&self) -> Location;
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
+
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
+    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>>;
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    fn commit(&mut self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    fn close(self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Destroy the db, removing all data from disk.
+    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [VJournal] of operations.
@@ -326,6 +373,8 @@ where
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1805): implement improved floor
+        // raising logic.
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
@@ -748,6 +797,54 @@ where
         self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await
             .map(|_| ())
+    }
+}
+
+impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get(key).await
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update(key, value).await
+    }
+
+    async fn delete(&mut self, key: K) -> Result<(), Error> {
+        self.delete(key).await
+    }
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit(None).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        self.prune(target_prune_loc).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
