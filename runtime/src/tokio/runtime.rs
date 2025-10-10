@@ -428,17 +428,13 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self);
 
-        // Branch the children tree so the spawned task (and its supervised descendants)
-        // receive a fresh aborter list. Any clones materialized before this point (such as
-        // pre-built actors) are retargeted to the new list as part of `swap_for_child`. We
-        // keep the previous list so the parent can abort the new task if supervision is
-        // enabled.
-        let (previous, children) = self.children.swap_for_child();
-        let parent_children = if self.model.is_supervised() {
-            Some(previous)
-        } else {
-            None
-        };
+        // Split the supervision tree so the spawned child receives its own descendant list
+        // while the parent keeps its original abort handles. The returned triple provides
+        // the optional parent supervisor list (if the child is supervised), the new child's
+        // aborter list, and the branch that should be installed on the child context.
+        let (parent_children, children, child_children) =
+            self.children.split_for_child(self.model.is_supervised());
+        self.children = child_children;
 
         // Set up the task
         let executor = self.executor.clone();

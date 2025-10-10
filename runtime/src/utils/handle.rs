@@ -19,97 +19,115 @@ use tracing::error;
 
 /// Tracks abort handles for a task along with any supervised descendants.
 ///
-/// `Children` instances form a lightweight tree: cloning a runtime context
-/// creates a new `Children` branch registered under the parent. When the parent later
-/// spawns a task, it swaps its aborter list via [`Children::replace`]. The swap
-/// automatically propagates to every branch that had already been created, so
-/// actors built ahead of time still inherit the correct parent-child linkage.
+/// `Children` instances form a lightweight supervision tree. Each branch owns
+/// its own descendant list and optionally shares the parent's supervisor list,
+/// so clones inherit supervision without giving siblings mutable access to one
+/// another's children.
 pub struct Children {
     inner: Mutex<ChildrenInner>,
 }
 
+/// Inner state for every `Children` handle that references the same supervision branch.
 struct ChildrenInner {
-    aborters: Arc<Mutex<Vec<Aborter>>>,
-    dependents: Vec<Weak<Children>>,
+    /// Abort handles for tasks spawned directly under this branch. Whenever the branch
+    /// completes or is aborted we drain this list and cancel descendants.
+    owned: Arc<Mutex<Vec<Aborter>>>,
+    /// Optional pointer to the parent's abort list when this branch is supervised. Newly
+    /// spawned children register their abort handles here so the parent can cascade aborts.
+    supervisor: Option<Arc<Mutex<Vec<Aborter>>>>,
+    /// Weak references to clones that are tracking this branch and need to be retargeted
+    /// whenever `split_for_child` splits the tree (e.g. pre-built actors).
+    tracked_clones: Vec<Weak<Children>>,
 }
 
 impl Children {
-    /// Creates a new root entry with an empty aborter list.
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(ChildrenInner {
-                aborters: Arc::new(Mutex::new(Vec::new())),
-                dependents: Vec::new(),
+                owned: Arc::new(Mutex::new(Vec::new())),
+                supervisor: None,
+                tracked_clones: Vec::new(),
             }),
         }
     }
 
-    /// Creates a child branch that points at the parent's current aborter list
-    /// and registers itself to receive future updates.
+    /// Returns a new clone that shares this branch's supervision state. Used when
+    /// a context is cloned (or `with_label`) so pre-built actors inherit the same
+    /// descendant/supervisor lists.
     pub fn branch(parent: &Arc<Self>) -> Arc<Self> {
-        let child = Arc::new(Self {
+        let (owned, supervisor) = {
+            let inner = parent.inner.lock().unwrap();
+            (inner.owned.clone(), inner.supervisor.clone())
+        };
+        let branch = Arc::new(Self {
             inner: Mutex::new(ChildrenInner {
-                // Start from the same aborter list the parent is currently using so we stay in sync.
-                aborters: parent.inner.lock().unwrap().aborters.clone(),
-                dependents: Vec::new(),
+                owned,
+                supervisor,
+                tracked_clones: Vec::new(),
             }),
         });
-
-        // Remember this branch on the parent so the next swap updates us.
         parent
             .inner
             .lock()
             .unwrap()
-            .dependents
-            .push(Arc::downgrade(&child));
-
-        child
+            .tracked_clones
+            .push(Arc::downgrade(&branch));
+        branch
     }
 
-    /// Replaces the aborter list with a freshly allocated list for a new child
-    /// task and propagates the update to every dependent branch.
-    ///
-    /// Returns `(previous, current)` where `previous` is the list that should be
-    /// registered with the parent and `current` is the new list to hand to the
-    /// spawned child.
+    /// Prepares a branch for spawning a child. This splits the supervision tree so the
+    /// newly spawned context receives a fresh descendant list while the parent keeps its
+    /// original abort handles. Returns `(parent_supervisor, child_owned, child_branch)`.
+    /// The first element is the optional abort list the parent uses to supervise the new
+    /// child, the second is the descendant list that should be passed to the handle for
+    /// cascading aborts and the third is the branch that must be installed on the child
+    /// context.
     #[allow(clippy::type_complexity)]
-    pub fn swap_for_child(&self) -> (Arc<Mutex<Vec<Aborter>>>, Arc<Mutex<Vec<Aborter>>>) {
-        let next = Arc::new(Mutex::new(Vec::new()));
-        let (previous, dependents) = {
+    pub fn split_for_child(
+        self: &Arc<Self>,
+        supervised: bool,
+    ) -> (
+        Option<Arc<Mutex<Vec<Aborter>>>>,
+        Arc<Mutex<Vec<Aborter>>>,
+        Arc<Self>,
+    ) {
+        // Capture the current parent state and detach any pre-built clones so we can
+        // retarget them after the child branch is created.
+        let (supervisor, tracked_state) = {
             let mut inner = self.inner.lock().unwrap();
-            // Keep the old list so we can register with our parent.
-            let previous = inner.aborters.clone();
-            // Future clones should see the new list immediately.
-            inner.aborters = next.clone();
-            // Drain dependents so they observe the swap once.
-            (previous, std::mem::take(&mut inner.dependents))
+            let parent_list = inner.owned.clone();
+            let supervisor = supervised.then_some(parent_list.clone());
+            let tracked_clones = std::mem::take(&mut inner.tracked_clones);
+            inner.supervisor = supervisor.clone();
+            let new_owned = Arc::new(Mutex::new(Vec::new()));
+
+            // Parent keeps using the same `owned` pointer, clones will be updated below.
+            // Descendants spawned by the new child branch should populate this fresh list.
+            inner.owned = new_owned.clone();
+            (supervisor, (tracked_clones, new_owned))
         };
 
-        for weak in dependents {
-            if let Some(dependent) = weak.upgrade() {
-                dependent.update_from_parent(next.clone());
+        let (tracked_clones, child_owned) = tracked_state;
+
+        // Retarget any pre-built clones so they continue to share supervision with the
+        // freshly spawned child branch.
+        for weak in tracked_clones {
+            if let Some(clone) = weak.upgrade() {
+                let mut inner = clone.inner.lock().unwrap();
+                inner.owned = child_owned.clone();
+                inner.supervisor = supervisor.clone();
             }
         }
 
-        (previous, next)
-    }
+        let child = Arc::new(Self {
+            inner: Mutex::new(ChildrenInner {
+                owned: child_owned.clone(),
+                supervisor: supervisor.clone(),
+                tracked_clones: Vec::new(),
+            }),
+        });
 
-    /// Applies an update from the parent and recursively informs this branch's
-    /// own dependents.
-    fn update_from_parent(&self, next: Arc<Mutex<Vec<Aborter>>>) {
-        let dependents = {
-            let mut inner = self.inner.lock().unwrap();
-            // Adopt the new list.
-            inner.aborters = next.clone();
-            // Inform our own dependents without consuming the vector.
-            inner.dependents.clone()
-        };
-
-        for weak in dependents {
-            if let Some(dependent) = weak.upgrade() {
-                dependent.update_from_parent(next.clone());
-            }
-        }
+        (supervisor, child_owned, child)
     }
 }
 
