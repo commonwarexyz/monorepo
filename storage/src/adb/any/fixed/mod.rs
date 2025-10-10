@@ -30,7 +30,7 @@ pub mod unordered;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
-pub(crate) const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
+pub(super) const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -168,7 +168,7 @@ pub(crate) async fn init_mmr_and_log<
 /// # Panic
 ///
 /// Panics if `target_prune_loc` is greater than the inactivity floor.
-pub(crate) async fn prune_db<E, O, H>(
+pub(super) async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut Journal<E, O>,
     hasher: &mut Standard<H>,
@@ -218,7 +218,7 @@ where
 /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
 /// [crate::mmr::MAX_LOCATION].
 /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
-pub(crate) async fn historical_proof<E, O, H>(
+pub(super) async fn historical_proof<E, O, H>(
     mmr: &Mmr<E, H>,
     log: &Journal<E, O>,
     op_count: Location,
