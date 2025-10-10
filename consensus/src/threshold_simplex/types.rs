@@ -54,18 +54,23 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-/// Identifies the context in which a vote or certificate is produced.
+/// Identifies the signing domain for a vote or certificate.
 #[derive(Copy, Clone)]
 pub enum VoteContext<'a, D: Digest> {
+    /// Signing context for notarize votes and certificates, carrying the proposal.
     Notarize { proposal: &'a Proposal<D> },
+    /// Signing context for nullify votes and certificates, scoped to a round.
     Nullify { round: Round },
+    /// Signing context for finalize votes and certificates, carrying the proposal.
     Finalize { proposal: &'a Proposal<D> },
 }
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug, Eq)]
 pub struct Vote<S: SigningScheme> {
+    /// Index of the signer inside the participant set.
     pub signer: u32,
+    /// Scheme-specific signature or share produced for the vote context.
     pub signature: S::Signature,
 }
 
@@ -108,11 +113,14 @@ impl<S: SigningScheme> Read for Vote<S> {
 
 /// Result of verifying a batch of votes.
 pub struct VoteVerification<S: SigningScheme> {
+    /// Contains the votes accepted by the scheme.
     pub verified: Vec<Vote<S>>,
+    /// Identifies the participant indices rejected during batch verification.
     pub invalid_signers: Vec<u32>,
 }
 
 impl<S: SigningScheme> VoteVerification<S> {
+    /// Creates a new `VoteVerification` result.
     pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
@@ -121,7 +129,12 @@ impl<S: SigningScheme> VoteVerification<S> {
     }
 }
 
-/// Trait that signing schemes must implement.
+/// Cryptographic surface required by `threshold_simplex`.
+///
+/// A `SigningScheme` produces validator votes, validates them (individually or in
+/// batches), assembles quorum certificates, checks recovered certificates and, when
+/// available, derives randomness for leader rotation. Implementations may override the
+/// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait SigningScheme: Clone + Send + Sync + 'static {
     type Signature: Clone
         + Debug
@@ -149,10 +162,13 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     type CertificateCfg: Clone + Send + Sync;
 
+    /// Returns `true` if this instance holds the secrets required to author votes.
     fn can_sign(&self) -> bool;
 
+    /// Signs a vote for the given context using the supplied namespace for domain separation.
     fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self>;
 
+    /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
@@ -160,6 +176,9 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         vote: &Vote<Self>,
     ) -> bool;
 
+    /// Batch-verifies votes and separates valid messages from the indices that failed verification.
+    ///
+    /// Callers must not include duplicate votes from the same signer.
     fn verify_votes<R, D, I>(
         &self,
         _rng: &mut R,
@@ -186,10 +205,14 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         VoteVerification::new(verified.collect(), invalid.into_iter().collect())
     }
 
+    /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
+    ///
+    /// Callers must not include duplicate votes from the same signer.
     fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>;
 
+    /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
@@ -198,6 +221,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         certificate: &Self::Certificate,
     ) -> bool;
 
+    /// Verifies a stream of certificates, returning `false` at the first failure.
     fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
@@ -218,15 +242,23 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         true
     }
 
+    /// Extracts randomness derived from the certificate, if provided by the scheme.
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
+    /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> Self::CertificateCfg;
 
-    // unbounded config for storage
+    /// Encoding configuration that allows unbounded certificate decoding.
+    ///
+    /// Only use this when decoding data from trusted local storage, it must not be exposed to
+    /// adversarial inputs or network payloads.
     fn certificate_codec_config_unbounded() -> Self::CertificateCfg;
 }
 
 /// The set of consensus participants.
+///
+/// Keys are stored in sorted order to provide stable, deterministic indices for
+/// signing schemes.
 #[derive(Clone, Debug)]
 pub struct Participants<P: PublicKey + Eq + Hash> {
     keys: Vec<P>,
@@ -291,6 +323,7 @@ impl<P: PublicKey + Eq + Hash> From<Vec<P>> for Participants<P> {
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+/// The verifier retains a clone of the active [`SigningScheme`] so it can batch-verify votes on demand.
 pub struct BatchVerifier<S: SigningScheme, D: Digest> {
     signing: S,
 
@@ -315,6 +348,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     ///
     /// # Arguments
     ///
+    /// * `signing` - Scheme handle used to verify and aggregate votes.
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
@@ -452,6 +486,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     ///
     /// # Arguments
     ///
+    /// * `rng` - Randomness source used by schemes that require batching randomness.
     /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
@@ -569,6 +604,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     ///
     /// # Arguments
     ///
+    /// * `rng` - Randomness source used by schemes that require batching randomness.
     /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
@@ -668,6 +704,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
     ///
     /// # Arguments
     ///
+    /// * `rng` - Randomness source used by schemes that require batching randomness.
     /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
@@ -773,17 +810,17 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Voter<S: SigningScheme, D: Digest> {
-    /// A single validator notarize over a proposal
+    /// A validator's notarize vote over a proposal
     Notarize(Notarize<S, D>),
-    /// A recovered threshold signature for a notarization
+    /// A recovered certificate for a notarization (scheme-specific)
     Notarization(Notarization<S, D>),
-    /// A single validator nullify to skip the current view (usually when leader is unresponsive)
+    /// A validator's nullify vote used to skip the current view (usually when the leader is unresponsive)
     Nullify(Nullify<S>),
-    /// A recovered threshold signature for a nullification
+    /// A recovered certificate for a nullification (scheme-specific)
     Nullification(Nullification<S>),
-    /// A single validator finalize over a proposal
+    /// A validator's finalize vote over a proposal
     Finalize(Finalize<S, D>),
-    /// A recovered threshold signature for a finalization
+    /// A recovered certificate for a finalization (scheme-specific)
     Finalization(Finalization<S, D>),
 }
 
@@ -967,14 +1004,17 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
-/// Partial notarize vote carrying the proposal and signatures.
+/// Validator vote that endorses a proposal for notarization.
 #[derive(Clone, Debug, Eq)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
+    /// Proposal being notarized.
     pub proposal: Proposal<D>,
+    /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
 impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+    /// Returns the round associated with this notarize vote.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -994,6 +1034,7 @@ impl<S: SigningScheme, D: Digest> Hash for Notarize<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+    /// Signs a notarize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let vote = scheme.sign_vote(
             namespace,
@@ -1005,6 +1046,7 @@ impl<S: SigningScheme, D: Digest> Notarize<S, D> {
         Self { proposal, vote }
     }
 
+    /// Verifies the notarize vote against the provided signing scheme.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
@@ -1062,7 +1104,10 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
     }
 }
 
-/// Aggregated notarization certificate with randomness seed.
+/// Aggregated notarization certificate recovered from notarize votes.
+///
+/// Some signing schemes embed additional randomness in the certificate (used for
+/// leader rotation), it can be accessed via [`SigningScheme::randomness`].
 #[derive(Clone, Debug, Eq)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
@@ -1070,6 +1115,7 @@ pub struct Notarization<S: SigningScheme, D: Digest> {
 }
 
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+    /// Builds a notarization certificate from matching notarize votes, if enough are present.
     pub fn from_notarizes(signing: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
         if notarizes.is_empty() {
             return None;
@@ -1090,6 +1136,7 @@ impl<S: SigningScheme, D: Digest> Notarization<S, D> {
         })
     }
 
+    /// Returns the round associated with the notarized proposal.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -1109,6 +1156,7 @@ impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+    /// Verifies the notarization certificate against the provided signing scheme.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
@@ -1164,7 +1212,7 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
-/// Partial nullify vote for a given round.
+/// Validator vote for nullifying the current round.
 #[derive(Clone, Debug, Eq)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
@@ -1185,12 +1233,14 @@ impl<S: SigningScheme> Hash for Nullify<S> {
 }
 
 impl<S: SigningScheme> Nullify<S> {
+    /// Signs a nullify vote for the given round.
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Self {
         let vote = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round });
 
         Self { round, vote }
     }
 
+    /// Verifies the nullify vote against the provided signing scheme.
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote::<D>(
             namespace,
@@ -1254,6 +1304,7 @@ pub struct Nullification<S: SigningScheme> {
 }
 
 impl<S: SigningScheme> Nullification<S> {
+    /// Builds a nullification certificate from matching nullify votes.
     pub fn from_nullifies(signing: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
         if nullifies.is_empty() {
             return None;
@@ -1296,6 +1347,7 @@ impl<S: SigningScheme> Write for Nullification<S> {
 }
 
 impl<S: SigningScheme> Nullification<S> {
+    /// Verifies the nullification certificate against the provided signing scheme.
     pub fn verify<R: Rng + CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
@@ -1344,7 +1396,7 @@ impl<S: SigningScheme> Viewable for Nullification<S> {
     }
 }
 
-/// Partial finalize vote carrying the proposal and signatures.
+/// Validator vote finalizing a proposal after notarization.
 #[derive(Clone, Debug, Eq)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
@@ -1352,6 +1404,7 @@ pub struct Finalize<S: SigningScheme, D: Digest> {
 }
 
 impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+    /// Returns the round associated with this finalize vote.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -1371,6 +1424,7 @@ impl<S: SigningScheme, D: Digest> Hash for Finalize<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+    /// Signs a finalize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let vote = scheme.sign_vote(
             namespace,
@@ -1382,6 +1436,7 @@ impl<S: SigningScheme, D: Digest> Finalize<S, D> {
         Self { proposal, vote }
     }
 
+    /// Verifies the finalize vote against the provided signing scheme.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
@@ -1447,6 +1502,7 @@ pub struct Finalization<S: SigningScheme, D: Digest> {
 }
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+    /// Builds a finalization certificate from matching finalize votes.
     pub fn from_finalizes(signing: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
         if finalizes.is_empty() {
             return None;
@@ -1467,6 +1523,7 @@ impl<S: SigningScheme, D: Digest> Finalization<S, D> {
         })
     }
 
+    /// Returns the round associated with the finalized proposal.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -1486,6 +1543,7 @@ impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+    /// Verifies the finalization certificate against the provided signing scheme.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
@@ -1697,7 +1755,7 @@ impl<S: SigningScheme, D: Digest> Response<S, D> {
         }
     }
 
-    /// Verifies the signatures on this response.
+    /// Verifies the certificates contained in this response against the signing scheme.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, signing: &S, namespace: &[u8]) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
@@ -1789,24 +1847,22 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
 ///
 /// # Warning
 ///
-/// After collecting `t` partial-signatures for the same [Activity], an attacker can derive
-/// the partial-signatures for the `n-t` remaining participants.
-///
-/// For this reason, it is not sound to use partial-signatures-backed [Activity] to reward participants
-/// for their contributions (as an attacker, for example, could forge contributions from offline participants).
+/// Certain signing schemes produce aggregated artifacts that do not expose every contributor.
+/// Unless the scheme provides attributable signatures, do not use unverified activities for
+/// incentives, an attacker may be able to synthesize contributions for offline participants.
 #[derive(Clone, Debug)]
 pub enum Activity<S: SigningScheme, D: Digest> {
-    /// A single validator notarize over a proposal
+    /// A validator's notarize vote over a proposal
     Notarize(Notarize<S, D>),
-    /// A threshold signature for a notarization
+    /// A recovered certificate for a notarization (scheme-specific)
     Notarization(Notarization<S, D>),
-    /// A single validator nullify to skip the current view
+    /// A validator's nullify vote used to skip the current view
     Nullify(Nullify<S>),
-    /// A threshold signature for a nullification
+    /// A recovered certificate for a nullification (scheme-specific)
     Nullification(Nullification<S>),
-    /// A single validator finalize over a proposal
+    /// A validator's finalize vote over a proposal
     Finalize(Finalize<S, D>),
-    /// A threshold signature for a finalization
+    /// A recovered certificate for a finalization (scheme-specific)
     Finalization(Finalization<S, D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
     ConflictingNotarize(ConflictingNotarize<S, D>),
