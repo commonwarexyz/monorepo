@@ -66,9 +66,14 @@ impl Children {
         child
     }
 
-    /// Replaces the aborter list and forwards the new list to every dependent
-    /// branch that existed before the swap.
-    pub fn replace(&self, next: Arc<Mutex<Vec<Aborter>>>) -> Arc<Mutex<Vec<Aborter>>> {
+    /// Replaces the aborter list with a freshly allocated list for a new child
+    /// task and propagates the update to every dependent branch.
+    ///
+    /// Returns `(previous, current)` where `previous` is the list that should be
+    /// registered with the parent and `current` is the new list to hand to the
+    /// spawned child.
+    pub fn swap_for_child(&self) -> (Arc<Mutex<Vec<Aborter>>>, Arc<Mutex<Vec<Aborter>>>) {
+        let next = Arc::new(Mutex::new(Vec::new()));
         let (previous, dependents) = {
             let mut inner = self.inner.lock().unwrap();
             // Keep the old list so we can register with our parent.
@@ -85,7 +90,7 @@ impl Children {
             }
         }
 
-        previous
+        (previous, next)
     }
 
     /// Applies an update from the parent and recursively informs this branch's

@@ -870,15 +870,12 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Allocate a fresh aborter list that the spawned task (and its supervised
-        // descendants) will own.
-        let children = Arc::new(Mutex::new(Vec::new()));
-
-        // Swap our wrapper to point at the new list. Since `Context::clone` branches the
-        // children tree, any clones created before this call (for example, actors built
-        // during initialization) also retarget to `children`. The previous list is kept
-        // so we can link this task back to its parent.
-        let previous = self.children.replace(children.clone());
+        // Branch the children tree so the spawned task (and its supervised descendants)
+        // receive a fresh aborter list. Any clones materialized before this point (such as
+        // pre-built actors) are retargeted to the new list as part of `swap_for_child`. We
+        // keep the previous list so the parent can abort the new task if supervision is
+        // enabled.
+        let (previous, children) = self.children.swap_for_child();
         let parent_children = if self.model.is_supervised() {
             Some(previous)
         } else {
