@@ -6,7 +6,7 @@ use commonware_cryptography::BloomFilter;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashSet,
-    num::{NonZeroU8, NonZeroUsize},
+    num::{NonZeroU64, NonZeroU8, NonZeroUsize},
 };
 
 #[derive(Arbitrary, Debug)]
@@ -33,7 +33,7 @@ fn fuzz(input: FuzzInput) {
     );
     let mut model: HashSet<Vec<u8>> = HashSet::new();
 
-    let cfg = (hashers, bits as u64);
+    let cfg = (hashers, NonZeroU64::new(bits as u64).unwrap());
 
     for op in input.ops.into_iter().take(64) {
         match op {
