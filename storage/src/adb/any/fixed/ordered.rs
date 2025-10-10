@@ -148,35 +148,27 @@ impl<
         pin_mut!(stream);
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
-            match result {
-                Err(e) => {
-                    return Err(Error::Journal(e));
+            let (i, op) = result?;
+            let loc = Location::new_unchecked(i);
+            match op {
+                Operation::Delete(key) => {
+                    let old_loc =
+                        Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
+                    callback(false, old_loc);
                 }
-                Ok((i, op)) => {
-                    let loc = Location::new_unchecked(i);
-                    match op {
-                        Operation::Delete(key) => {
-                            let old_loc =
-                                Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc)
-                                    .await?;
-                            callback(false, old_loc);
-                        }
-                        Operation::Update(key, _, _) => {
-                            let old_loc =
-                                Any::<E, K, V, H, T>::replay_update(snapshot, log, &key, loc)
-                                    .await?;
-                            callback(true, old_loc);
-                        }
-                        Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-                    }
+                Operation::Update(key, _, _) => {
+                    let old_loc =
+                        Any::<E, K, V, H, T>::replay_update(snapshot, log, &key, loc).await?;
+                    callback(true, old_loc);
                 }
+                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
             }
         }
 
         Ok(())
     }
 
-    /// Returns the lexicographically-last key produced by `iter` along with its associated data.
+    /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
         log: &Journal<E, Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
@@ -286,9 +278,7 @@ impl<
         // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
         let iter = self.snapshot.last_translated_key();
         let last_key = Self::last_key_in_iter(&self.log, iter).await?;
-        let Some((loc, last_key)) = last_key else {
-            unreachable!("no last key found in non-empty snapshot");
-        };
+        let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
         callback(Some(loc));
         Self::update_known_loc(self, &last_key.key, loc, next_loc).await?;
