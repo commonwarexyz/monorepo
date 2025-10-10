@@ -112,25 +112,38 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Return an [Mmr] initialized with the given `config`.
-    pub fn init(config: Config<H>) -> Self {
-        let mut mmr = Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
+    /// count for `config.pruned_to_pos`.
+    pub fn init(config: Config<H>) -> Result<Self, Error> {
+        // Validate and populate pinned nodes
+        let mut pinned_nodes = BTreeMap::new();
+        let mut expected_pinned_nodes = 0;
+        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
+            expected_pinned_nodes += 1;
+            if i >= config.pinned_nodes.len() {
+                return Err(Error::InvalidPinnedNodes);
+            }
+            pinned_nodes.insert(pos, config.pinned_nodes[i]);
+        }
+
+        // Check for too many pinned nodes
+        let actual = config.pinned_nodes.len();
+        if actual != expected_pinned_nodes {
+            return Err(Error::InvalidPinnedNodes);
+        }
+
+        Ok(Self {
             nodes: VecDeque::from(config.nodes),
             pruned_to_pos: config.pruned_to_pos,
-            pinned_nodes: BTreeMap::new(),
+            pinned_nodes,
             dirty_nodes: BTreeSet::new(),
             dirty_digest: Self::dirty_digest(),
             #[cfg(feature = "std")]
             thread_pool: config.pool,
-        };
-        if mmr.size() == 0 {
-            return mmr;
-        }
-
-        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
-            mmr.pinned_nodes.insert(pos, config.pinned_nodes[i]);
-        }
-
-        mmr
+        })
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
@@ -752,6 +765,7 @@ impl<H: CHasher> Mmr<H> {
             #[cfg(feature = "std")]
             pool: None,
         })
+        .expect("clone_pruned should never fail with valid internal state")
     }
 
     /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
@@ -965,7 +979,8 @@ mod tests {
                 pinned_nodes: digests,
                 #[cfg(feature = "std")]
                 pool: None,
-            });
+            })
+            .unwrap();
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
             assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
@@ -1056,7 +1071,8 @@ mod tests {
                 pinned_nodes: vec![],
                 #[cfg(feature = "std")]
                 pool: Some(pool),
-            });
+            })
+            .unwrap();
             build_batched_and_check_test_roots(&mut mmr);
         });
     }
@@ -1227,7 +1243,8 @@ mod tests {
                 pinned_nodes: Vec::new(),
                 #[cfg(feature = "std")]
                 pool: Some(pool),
-            });
+            })
+            .unwrap();
             let leaves = compute_big_mmr(&mut hasher, &mut mmr);
             do_batch_update(&mut hasher, &mut mmr, &leaves);
         });
@@ -1263,5 +1280,60 @@ mod tests {
         mmr.sync(hasher);
         let restored_root = mmr.root(hasher);
         assert_eq!(root, restored_root);
+    }
+
+    #[test]
+    fn test_config_validation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Test with empty config - should succeed
+            let config = Config::<Sha256> {
+                nodes: vec![],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+
+            // Test with mismatched pinned nodes - should fail
+            // Use a larger position to ensure pinned nodes are required
+            // Position 100 will definitely require pinned nodes
+            let config = Config::<Sha256> {
+                nodes: vec![],
+                pruned_to_pos: Position::new(100),
+                pinned_nodes: vec![], // Should have nodes for position 100
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(matches!(Mmr::init(config), Err(Error::InvalidPinnedNodes)));
+
+            // Test with too many pinned nodes - should fail
+            let config = Config::<Sha256> {
+                nodes: vec![],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![Sha256::hash(b"dummy")],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(matches!(Mmr::init(config), Err(Error::InvalidPinnedNodes)));
+
+            // Test with correct number of pinned nodes - should succeed
+            // Build a small MMR to get valid pinned nodes
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0u64..50 {
+                mmr.add(&mut hasher, &i.to_be_bytes());
+            }
+            let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
+            let config = Config::<Sha256> {
+                nodes: vec![],
+                pruned_to_pos: Position::new(50),
+                pinned_nodes,
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+        });
     }
 }
