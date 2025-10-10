@@ -1199,39 +1199,22 @@ where
             return Poll::Ready(value);
         }
 
-        let mut poll_future = |cx: &mut task::Context<'_>| -> Poll<F::Output> {
-            let poll = {
-                let future = this
-                    .future
-                    .as_mut()
-                    .expect("future already polled at scheduled time");
-                future.as_mut().poll(cx)
-            };
+        let blocker = Blocker::new();
+        loop {
+            let future = this
+                .future
+                .as_mut()
+                .expect("future already polled at scheduled time");
 
-            match poll {
+            let waker = waker(blocker.clone());
+            let mut cx_block = task::Context::from_waker(&waker);
+
+            match future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
                     *this.future = None;
-                    Poll::Ready(value)
+                    break Poll::Ready(value);
                 }
-                Poll::Pending => Poll::Pending,
-            }
-        };
-
-        // After the delay passes, block the runtime thread until the future reports ready.
-        let mut blocker: Option<Arc<Blocker>> = None;
-        loop {
-            if let Some(blocker) = blocker.as_ref() {
-                let waker = waker(blocker.clone());
-                let mut cx_block = task::Context::from_waker(&waker);
-                match poll_future(&mut cx_block) {
-                    Poll::Ready(value) => break Poll::Ready(value),
-                    Poll::Pending => blocker.wait(),
-                }
-            } else {
-                match poll_future(cx) {
-                    Poll::Ready(value) => break Poll::Ready(value),
-                    Poll::Pending => blocker = Some(Blocker::new()),
-                }
+                Poll::Pending => blocker.wait(),
             }
         }
     }
