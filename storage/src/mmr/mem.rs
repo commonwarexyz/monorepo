@@ -117,7 +117,18 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
     /// count for `config.pruned_to_pos`.
+    ///
+    /// Returns [Error::InvalidSize] if the MMR size is invalid.
     pub fn init(config: Config<H>) -> Result<Self, Error> {
+        // Validate that the total size is valid
+        let total_size = (*config.pruned_to_pos).checked_add(config.nodes.len() as u64);
+        let Some(size) = total_size else {
+            return Err(Error::InvalidSize(u64::MAX));
+        };
+        if !PeakIterator::check_validity(Position::new(size)) {
+            return Err(Error::InvalidSize(size));
+        }
+
         // Validate and populate pinned nodes
         let mut pinned_nodes = BTreeMap::new();
         let mut expected_pinned_nodes = 0;
@@ -1283,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation() {
+    fn test_init_pinned_nodes_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test with empty config - should succeed
@@ -1296,13 +1307,12 @@ mod tests {
             };
             assert!(Mmr::init(config).is_ok());
 
-            // Test with mismatched pinned nodes - should fail
-            // Use a larger position to ensure pinned nodes are required
-            // Position 100 will definitely require pinned nodes
+            // Test with too few pinned nodes - should fail
+            // Use a valid MMR size (127 is valid: 2^7 - 1 makes a complete tree)
             let config = Config::<Sha256> {
                 nodes: vec![],
-                pruned_to_pos: Position::new(100),
-                pinned_nodes: vec![], // Should have nodes for position 100
+                pruned_to_pos: Position::new(127),
+                pinned_nodes: vec![], // Should have nodes for position 127
                 #[cfg(feature = "std")]
                 pool: None,
             };
@@ -1334,6 +1344,115 @@ mod tests {
                 pool: None,
             };
             assert!(Mmr::init(config).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_init_size_validation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Test with valid size 0 - should succeed
+            let config = Config::<Sha256> {
+                nodes: vec![],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+
+            // Test with invalid size 2 - should fail
+            // Size 2 is invalid (can't have just one parent node + one leaf)
+            let config = Config::<Sha256> {
+                nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
+
+            // Test with valid size 3 (one full tree with 2 leaves) - should succeed
+            let config = Config::<Sha256> {
+                nodes: vec![
+                    Sha256::hash(b"leaf1"),
+                    Sha256::hash(b"leaf2"),
+                    Sha256::hash(b"parent"),
+                ],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+
+            // Test with large valid size (127 = 2^7 - 1, a complete tree) - should succeed
+            // Build a real MMR to get the correct structure
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0u64..64 {
+                mmr.add(&mut hasher, &i.to_be_bytes());
+            }
+            assert_eq!(mmr.size(), 127); // Verify we have the expected size
+            let nodes: Vec<_> = (0..127)
+                .map(|i| *mmr.get_node_unchecked(Position::new(i)))
+                .collect();
+
+            let config = Config::<Sha256> {
+                nodes,
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+
+            // Test with non-zero pruned_to_pos - should succeed
+            // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0u64..11 {
+                mmr.add(&mut hasher, &i.to_be_bytes());
+            }
+            assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
+
+            // Prune to position 7
+            mmr.prune_to_pos(Position::new(7));
+            let nodes: Vec<_> = (7..*mmr.size())
+                .map(|i| *mmr.get_node_unchecked(Position::new(i)))
+                .collect();
+            let pinned_nodes = mmr.node_digests_to_pin(Position::new(7));
+
+            let config = Config::<Sha256> {
+                nodes: nodes.clone(),
+                pruned_to_pos: Position::new(7),
+                pinned_nodes: pinned_nodes.clone(),
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(Mmr::init(config).is_ok());
+
+            // Same nodes but wrong pruned_to_pos - should fail
+            // pruned_to_pos=8 + 12 nodes = size 20 (invalid)
+            let config = Config::<Sha256> {
+                nodes: nodes.clone(),
+                pruned_to_pos: Position::new(8),
+                pinned_nodes: pinned_nodes.clone(),
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
+
+            // Same nodes but different wrong pruned_to_pos - should fail
+            // pruned_to_pos=9 + 12 nodes = size 21 (invalid)
+            let config = Config::<Sha256> {
+                nodes,
+                pruned_to_pos: Position::new(9),
+                pinned_nodes,
+                #[cfg(feature = "std")]
+                pool: None,
+            };
+            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
         });
     }
 }
