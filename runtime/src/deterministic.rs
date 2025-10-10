@@ -45,6 +45,7 @@ use futures::{
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use pin_project_lite::pin_project;
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -1097,19 +1098,14 @@ impl ArcWake for Blocker {
     }
 }
 
-struct Awaiter<F: Future> {
-    executor: Weak<Executor>,
-    target: SystemTime,
-    future: Option<Pin<Box<F>>>,
-    ready: Option<F::Output>,
-    started: bool,
-    registered: bool,
-}
-
-impl<F: Future> Awaiter<F> {
-    /// Upgrade Weak reference to [Executor].
-    fn executor(&self) -> Arc<Executor> {
-        self.executor.upgrade().expect("executor already dropped")
+pin_project! {
+    struct Awaiter<F: Future> {
+        executor: Weak<Executor>,
+        target: SystemTime,
+        future: Option<Pin<Box<F>>>,
+        ready: Option<F::Output>,
+        started: bool,
+        registered: bool,
     }
 }
 
@@ -1168,11 +1164,10 @@ where
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: Accessing fields through `this` does not move the pinned future. We only ever
-        // drop the pinned future in place by setting the `Option` to `None`.
-        let this = unsafe { self.get_unchecked_mut() };
-        if !this.started {
-            this.started = true;
+        let this = self.project();
+
+        if !*this.started {
+            *this.started = true;
             if let Some(future) = this.future.as_mut() {
                 // Poll once with a noop waker so the future can register interest or start work
                 // without being able to wake this task before the sampled delay expires. Any ready
@@ -1181,25 +1176,25 @@ where
                 let mut cx_noop = task::Context::from_waker(&waker);
                 match future.as_mut().poll(&mut cx_noop) {
                     Poll::Ready(value) => {
-                        this.future = None;
-                        this.ready = Some(value);
+                        *this.future = None;
+                        *this.ready = Some(value);
                     }
                     Poll::Pending => {}
                 }
             }
         }
 
-        let executor = this.executor();
+        let executor = this.executor.upgrade().expect("executor already dropped");
         let current_time = *executor.time.lock().unwrap();
-        if this.registered && current_time >= this.target {
-            this.registered = false;
+        if *this.registered && current_time >= *this.target {
+            *this.registered = false;
         }
 
-        if current_time < this.target {
-            if !this.registered {
-                this.registered = true;
+        if current_time < *this.target {
+            if !*this.registered {
+                *this.registered = true;
                 executor.sleeping.lock().unwrap().push(Alarm {
-                    time: this.target,
+                    time: *this.target,
                     waker: cx.waker().clone(),
                 });
             }
@@ -1213,7 +1208,7 @@ where
         if let Some(future) = this.future.as_mut() {
             match future.as_mut().poll(cx) {
                 Poll::Ready(value) => {
-                    this.future = None;
+                    *this.future = None;
                     return Poll::Ready(value);
                 }
                 Poll::Pending => {}
@@ -1231,7 +1226,7 @@ where
             let mut cx_block = task::Context::from_waker(&waker);
             match future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
-                    this.future = None;
+                    *this.future = None;
                     break Poll::Ready(value);
                 }
                 Poll::Pending => blocker.wait(),
