@@ -39,11 +39,8 @@ enum NetworkOperation {
         recipient_idx: u8,
         msg_size: usize,
         priority: bool,
-        channel_id: u8,
     },
-    ReceiveMessage {
-        receiver_idx: u8,
-    },
+    ReceiveMessages,
     RegisterPeers {
         peer_idx: u8,
         index: u8,
@@ -233,8 +230,8 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let mut expected_messages: HashMap<(u8, u8, u8), VecDeque<Bytes>> = HashMap::new();
-        let mut pending_by_receiver: HashMap<(u8, u8), Vec<u8>> = HashMap::new();
+        let mut expected_messages: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut pending_by_receiver: HashMap<u8, Vec<u8>> = HashMap::new();
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
@@ -244,7 +241,6 @@ fn fuzz(input: FuzzInput) {
                     recipient_idx,
                     msg_size,
                     priority,
-                    channel_id,
                 } => {
                     let sender_idx = (sender_idx as usize) % peers.len();
                     let sender_idx_u8 = sender_idx as u8;
@@ -324,41 +320,36 @@ fn fuzz(input: FuzzInput) {
                     // Only add expectations if send succeeds
                     if sent {
                         for to_idx in target_recipients {
-                            expected_messages.entry((to_idx, sender_idx_u8, channel_id))
+                            expected_messages.entry((to_idx, sender_idx_u8))
                                 .or_default()
                                 .push_back(message.clone());
-                            pending_by_receiver.entry((to_idx, channel_id))
+                            pending_by_receiver.entry(to_idx)
                                 .or_default()
                                 .push(sender_idx_u8);
                         }
                     }
                 }
 
-                NetworkOperation::ReceiveMessage { receiver_idx } => {
-                    let receiver_idx = (receiver_idx as usize) % peers.len();
-                    let receiver_idx_u8 = receiver_idx as u8;
+                NetworkOperation::ReceiveMessages => {
+                    // Collect all receivers that have pending messages
+                    let receivers_with_pending: Vec<u8> = pending_by_receiver.keys().cloned().collect();
 
-                    let Some(network_state) = networks.get_mut(&receiver_idx_u8) else {
-                        continue;
-                    };
+                    // Process messages for each receiver that has pending messages
+                    for receiver_idx_u8 in receivers_with_pending {
+                        let Some(network_state) = networks.get_mut(&receiver_idx_u8) else {
+                            continue;
+                        };
 
-                    let mut ch_set = HashSet::new();
-                    for ((to_idx, ch), senders) in pending_by_receiver.iter() {
-                        if *to_idx == receiver_idx_u8 && !senders.is_empty() {
-                            ch_set.insert(*ch);
+                        // Check if this receiver has any pending messages
+                        if !pending_by_receiver.contains_key(&receiver_idx_u8) {
+                            continue;
                         }
-                    }
-                    let channels_with_pending: Vec<u8> = ch_set.into_iter().collect();
-                    if channels_with_pending.is_empty() {
-                        continue;
-                    }
 
-                    for channel in channels_with_pending {
-                        match network_state {
-                            NetworkState::Discovery { channels, .. } => {
-                                let receiver = &mut channels.1;
+                        // Define the macro to handle the common select! logic
+                        macro_rules! process_receiver {
+                            ($receiver:expr) => {
                                 commonware_macros::select! {
-                                    result = receiver.recv() => {
+                                    result = $receiver.recv() => {
                                         let Ok((sender_pk, message)) = result else {
                                             continue;
                                         };
@@ -367,36 +358,37 @@ fn fuzz(input: FuzzInput) {
                                             continue;
                                         };
 
-                                        let key = (receiver_idx_u8, actual_sender_idx, channel);
+                                        let key = (receiver_idx_u8, actual_sender_idx);
                                         if let Some(queue) = expected_messages.get_mut(&key) {
-                                            let Some(expected_message) = queue.pop_front() else {
-                                                continue;
-                                            };
-                                            assert_eq!(message, expected_message);
-                                            if queue.is_empty() {
-                                                expected_messages.remove(&key);
-                                            }
-                                            // Remove from pending_by_receiver
-                                            if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                    senders.remove(pos);
-                                                }
-                                                if senders.is_empty() {
-                                                    pending_by_receiver.remove(&(receiver_idx_u8, channel));
+                                            // Check if the received message matches ANY expected message from this sender
+                                            // Messages might arrive out of order
+                                            let mut found_index = None;
+                                            for (i, expected) in queue.iter().enumerate() {
+                                                if message == *expected {
+                                                    found_index = Some(i);
+                                                    break;
                                                 }
                                             }
-                                            break;
+
+                                            if let Some(index) = found_index {
+                                                queue.remove(index);
+                                                if queue.is_empty() {
+                                                    expected_messages.remove(&key);
+                                                }
+                                                if let Some(senders) = pending_by_receiver.get_mut(&receiver_idx_u8) {
+                                                    if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
+                                                        senders.remove(pos);
+                                                    }
+                                                    if senders.is_empty() {
+                                                        pending_by_receiver.remove(&receiver_idx_u8);
+                                                    }
+                                                }
+                                                break;
+                                            } else {
+                                                panic!("Peer index {} Received unexpected message from sender {}", receiver_idx_u8, actual_sender_idx);
+                                            }
                                         } else {
-                                            // Unexpected delivery - still need to clean up pending_by_receiver
-                                            if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                    senders.remove(pos);
-                                                }
-                                                if senders.is_empty() {
-                                                    pending_by_receiver.remove(&(receiver_idx_u8, channel));
-                                                }
-                                            }
-                                            break;
+                                            panic!("Unexpected delivery for peer {} with index {}", peers[receiver_idx_u8 as usize].public_key, receiver_idx_u8);
                                         }
                                     },
                                     _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
@@ -404,54 +396,16 @@ fn fuzz(input: FuzzInput) {
                                     },
                                 }
                             }
+                        }
+
+                        match network_state {
+                            NetworkState::Discovery { channels, .. } => {
+                                let receiver = &mut channels.1;
+                                process_receiver!(receiver);
+                            }
                             NetworkState::Lookup { channels, .. } => {
                                 let receiver = &mut channels.1;
-                                commonware_macros::select! {
-                                    result = receiver.recv() => {
-                                        let Ok((sender_pk, message)) = result else {
-                                            continue;
-                                        };
-
-                                        let Some(&actual_sender_idx) = pk_to_idx.get(&sender_pk) else {
-                                            continue;
-                                        };
-
-                                        let key = (receiver_idx_u8, actual_sender_idx, channel);
-                                        if let Some(queue) = expected_messages.get_mut(&key) {
-                                            let Some(expected_message) = queue.pop_front() else {
-                                                continue;
-                                            };
-                                            assert_eq!(message, expected_message);
-                                            if queue.is_empty() {
-                                                expected_messages.remove(&key);
-                                            }
-                                            // Remove from pending_by_receiver
-                                            if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                    senders.remove(pos);
-                                                }
-                                                if senders.is_empty() {
-                                                    pending_by_receiver.remove(&(receiver_idx_u8, channel));
-                                                }
-                                            }
-                                            break;
-                                        } else {
-                                            // Unexpected delivery - still need to clean up pending_by_receiver
-                                            if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                    senders.remove(pos);
-                                                }
-                                                if senders.is_empty() {
-                                                    pending_by_receiver.remove(&(receiver_idx_u8, channel));
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    },
-                                    _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
-                                        continue;
-                                    },
-                                }
+                                process_receiver!(receiver);
                             }
                         }
                     }
@@ -519,17 +473,17 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     // Remove expectations for messages from target_idx to peer_idx
-                    expected_messages.retain(|(to_idx, from_idx, _ch), _queue| {
+                    expected_messages.retain(|(to_idx, from_idx), _queue| {
                         !(*to_idx == peer_idx_u8 && *from_idx == target_idx_u8)
                     });
 
                     // Remove from pending_by_receiver index
-                    pending_by_receiver.retain(|(to_idx, _ch), senders| {
-                        if *to_idx == peer_idx_u8 {
-                            senders.retain(|&from_idx| from_idx != target_idx_u8);
+                    if let Some(senders) = pending_by_receiver.get_mut(&peer_idx_u8) {
+                        senders.retain(|&from_idx| from_idx != target_idx_u8);
+                        if senders.is_empty() {
+                            pending_by_receiver.remove(&peer_idx_u8);
                         }
-                        !senders.is_empty()
-                    });
+                    }
 
                 }
             }
