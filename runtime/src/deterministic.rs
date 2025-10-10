@@ -1137,6 +1137,9 @@ where
         if !this.started {
             this.started = true;
             if let Some(future) = this.future.as_mut() {
+                // Poll once with a noop waker so the future can register interest or start work
+                // without being able to wake this task before the deadline. Any ready value is
+                // cached and only released after the clock reaches `self.time`.
                 let waker = noop_waker();
                 let mut cx_noop = task::Context::from_waker(&waker);
                 match future.as_mut().poll(&mut cx_noop) {
