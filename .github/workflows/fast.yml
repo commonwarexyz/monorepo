@@ -133,6 +133,14 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+    # The ubuntu runner normally has ~20GB of available disk space, which
+    # is insufficient for building the entire workspace. To allow the full
+    # build to complete, we clear out unnecessary pre-installed packages
+    # and toolchains.
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+      with:
+        large-packages: false
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
