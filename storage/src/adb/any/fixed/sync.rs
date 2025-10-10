@@ -291,7 +291,7 @@ mod tests {
         },
         journal::{self, fixed},
         mmr::iterator::nodes_to_pin,
-        store::operation::Fixed,
+        store::operation::{Fixed, FixedOperation as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{

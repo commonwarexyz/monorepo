@@ -56,6 +56,28 @@ pub enum Fixed<K: Array, V: CodecFixed> {
     CommitFloor(Location),
 }
 
+/// Methods common to fixed-size operation types.
+pub trait FixedOperation: Read<Cfg = ()> + Write + FixedSize + Sized {
+    /// The key type for this operation.
+    type Key: Array;
+
+    /// The value type for this operation.
+    type Value: CodecFixed;
+
+    /// Returns the commit floor location if this operation is a commit operation with a floor
+    /// value, None otherwise.
+    fn commit_floor(&self) -> Option<Location>;
+
+    /// Returns the key if this operation involves a key, None otherwise.
+    fn key(&self) -> Option<&Self::Key>;
+
+    /// Returns the value if this operation involves a value, None otherwise.
+    fn value(&self) -> Option<&Self::Value>;
+
+    /// Consumes the operation and returns the value if this operation involves a value, None otherwise.
+    fn into_value(self) -> Option<Self::Value>;
+}
+
 /// Operations for keyless stores.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Keyless<V: Codec> {
@@ -90,6 +112,57 @@ pub enum Variable<K: Array, V: Codec> {
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
+}
+
+impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Fixed<K, V> {
+    type Key = K;
+    type Value = V;
+
+    fn commit_floor(&self) -> Option<Location> {
+        match self {
+            Fixed::CommitFloor(loc) => Some(*loc),
+            _ => None,
+        }
+    }
+
+    fn key(&self) -> Option<&Self::Key> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(key) => Some(key),
+            Fixed::Update(key, _) => Some(key),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+
+    fn value(&self) -> Option<&Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(_) => None,
+            Fixed::Update(_, value) => Some(value),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+
+    fn into_value(self) -> Option<Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(_) => None,
+            Fixed::Update(_, value) => Some(value),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
 }
 
 impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
@@ -127,51 +200,6 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
             Self::SIZE >= Self::_MIN_OPERATION_LEN,
             "array size too small for commit op"
         );
-    }
-
-    /// If this is a [Fixed::Update] or [Fixed::Delete] operation, returns the key.
-    /// Otherwise, returns None.
-    pub fn key(&self) -> Option<&K> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(key) => Some(key),
-            Fixed::Update(key, _) => Some(key),
-            Fixed::CommitFloor(_) => None,
-        }
-    }
-
-    /// If this is a [Fixed::Update] operation, returns the value.
-    /// Otherwise, returns None.
-    pub fn value(&self) -> Option<&V> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(_) => None,
-            Fixed::Update(_, value) => Some(value),
-            Fixed::CommitFloor(_) => None,
-        }
-    }
-
-    /// If this is a [Fixed::Update] operation, returns the value.
-    /// Otherwise, returns None.
-    pub fn into_value(self) -> Option<V> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(_) => None,
-            Fixed::Update(_, value) => Some(value),
-            Fixed::CommitFloor(_) => None,
-        }
     }
 }
 

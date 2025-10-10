@@ -15,7 +15,10 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::Fixed as Operation,
+    store::{
+        operation::{Fixed as Operation, FixedOperation as _},
+        Db,
+    },
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -720,6 +723,55 @@ impl<
         }
 
         Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+    > Db<E, K, V, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+        self.get(key).await.map_err(Into::into)
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+        self.update(key, value).await.map_err(Into::into)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+        self.delete(key).await.map(|_| ()).map_err(Into::into)
+    }
+
+    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+        self.commit().await.map_err(Into::into)
+    }
+
+    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+        self.sync().await.map_err(Into::into)
+    }
+
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+        self.prune(target_prune_loc).await.map_err(Into::into)
+    }
+
+    async fn close(self) -> Result<(), crate::store::Error> {
+        self.close().await.map_err(Into::into)
+    }
+
+    async fn destroy(self) -> Result<(), crate::store::Error> {
+        self.destroy().await.map_err(Into::into)
     }
 }
 
