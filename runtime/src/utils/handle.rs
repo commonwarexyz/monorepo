@@ -54,9 +54,9 @@ impl Children {
     /// Returns a new clone that shares this branch's supervision state. Used when
     /// a context is cloned (or `with_label`) so pre-built actors inherit the same
     /// descendant/supervisor lists.
-    pub fn branch(parent: &Arc<Self>) -> Arc<Self> {
+    pub fn branch(source: &Arc<Self>) -> Arc<Self> {
         let (owned, supervisor) = {
-            let inner = parent.inner.lock().unwrap();
+            let inner = source.inner.lock().unwrap();
             (inner.owned.clone(), inner.supervisor.clone())
         };
         let branch = Arc::new(Self {
@@ -66,7 +66,7 @@ impl Children {
                 tracked_clones: Vec::new(),
             }),
         });
-        parent
+        source
             .inner
             .lock()
             .unwrap()
@@ -91,7 +91,7 @@ impl Children {
         Arc<Mutex<Vec<Aborter>>>,
         Arc<Self>,
     ) {
-        // Capture the current parent state and detach any pre-built clones so we can
+        // Capture the current branch state and detach any pre-built clones so we can
         // retarget them after the child branch is created.
         let (supervisor, tracked_state) = {
             let mut inner = self.inner.lock().unwrap();
