@@ -28,15 +28,27 @@ use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
 use tracing::info;
 
+/// Data about a key that exists in the snapshot.
+#[derive(Debug, PartialEq)]
+pub struct KeyData<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
+    /// The key that exists in the snapshot.
+    pub key: K,
+    /// The value of the key in the database.
+    pub value: V,
+    /// The next-key of the key in the database.
+    pub next_key: K,
+}
+
 /// The return type of the `Any::update_loc` method.
 enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
 
-    /// The key did not already exist in the snapshot. The wrapped values are the immediately
-    /// preceding key that does exist in the snapshot, plus its value and next-key.
-    NotExists((K, V, K)),
+    /// The key did not already exist in the snapshot. The wrapped key data is for the the first
+    /// preceding key that does exist in the snapshot.
+    NotExists(KeyData<K, V>),
 }
+
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
 /// active key.
@@ -168,16 +180,16 @@ impl<
     async fn last_key_in_iter(
         log: &Journal<E, Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
-    ) -> Result<Option<(Location, K, V, K)>, Error> {
-        let mut last_key = None;
+    ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        let mut last_key: Option<(Location, KeyData<K, V>)> = None;
         for &loc in iter {
-            let (k, v, next_key) = Self::get_update_op(log, loc).await?;
-            if let Some((_, ref other_key, _, _)) = last_key {
-                if k > *other_key {
-                    last_key = Some((loc, k, v, next_key));
+            let data = Self::get_update_op(log, loc).await?;
+            if let Some(ref other_key) = last_key {
+                if data.key > other_key.1.key {
+                    last_key = Some((loc, data));
                 }
             } else {
-                last_key = Some((loc, k, v, next_key));
+                last_key = Some((loc, data));
             }
         }
 
@@ -213,9 +225,9 @@ impl<
         key: &K,
     ) -> Result<Option<(Location, K, V, K)>, Error> {
         while let Some(&loc) = cursor.next() {
-            let (k, v, next_key) = Self::get_update_op(log, loc).await?;
-            if k == *key {
-                return Ok(Some((loc, k, v, next_key)));
+            let data = Self::get_update_op(log, loc).await?;
+            if data.key == *key {
+                return Ok(Some((loc, data.key, data.value, data.next_key)));
             }
         }
 
@@ -265,28 +277,23 @@ impl<
         assert_ne!(self.snapshot.keys(), 0);
 
         let iter = self.snapshot.prev_translated_key(key);
-        if let Some(prev_key) = Self::last_key_in_iter(&self.log, iter).await? {
-            callback(Some(prev_key.0));
-            self.update_known_loc(&prev_key.1, prev_key.0, next_loc)
-                .await?;
-            return Ok(UpdateLocResult::NotExists((
-                prev_key.1, prev_key.2, prev_key.3,
-            )));
+        if let Some((loc, prev_key)) = Self::last_key_in_iter(&self.log, iter).await? {
+            callback(Some(loc));
+            self.update_known_loc(&prev_key.key, loc, next_loc).await?;
+            return Ok(UpdateLocResult::NotExists(prev_key));
         }
 
         // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
         let iter = self.snapshot.last_translated_key();
         let last_key = Self::last_key_in_iter(&self.log, iter).await?;
-        let Some(last_key) = last_key else {
+        let Some((loc, last_key)) = last_key else {
             unreachable!("no last key found in non-empty snapshot");
         };
 
-        callback(Some(last_key.0));
-        Self::update_known_loc(self, &last_key.1, last_key.0, next_loc).await?;
+        callback(Some(loc));
+        Self::update_known_loc(self, &last_key.key, loc, next_loc).await?;
 
-        Ok(UpdateLocResult::NotExists((
-            last_key.1, last_key.2, last_key.3,
-        )))
+        Ok(UpdateLocResult::NotExists(last_key))
     }
 
     /// Update the location of `key` to `new_loc` in the snapshot, and update the location of
@@ -311,23 +318,23 @@ impl<
             // Iterate over conflicts in the snapshot to try and find the key, or its predecessor if it
             // doesn't exist.
             while let Some(&loc) = cursor.next() {
-                let (k, v, next_key) = Self::get_update_op(&self.log, loc).await?;
-                if k == *key {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == *key {
                     // Found the key in the snapshot.  Update its location and return its next-key.
                     assert!(next_loc > loc);
                     cursor.update(next_loc);
                     callback(Some(loc));
-                    return Ok(UpdateLocResult::Exists(next_key));
+                    return Ok(UpdateLocResult::Exists(data.next_key));
                 }
-                if k > *key {
+                if data.key > *key {
                     continue;
                 }
                 if let Some((_, ref other_key, _, _)) = best_prev_key {
-                    if k > *other_key {
-                        best_prev_key = Some((loc, k, v, next_key));
+                    if data.key > *other_key {
+                        best_prev_key = Some((loc, data.key, data.value, data.next_key));
                     }
                 } else {
-                    best_prev_key = Some((loc, k, v, next_key));
+                    best_prev_key = Some((loc, data.key, data.value, data.next_key));
                 }
             }
 
@@ -346,7 +353,11 @@ impl<
                 if cursor_loc == loc {
                     cursor.update(next_loc + 1);
                     callback(Some(loc));
-                    return Ok(UpdateLocResult::NotExists((prev_key, v, next_key)));
+                    return Ok(UpdateLocResult::NotExists(KeyData {
+                        key: prev_key,
+                        value: v,
+                        next_key,
+                    }));
                 }
             }
             unreachable!("prev_key should have been found");
@@ -365,12 +376,16 @@ impl<
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
-    ) -> Result<(K, V, K), Error> {
-        let Operation::Update(k, v, next_key) = log.read(*loc).await? else {
+    ) -> Result<KeyData<K, V>, Error> {
+        let Operation::Update(key, value, next_key) = log.read(*loc).await? else {
             unreachable!("location does not reference update operation. loc={loc}");
         };
 
-        Ok((k, v, next_key))
+        Ok(KeyData {
+            key,
+            value,
+            next_key,
+        })
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -391,19 +406,19 @@ impl<
         log: &Journal<E, Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
         key: &K,
-    ) -> Result<Option<(K, V, K, Location)>, Error> {
+    ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         for &loc in iter {
             // Iterate over all conflicting keys in the snapshot to find the span.
-            let (k, v, next) = Self::get_update_op(log, loc).await?;
-            if k >= next {
+            let data = Self::get_update_op(log, loc).await?;
+            if data.key >= data.next_key {
                 // cyclic span case
-                if *key >= k || *key < next {
-                    return Ok(Some((k, v, next, loc)));
+                if *key >= data.key || *key < data.next_key {
+                    return Ok(Some((loc, data)));
                 }
             } else {
                 // normal span case
-                if *key >= k && *key < next {
-                    return Ok(Some((k, v, next, loc)));
+                if *key >= data.key && *key < data.next_key {
+                    return Ok(Some((loc, data)));
                 }
             }
         }
@@ -413,7 +428,7 @@ impl<
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<Option<(K, V, K, Location)>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         if self.snapshot.keys() == 0 {
             return Ok(None);
         }
@@ -470,9 +485,9 @@ impl<
     /// if it has no value.
     pub(super) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
-            let (k, v, next_key) = Self::get_update_op(&self.log, loc).await?;
-            if k == *key {
-                return Ok(Some((v, next_key, loc)));
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if data.key == *key {
+                return Ok(Some((data.value, data.next_key, loc)));
             }
         }
 
@@ -528,12 +543,12 @@ impl<
         let res = self.update_loc(&key, next_loc, callback).await?;
         let op = match res {
             UpdateLocResult::Exists(next_key) => Operation::Update(key, value, next_key),
-            UpdateLocResult::NotExists((prev_key, v, next_key)) => {
-                self.apply_op(Operation::Update(key.clone(), value, next_key))
+            UpdateLocResult::NotExists(prev_data) => {
+                self.apply_op(Operation::Update(key.clone(), value, prev_data.next_key))
                     .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
-                Operation::Update(prev_key, v, key)
+                Operation::Update(prev_data.key, prev_data.value, key)
             }
         };
 
@@ -574,23 +589,23 @@ impl<
             // Iterate over all conflicting keys in the snapshot to delete the key if it exists, and
             // potentially find the previous key.
             while let Some(&loc) = cursor.next() {
-                let (k, v, next) = Self::get_update_op(&self.log, loc).await?;
-                if k == key {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == key {
                     // The key is in the snapshot, so delete it.
                     cursor.delete();
-                    next_key = Some(next);
+                    next_key = Some(data.next_key);
                     callback(false, Some(loc));
                     continue;
                 }
-                if k > key {
+                if data.key > key {
                     continue;
                 }
                 let Some((_, ref current_prev_key, _)) = prev_key else {
-                    prev_key = Some((loc, k.clone(), v));
+                    prev_key = Some((loc, data.key.clone(), data.value));
                     continue;
                 };
-                if k > *current_prev_key {
-                    prev_key = Some((loc, k.clone(), v));
+                if data.key > *current_prev_key {
+                    prev_key = Some((loc, data.key.clone(), data.value));
                 }
             }
         }
@@ -611,14 +626,14 @@ impl<
         if prev_key.is_none() {
             let iter = self.snapshot.prev_translated_key(&key);
             let last_key = Self::last_key_in_iter(&self.log, iter).await?;
-            prev_key = last_key.map(|(loc, k, v, _)| (loc, k, v));
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
         if prev_key.is_none() {
             // Unusual case where we deleted the very first key in the DB, so the very last key in
             // the DB defines the span in need of update.
             let iter = self.snapshot.last_translated_key();
             let last_key = Self::last_key_in_iter(&self.log, iter).await?;
-            prev_key = last_key.map(|(loc, k, v, _)| (loc, k, v));
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
         let Some(prev_key) = prev_key else {
@@ -1844,7 +1859,7 @@ mod test {
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
-                    assert_eq!(db.get_span(key).await.unwrap().unwrap().2, next);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
                     next_key = next;
                 }
 
@@ -1862,7 +1877,7 @@ mod test {
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
-                    assert_eq!(db.get_span(key).await.unwrap().unwrap().2, next);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
                     next_key = next;
                 }
 
