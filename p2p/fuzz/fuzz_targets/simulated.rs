@@ -28,7 +28,7 @@ enum SimulatedOperation {
         channel_id: u8,
     },
     SendMessage {
-            peer_idx: u8,
+        peer_idx: u8,
         channel_id: u8,
         to_idx: u8,
         msg_size: usize,

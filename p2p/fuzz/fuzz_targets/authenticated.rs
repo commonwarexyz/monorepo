@@ -332,7 +332,6 @@ fn fuzz(input: FuzzInput) {
                                 .push(sender_idx_u8);
                         }
                     }
-
                 }
 
                 NetworkOperation::ReceiveMessage { receiver_idx } => {
@@ -350,7 +349,6 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                     let channels_with_pending: Vec<u8> = ch_set.into_iter().collect();
-
                     if channels_with_pending.is_empty() {
                         continue;
                     }
