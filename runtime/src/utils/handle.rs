@@ -72,6 +72,7 @@ impl Children {
     /// Returns `(previous, current)` where `previous` is the list that should be
     /// registered with the parent and `current` is the new list to hand to the
     /// spawned child.
+    #[allow(clippy::type_complexity)]
     pub fn swap_for_child(&self) -> (Arc<Mutex<Vec<Aborter>>>, Arc<Mutex<Vec<Aborter>>>) {
         let next = Arc::new(Mutex::new(Vec::new()));
         let (previous, dependents) = {
