@@ -1747,7 +1747,7 @@ pub(super) mod test {
     #[test_traced]
     fn test_fixed_db_get_loc_out_of_bounds() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
 
             // Test getting from empty database
@@ -1757,13 +1757,12 @@ pub(super) mod test {
             );
 
             // Add some operations
-            let mut rng = OsRng;
-            let key1 = Digest::random(&mut rng);
-            let key2 = Digest::random(&mut rng);
-            let key3 = Digest::random(&mut rng);
-            let val1 = Digest::random(&mut rng);
-            let val2 = Digest::random(&mut rng);
-            let val3 = Digest::random(&mut rng);
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
+            let val1 = Digest::random(&mut context);
+            let val2 = Digest::random(&mut context);
+            let val3 = Digest::random(&mut context);
 
             db.update(key1, val1).await.unwrap();
             db.update(key2, val2).await.unwrap();
@@ -1791,17 +1790,16 @@ pub(super) mod test {
     #[test_traced]
     fn test_fixed_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
 
             // Add some operations
-            let mut rng = OsRng;
-            let key1 = Digest::random(&mut rng);
-            let key2 = Digest::random(&mut rng);
-            let key3 = Digest::random(&mut rng);
-            let val1 = Digest::random(&mut rng);
-            let val2 = Digest::random(&mut rng);
-            let val3 = Digest::random(&mut rng);
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
+            let val1 = Digest::random(&mut context);
+            let val2 = Digest::random(&mut context);
+            let val3 = Digest::random(&mut context);
 
             db.update(key1, val1).await.unwrap();
             db.update(key2, val2).await.unwrap();

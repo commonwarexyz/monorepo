@@ -912,7 +912,6 @@ pub(super) mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use rand::rngs::OsRng;
     use std::collections::HashMap;
 
     const PAGE_SIZE: usize = 77;
@@ -1659,9 +1658,8 @@ pub(super) mod test {
     #[test_traced]
     fn test_variable_db_get_loc_out_of_bounds() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut rng = OsRng;
 
             // Test getting from empty database
             let result = db.get_loc(Location::new_unchecked(0)).await;
@@ -1670,9 +1668,9 @@ pub(super) mod test {
             );
 
             // Add some operations
-            db.update(Digest::random(&mut rng), vec![10]).await.unwrap();
-            db.update(Digest::random(&mut rng), vec![20]).await.unwrap();
-            db.update(Digest::random(&mut rng), vec![30]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![10]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
             db.commit(None).await.unwrap();
 
             // Test getting valid locations succeeds
@@ -1695,11 +1693,10 @@ pub(super) mod test {
     #[test_traced]
     fn test_variable_db_get_from_loc_out_of_bounds() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut rng = OsRng;
 
-            let key = Digest::random(&mut rng);
+            let key = Digest::random(&mut context);
 
             // Test getting from empty database
             let result = db.get_from_loc(&key, Location::new_unchecked(0)).await;
@@ -1709,8 +1706,8 @@ pub(super) mod test {
 
             // Add some operations
             db.update(key, vec![10]).await.unwrap();
-            db.update(Digest::random(&mut rng), vec![20]).await.unwrap();
-            db.update(Digest::random(&mut rng), vec![30]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
             db.commit(None).await.unwrap();
 
             // Test getting valid locations succeeds
@@ -1731,14 +1728,13 @@ pub(super) mod test {
     #[test_traced]
     fn test_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut rng = OsRng;
 
             // Add some operations
-            let key1 = Digest::random(&mut rng);
-            let key2 = Digest::random(&mut rng);
-            let key3 = Digest::random(&mut rng);
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
 
             db.update(key1, vec![10]).await.unwrap();
             db.update(key2, vec![20]).await.unwrap();
