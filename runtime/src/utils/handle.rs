@@ -93,7 +93,7 @@ impl Children {
     ) {
         // Capture the current branch state and detach any pre-built clones so we can
         // retarget them after the child branch is created.
-        let (supervisor, tracked_state) = {
+        let (supervisor, tracked_clones, child_owned) = {
             let mut inner = self.inner.lock().unwrap();
             let parent_list = inner.owned.clone();
             let supervisor = supervised.then_some(parent_list.clone());
@@ -104,10 +104,8 @@ impl Children {
             // Parent keeps using the same `owned` pointer, clones will be updated below.
             // Descendants spawned by the new child branch should populate this fresh list.
             inner.owned = new_owned.clone();
-            (supervisor, (tracked_clones, new_owned))
+            (supervisor, tracked_clones, new_owned)
         };
-
-        let (tracked_clones, child_owned) = tracked_state;
 
         // Retarget any pre-built clones so they continue to share supervision with the
         // freshly spawned child branch.
