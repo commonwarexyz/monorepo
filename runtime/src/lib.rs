@@ -316,8 +316,8 @@ pub trait External: Clock + Clone + Send + Sync + 'static {
     /// `Poll::Pending` again.
     fn constrain<'a, F, T>(
         &'a self,
-        _range: Range<Duration>,
         future: F,
+        _range: Range<Duration>,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
@@ -343,7 +343,7 @@ pub trait FutureExt: Future + Send + Sized {
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        external.constrain(range, self)
+        external.constrain(self, range)
     }
 }
 

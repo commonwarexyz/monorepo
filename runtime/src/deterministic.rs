@@ -1260,8 +1260,8 @@ impl Clock for Context {
 impl External for Context {
     fn constrain<'a, F, T>(
         &'a self,
-        range: Range<Duration>,
         future: F,
+        range: Range<Duration>,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,

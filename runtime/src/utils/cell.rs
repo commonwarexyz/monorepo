@@ -178,14 +178,14 @@ where
 {
     fn constrain<'a, F, T>(
         &'a self,
-        range: Range<Duration>,
         future: F,
+        range: Range<Duration>,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().constrain(range, future)
+        self.as_ref().constrain(future, range)
     }
 }
 
