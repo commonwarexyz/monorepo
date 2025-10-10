@@ -41,7 +41,7 @@ use crate::{
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
-    task::{waker, ArcWake},
+    task::{noop_waker, waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -1060,14 +1060,16 @@ impl Sleeper {
     }
 }
 
-struct Awaiter<F> {
+struct Awaiter<F: Future> {
     executor: Weak<Executor>,
     time: SystemTime,
     future: Option<Pin<Box<F>>>,
+    ready: Option<F::Output>,
+    started: bool,
     registered: bool,
 }
 
-impl<F> Awaiter<F> {
+impl<F: Future> Awaiter<F> {
     /// Upgrade Weak reference to [Executor].
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
@@ -1128,39 +1130,55 @@ where
 {
     type Output = F::Output;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        // If the current time is before the deadline, we need to wait
-        let executor = self.executor();
-        {
-            let current_time = *executor.time.lock().unwrap();
-            if current_time < self.time {
-                if !self.registered {
-                    self.registered = true;
-                    executor.sleeping.lock().unwrap().push(Alarm {
-                        time: self.time,
-                        waker: cx.waker().clone(),
-                    });
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: Accessing fields through `this` does not move the pinned future. We only ever
+        // drop the pinned future in place by setting the `Option` to `None`.
+        let this = unsafe { self.get_unchecked_mut() };
+        if !this.started {
+            this.started = true;
+            if let Some(future) = this.future.as_mut() {
+                let waker = noop_waker();
+                let mut cx_noop = task::Context::from_waker(&waker);
+                match future.as_mut().poll(&mut cx_noop) {
+                    Poll::Ready(value) => {
+                        this.future = None;
+                        this.ready = Some(value);
+                    }
+                    Poll::Pending => {}
                 }
-                return Poll::Pending;
             }
         }
 
-        // Poll the future
-        let poll_result = {
-            let future = self
-                .future
-                .as_mut()
-                .expect("future already polled at scheduled time");
-            future.as_mut().poll(cx)
-        };
-        match poll_result {
+        let executor = this.executor();
+        let current_time = *executor.time.lock().unwrap();
+
+        if current_time < this.time {
+            if !this.registered {
+                this.registered = true;
+                executor.sleeping.lock().unwrap().push(Alarm {
+                    time: this.time,
+                    waker: cx.waker().clone(),
+                });
+            }
+            return Poll::Pending;
+        }
+
+        if let Some(value) = this.ready.take() {
+            return Poll::Ready(value);
+        }
+
+        let future = this
+            .future
+            .as_mut()
+            .expect("future already polled at scheduled time");
+        match future.as_mut().poll(cx) {
             Poll::Ready(value) => {
-                self.future = None;
+                this.future = None;
                 Poll::Ready(value)
             }
             Poll::Pending => panic!(
                 "future not ready when polled at scheduled time {:?}",
-                self.time
+                this.time
             ),
         }
     }
@@ -1205,6 +1223,8 @@ impl Clock for Context {
             executor: self.executor.clone(),
             time: deadline,
             future: Some(Box::pin(future)),
+            ready: None,
+            started: false,
             registered: false,
         }
     }
