@@ -180,8 +180,18 @@ jobs:
       run: ./.github/scripts/check_no_std.sh
 
   Unsafe:
+    name: miri (${{ matrix.dir }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - dir: storage
+            module: 'index::'
+            flags: ''
+          - dir: runtime
+            module: 'iouring::'
+            flags: '--features iouring-storage'
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -196,7 +206,7 @@ jobs:
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0
-    - name: Run miri tests for storage::index
+    - name: Run miri tests for ${{ matrix.module }}
       run: |
-        cd storage
-        just miri index::
+        cd ${{ matrix.dir }}
+        just miri ${{ matrix.module }} ${{ matrix.flags }}

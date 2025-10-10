@@ -60,5 +60,5 @@ udeps nightly_version='+nightly':
   cargo {{nightly_version}} udeps --all-targets
 
 # Run miri tests on a given module
-miri module:
-  MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib {{module}}
+miri module *args='':
+  MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test {{args}} --lib {{module}}
