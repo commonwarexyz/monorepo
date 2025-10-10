@@ -9,7 +9,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -19,7 +19,7 @@ pub struct Config<S: SigningScheme> {
 }
 
 pub struct Reconfigurer<E: Spawner, S: SigningScheme, H: Hasher> {
-    context: E,
+    context: ContextCell<E>,
     signing: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
@@ -28,7 +28,7 @@ pub struct Reconfigurer<E: Spawner, S: SigningScheme, H: Hasher> {
 impl<E: Spawner, S: SigningScheme, H: Hasher> Reconfigurer<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
+            context: ContextCell::new(context),
             signing: cfg.signing,
             namespace: cfg.namespace,
             _hasher: PhantomData,
@@ -36,7 +36,7 @@ impl<E: Spawner, S: SigningScheme, H: Hasher> Reconfigurer<E, S, H> {
     }
 
     pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(pending_network))
+        spawn_cell!(self.context, self.run(pending_network).await)
     }
 
     async fn run(self, pending_network: (impl Sender, impl Receiver)) {

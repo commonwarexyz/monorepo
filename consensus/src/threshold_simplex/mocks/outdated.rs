@@ -7,7 +7,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
@@ -19,7 +19,7 @@ pub struct Config<S: SigningScheme> {
 }
 
 pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
-    context: E,
+    context: ContextCell<E>,
     signing: S,
 
     namespace: Vec<u8>,
@@ -33,7 +33,7 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: H
 impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Outdated<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
+            context: ContextCell::new(context),
             signing: cfg.signing,
 
             namespace: cfg.namespace,
@@ -46,7 +46,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Outdated
     }
 
     pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(pending_network))
+        spawn_cell!(self.context, self.run(pending_network).await)
     }
 
     async fn run(mut self, pending_network: (impl Sender, impl Receiver)) {

@@ -117,7 +117,7 @@ fn fuzz(input: FuzzInput) {
                 let root = mmr.root(&mut hasher);
 
                 for leaf in 0u64..num_elements {
-                    let loc = Location::new(leaf);
+                    let loc = Location::new(leaf).unwrap();
                     let original_proof = mmr.proof(loc).unwrap();
 
                     assert!(

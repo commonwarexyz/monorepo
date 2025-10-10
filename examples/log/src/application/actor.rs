@@ -4,7 +4,7 @@ use super::{
     Config, SigningScheme,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -15,7 +15,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner, H: Hasher> {
-    context: R,
+    context: ContextCell<R>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -31,7 +31,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 hasher: config.hasher,
                 mailbox,
             },
@@ -43,7 +43,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
 
     /// Run the application actor.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {

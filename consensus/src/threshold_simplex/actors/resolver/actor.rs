@@ -19,7 +19,7 @@ use commonware_p2p::{
     },
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -105,7 +105,7 @@ pub struct Actor<
     B: Blocker<PublicKey = P>,
     D: Digest,
 > {
-    context: E,
+    context: ContextCell<E>,
     signing: S,
 
     blocker: B,
@@ -149,7 +149,7 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let mut requester = requester::Requester::new(context.clone(), config);
+        let mut requester = requester::Requester::new(context.with_label("requester"), config);
         requester.reconcile(&cfg.participants);
 
         // Initialize metrics
@@ -172,7 +172,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 signing: cfg.signing,
 
                 blocker: cfg.blocker,
@@ -307,7 +307,7 @@ impl<
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter, sender, receiver))
+        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
 
     async fn run(

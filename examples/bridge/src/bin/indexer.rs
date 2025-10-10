@@ -239,7 +239,7 @@ fn main() {
             };
 
             let (peer, mut sender, mut receiver) = match listen(
-                context.clone(),
+                context.with_label("listener"),
                 |peer| {
                     let out = validators.contains(&peer);
                     async move { out }

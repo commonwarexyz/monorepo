@@ -43,6 +43,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 _Sometimes, we opt to maintain software that is neither a primitive nor an example to make it easier to interact with the Commonware Library. Unless otherwise indicated, code in this section is intended to be used in production. Please refer to our [security policy](./SECURITY.md) before disclosing an exploit publicly._
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
+* [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.

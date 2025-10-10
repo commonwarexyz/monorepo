@@ -11,7 +11,9 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -23,14 +25,14 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
     crypto: C,
 
     /// The maximum number of peers in a set.
-    max_peer_set_size: usize,
+    max_peer_set_size: u64,
 
     /// The maximum number of [types::Info] allowable in a single message.
     peer_gossip_max_count: usize,
@@ -80,7 +82,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the directory
         let directory = Directory::init(
-            context.clone(),
+            context.with_label("directory"),
             cfg.bootstrappers,
             myself,
             directory_cfg,
@@ -98,7 +100,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -113,7 +115,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {
@@ -131,7 +133,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Panic since there is no way to recover from this.
                 let len = peers.len();
                 let max = self.max_peer_set_size;
-                assert!(len <= max, "peer set too large: {len} > {max}");
+                assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
                 self.directory.add_set(index, peers);
             }
@@ -247,7 +249,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{BitVec as UtilsBitVec, NZU32};
+    use commonware_utils::{bitmap::BitMap, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -353,9 +355,9 @@ mod tests {
         let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle, _) = Actor::new(runner_context.clone(), cfg_to_clone);
+        let (actor, mailbox, oracle, _) = Actor::new(runner_context, cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        runner_context.spawn(|_| actor.run());
+        actor.start();
 
         TestHarness {
             mailbox,
@@ -378,7 +380,7 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Vec<PublicKey> = (1..=(cfg.max_peer_set_size + 1) as u64)
+            let too_many_peers: Vec<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .collect();
             oracle.register(0, too_many_peers).await;
@@ -505,7 +507,7 @@ mod tests {
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
-                bits: UtilsBitVec::ones(1),
+                bits: BitMap::ones(1),
             };
 
             let _r1 = connect_to_peer(
@@ -652,11 +654,11 @@ mod tests {
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
             // Act as if pk1 received a bit vector where pk2 is not known.
-            let mut bv = UtilsBitVec::zeroes(set1.len());
+            let mut bv = BitMap::zeroes(set1.len() as u64);
             let idx_tracker_in_set1 = set1.iter().position(|p| p == &tracker_pk).unwrap();
             let idx_pk1_in_set1 = set1.iter().position(|p| p == &pk1).unwrap();
-            bv.set(idx_tracker_in_set1);
-            bv.set(idx_pk1_in_set1);
+            bv.set(idx_tracker_in_set1 as u64, true);
+            bv.set(idx_pk1_in_set1 as u64, true);
             mailbox.bit_vec(
                 types::BitVec { index: 1, bits: bv },
                 peer_mailbox_s1.clone(),
@@ -732,14 +734,14 @@ mod tests {
 
             let mut sorted_set0_peers = peer_set_0_peers.clone();
             sorted_set0_peers.sort();
-            let mut knowledge_for_set0 = UtilsBitVec::zeroes(sorted_set0_peers.len());
+            let mut knowledge_for_set0 = BitMap::zeroes(sorted_set0_peers.len() as u64);
             let idx_tracker_in_set0 = sorted_set0_peers
                 .iter()
                 .position(|p| p == &tracker_pk)
                 .unwrap();
             let idx_pk1_in_set0 = sorted_set0_peers.iter().position(|p| p == &pk1).unwrap();
-            knowledge_for_set0.set(idx_tracker_in_set0);
-            knowledge_for_set0.set(idx_pk1_in_set0);
+            knowledge_for_set0.set(idx_tracker_in_set0 as u64, true);
+            knowledge_for_set0.set(idx_pk1_in_set0 as u64, true);
 
             let bit_vec_from_pk1 = types::BitVec {
                 index: 0,
@@ -899,7 +901,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
             let invalid_bit_vec = types::BitVec {
                 index: 0,
-                bits: UtilsBitVec::ones(2),
+                bits: BitMap::ones(2),
             };
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone());
             assert!(matches!(
@@ -949,10 +951,10 @@ mod tests {
                 _ => panic!("Expected BitVec for set 0"),
             };
             assert_eq!(bit_vec0.index, 0);
-            assert_eq!(bit_vec0.bits.len(), set0_peers.len());
+            assert_eq!(bit_vec0.bits.len(), set0_peers.len() as u64);
             let tracker_idx_s0 = set0_peers.iter().position(|p| p == &tracker_pk).unwrap();
             assert!(
-                bit_vec0.bits.get(tracker_idx_s0).unwrap(),
+                bit_vec0.bits.get(tracker_idx_s0 as u64),
                 "Tracker should know itself in set 0"
             );
 
@@ -976,16 +978,16 @@ mod tests {
                 _ => panic!("Expected updated BitVec for set 0"),
             };
             let peer1_idx_s0 = set0_peers.iter().position(|p| p == &peer1_pk).unwrap();
-            assert!(bit_vec0_updated.bits.get(tracker_idx_s0).unwrap());
+            assert!(bit_vec0_updated.bits.get(tracker_idx_s0 as u64));
             assert!(
-                bit_vec0_updated.bits.get(peer1_idx_s0).unwrap(),
+                bit_vec0_updated.bits.get(peer1_idx_s0 as u64),
                 "Tracker should know peer1 in set 0 after Peers msg"
             );
 
             // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
             // Tracker should respond with Info for peer1_pk (as it just learned it)
-            let mut peer1_knowledge_s0 = UtilsBitVec::zeroes(set0_peers.len());
-            peer1_knowledge_s0.set(tracker_idx_s0); // Peer1 knows tracker
+            let mut peer1_knowledge_s0 = BitMap::zeroes(set0_peers.len() as u64);
+            peer1_knowledge_s0.set(tracker_idx_s0 as u64, true); // Peer1 knows tracker
             mailbox.bit_vec(
                 types::BitVec {
                     index: 0,

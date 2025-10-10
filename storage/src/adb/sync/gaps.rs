@@ -256,15 +256,16 @@ mod tests {
         let fetched_ops: BTreeMap<Location, u64> = test_case
             .fetched_ops
             .into_iter()
-            .map(|(k, v)| (Location::new(k), v))
+            .map(|(k, v)| (Location::new_unchecked(k), v))
             .collect();
         let outstanding_requests: BTreeSet<Location> = test_case
             .requested_ops
             .into_iter()
-            .map(Location::new)
+            .map(Location::new_unchecked)
             .collect();
         let result = find_next(
-            Location::new(test_case.lower_bound)..Location::new(test_case.upper_bound),
+            Location::new_unchecked(test_case.lower_bound)
+                ..Location::new_unchecked(test_case.upper_bound),
             &fetched_ops,
             &outstanding_requests,
             NonZeroU64::new(test_case.fetch_batch_size).unwrap(),
@@ -273,7 +274,8 @@ mod tests {
             result,
             test_case
                 .expected
-                .map(|range| Location::new(range.start)..Location::new(range.end))
+                .map(|range| Location::new_unchecked(range.start)
+                    ..Location::new_unchecked(range.end))
         );
     }
 }

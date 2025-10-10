@@ -167,7 +167,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
@@ -270,7 +270,7 @@ mod tests {
                 let mut complete_sender = complete_sender.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
-                    context.with_label("receiver").spawn(move |_| async move {
+                    let receiver = context.with_label("receiver").spawn(move |_| async move {
                         // Wait for all peers to send their identity
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
@@ -290,7 +290,7 @@ mod tests {
                     });
 
                     // Send identity to all peers
-                    context
+                    let sender = context
                         .with_label("sender")
                         .spawn(move |context| async move {
                             // Loop forever to account for unexpected message drops
@@ -382,6 +382,16 @@ mod tests {
                                 context.sleep(Duration::from_secs(10)).await;
                             }
                         });
+
+                    // Neither task should exit
+                    select! {
+                        receiver = receiver => {
+                            panic!("receiver exited: {receiver:?}");
+                        },
+                        sender = sender => {
+                            panic!("sender exited: {sender:?}");
+                        },
+                    }
                 }
             });
         }

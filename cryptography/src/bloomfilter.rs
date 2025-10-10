@@ -7,11 +7,10 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     codec::{Read, Write},
-    config::RangeCfg,
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
-use commonware_utils::BitVec;
+use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
@@ -28,7 +27,7 @@ const FULL_DIGEST_LEN: usize = Digest::SIZE;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
-    bits: BitVec,
+    bits: BitMap,
 }
 
 impl BloomFilter {
@@ -36,12 +35,12 @@ impl BloomFilter {
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
-            bits: BitVec::zeroes(bits.get()),
+            bits: BitMap::zeroes(bits.get() as u64),
         }
     }
 
     /// Generate `num_hashers` bit indices for a given item.
-    fn indices(&self, item: &[u8], bits: usize) -> impl Iterator<Item = usize> {
+    fn indices(&self, item: &[u8], bits: u64) -> impl Iterator<Item = u64> {
         // Extract two 128-bit hash values from the SHA256 digest of the item
         let digest = Sha256::hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
@@ -58,14 +57,14 @@ impl BloomFilter {
         let bits = bits as u128;
         (0..hashers)
             .map(move |hasher| h1.wrapping_add(hasher.wrapping_mul(h2)) % bits)
-            .map(|index| index as usize)
+            .map(|index| index as u64)
     }
 
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
         let indices = self.indices(item, self.bits.len());
         for index in indices {
-            self.bits.set(index);
+            self.bits.set(index, true);
         }
     }
 
@@ -75,7 +74,7 @@ impl BloomFilter {
     pub fn contains(&self, item: &[u8]) -> bool {
         let indices = self.indices(item, self.bits.len());
         for index in indices {
-            if !self.bits.get(index).expect("index out of bounds") {
+            if !self.bits.get(index) {
                 return false;
             }
         }
@@ -91,17 +90,27 @@ impl Write for BloomFilter {
 }
 
 impl Read for BloomFilter {
-    type Cfg = (RangeCfg, RangeCfg);
+    // The number of hashers and the number of bits that the bitmap must have.
+    type Cfg = (u8, u64);
 
     fn read_cfg(
         buf: &mut impl Buf,
         (hashers_cfg, bits_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let hashers = u8::read_cfg(buf, &())?;
-        if !hashers_cfg.contains(&(hashers as usize)) {
-            return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
+        if hashers != *hashers_cfg {
+            return Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config",
+            ));
         }
-        let bits = BitVec::read_cfg(buf, bits_cfg)?;
+        let bits = BitMap::read_cfg(buf, bits_cfg)?;
+        if bits.len() != *bits_cfg {
+            return Err(CodecError::Invalid(
+                "BloomFilter",
+                "bitmap length doesn't match config",
+            ));
+        }
         Ok(Self { hashers, bits })
     }
 }
@@ -171,7 +180,7 @@ mod tests {
         bf.insert(b"test1");
         bf.insert(b"test2");
 
-        let cfg = ((1..=100).into(), (100..=100).into());
+        let cfg = (5, 100);
 
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
@@ -182,7 +191,7 @@ mod tests {
     #[test]
     fn test_codec_empty() {
         let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
-        let cfg = ((1..=100).into(), (128..=128).into());
+        let cfg = (4, 128);
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(bf, decoded);
@@ -194,20 +203,26 @@ mod tests {
         bf.insert(b"test1");
         let encoded = bf.encode();
 
-        // Too small
-        let cfg = ((10..=10).into(), (100..=100).into());
+        // Too large
+        let cfg = (10, 100);
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config"
+            ))
         ));
 
-        // Too large
-        let cfg = ((0..5).into(), (100..=100).into());
+        // Too small
+        let cfg = (4, 100);
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config"
+            ))
         ));
     }
 
@@ -217,14 +232,19 @@ mod tests {
         bf.insert(b"test1");
         let encoded = bf.encode();
 
-        // Too small
-        let cfg_small = ((5..=5).into(), (101..=110).into());
-        let result_small = BloomFilter::decode_cfg(encoded.clone(), &cfg_small);
-        assert!(matches!(result_small, Err(CodecError::InvalidLength(100))));
+        // Wrong bit count
+        let cfg = (5, 99);
+        let result = BloomFilter::decode_cfg(encoded.clone(), &cfg);
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
-        // Too large
-        let cfg_large = ((5..=5).into(), (0..100).into());
-        let result_large = BloomFilter::decode_cfg(encoded.clone(), &cfg_large);
-        assert!(matches!(result_large, Err(CodecError::InvalidLength(100))));
+        let cfg = (5, 101);
+        let result = BloomFilter::decode_cfg(encoded, &cfg);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "bitmap length doesn't match config"
+            ))
+        ));
     }
 }

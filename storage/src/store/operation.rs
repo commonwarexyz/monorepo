@@ -326,7 +326,13 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::CommitFloor(Location::new(floor_loc)))
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::adb::operation::Fixed",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -356,7 +362,13 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
             COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(metadata, Location::new(floor_loc.into())))
+                let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::adb::operation::Variable",
+                        "commit floor location overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -433,7 +445,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.key());
     }
 
@@ -448,7 +460,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.value());
     }
 
@@ -473,10 +485,10 @@ mod tests {
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
-        assert!(matches!(from, Fixed::CommitFloor(loc) if loc == Location::new(42)));
+        assert!(matches!(from, Fixed::CommitFloor(loc) if loc == Location::new_unchecked(42)));
         assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation

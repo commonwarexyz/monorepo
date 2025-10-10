@@ -19,7 +19,7 @@ use commonware_p2p::{
     },
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -104,7 +104,7 @@ pub struct Actor<
     D: Digest,
     S: Supervisor<Index = View, PublicKey = C>,
 > {
-    context: E,
+    context: ContextCell<E>,
     supervisor: S,
 
     epoch: Epoch,
@@ -146,7 +146,7 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(context.clone(), config);
+        let requester = requester::Requester::new(context.with_label("requester"), config);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
@@ -168,7 +168,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 supervisor: cfg.supervisor,
 
                 epoch: cfg.epoch,
@@ -302,7 +302,7 @@ impl<
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter, sender, receiver))
+        spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
 
     async fn run(

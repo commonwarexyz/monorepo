@@ -43,7 +43,7 @@ impl<D: Digest> Read for Target<D> {
         }
         Ok(Self {
             root,
-            range: Location::new(lower_bound)..Location::new(upper_bound),
+            range: Location::new_unchecked(lower_bound)..Location::new_unchecked(upper_bound),
         })
     }
 }
@@ -93,7 +93,7 @@ mod tests {
     fn test_sync_target_serialization() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            range: Location::new(100)..Location::new(500),
+            range: Location::new_unchecked(100)..Location::new_unchecked(500),
         };
 
         // Serialize
@@ -117,7 +117,7 @@ mod tests {
     fn test_sync_target_read_invalid_bounds() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            range: Location::new(100)..Location::new(50), // invalid: lower > upper
+            range: Location::new_unchecked(100)..Location::new_unchecked(50), // invalid: lower > upper
         };
 
         let mut buffer = Vec::new();
@@ -133,35 +133,35 @@ mod tests {
     type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new(50)..Location::new(200) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
         Ok(());
         "valid update"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new(200)..Location::new(100) },
-        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new(200), upper_bound_pos: Location::new(100) }));
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(200)..Location::new_unchecked(100) },
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new_unchecked(200), upper_bound_pos: Location::new_unchecked(100) }));
         "invalid bounds - lower > upper"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
-        Target { root: sha256::Digest::from([1; 32]), range: Location::new(0)..Location::new(50) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(50) },
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
             old: Target {
                 root: sha256::Digest::from([0; 32]),
-                range: Location::new(0)..Location::new(100),
+                range: Location::new_unchecked(0)..Location::new_unchecked(100),
             },
             new: Target {
                 root: sha256::Digest::from([1; 32]),
-                range: Location::new(0)..Location::new(50),
+                range: Location::new_unchecked(0)..Location::new_unchecked(50),
             },
         }));
         "moves backward"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..Location::new(100) },
-        Target { root: sha256::Digest::from([0; 32]), range: Location::new(50)..Location::new(200) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged));
         "same root"
     )]

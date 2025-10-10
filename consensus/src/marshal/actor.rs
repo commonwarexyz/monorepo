@@ -22,7 +22,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
@@ -66,7 +66,7 @@ pub struct Actor<
     S: SigningScheme,
 > {
     // ---------- Context ----------
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
@@ -221,7 +221,7 @@ impl<
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
@@ -252,7 +252,7 @@ impl<
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        self.context.spawn_ref()(self.run(application, buffer, resolver))
+        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
@@ -269,16 +269,15 @@ impl<
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
-        let finalizer_context = self.context.with_label("finalizer");
         let finalizer = Finalizer::new(
-            finalizer_context.clone(),
+            self.context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
         )
         .await;
-        finalizer_context.spawn(|_| finalizer.run());
+        finalizer.start();
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();

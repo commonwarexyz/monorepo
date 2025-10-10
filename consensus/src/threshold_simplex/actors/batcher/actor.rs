@@ -16,8 +16,9 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
@@ -315,7 +316,7 @@ pub struct Actor<
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    context: E,
+    context: ContextCell<E>,
 
     participants: Participants<P>,
     signing: S,
@@ -374,10 +375,12 @@ impl<
             "latency of partial signature verification",
             verify_latency.clone(),
         );
+        // TODO(#1833): Metrics should use the post-start context
+        let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: context.clone(),
+                context: ContextCell::new(context),
 
                 participants: cfg.participants.into(),
                 signing: cfg.signing,
@@ -396,7 +399,7 @@ impl<
                 verified,
                 inbound_messages,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, Arc::new(context)),
+                verify_latency: histogram::Timed::new(verify_latency, clock),
             },
             Mailbox::new(sender),
         )
@@ -407,7 +410,7 @@ impl<
         consensus: voter::Mailbox<S, D>,
         receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(consensus, receiver))
+        spawn_cell!(self.context, self.run(consensus, receiver).await)
     }
 
     pub async fn run(

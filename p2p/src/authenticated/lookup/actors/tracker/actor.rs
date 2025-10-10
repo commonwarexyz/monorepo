@@ -9,7 +9,9 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -21,7 +23,7 @@ use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- Message-Passing ----------
     /// The unbounded mailbox for the actor.
@@ -68,11 +70,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
-        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser);
+        let directory = Directory::init(
+            context.with_label("directory"),
+            myself,
+            directory_cfg,
+            releaser,
+        );
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 receiver,
                 directory,
                 listener: cfg.listener,
@@ -85,7 +92,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {
@@ -224,8 +231,8 @@ mod tests {
         cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        runner_context.spawn(|_| actor.run());
+        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
+        actor.start();
 
         TestHarness { mailbox, oracle }
     }
