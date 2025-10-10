@@ -57,7 +57,7 @@ use std::{
     mem::{replace, take},
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Condvar, Mutex, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1060,6 +1060,36 @@ impl Sleeper {
     }
 }
 
+struct Blocker {
+    state: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Blocker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn wait(&self) {
+        let mut signaled = self.state.lock().unwrap();
+        while !*signaled {
+            signaled = self.cv.wait(signaled).unwrap();
+        }
+        *signaled = false;
+    }
+}
+
+impl ArcWake for Blocker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let mut signaled = arc_self.state.lock().unwrap();
+        *signaled = true;
+        arc_self.cv.notify_one();
+    }
+}
+
 struct Awaiter<F: Future> {
     executor: Weak<Executor>,
     time: SystemTime,
@@ -1170,19 +1200,22 @@ where
             return Poll::Ready(value);
         }
 
-        let future = this
-            .future
-            .as_mut()
-            .expect("future already polled at scheduled time");
-        match future.as_mut().poll(cx) {
-            Poll::Ready(value) => {
-                this.future = None;
-                Poll::Ready(value)
+        // After the deadline passes, block the runtime thread until the future reports ready.
+        let blocker = Blocker::new();
+        loop {
+            let future = this
+                .future
+                .as_mut()
+                .expect("future already polled at scheduled time");
+            let waker = waker(blocker.clone());
+            let mut cx_block = task::Context::from_waker(&waker);
+            match future.as_mut().poll(&mut cx_block) {
+                Poll::Ready(value) => {
+                    this.future = None;
+                    break Poll::Ready(value);
+                }
+                Poll::Pending => blocker.wait(),
             }
-            Poll::Pending => panic!(
-                "future not ready when polled at scheduled time {:?}",
-                this.time
-            ),
         }
     }
 }
@@ -1605,8 +1638,11 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            first_rx.await_at(&context, first_wait * 2).await.unwrap();
+            // Wait for a delay that is before first_wait
+            first_rx.await_at(&context, Duration::ZERO).await.unwrap();
             println!("first task finished");
+
+            // Wait for a delay that is after second_wait
             second_rx.await_at(&context, second_wait * 2).await.unwrap();
             println!("second task finished");
 

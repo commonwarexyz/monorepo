@@ -268,12 +268,13 @@ pub trait Clock: Clone + Send + Sync + 'static {
     ///
     /// Deterministic runtimes can use this as a guard-rail when coordinating with external
     /// processes. The future is polled immediately to allow it to register any wakers, but the
-    /// runtime guarantees it is also polled again once `delay` has elapsed. If the future is still
-    /// pending at that point, the runtime panics.
+    /// runtime guarantees it is not considered complete until `delay` has elapsed. If the future is
+    /// still pending at that point, the runtime continues polling with the caller's waker until it
+    /// completes.
     ///
     /// # Panics
     ///
-    /// Panics if `future` remains pending when polled at or after the deadline.
+    /// This function never panics.
     fn await_at<'a, F, T>(
         &'a self,
         _delay: Duration,
