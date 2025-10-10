@@ -269,6 +269,9 @@ impl<D: Digest> Proof<D> {
         // Get the positions of all nodes that should be pinned.
         let start_pos = Position::try_from(range.start)?;
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
+        if !self.size.is_valid_size() {
+            return Err(Error::InvalidProof);
+        }
 
         // Get all positions required for the proof.
         let required_positions = nodes_required_for_range_proof(self.size, range)?;
