@@ -1166,12 +1166,12 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
+        // Poll once with a noop waker so the future can register interest or start work
+        // without being able to wake this task before the sampled delay expires. Any ready
+        // value is cached and only released after the clock reaches `self.target`.
         if !*this.started {
             *this.started = true;
             if let Some(future) = this.future.as_mut() {
-                // Poll once with a noop waker so the future can register interest or start work
-                // without being able to wake this task before the sampled delay expires. Any ready
-                // value is cached and only released after the clock reaches `self.target`.
                 let waker = noop_waker();
                 let mut cx_noop = task::Context::from_waker(&waker);
                 if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
@@ -1181,9 +1181,12 @@ where
             }
         }
 
+        // Only allow the task to progress once the sampled delay has elapsed.
         let executor = this.executor.upgrade().expect("executor already dropped");
         let current_time = *executor.time.lock().unwrap();
         if current_time < *this.target {
+            // Register exactly once with the deterministic sleeper queue so the executor
+            // wakes us once the clock reaches the scheduled target time.
             if !*this.registered {
                 *this.registered = true;
                 executor.sleeping.lock().unwrap().push(Alarm {
@@ -1194,10 +1197,13 @@ where
             return Poll::Pending;
         }
 
+        // If the underlying future completed during the noop pre-poll, surface the cached value.
         if let Some(value) = this.ready.take() {
             return Poll::Ready(value);
         }
 
+        // Block the current thread until the future reschedules itself, keeping polling
+        // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
             let future = this
