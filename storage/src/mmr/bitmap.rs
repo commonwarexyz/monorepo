@@ -221,14 +221,11 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     #[inline]
     fn complete_chunks(&self) -> usize {
         let chunks_len = self.bitmap.chunks_len();
-        if chunks_len == 0 {
-            return 0;
-        }
-        let (_, next_bit) = self.bitmap.last_chunk();
-        if next_bit == Self::CHUNK_SIZE_BITS {
+        if self.bitmap.len().is_multiple_of(Self::CHUNK_SIZE_BITS) {
             chunks_len
         } else {
-            chunks_len - 1
+            // Last chunk is partial
+            chunks_len.checked_sub(1).unwrap()
         }
     }
 
@@ -392,16 +389,12 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         );
         let mmr_root = self.mmr.root(hasher);
 
-        // Handle empty bitmap
-        if self.bitmap.chunks_len() == 0 {
+        // Either the bitmap is empty or the last chunk is complete (there is no partial chunk to add)
+        if self.bitmap.len().is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return Ok(mmr_root);
         }
 
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
-        if next_bit == Self::CHUNK_SIZE_BITS {
-            // Last chunk is complete, no partial chunk to add
-            return Ok(mmr_root);
-        }
 
         // We must add the partial chunk to the digest for its bits to be provable.
         let last_chunk_digest = hasher.digest(last_chunk);
