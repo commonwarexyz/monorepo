@@ -485,6 +485,11 @@ impl<
         self.mmr.leaves()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {
