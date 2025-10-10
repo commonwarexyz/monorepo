@@ -1,13 +1,16 @@
 use crate::{utils::extract_panic_message, Error};
 use futures::{
     channel::oneshot,
+    future::{select, Either},
+    pin_mut,
     stream::{AbortHandle, Abortable},
     FutureExt as _,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
+    any::Any,
     future::Future,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -28,10 +31,10 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init_future<F>(
+    pub(crate) fn init<F>(
         f: F,
         metric: MetricHandle,
-        catch_panic: bool,
+        panicker: Panicker,
         children: Arc<Mutex<Vec<Aborter>>>,
     ) -> (impl Future<Output = ()>, Self)
     where
@@ -49,12 +52,8 @@ where
             // Handle result
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => {
-                    if !catch_panic {
-                        resume_unwind(err);
-                    }
-                    let err = extract_panic_message(&*err);
-                    error!(?err, "task panicked");
+                Err(panic) => {
+                    panicker.notify(panic);
                     Err(Error::Exited)
                 }
             };
@@ -79,54 +78,6 @@ where
             abortable,
             Self {
                 abort_handle: Some(abort_handle),
-                receiver,
-                metric,
-            },
-        )
-    }
-
-    pub(crate) fn init_blocking<F>(
-        f: F,
-        metric: MetricHandle,
-        catch_panic: bool,
-    ) -> (impl FnOnce(), Self)
-    where
-        F: FnOnce() -> T + Send + 'static,
-    {
-        // Initialize channel to handle result
-        let (sender, receiver) = oneshot::channel();
-
-        // Wrap the closure with panic handling
-        let f = {
-            let metric = metric.clone();
-            move || {
-                // Run blocking task
-                let result = catch_unwind(AssertUnwindSafe(f));
-
-                // Handle result
-                let result = match result {
-                    Ok(value) => Ok(value),
-                    Err(err) => {
-                        if !catch_panic {
-                            resume_unwind(err);
-                        }
-                        let err = extract_panic_message(&*err);
-                        error!(?err, "task panicked");
-                        Err(Error::Exited)
-                    }
-                };
-                let _ = sender.send(result);
-
-                // Mark the task as finished
-                metric.finish();
-            }
-        };
-
-        // Return the task and handle
-        (
-            f,
-            Self {
-                abort_handle: None,
                 receiver,
                 metric,
             },
@@ -195,6 +146,88 @@ impl MetricHandle {
         self.finished.call_once(move || {
             gauge.dec();
         });
+    }
+}
+
+/// A panic emitted by a spawned task.
+pub type Panic = Box<dyn Any + Send + 'static>;
+
+/// Notifies the runtime when a spawned task panics, so it can propagate the failure.
+#[derive(Clone)]
+pub(crate) struct Panicker {
+    catch: bool,
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
+}
+
+impl Panicker {
+    /// Creates a new [Panicker].
+    pub(crate) fn new(catch: bool) -> (Self, Panicked) {
+        let (sender, receiver) = oneshot::channel();
+        let panicker = Self {
+            catch,
+            sender: Arc::new(Mutex::new(Some(sender))),
+        };
+        let panicked = Panicked { receiver };
+        (panicker, panicked)
+    }
+
+    /// Returns whether the [Panicker] is configured to catch panics.
+    pub(crate) fn catch(&self) -> bool {
+        self.catch
+    }
+
+    /// Notifies the [Panicker] that a panic has occurred.
+    pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
+        // Log the panic
+        let err = extract_panic_message(&*panic);
+        error!(?err, "task panicked");
+
+        // If we are catching panics, just return
+        if self.catch {
+            return;
+        }
+
+        // If we've already sent a panic, ignore the new one
+        let mut sender = self.sender.lock().unwrap();
+        let Some(sender) = sender.take() else {
+            return;
+        };
+
+        // Send the panic
+        let _ = sender.send(panic);
+    }
+}
+
+/// A handle that will be notified when a panic occurs.
+pub(crate) struct Panicked {
+    receiver: oneshot::Receiver<Panic>,
+}
+
+impl Panicked {
+    /// Polls a task that should be interrupted by a panic.
+    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
+    where
+        Fut: Future,
+    {
+        // Wait for task to complete or panic
+        let panicked = self.receiver;
+        pin_mut!(panicked);
+        pin_mut!(task);
+        match select(panicked, task).await {
+            Either::Left((panic, task)) => match panic {
+                // If there is a panic, resume the unwind
+                Ok(panic) => {
+                    resume_unwind(panic);
+                }
+                // If there can never be a panic (oneshot is closed), wait for the task to complete
+                // and return the output
+                Err(_) => task.await,
+            },
+            Either::Right((output, _)) => {
+                // Return the output
+                output
+            }
+        }
     }
 }
 
@@ -332,9 +365,8 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let context = context.with_label(LABEL);
-            let spawn_blocking = context.clone().spawn_blocking_ref(false);
 
-            let blocking_handle = spawn_blocking(|| {
+            let blocking_handle = context.clone().shared(true).spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });

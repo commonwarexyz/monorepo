@@ -12,7 +12,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -48,26 +48,21 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
-    context: E,
+    context: ContextCell<E>,
     sender: S,
     receiver: R,
     mailbox_size: usize,
-    control_rx: mpsc::Receiver<Control<R>>,
+    control_rx: mpsc::UnboundedReceiver<Control<R>>,
     routes: Routes<R::PublicKey>,
 }
 
 impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
-    pub fn new(
-        context: E,
-        sender: S,
-        receiver: R,
-        mailbox_size: usize,
-    ) -> (Self, MuxHandle<E, S, R>) {
-        let (control_tx, control_rx) = mpsc::channel(mailbox_size);
+    pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
+        let (control_tx, control_rx) = mpsc::unbounded();
         let mux = Self {
-            context: context.clone(),
+            context: ContextCell::new(context),
             sender,
             receiver,
             mailbox_size,
@@ -76,7 +71,6 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
         };
 
         let handle = MuxHandle {
-            context,
             sender: mux.sender.clone(),
             control_tx,
         };
@@ -86,7 +80,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.
@@ -96,7 +90,8 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     pub async fn run(mut self) -> Result<(), R::Error> {
         loop {
             select! {
-                // Control messages (registration/deregistration)
+                // Prefer control messages because network messages will
+                // already block when full (providing backpressure).
                 control = self.control_rx.next() => {
                     match control {
                         Some(Control::Register { subchannel, sender }) => {
@@ -121,7 +116,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                         }
                     }
                 },
-                // Network messages
+                // Process network messages.
                 message = self.receiver.recv() => {
                     let (pk, mut bytes) = message?;
 
@@ -156,13 +151,12 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
 #[derive(Clone)]
-pub struct MuxHandle<E: Spawner, S: Sender, R: Receiver> {
-    context: E,
+pub struct MuxHandle<S: Sender, R: Receiver> {
     sender: S,
-    control_tx: mpsc::Sender<Control<R>>,
+    control_tx: mpsc::UnboundedSender<Control<R>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> MuxHandle<E, S, R> {
+impl<S: Sender, R: Receiver> MuxHandle<S, R> {
     /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
     /// and receive messages for that subchannel.
     ///
@@ -170,7 +164,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxHandle<E, S, R> {
     pub async fn register(
         &mut self,
         subchannel: Channel,
-    ) -> Result<(SubSender<S>, SubReceiver<E, R>), Error> {
+    ) -> Result<(SubSender<S>, SubReceiver<R>), Error> {
         let (tx, rx) = oneshot::channel();
         self.control_tx
             .send(Control::Register {
@@ -187,7 +181,6 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxHandle<E, S, R> {
                 inner: self.sender.clone(),
             },
             SubReceiver {
-                context: self.context.clone(),
                 receiver,
                 control_tx: Some(self.control_tx.clone()),
                 subchannel,
@@ -222,14 +215,13 @@ impl<S: Sender> Sender for SubSender<S> {
 }
 
 /// Receiver that yields messages for a specific subchannel.
-pub struct SubReceiver<E: Spawner, R: Receiver> {
-    context: E,
+pub struct SubReceiver<R: Receiver> {
     receiver: mpsc::Receiver<Message<R::PublicKey>>,
-    control_tx: Option<mpsc::Sender<Control<R>>>,
+    control_tx: Option<mpsc::UnboundedSender<Control<R>>>,
     subchannel: Channel,
 }
 
-impl<E: Spawner, R: Receiver> Receiver for SubReceiver<E, R> {
+impl<R: Receiver> Receiver for SubReceiver<R> {
     type Error = Error;
     type PublicKey = R::PublicKey;
 
@@ -238,32 +230,23 @@ impl<E: Spawner, R: Receiver> Receiver for SubReceiver<E, R> {
     }
 }
 
-impl<E: Spawner, R: Receiver> Debug for SubReceiver<E, R> {
+impl<R: Receiver> Debug for SubReceiver<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SubReceiver({})", self.subchannel)
     }
 }
 
-impl<E: Spawner, R: Receiver> Drop for SubReceiver<E, R> {
+impl<R: Receiver> Drop for SubReceiver<R> {
     fn drop(&mut self) {
         // Take the control channel to avoid cloning.
-        let mut control_tx = self
+        let control_tx = self
             .control_tx
             .take()
             .expect("SubReceiver::drop called twice");
 
-        // If the control channel is not full, deregister the subchannel immediately.
-        let subchannel = self.subchannel;
-        if control_tx
-            .try_send(Control::Deregister { subchannel })
-            .is_ok()
-        {
-            return;
-        }
-
-        // Otherwise, spawn a task to deregister the subchannel.
-        self.context.spawn_ref()(async move {
-            let _ = control_tx.send(Control::Deregister { subchannel }).await;
+        // Deregister the subchannel immediately.
+        let _ = control_tx.unbounded_send(Control::Deregister {
+            subchannel: self.subchannel,
         });
     }
 }
@@ -315,17 +298,17 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner>(
+    async fn create_peer<E: Spawner + Metrics>(
         context: &E,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
         Pk,
-        MuxHandle<E, impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
-        let (mux, handle) = Muxer::new(context.clone(), sender, receiver, CAPACITY);
+        let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
@@ -345,7 +328,7 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver.
     async fn expect_n_messages<E: Spawner + Clock>(
-        rx: &mut SubReceiver<E, impl Receiver<PublicKey = Pk>>,
+        rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>,
         n: usize,
         context: &E,
     ) {

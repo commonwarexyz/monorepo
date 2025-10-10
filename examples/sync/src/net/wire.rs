@@ -17,7 +17,7 @@ pub const MAX_DIGESTS: usize = 10_000;
 #[derive(Debug)]
 pub struct GetOperationsRequest {
     pub request_id: RequestId,
-    pub size: u64,
+    pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
 }
@@ -164,8 +164,8 @@ where
 impl Write for GetOperationsRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.size.write(buf);
-        self.start_loc.as_u64().write(buf);
+        self.op_count.write(buf);
+        self.start_loc.write(buf);
         self.max_ops.get().write(buf);
     }
 }
@@ -173,8 +173,8 @@ impl Write for GetOperationsRequest {
 impl EncodeSize for GetOperationsRequest {
     fn encode_size(&self) -> usize {
         self.request_id.encode_size()
-            + self.size.encode_size()
-            + self.start_loc.as_u64().encode_size()
+            + self.op_count.encode_size()
+            + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
     }
 }
@@ -183,14 +183,30 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let size = u64::read(buf)?;
-        let start_loc = Location::new(u64::read(buf)?);
-        let max_ops_raw = u64::read(buf)?;
-        let max_ops = NonZeroU64::new(max_ops_raw)
-            .ok_or_else(|| CodecError::Invalid("GetOperationsRequest", "max_ops cannot be zero"))?;
+        let op_count = u64::read(buf)?;
+        let Some(op_count) = Location::new(op_count) else {
+            return Err(CodecError::Invalid(
+                "GetOperationsRequest",
+                "op_count exceeds MAX_LOCATION",
+            ));
+        };
+        let start_loc = u64::read(buf)?;
+        let Some(start_loc) = Location::new(start_loc) else {
+            return Err(CodecError::Invalid(
+                "GetOperationsRequest",
+                "start_loc exceeds MAX_LOCATION",
+            ));
+        };
+        let max_ops = u64::read(buf)?;
+        let Some(max_ops) = NonZeroU64::new(max_ops) else {
+            return Err(CodecError::Invalid(
+                "GetOperationsRequest",
+                "max_ops cannot be zero",
+            ));
+        };
         Ok(Self {
             request_id,
-            size,
+            op_count,
             start_loc,
             max_ops,
         })
@@ -199,16 +215,11 @@ impl Read for GetOperationsRequest {
 
 impl GetOperationsRequest {
     pub fn validate(&self) -> Result<(), crate::Error> {
-        if self.start_loc.as_u64() >= self.size {
+        if self.start_loc >= self.op_count {
             return Err(crate::Error::InvalidRequest(format!(
                 "start_loc >= size ({}) >= ({})",
-                self.start_loc, self.size
+                self.start_loc, self.op_count
             )));
-        }
-        if self.max_ops.get() == 0 {
-            return Err(crate::Error::InvalidRequest(
-                "max_ops cannot be zero".to_string(),
-            ));
         }
         Ok(())
     }

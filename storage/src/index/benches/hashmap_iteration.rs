@@ -2,9 +2,9 @@ use criterion::{black_box, criterion_group, BatchSize, Criterion};
 use rand::Rng;
 use std::collections::HashMap;
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_ITEMS: [usize; 1] = [100_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_ITEMS: [usize; 3] = [100_000, 1_000_000, 10_000_000];
 
 struct MockIndex {

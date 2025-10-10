@@ -20,10 +20,13 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
-mod bitvec;
-pub use bitvec::{BitIterator, BitVec};
+pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
+#[cfg(feature = "std")]
+pub mod net;
+#[cfg(feature = "std")]
+pub use net::IpAddrExt;
 #[cfg(feature = "std")]
 pub mod time;
 #[cfg(feature = "std")]
@@ -40,6 +43,9 @@ pub use priority_set::PrioritySet;
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
+#[cfg(feature = "std")]
+pub mod concurrency;
+
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();

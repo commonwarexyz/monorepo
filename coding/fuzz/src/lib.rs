@@ -62,24 +62,27 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         minimum_shards: min,
         extra_shards: recovery,
     };
-    let (commitment, mut shards) = S::encode(&config, data.as_slice()).unwrap();
+    let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     // Each participant checks their shard
-    let mut reshards = shards
-        .iter()
-        .map(|(shard, proof)| S::check(&commitment, proof, shard).unwrap())
-        .collect::<Vec<_>>();
-    // The last shard is "ours"
-    let (my_shard, _) = shards.pop().unwrap();
+    let (mut checking_data, mut checked_shards): (Vec<_>, Vec<_>) = shards
+        .into_iter()
+        .enumerate()
+        .map(|(i, shard)| {
+            let (checking_data, checked_shard, _) =
+                S::reshard(&config, &commitment, i as u16, shard).unwrap();
+            (checking_data, checked_shard)
+        })
+        .collect();
     // We shuffle the remaining reshards
-    reshards.truncate(reshards.len() - 1);
-    shuffle(&shuffle_bytes, &mut reshards);
+    checked_shards.truncate(checked_shards.len() - 1);
+    shuffle(&shuffle_bytes, &mut checked_shards);
     // We decode using the specified number of reshards, and ours.
     let decoded = S::decode(
         &config,
         &commitment,
-        my_shard,
-        &reshards[..(to_use - 1) as usize],
+        checking_data.pop().unwrap(),
+        &checked_shards[..(to_use as usize).min(checked_shards.len())],
     )
     .unwrap();
     assert_eq!(&decoded, &data);

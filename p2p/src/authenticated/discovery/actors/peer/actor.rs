@@ -1,7 +1,13 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
     data::Data,
-    discovery::{actors::tracker, channels::Channels, metrics, types},
+    discovery::{
+        actors::tracker,
+        channels::Channels,
+        metrics,
+        types::{self, InfoVerifier},
+    },
+    mailbox::UnboundedMailbox,
     relay::Relay,
     Mailbox,
 };
@@ -23,6 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
+    info_verifier: InfoVerifier<C>,
 
     codec_config: types::Config,
 
@@ -39,18 +46,18 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(control_sender);
         (
             Self {
                 context,
-                mailbox: mailbox.clone(),
+                mailbox: control_sender.clone(),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
+                info_verifier: cfg.info_verifier,
                 codec_config: types::Config {
                     max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
@@ -62,7 +69,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
-            mailbox,
+            control_sender,
             Relay::new(low_sender, high_sender),
         )
     }
@@ -100,7 +107,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        mut tracker: Mailbox<tracker::Message<E, C>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
@@ -128,7 +135,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     select! {
                         _ = context.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone()).await;
+                            tracker.construct(peer.clone(), mailbox.clone());
 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
@@ -228,11 +235,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     match msg {
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                            tracker.bit_vec(bit_vec, self.mailbox.clone());
                         }
                         types::Payload::Peers(peers) => {
+                            // Verify all info is valid
+                            self.info_verifier.validate(&context, &peers).map_err(Error::Types)?;
+
                             // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone()).await;
+                            tracker.peers(peers);
                         }
                         types::Payload::Data(data) => {
                             // Send message to client

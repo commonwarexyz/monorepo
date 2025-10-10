@@ -28,8 +28,9 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     buffer::PoolRef,
+    spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, quorum_from_slice};
@@ -139,7 +140,7 @@ impl<
     > Round<E, C, V, D, S>
 {
     pub fn new(
-        context: &E,
+        context: &ContextCell<E>,
         supervisor: S,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
@@ -369,40 +370,38 @@ impl<
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
-
-        // Ensure we have a notarization
-        let Some(notarization) = &self.notarization else {
-            return None;
-        };
-        let seed_signature = notarization.seed_signature;
-
-        // Check notarization and finalization proposal match
-        if notarization.proposal != proposal {
-            warn!(
-                ?proposal,
-                ?notarization.proposal,
-                "finalization proposal does not match notarization"
-            );
-        }
-
-        // There should never exist enough finalizes for multiple proposals, so it doesn't
-        // matter which one we choose.
         debug!(
             ?proposal,
             verified = self.verified_proposal,
             "broadcasting finalization"
         );
 
-        // Only select verified finalizes
-        let proposals = self
-            .finalizes
-            .iter()
-            .map(|finalize| &finalize.proposal_signature);
-
         // Recover threshold signature
         let mut timer = self.recover_latency.timer();
-        let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-            .expect("failed to recover threshold signature");
+        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+            .finalizes
+            .iter()
+            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
+            .unzip();
+
+        // If we have a notarization we'll extract the recovered seed signature (equivalent to what we'd recover)
+        let (proposal_signature, seed_signature) = if let Some(notarization) = &self.notarization {
+            // It is not possible to have a finalization that does not match the notarization proposal. If this
+            // is detected, there is a critical bug or there has been a safety violation.
+            assert_eq!(
+                notarization.proposal, proposal,
+                "finalization proposal does not match notarization"
+            );
+
+            // Recover only the proposal signature
+            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
+                .expect("failed to recover threshold signature");
+            (proposal_signature, notarization.seed_signature)
+        } else {
+            // Recover both the proposal and seed signatures
+            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                .expect("failed to recover threshold signature")
+        };
         timer.observe();
 
         // Construct finalization
@@ -440,7 +439,7 @@ pub struct Actor<
         Share = group::Share,
     >,
 > {
-    context: E,
+    context: ContextCell<E>,
     crypto: C,
     blocker: B,
     automaton: A,
@@ -542,13 +541,15 @@ impl<
             "threshold signature recover latency",
             recover_latency.clone(),
         );
+        // TODO(#1833): Metrics should use the post-start context
+        let clock = Arc::new(context.clone());
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context: context.clone(),
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -586,7 +587,7 @@ impl<
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
-                recover_latency: histogram::Timed::new(recover_latency, Arc::new(context)),
+                recover_latency: histogram::Timed::new(recover_latency, clock),
             },
             mailbox,
         )
@@ -1645,13 +1646,17 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            batcher,
-            resolver,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        ))
+        spawn_cell!(
+            self.context,
+            self.run(
+                batcher,
+                resolver,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver
+            )
+            .await
+        )
     }
 
     async fn run(
@@ -1678,7 +1683,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Voter<V, D>>::init(
-            self.context.with_label("journal"),
+            self.context.with_label("journal").into(),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

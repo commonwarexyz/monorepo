@@ -18,7 +18,9 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{buffer::PoolRef, Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
@@ -324,7 +326,7 @@ pub struct Actor<
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: E,
+    context: ContextCell<E>,
     crypto: C,
     automaton: A,
     relay: R,
@@ -417,7 +419,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -1690,7 +1692,7 @@ impl<
         sender: impl Sender,
         receiver: impl Receiver,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(backfiller, sender, receiver))
+        spawn_cell!(self.context, self.run(backfiller, sender, receiver).await)
     }
 
     async fn run(
@@ -1713,7 +1715,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Voter<C::Signature, D>>::init(
-            self.context.with_label("journal"),
+            self.context.with_label("journal").into(),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None,        // most of the data is not compressible

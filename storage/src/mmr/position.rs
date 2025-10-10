@@ -89,24 +89,51 @@ impl From<usize> for Position {
 impl From<Position> for u64 {
     #[inline]
     fn from(position: Position) -> Self {
-        position.as_u64()
+        *position
     }
 }
 
-/// Returns the position of the leaf at the given location in an MMR.
+/// Try to convert a [Location] to a [Position].
+///
+/// Returns an error if `loc` > [super::MAX_LOCATION].
+///
+/// # Examples
+///
+/// ```
+/// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
+/// use core::convert::TryFrom;
+///
+/// let loc = Location::new(5).unwrap();
+/// let pos = Position::try_from(loc).unwrap();
+/// assert_eq!(pos, Position::new(8));
+///
+/// // Invalid locations return error  
+/// assert!(Location::new(MAX_LOCATION + 1).is_none());
+/// ```
+impl TryFrom<Location> for Position {
+    type Error = super::Error;
+
+    #[inline]
+    fn try_from(loc: Location) -> Result<Self, Self::Error> {
+        if !loc.is_valid() {
+            return Err(super::Error::LocationOverflow(loc));
+        }
+        // This will never underflow since 2*n >= count_ones(n).
+        let loc_val = *loc;
+        Ok(Self(
+            loc_val
+                .checked_mul(2)
+                .expect("should not overflow for valid location")
+                - loc_val.count_ones() as u64,
+        ))
+    }
+}
+
+/// Add two positions together.
 ///
 /// # Panics
 ///
-/// Panics if `loc` is too large (must fit in 64 bits after multiplication by 2).
-impl From<Location> for Position {
-    #[inline]
-    fn from(loc: Location) -> Self {
-        // This will never underflow since 2*n >= count_ones(n).
-        let loc = loc.as_u64();
-        Self(loc.checked_mul(2).expect("leaf_loc overflow") - loc.count_ones() as u64)
-    }
-}
-
+/// Panics if the result overflows.
 impl Add for Position {
     type Output = Self;
 
@@ -116,6 +143,11 @@ impl Add for Position {
     }
 }
 
+/// Add a position and a `u64`.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add<u64> for Position {
     type Output = Self;
 
@@ -125,6 +157,11 @@ impl Add<u64> for Position {
     }
 }
 
+/// Subtract two positions.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub for Position {
     type Output = Self;
 
@@ -134,6 +171,11 @@ impl Sub for Position {
     }
 }
 
+/// Subtract a `u64` from a position.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub<u64> for Position {
     type Output = Self;
 
@@ -172,6 +214,11 @@ impl PartialOrd<Position> for u64 {
     }
 }
 
+/// Add a `u64` to a position.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl AddAssign<u64> for Position {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
@@ -179,6 +226,11 @@ impl AddAssign<u64> for Position {
     }
 }
 
+/// Subtract a `u64` from a position.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl SubAssign<u64> for Position {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
@@ -194,25 +246,25 @@ mod tests {
     #[test]
     fn test_from_location() {
         const CASES: &[(Location, Position)] = &[
-            (Location::new(0), Position::new(0)),
-            (Location::new(1), Position::new(1)),
-            (Location::new(2), Position::new(3)),
-            (Location::new(3), Position::new(4)),
-            (Location::new(4), Position::new(7)),
-            (Location::new(5), Position::new(8)),
-            (Location::new(6), Position::new(10)),
-            (Location::new(7), Position::new(11)),
-            (Location::new(8), Position::new(15)),
-            (Location::new(9), Position::new(16)),
-            (Location::new(10), Position::new(18)),
-            (Location::new(11), Position::new(19)),
-            (Location::new(12), Position::new(22)),
-            (Location::new(13), Position::new(23)),
-            (Location::new(14), Position::new(25)),
-            (Location::new(15), Position::new(26)),
+            (Location::new_unchecked(0), Position::new(0)),
+            (Location::new_unchecked(1), Position::new(1)),
+            (Location::new_unchecked(2), Position::new(3)),
+            (Location::new_unchecked(3), Position::new(4)),
+            (Location::new_unchecked(4), Position::new(7)),
+            (Location::new_unchecked(5), Position::new(8)),
+            (Location::new_unchecked(6), Position::new(10)),
+            (Location::new_unchecked(7), Position::new(11)),
+            (Location::new_unchecked(8), Position::new(15)),
+            (Location::new_unchecked(9), Position::new(16)),
+            (Location::new_unchecked(10), Position::new(18)),
+            (Location::new_unchecked(11), Position::new(19)),
+            (Location::new_unchecked(12), Position::new(22)),
+            (Location::new_unchecked(13), Position::new(23)),
+            (Location::new_unchecked(14), Position::new(25)),
+            (Location::new_unchecked(15), Position::new(26)),
         ];
         for (loc, expected_pos) in CASES {
-            let pos = Position::from(*loc);
+            let pos = Position::try_from(*loc).unwrap();
             assert_eq!(pos, *expected_pos);
         }
     }

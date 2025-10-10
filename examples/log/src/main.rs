@@ -144,7 +144,7 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
-    let p2p_cfg = discovery::Config::aggressive(
+    let p2p_cfg = discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

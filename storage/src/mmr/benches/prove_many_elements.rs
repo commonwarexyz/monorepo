@@ -8,9 +8,9 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
 
 fn bench_prove_many_elements(c: &mut Criterion) {
@@ -51,8 +51,8 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {
                                 for start_index in start_loc_samples {
-                                    let leaf_range = Location::new(start_index)
-                                        ..Location::new(start_index + range);
+                                    let leaf_range = Location::new(start_index).unwrap()
+                                        ..Location::new(start_index + range).unwrap();
                                     samples.push(leaf_range);
                                 }
                                 samples

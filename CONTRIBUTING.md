@@ -13,17 +13,27 @@ The Commonware Library provides robust, high-performance primitives and contribu
 
 # Style
 
+> [!NOTE]
+> Common commands are aliased in a [`justfile`](https://github.com/casey/just) for convenience. Refer to
+> [Just's installation guide](https://github.com/casey/just?tab=readme-ov-file#installation), or run
+> `cargo install just` on any platform.
+
 This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. To check linting, run:
 
 ```bash
-$ cargo clippy --all-targets --all-features -- -D warnings
-$ cargo +nightly fmt --all -- --check
+$ just lint
 ```
 
-To fix linting automatically, run:
+To fix formatting automatically, run:
 
 ```bash
-$ cargo +nightly fmt --all
+$ just fix-fmt
+```
+
+Before making a PR, to run all lints and tests, run:
+
+```bash
+$ just pre-pr
 ```
 
 # Releases

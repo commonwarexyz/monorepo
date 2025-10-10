@@ -35,8 +35,8 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// configured to provide 8 cores.
 const THREADS: usize = 8;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, ())> {
-    AConfig::<EightCap, (commonware_codec::RangeCfg, ())> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,

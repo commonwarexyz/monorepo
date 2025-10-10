@@ -59,7 +59,7 @@ impl commonware_codec::EncodeSize for FuzzMessage {
 }
 
 impl commonware_codec::Read for FuzzMessage {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let commitment = Vec::<u8>::read_range(buf, *range)?;
         let content = Vec::<u8>::read_range(buf, *range)?;

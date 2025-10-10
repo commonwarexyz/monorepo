@@ -155,7 +155,7 @@ fn main() {
     };
 
     // Configure network
-    let p2p_cfg = authenticated::discovery::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -171,9 +171,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.clone(), indexer_cfg, indexer, stream, sink)
-            .await
-            .expect("Failed to upgrade connection with indexer");
+        let indexer = dial(
+            context.with_label("dialer"),
+            indexer_cfg,
+            indexer,
+            stream,
+            sink,
+        )
+        .await
+        .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =

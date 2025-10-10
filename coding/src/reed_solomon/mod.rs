@@ -24,10 +24,12 @@ pub enum Error {
     InvalidDataLength(usize),
     #[error("invalid index: {0}")]
     InvalidIndex(u16),
+    #[error("wrong index: {0}")]
+    WrongIndex(u16),
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
     shard: Vec<u8>,
@@ -97,6 +99,14 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
+
+impl<H: Hasher> PartialEq for Chunk<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.shard == other.shard && self.index == other.index && self.proof == other.proof
+    }
+}
+
+impl<H: Hasher> Eq for Chunk<H> {}
 
 /// Prepare data for encoding.
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
@@ -224,6 +234,8 @@ fn encode<H: Hasher>(
 
 /// Decode data from a set of [Chunk]s.
 ///
+/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
+///
 /// # Parameters
 ///
 /// - `total`: The total number of chunks to generate.
@@ -238,7 +250,7 @@ fn decode<H: Hasher>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: Vec<Chunk<H>>,
+    chunks: &[Chunk<H>],
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
     assert!(total > min);
@@ -266,16 +278,11 @@ fn decode<H: Hasher>(
         }
         seen.insert(index);
 
-        // Verify Merkle proof
-        if !chunk.verify(chunk.index, root) {
-            return Err(Error::InvalidProof);
-        }
-
         // Add to provided shards
         if index < min {
-            provided_originals.push((index as usize, chunk.shard));
+            provided_originals.push((index as usize, chunk.shard.clone()));
         } else {
-            provided_recoveries.push((index as usize - k, chunk.shard));
+            provided_recoveries.push((index as usize - k, chunk.shard.clone()));
         }
     }
 
@@ -419,8 +426,15 @@ fn decode<H: Hasher>(
 ///    generated. This new root MUST match the original [bmt] root. This prevents attacks where
 ///    an adversary provides a valid set of chunks that decode to different data.
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
+#[derive(Clone, Copy)]
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
+}
+
+impl<H> std::fmt::Debug for ReedSolomon<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReedSolomon").finish()
+    }
 }
 
 impl<H: Hasher> Scheme for ReedSolomon<H> {
@@ -428,49 +442,66 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     type Shard = Chunk<H>;
     type ReShard = Chunk<H>;
-
-    type Proof = ();
+    type CheckedShard = Chunk<H>;
+    type CheckingData = ();
 
     type Error = Error;
 
     fn encode(
         config: &Config,
         mut data: impl Buf,
-    ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error> {
+    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        let (commitment, chunks) = encode(
+        encode(
             config.minimum_shards + config.extra_shards,
             config.minimum_shards,
             data,
-        )?;
-        Ok((commitment, chunks.into_iter().map(|s| (s, ())).collect()))
+        )
     }
 
-    fn check(
+    fn reshard(
+        _config: &Config,
         commitment: &Self::Commitment,
-        _proof: &Self::Proof,
-        shard: &Self::Shard,
-    ) -> Result<Self::ReShard, Self::Error> {
+        index: u16,
+        shard: Self::Shard,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
+        if shard.index != index {
+            return Err(Error::WrongIndex(index));
+        }
         if shard.verify(shard.index, commitment) {
-            Ok(shard.clone())
+            Ok(((), shard.clone(), shard))
         } else {
             Err(Error::InvalidProof)
         }
     }
 
+    fn check(
+        _config: &Config,
+        commitment: &Self::Commitment,
+        _checking_data: &Self::CheckingData,
+        index: u16,
+        reshard: Self::ReShard,
+    ) -> Result<Self::CheckedShard, Self::Error> {
+        if reshard.index != index {
+            return Err(Error::WrongIndex(reshard.index));
+        }
+        if !reshard.verify(reshard.index, commitment) {
+            return Err(Error::InvalidProof);
+        }
+        Ok(reshard)
+    }
+
     fn decode(
         config: &Config,
         commitment: &Self::Commitment,
-        my_shard: Self::Shard,
-        shards: &[Self::ReShard],
+        _checking_data: Self::CheckingData,
+        shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
             config.minimum_shards + config.extra_shards,
             config.minimum_shards,
             commitment,
-            std::iter::once(my_shard)
-                .chain(shards.iter().cloned())
-                .collect(),
+            shards,
         )
     }
 }
@@ -497,7 +528,7 @@ mod tests {
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
+        let decoded = decode::<Sha256>(total, min, &root, &pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -514,7 +545,7 @@ mod tests {
         let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::NotEnoughChunks)));
     }
 
@@ -531,7 +562,7 @@ mod tests {
         let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::DuplicateIndex(0))));
     }
 
@@ -578,8 +609,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -593,8 +624,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -618,11 +649,11 @@ mod tests {
         }
 
         // Collect valid pieces (these are legitimate fragments)
-        let minimal = chunks.into_iter().take(min as usize).collect();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
 
         // Attempt to decode with malicious root
-        let result = decode::<Sha256>(total, min, &malicious_root, minimal);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        let result = decode::<Sha256>(total, min, &malicious_root, &minimal);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
@@ -640,8 +671,8 @@ mod tests {
         }
 
         // Try to decode with the tampered chunk
-        let result = decode::<Sha256>(total, min, &root, chunks);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        let result = decode::<Sha256>(total, min, &root, &chunks);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
@@ -696,7 +727,7 @@ mod tests {
         }
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &malicious_root, pieces);
+        let result = decode::<Sha256>(total, min, &malicious_root, &pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -718,7 +749,7 @@ mod tests {
         ];
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 
@@ -732,8 +763,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 

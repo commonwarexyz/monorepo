@@ -8,11 +8,14 @@ use crate::authenticated::{
         },
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
+};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
@@ -41,7 +44,7 @@ pub struct Config<C: Signer> {
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
 pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- State ----------
     /// The list of peers to dial.
@@ -66,7 +69,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             attempts.clone(),
         );
         Self {
-            context: context.clone(),
+            context: ContextCell::new(context),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
@@ -79,8 +82,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     async fn dial_peer(
         &mut self,
-        reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        reservation: Reservation<C::PublicKey>,
+        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -126,20 +129,18 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut self,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();

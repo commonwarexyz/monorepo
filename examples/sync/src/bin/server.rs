@@ -8,10 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{
-    adb::sync::Target,
-    mmr::{Location, StandardHasher as Standard},
-};
+use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -161,15 +158,14 @@ where
         (
             database.root(&mut hasher),
             database.lower_bound(),
-            Location::new(database.op_count().saturating_sub(1)),
+            database.op_count(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound,
-            upper_bound,
+            range: lower_bound..upper_bound,
         },
     };
 
@@ -200,7 +196,7 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc.as_u64());
+    let max_ops = std::cmp::min(request.max_ops.get(), *db_size - *request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
@@ -209,13 +205,13 @@ where
         request_id = request.request_id,
         max_ops,
         start_loc = ?request.start_loc,
-        db_size,
+        ?db_size,
         "operations request"
     );
 
     // Get the historical proof and operations
     let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
+        .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
     drop(database);
@@ -391,7 +387,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = database.op_count(),
+        op_count = ?database.op_count(),
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -440,10 +436,9 @@ where
                 match client_result {
                     Ok((client_addr, sink, stream)) => {
                         let state = state.clone();
-                        let context = context.clone();
                         context.with_label("client").spawn(move|context|async move {
                             if let Err(e) =
-                                handle_client::<DB, _>(context, state.clone(), sink, stream, client_addr).await
+                                handle_client::<DB, _>(context, state, sink, stream, client_addr).await
                             {
                                 error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                             }
