@@ -1110,6 +1110,29 @@ impl Future for Sleeper {
     }
 }
 
+impl Clock for Context {
+    fn current(&self) -> SystemTime {
+        *self.executor().time.lock().unwrap()
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        let deadline = self
+            .current()
+            .checked_add(duration)
+            .expect("overflow when setting wake time");
+        self.sleep_until(deadline)
+    }
+
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        Sleeper {
+            executor: self.executor.clone(),
+
+            time: deadline,
+            registered: false,
+        }
+    }
+}
+
 pin_project! {
     /// A future that resolves when a given target time is reached.
     ///
@@ -1186,29 +1209,6 @@ where
                 }
                 Poll::Pending => blocker.wait(),
             }
-        }
-    }
-}
-
-impl Clock for Context {
-    fn current(&self) -> SystemTime {
-        *self.executor().time.lock().unwrap()
-    }
-
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        let deadline = self
-            .current()
-            .checked_add(duration)
-            .expect("overflow when setting wake time");
-        self.sleep_until(deadline)
-    }
-
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        Sleeper {
-            executor: self.executor.clone(),
-
-            time: deadline,
-            registered: false,
         }
     }
 }
