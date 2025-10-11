@@ -84,4 +84,6 @@ pub enum Error {
     DecompressionFailed,
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }

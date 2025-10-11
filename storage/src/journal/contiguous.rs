@@ -65,7 +65,10 @@ use crate::metadata::{self, Metadata};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::sequence::U64;
-use futures::{stream::Stream, StreamExt};
+use futures::{
+    stream::{self, Stream, StreamExt},
+    try_join,
+};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, trace, warn};
 
@@ -98,6 +101,15 @@ pub struct Config<C> {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+
+    /// Optional starting position for state sync scenarios.
+    /// When provided, the journal will start at this position instead of 0.
+    /// This is used in state sync to start the journal at an unaligned position.
+    pub tail: Option<u64>,
+
+    /// Optional section index for the tail position.
+    /// Must be provided if `tail` is provided.
+    pub tail_index: Option<u64>,
 }
 
 /// Helper function to get the metadata key for tracking items in current section.
@@ -128,8 +140,16 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
     /// Initialize a new `contiguous::Journal` instance.
     ///
     /// During initialization, the journal replays all data to compute the current size
-    /// and validate the metadata.
+    /// and validate the metadata. If `cfg.tail` is provided, the journal starts at that
+    /// position instead of 0 (for state sync scenarios).
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        // Validate tail configuration
+        if cfg.tail.is_some() != cfg.tail_index.is_some() {
+            return Err(Error::InvalidConfiguration(
+                "tail and tail_index must both be provided or both be None".to_string(),
+            ));
+        }
+
         // Initialize the variable journal
         let variable_cfg = variable::Config {
             partition: cfg.partition.clone(),
@@ -157,15 +177,17 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         };
         let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
-        // Compute the current size by replaying the journal
-        // We need to count all items to align with locations
+        // If tail is provided, use it as the starting position only if journal is empty
+        // If journal has data, we'll count from replay
+        let tail_pos = cfg.tail.unwrap_or(0);
         let mut size = 0u64;
         let mut items_in_current_section = 0u64;
-        let mut current_section = None;
+        let mut current_section = cfg.tail_index;
 
         const BUFFER_SIZE: usize = 4096;
         let buffer_size = NonZeroUsize::new(BUFFER_SIZE).unwrap();
 
+        let mut has_data = false;
         if let Some(oldest_section) = inner.oldest_section() {
             // Replay from the oldest section to count all items
             let replay = inner.replay(oldest_section, 0, buffer_size).await?;
@@ -175,6 +197,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             while let Some(result) = replay.next().await {
                 let (section, offset, _size, _item) = result?;
                 found_items = true;
+                has_data = true;
                 if current_section != Some(section) {
                     if current_section.is_some() {
                         // Moving to a new section, reset counter
@@ -197,6 +220,16 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             // not store metadata for an empty section.
             if !found_items {
                 debug!(oldest_section, "no items found during replay");
+            }
+        }
+
+        // If journal is empty and tail is provided, use tail as starting position
+        if !has_data && tail_pos > 0 {
+            size = tail_pos;
+            // Pre-populate locations journal with dummy entries for positions before tail
+            // This ensures position-to-offset mapping works correctly
+            for _ in 0..tail_pos {
+                locations.append(0u32).await?;
             }
         }
 
@@ -245,18 +278,14 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
 
     /// Append a new item to the journal. Returns the item's position in the journal.
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
-        use futures::try_join;
-
         let pos = self.size;
         let (section, offset_within_section) = self.position_to_location(pos);
 
-        // Append to the underlying variable journal and locations concurrently
-        let (offset, _size) = {
-            let (offset, size) = self.inner.append(section, item).await?;
-            // Now that we have the offset, append to locations concurrently with any future work
-            self.locations.append(offset).await?;
-            (offset, size)
-        };
+        // Append to the underlying variable journal first to get the offset
+        let (offset, _size) = self.inner.append(section, item).await?;
+
+        // Then append the offset to the locations journal
+        self.locations.append(offset).await?;
 
         trace!(pos, section, offset, "appended item");
         self.size += 1;
@@ -277,8 +306,6 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
 
     /// Sync any pending updates to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        use futures::try_join;
-
         // Sync the current section, locations, and metadata concurrently
         if self.size > 0 {
             let (current_section, _) = self.position_to_location(self.size - 1);
@@ -334,9 +361,6 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         let replay = self.inner.replay(start_section, 0, buffer).await?;
 
         let items_per_section = self.items_per_section.get();
-
-        // Manually iterate to track state across items
-        use futures::stream::{self, StreamExt};
 
         let current_section = start_section;
         let pos_in_section = 0u64;
@@ -513,6 +537,24 @@ mod tests {
             codec_config: (),
             buffer_pool: commonware_runtime::buffer::PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
+            tail: None,
+            tail_index: None,
+        }
+    }
+
+    fn test_cfg_with_tail(items_per_section: NonZeroU64, tail: u64, tail_index: u64) -> Config<()> {
+        Config {
+            partition: "test_partition".to_string(),
+            metadata_partition: "test_metadata_partition".to_string(),
+            locations_partition: "test_locations_partition".to_string(),
+            items_per_section,
+            locations_items_per_blob: NZU64!(100),
+            compression: None,
+            codec_config: (),
+            buffer_pool: commonware_runtime::buffer::PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(2048),
+            tail: Some(tail),
+            tail_index: Some(tail_index),
         }
     }
 
@@ -768,38 +810,40 @@ mod tests {
                 .expect("Failed to get oldest");
             assert_eq!(oldest, Some(0));
 
-            // Now test reading from middle (state sync scenario)
-            // If we had synced starting from position 3, oldest would be 3
-            // Simulate this by pruning and adding new items
             journal.destroy().await.expect("Failed to destroy");
 
-            // Create a new journal for state sync scenario starting at position 3
-            let mut journal: Journal<_, u64> = Journal::init(context.clone(), cfg.clone())
+            // Now test state sync scenario: start at position 3 (unaligned)
+            let cfg_tail = test_cfg_with_tail(NZU64!(10), 3, 0);
+            let mut journal: Journal<_, u64> = Journal::init(context.clone(), cfg_tail.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize journal with tail");
 
-            // In a real state sync, we'd start adding from position 3
-            // For this test, we add items and then prune to simulate starting at position 3
-            for i in 0u64..10 {
-                journal.append(i * 10).await.expect("Failed to append");
+            // Verify starting position is 3
+            let size = journal.size().await.expect("Failed to get size");
+            assert_eq!(size, 3);
+
+            // Append items starting from position 3
+            for i in 3u64..10 {
+                let pos = journal.append(i * 10).await.expect("Failed to append");
+                assert_eq!(pos, i);
             }
 
-            // Prune first 3 items (positions 0, 1, 2)
-            journal.prune(3).await.expect("Failed to prune");
+            // Verify size is now 10
+            let size = journal.size().await.expect("Failed to get size");
+            assert_eq!(size, 10);
 
-            // Verify oldest_retained_pos is now 0 (section boundary)
+            // Verify we can read items from position 3 onward
+            for i in 3u64..10 {
+                let item: u64 = journal.read(i).await.expect("Failed to read");
+                assert_eq!(item, i * 10);
+            }
+
+            // Verify oldest_retained_pos reflects the tail start
             let oldest = journal
                 .oldest_retained_pos()
                 .await
                 .expect("Failed to get oldest");
-            // After pruning position 3, we should still be at section 0
-            assert_eq!(oldest, Some(0));
-
-            // Verify we can still read items 3-9 (they weren't pruned)
-            for i in 0u64..10 {
-                let item: u64 = journal.read(i).await.expect("Failed to read");
-                assert_eq!(item, i * 10);
-            }
+            assert_eq!(oldest, Some(0)); // Section 0 is the oldest
 
             journal.destroy().await.expect("Failed to destroy");
         });
