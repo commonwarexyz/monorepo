@@ -171,8 +171,10 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             let replay = inner.replay(oldest_section, 0, buffer_size).await?;
             futures::pin_mut!(replay);
 
+            let mut found_items = false;
             while let Some(result) = replay.next().await {
                 let (section, offset, _size, _item) = result?;
+                found_items = true;
                 if current_section != Some(section) {
                     if current_section.is_some() {
                         // Moving to a new section, reset counter
@@ -188,6 +190,13 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
                 if locations_size < size {
                     locations.append(offset).await?;
                 }
+            }
+
+            // If we didn't find any items in the oldest section, the journal may have been
+            // pruned or corrupted. In this case, current_section will be None and we should
+            // not store metadata for an empty section.
+            if !found_items {
+                debug!(oldest_section, "no items found during replay");
             }
         }
 
