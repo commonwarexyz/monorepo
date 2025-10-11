@@ -7,7 +7,8 @@ use commonware_runtime::{
     Runner as _, ThreadPool,
 };
 use commonware_storage::{
-    adb::any::fixed::{Any, Config as AConfig},
+    adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
+    store::Db,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -43,6 +44,27 @@ cfg_if::cfg_if! {
     }
 }
 
+type UAnyDb =
+    UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type OAnyDb =
+    OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+
+async fn get_unordered_any(ctx: Context) -> UAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        .await
+        .unwrap()
+}
+
+async fn get_ordered_any(ctx: Context) -> OAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        .await
+        .unwrap()
+}
+
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -63,84 +85,105 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `COMMIT_FREQUENCY` operations.
-fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
-    let runner = Runner::new(cfg.clone());
-    runner.start(|ctx| async move {
-        let pool = create_pool(ctx.clone(), THREADS).unwrap();
-        let any_cfg = any_cfg(pool);
-        let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
-            .await
-            .unwrap();
+async fn gen_random_kv<
+    A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
+>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+) {
+    // Insert a random value for every possible element into the db.
+    let mut rng = StdRng::seed_from_u64(42);
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        db.update(k, v).await.unwrap();
+    }
 
-        // Insert a random value for every possible element into the db.
-        let mut rng = StdRng::seed_from_u64(42);
-        for i in 0u64..num_elements {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-            db.update(k, v).await.unwrap();
+    // Randomly update / delete them.
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            db.delete(rand_key).await.unwrap();
+            continue;
         }
-
-        // Randomly update / delete them.
-        for _ in 0u64..num_operations {
-            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
-            if rng.next_u32() % DELETE_FREQUENCY == 0 {
-                db.delete(rand_key).await.unwrap();
-                continue;
-            }
-            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-            db.update(rand_key, v).await.unwrap();
-            if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-                db.commit().await.unwrap();
-            }
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        db.update(rand_key, v).await.unwrap();
+        if rng.next_u32() % COMMIT_FREQUENCY == 0 {
+            db.commit().await.unwrap();
         }
-        db.commit().await.unwrap();
-        db.prune(db.inactivity_floor_loc()).await.unwrap();
-        db.close().await.unwrap();
-    });
+    }
+    db.commit().await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
+    db.close().await.unwrap();
 }
-
-type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_fixed_init(c: &mut Criterion) {
     let cfg = Config::default();
-    let runner = tokio::Runner::new(cfg.clone());
     for elements in ELEMENTS {
         for operations in OPERATIONS {
-            gen_random_any(cfg.clone(), elements, operations);
+            for variant in ["unordered", "ordered"] {
+                let runner = Runner::new(cfg.clone());
+                runner.start(|ctx| async move {
+                    if variant == "unordered" {
+                        let db = get_unordered_any(ctx.clone()).await;
+                        gen_random_kv(db, elements, operations).await;
+                    } else {
+                        let db = get_ordered_any(ctx.clone()).await;
+                        gen_random_kv(db, elements, operations).await;
+                    }
+                });
+                let runner = tokio::Runner::new(cfg.clone());
 
-            c.bench_function(
-                &format!(
-                    "{}/elements={} operations={}",
-                    module_path!(),
-                    elements,
-                    operations,
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                        let any_cfg = any_cfg(pool);
-                        let start = Instant::now();
-                        for _ in 0..iters {
-                            let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
-                            assert_ne!(db.op_count(), 0);
-                            db.close().await.unwrap();
-                        }
+                c.bench_function(
+                    &format!(
+                        "{}/elements={} operations={}, keyspace={}",
+                        module_path!(),
+                        elements,
+                        operations,
+                        variant,
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let pool =
+                                commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
+                            let any_cfg = any_cfg(pool);
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                if variant == "unordered" {
+                                    let db =
+                                        UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                                    assert_ne!(db.op_count(), 0);
+                                    db.close().await.unwrap();
+                                } else {
+                                    let db =
+                                        OAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                                    assert_ne!(db.op_count(), 0);
+                                    db.close().await.unwrap();
+                                };
+                            }
 
-                        start.elapsed()
-                    });
-                },
-            );
+                            start.elapsed()
+                        });
+                    },
+                );
 
-            let runner = Runner::new(cfg.clone());
-            runner.start(|ctx| async move {
-                let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                let any_cfg = any_cfg(pool);
-                // Clean up the database after the benchmark.
-                let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
-                db.destroy().await.unwrap();
-            });
+                let runner = Runner::new(cfg.clone());
+                runner.start(|ctx| async move {
+                    let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
+                    let any_cfg = any_cfg(pool);
+                    // Clean up the database after the benchmark.
+                    if variant == "unordered" {
+                        let db = UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                        db.destroy().await.unwrap();
+                    } else {
+                        let db = OAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                        db.destroy().await.unwrap();
+                    }
+                });
+            }
         }
     }
 }

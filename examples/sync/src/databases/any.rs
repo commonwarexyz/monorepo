@@ -4,7 +4,10 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{self, any::fixed},
+    adb::{
+        self,
+        any::fixed::{unordered::Any, Config},
+    },
     mmr::{Location, Proof, StandardHasher as Standard},
     store::operation,
 };
@@ -12,14 +15,14 @@ use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
-pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = operation::Fixed<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config() -> fixed::Config<Translator> {
-    fixed::Config {
+pub fn create_config() -> Config<Translator> {
+    Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: NZU64!(4096),

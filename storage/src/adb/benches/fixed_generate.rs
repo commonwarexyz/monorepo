@@ -7,7 +7,8 @@ use commonware_runtime::{
     ThreadPool,
 };
 use commonware_storage::{
-    adb::any::fixed::{Any, Config as AConfig},
+    adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
+    store::Db,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -32,6 +33,11 @@ const PAGE_CACHE_SIZE: usize = 10_000;
 /// configured to provide 8 cores.
 const THREADS: usize = 8;
 
+type UAnyDb =
+    UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type OAnyDb =
+    OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -47,18 +53,34 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     }
 }
 
+async fn get_unordered_any(ctx: Context) -> UAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        .await
+        .unwrap()
+}
+
+async fn get_ordered_any(ctx: Context) -> OAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        .await
+        .unwrap()
+}
+
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
-/// after every `COMMIT_FREQUENCY` operations.
-async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) -> AnyDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
-    let any_cfg = any_cfg(pool);
-    let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
-        .await
-        .unwrap();
-
+/// after every `COMMIT_FREQUENCY` operations, and pruned before returning.
+async fn gen_random_kv<
+    A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
+>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+) -> A {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
@@ -88,37 +110,43 @@ async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) ->
     db
 }
 
-type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-
 /// Benchmark the generation of a large randomly generated any db.
 fn bench_fixed_generate(c: &mut Criterion) {
-    let cfg = Config::default();
-    let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            c.bench_function(
-                &format!(
-                    "{}/elements={} operations={}",
-                    module_path!(),
-                    elements,
-                    operations,
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<Context>();
-                        let mut total_elapsed = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            let mut db = gen_random_any(ctx.clone(), elements, operations).await;
-                            db.sync().await.unwrap();
-                            total_elapsed += start.elapsed();
-
-                            db.destroy().await.unwrap(); // don't time destroy
-                        }
-                        total_elapsed
-                    });
-                },
-            );
+            for db_type in ["unordered", "ordered"] {
+                let runner = tokio::Runner::new(Config::default().clone());
+                c.bench_function(
+                    &format!(
+                        "{}/elements={} operations={}, keyspace={}",
+                        module_path!(),
+                        elements,
+                        operations,
+                        db_type,
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<Context>();
+                            let mut total_elapsed = Duration::ZERO;
+                            for _ in 0..iters {
+                                let start = Instant::now();
+                                if db_type == "unordered" {
+                                    let db = get_unordered_any(ctx.clone()).await;
+                                    let db = gen_random_kv(db, elements, operations).await;
+                                    total_elapsed += start.elapsed();
+                                    db.destroy().await.unwrap(); // don't time destroy
+                                } else {
+                                    let db = get_ordered_any(ctx.clone()).await;
+                                    let db = gen_random_kv(db, elements, operations).await;
+                                    total_elapsed += start.elapsed();
+                                    db.destroy().await.unwrap(); // don't time destroy
+                                };
+                            }
+                            total_elapsed
+                        });
+                    },
+                );
+            }
         }
     }
 }

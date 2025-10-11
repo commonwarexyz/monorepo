@@ -24,9 +24,9 @@ use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
+pub mod ordered;
 pub mod sync;
 pub mod unordered;
-pub use unordered::Any;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

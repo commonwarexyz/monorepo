@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::fixed::{unordered::Any, Config},
+        any::fixed::{ordered::Any, Config},
         verify_proof,
     },
     mmr::{Location, StandardHasher as Standard},
@@ -29,6 +29,7 @@ enum AdbOperation {
     Root,
     Proof { start_loc: u64, max_ops: u64 },
     Get { key: RawKey },
+    GetSpan { key: RawKey },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -61,7 +62,7 @@ fn fuzz(data: FuzzInput) {
             .await
             .expect("init adb");
 
-        let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+        let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut uncommitted_ops = 0;
         let mut last_known_op_count = Location::new(0).unwrap();
@@ -72,21 +73,29 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
+                    let empty = adb.is_empty();
                     adb.update(k, v).await.expect("update should not fail");
-                    expected_state.insert(*key, Some(*value));
+                    let result = expected_state.insert(*key, *value);
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
+                    if !empty && result.is_none() {
+                        // Account for the previous key update
+                        uncommitted_ops += 1;
+                    }
+                    let actual_count = adb.op_count();
+                    let expected_count = last_known_op_count + uncommitted_ops;
+                    assert_eq!(actual_count, expected_count,
+                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
                 }
 
                 AdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    let result = adb.delete(k).await.expect("delete should not fail");
-
-                    if result.is_some() {
-                        // Delete succeeded - mark as deleted, not remove
-                        assert!(all_keys.contains(key), "there was no key");
-                        expected_state.insert(*key, None);
+                    adb.delete(k).await.expect("delete should not fail");
+                    if expected_state.remove(key).is_some() {
                         uncommitted_ops += 1;
+                        if expected_state.keys().len() != 0 {
+                            uncommitted_ops += 1;
+                        }
                     }
                 }
 
@@ -157,31 +166,27 @@ fn fuzz(data: FuzzInput) {
 
                     // Verify against expected state
                     match expected_state.get(key) {
-                        Some(Some(expected_value)) => {
+                        Some(expected_value) => {
                             // Key should exist with this value
-                            assert!(result.is_some(), "Expected value for key {key:?}");
                             let v = result.expect("get should not fail");
                             let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
                         }
-                        Some(None) => {
-                            // Key was explicitly deleted
-                            assert!(
-                                result.is_none(),
-                                "Expected no value for deleted key {key:?}, but found one",
-                            );
-                        }
                         None => {
-                            // Key was never set or deleted
                             assert!(
                                 result.is_none(),
                                 "Found unexpected value for key {key:?} that was never touched",
                             );
                         }
                     }
-
                     // Track that we accessed this key
                     all_keys.insert(*key);
+                }
+
+                AdbOperation::GetSpan { key } => {
+                    let k = Key::new(*key);
+                    let result = adb.get_span(&k).await.expect("get should not fail");
+                    assert_eq!(result.is_some(), !adb.is_empty(), "span should be empty only if db is empty");
                 }
             }
         }
@@ -197,7 +202,7 @@ fn fuzz(data: FuzzInput) {
             let result = adb.get(&k).await.expect("final get should not fail");
 
             match expected_state.get(key) {
-                Some(Some(expected_value)) => {
+                Some(expected_value) => {
                     assert!(result.is_some(), "Lost value for key {key:?} at end");
                     let v = result.expect("get should not fail");
                     let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
@@ -206,17 +211,12 @@ fn fuzz(data: FuzzInput) {
                         "Final value mismatch for key {key:?}"
                     );
                 }
-                Some(None) => {
+                None => {
                     assert!(
                         result.is_none(),
                         "Deleted key {key:?} should remain deleted, but found value",
                     );
-                }
-                None => {
-                    // This case shouldn't happen in final verification since we're
-                    // iterating over all_keys, but include for completeness
-                    assert!(result.is_none(), "Key {key:?} should not exist");
-                }
+                },
             }
         }
 
