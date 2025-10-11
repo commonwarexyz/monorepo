@@ -316,7 +316,8 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     /// the future is ready.
     ///
     /// In [crate::deterministic], this is used to ensure interactions with external systems can
-    /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
+    /// be interacted with deterministically. In [crate::tokio], this is a passthrough (allows
+    /// multiple runtimes to be tested with no code changes).
     ///
     /// # Warning
     ///
@@ -329,10 +330,7 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
-        T: Send + 'a,
-    {
-        future
-    }
+        T: Send + 'a;
 }
 
 /// Extension trait that makes it more ergonomic to use [Pacer].

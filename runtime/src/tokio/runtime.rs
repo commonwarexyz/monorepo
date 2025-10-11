@@ -16,7 +16,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, Aborter, Panicker},
-    Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
+    Clock, Error, Handle, Model, Pacer, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -30,6 +30,7 @@ use std::{
     env,
     future::Future,
     net::SocketAddr,
+    ops::Range,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -556,6 +557,21 @@ impl Clock for Context {
         };
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
+    }
+}
+
+impl Pacer for Context {
+    fn pace<'a, F, T>(
+        &'a self,
+        _range: Range<Duration>,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        // Execute the future immediately
+        future
     }
 }
 
