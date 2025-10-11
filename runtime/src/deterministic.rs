@@ -1062,53 +1062,6 @@ impl Sleeper {
     }
 }
 
-// Synchronization primitive that lets a thread block until a waker delivers a signal.
-struct Blocker {
-    // Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
-    state: Mutex<bool>,
-    // Condvar used to park and resume the thread when the signal flips to true.
-    cv: Condvar,
-}
-
-impl Blocker {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(false),
-            cv: Condvar::new(),
-        })
-    }
-
-    fn wait(&self) {
-        let mut signaled = self.state.lock().unwrap();
-        // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
-        while !*signaled {
-            signaled = self.cv.wait(signaled).unwrap();
-        }
-        // Reset the flag so subsequent waits park again until the next wake signal.
-        *signaled = false;
-    }
-}
-
-impl ArcWake for Blocker {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut signaled = arc_self.state.lock().unwrap();
-        *signaled = true;
-        // Notify a single waiter so the blocked thread re-checks the flag.
-        arc_self.cv.notify_one();
-    }
-}
-
-pin_project! {
-    struct Waiter<F: Future> {
-        executor: Weak<Executor>,
-        target: SystemTime,
-        future: Option<Pin<Box<F>>>,
-        ready: Option<F::Output>,
-        started: bool,
-        registered: bool,
-    }
-}
-
 struct Alarm {
     time: SystemTime,
     waker: Waker,
@@ -1154,6 +1107,56 @@ impl Future for Sleeper {
             });
         }
         Poll::Pending
+    }
+}
+
+// Synchronization primitive that lets a thread block until a waker delivers a signal.
+struct Blocker {
+    // Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
+    state: Mutex<bool>,
+    // Condvar used to park and resume the thread when the signal flips to true.
+    cv: Condvar,
+}
+
+impl Blocker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn wait(&self) {
+        let mut signaled = self.state.lock().unwrap();
+        // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
+        while !*signaled {
+            signaled = self.cv.wait(signaled).unwrap();
+        }
+        // Reset the flag so subsequent waits park again until the next wake signal.
+        *signaled = false;
+    }
+}
+
+impl ArcWake for Blocker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let mut signaled = arc_self.state.lock().unwrap();
+        *signaled = true;
+        // Notify a single waiter so the blocked thread re-checks the flag.
+        arc_self.cv.notify_one();
+    }
+}
+
+pin_project! {
+    /// A future that resolves when a given target time is reached.
+    ///
+    /// If the future is not ready at the target time, the future is blocked until the target time is reached.
+    struct Waiter<F: Future> {
+        executor: Weak<Executor>,
+        target: SystemTime,
+        future: Option<Pin<Box<F>>>,
+        ready: Option<F::Output>,
+        started: bool,
+        registered: bool,
     }
 }
 
