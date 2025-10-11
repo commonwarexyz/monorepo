@@ -1147,17 +1147,38 @@ mod test {
             db.commit().await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
 
             db.delete(key1.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
+
             db.delete(key2.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().is_none());
+            assert!(db.get_span(&key2).await.unwrap().is_none());
+
             db.commit().await.unwrap();
             assert!(db.is_empty());
 
+            // Update the keys in opposite order from earlier.
             db.update(key2.clone(), 2).await.unwrap();
             db.update(key1.clone(), 1).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+
+            // Delete the keys in opposite order from earlier.
+            db.delete(key2.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+
+            db.delete(key1.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().is_none());
+            assert!(db.get_span(&key2).await.unwrap().is_none());
+            db.commit().await.unwrap();
 
             db.destroy().await.unwrap();
         });
