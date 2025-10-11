@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Reconfiguration + Reshare with consensus::threshold_simplex</title>
+    <meta name="description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes. Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. examples/reshare shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch.">
+    <meta name="author" content="Ben Clabby">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/reshare.png" />
+    <meta property="og:title" content="Reconfiguration + Reshare with consensus::threshold_simplex" />
+    <meta property="og:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes. Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. examples/reshare shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch." />
+    <meta property="article:author" content="https://x.com/vex_0x" />
+    <meta property="article:published_time" content="2025-10-11T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-10-11T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <meta property="twitter:title" content="Reconfiguration + Reshare with consensus::threshold_simplex" />
+    <meta property="twitter:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes. Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. examples/reshare shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/reshare.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@vex_0x" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Reconfiguration + Reshare with <code>consensus::threshold_simplex</code></h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">October 11, 2025</div>
+        </div>
+        <p>An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes.</p>
+        <p>Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. <code>examples/reshare</code> shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch.</p>
+        <img src ="../imgs/reshare.png" alt="Reshare Flow" />
+        <p>The example combines <code>consensus::threshold_simplex</code>, <code>cryptography::bls12381::dkg</code>, and <code>p2p::authenticated</code> into a single demonstration that you can run end to end. Because every interaction in the reshare lands in the log, each participant gains an auditable transcript of who proposed what, which shares were acknowledged, and how the next committee was formed.</p>
+
+        <h2>A refresher on <code>consensus::threshold_simplex</code> and <code>examples/vrf</code></h2>
+        <p>The <code>consensus::threshold_simplex</code> module utilizes BLS12-381 threshold signatures to enable a group of validators to collectively sign consensus messages. Each active validator has a share of the private key, and a predefined threshold of these shares is required to produce a valid signature for a given message.</p>
+        <p><a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>examples/vrf</code></a> showcases a continuous key reshare process to generate randomness, but with a key caveat - participants trust a central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>" to track commitments, acknowledgements, and reveals.</p>
+
+        <h2>Epoching</h2>
+        <p>Recently, <a href="https://x.com/B_Chou">Brendan Chou</a> added support for height-based epoching in <code>consensus::threshold_simplex</code>. This feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the perfect platform to perform progressive BLS key reshare as a means of facilitating committee reconfiguration.</p>
+        <p>This approach was derived from <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden and Ertem Nusret Tas.</p>
+
+        <h2>Piggybacking on Consensus</h2>
+        <p>To facilitate safe reconfiguration of the validator committee in a <code>consensus::threshold_simplex</code> engine, <code>cryptography::bls12381::dkg</code> can be employed to securely generate new shares for the next committee.</p>
+        <p>Each epoch begins with a threshold of validators acting as dealers and players for the next BLS polynomial. Dealers encrypt fresh shares to the upcoming committee (players), players acknowledge receipt, and anyone who misbehaves is deterministically flagged by participants. Those transcripts are bundled into a compact reshare outcome and proposed alongside normal blocks.</p>
+        <p>Consensus handles the rest. Once the reshare outcomes are included within finalized blocks, every replica learns the same public polynomial, optional local share (if part of the current committee), and participant list for the next epoch.</p>
+        <img src="../imgs/reshare_actors.png" alt="Actor Interactions" />
+        <p>
+            Driving resharing through the replicated log buys:
+            <ol>
+                <li><b>accountability</b>: cryptographic receipts for every dealer's outcome are included in the replicated log.</li>
+                <li><b>availability</b>: the network keeps producing blocks while it prepares the next quorum, so reconfiguration/reshare does not compete with liveness.</li>
+                <li><b>recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channeled communication.</li>
+            </ol>
+        </p>
+
+        <h2>Trying It Locally</h2>
+        <p>You can run the example locally by generating participant configurations and launching the validators with the command emitted by the setup step. Within a few minutes the logs will show share distributions, resumed consensus rounds, and epoch transitions as the network continually rotates the committee with refreshed shares.</p>
+        <pre><code>
+$ git clone git@github.com:commonwarexyz/monorepo.git && cd monorepo
+$ cargo run --bin commonware-reshare setup
+# Execute the `mprocs` command emitted by the previous step
+        </code></pre>
+
+        <h2>What Comes Next</h2>
+        <p>We expect builders to swap in their own selection rules, plug the reshare transcript into application state, and experiment with rotating keys on cadences that were impractical before. If you take the example in a new direction, or uncover interesting corner cases, let us know. Validator networks should be able to evolve in real time, and this example is an invitation to make that the default.</p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+</body>
+
+</html>
