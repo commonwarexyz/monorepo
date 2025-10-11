@@ -128,8 +128,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             partition: cfg.metadata_partition,
             codec_config: (),
         };
-        let mut metadata =
-            Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
+        let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
         // Replay the journal to compute the current size
         let mut size = 0u64;
@@ -161,7 +160,10 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             metadata.sync().await?;
         }
 
-        debug!(size, items_in_current_section, "initialized contiguous journal");
+        debug!(
+            size,
+            items_in_current_section, "initialized contiguous journal"
+        );
 
         Ok(Self {
             inner,
@@ -268,11 +270,11 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         let replay = self.inner.replay(start_section, 0, buffer).await?;
 
         let items_per_section = self.items_per_section.get();
-        
+
         // Use an atomic counter for position tracking in the async closure
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        
+        use std::sync::Arc;
+
         let current_pos = Arc::new(AtomicU64::new(0));
         let skip_count = Arc::new(AtomicU64::new(start_offset_within_section));
         let current_section_val = Arc::new(AtomicU64::new(start_section));
@@ -281,7 +283,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             let current_pos = current_pos.clone();
             let skip_count = skip_count.clone();
             let current_section_val = current_section_val.clone();
-            
+
             async move {
                 match result {
                     Ok((section, _offset, _size, item)) => {
