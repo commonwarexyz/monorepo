@@ -1379,7 +1379,7 @@ mod tests {
         channel::{mpsc, oneshot},
         future::pending,
         task::{noop_waker, waker},
-        try_join, SinkExt, StreamExt,
+        SinkExt, StreamExt,
     };
     use std::{
         sync::{
@@ -1760,7 +1760,10 @@ mod tests {
                     .unwrap();
                 results_tx.send(2).await.unwrap();
             });
-            try_join!(first, second).unwrap();
+
+            // Wait for both tasks to complete
+            second.await.unwrap();
+            first.await.unwrap();
 
             // Ensure order is correct
             let mut results = Vec::new();
