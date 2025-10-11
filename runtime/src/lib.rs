@@ -318,8 +318,8 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
     fn pace<'a, F, T>(
         &'a self,
-        future: F,
         _range: Range<Duration>,
+        future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
@@ -345,7 +345,7 @@ pub trait FutureExt: Future + Send + Sized {
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        pacer.pace(self, range)
+        pacer.pace(range, self)
     }
 }
 

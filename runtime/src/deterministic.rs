@@ -1216,8 +1216,8 @@ where
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,
-        future: F,
         range: Range<Duration>,
+        future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,

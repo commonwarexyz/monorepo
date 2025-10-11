@@ -178,14 +178,14 @@ where
 {
     fn pace<'a, F, T>(
         &'a self,
-        future: F,
         range: Range<Duration>,
+        future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().pace(future, range)
+        self.as_ref().pace(range, future)
     }
 }
 
