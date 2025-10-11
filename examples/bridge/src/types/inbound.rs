@@ -1,4 +1,5 @@
 use super::block::BlockFormat;
+use crate::SigningScheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
@@ -10,7 +11,7 @@ use commonware_cryptography::{
 /// Enum representing incoming messages from validators to the indexer.
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
@@ -85,7 +86,7 @@ impl<D: Digest> EncodeSize for Inbound<D> {
 }
 
 /// Message to store a new block in the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
@@ -147,12 +148,12 @@ impl<D: Digest> FixedSize for GetBlock<D> {
 }
 
 /// Message to store a finality certificate in the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
     pub network: <MinSig as Variant>::Public,
     /// The finality certificate
-    pub finalization: Finalization<MinSig, D>,
+    pub finalization: Finalization<SigningScheme, D>,
 }
 
 impl<D: Digest> Write for PutFinalization<D> {
@@ -213,12 +214,12 @@ impl EncodeSize for GetFinalization {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_consensus::{threshold_simplex::types::Proposal, types::Round};
+    use commonware_consensus::{
+        threshold_simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        types::Round,
+    };
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::{self, Element},
-            variant::MinSig,
-        },
+        bls12381::primitives::group::{self, Element},
         sha256::Digest as Sha256Digest,
     };
     use rand::thread_rng;
@@ -238,7 +239,7 @@ mod tests {
         result
     }
 
-    fn new_finalization() -> Finalization<MinSig, Sha256Digest> {
+    fn new_finalization() -> Finalization<SigningScheme, Sha256Digest> {
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);
@@ -250,8 +251,10 @@ mod tests {
                 parent: 54321,
                 payload: new_digest(),
             },
-            proposal_signature,
-            seed_signature,
+            certificate: bls12381_threshold::Signature::<MinSig> {
+                message_signature: proposal_signature,
+                seed_signature,
+            },
         }
     }
 

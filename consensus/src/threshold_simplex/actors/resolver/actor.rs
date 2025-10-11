@@ -5,12 +5,12 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, Request, Response, SigningScheme, Voter},
     },
     types::{Epoch, View},
-    Epochable, ThresholdSupervisor, Viewable,
+    Epochable, Viewable,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -23,7 +23,7 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{seq::IteratorRandom, CryptoRng, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -99,39 +99,34 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + Metrics + Spawner,
-    C: PublicKey,
-    B: Blocker<PublicKey = C>,
-    V: Variant,
+    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+    P: PublicKey,
+    S: SigningScheme,
+    B: Blocker<PublicKey = P>,
     D: Digest,
-    S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C,
-        Identity = V::Public,
-        Polynomial = Vec<V::Public>,
-    >,
 > {
     context: ContextCell<E>,
+    signing: S,
+
     blocker: B,
-    supervisor: S,
 
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, Notarization<V, D>>,
-    nullifications: BTreeMap<View, Nullification<V>>,
+    notarizations: BTreeMap<View, Notarization<S, D>>,
+    nullifications: BTreeMap<View, Nullification<S>>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
     fetch_concurrent: usize,
-    requester: requester::Requester<E, C>,
+    requester: requester::Requester<E, P>,
 
     unfulfilled: Gauge,
     outstanding: Gauge,
@@ -139,20 +134,14 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
+        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+        P: PublicKey,
+        S: SigningScheme,
+        B: Blocker<PublicKey = P>,
         D: Digest,
-        S: ThresholdSupervisor<
-            Index = View,
-            PublicKey = C,
-            Identity = V::Public,
-            Polynomial = Vec<V::Public>,
-        >,
-    > Actor<E, C, B, V, D, S>
+    > Actor<E, P, S, B, D>
 {
-    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<P, S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto,
@@ -160,7 +149,8 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(context.with_label("requester"), config);
+        let mut requester = requester::Requester::new(context.with_label("requester"), config);
+        requester.reconcile(&cfg.participants);
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
@@ -183,8 +173,9 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
+                signing: cfg.signing,
+
                 blocker: cfg.blocker,
-                supervisor: cfg.supervisor,
 
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
@@ -213,10 +204,10 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send<Sr: Sender<PublicKey = C>>(
+    async fn send<Sr: Sender<PublicKey = P>>(
         &mut self,
         shuffle: bool,
-        sender: &mut WrappedSender<Sr, Backfiller<V, D>>,
+        sender: &mut WrappedSender<Sr, Backfiller<S, D>>,
     ) {
         // Clear retry
         self.retry = None;
@@ -281,7 +272,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = Backfiller::<V, D>::Request(msg.clone());
+                let encoded = Backfiller::<S, D>::Request(msg.clone());
 
                 // Try to send
                 if sender
@@ -312,26 +303,32 @@ impl<
 
     pub fn start(
         mut self,
-        voter: voter::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C>,
-        receiver: impl Receiver<PublicKey = C>,
+        voter: voter::Mailbox<S, D>,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C>,
-        receiver: impl Receiver<PublicKey = C>,
+        mut voter: voter::Mailbox<S, D>,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap(self.max_fetch_count, sender, receiver);
+        let (mut sender, mut receiver) = wrap(
+            (
+                self.max_fetch_count,
+                self.signing.certificate_codec_config(),
+            ),
+            sender,
+            receiver,
+        );
 
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
-        let identity = *self.supervisor.identity();
         loop {
             // Record outstanding metric
             self.unfulfilled.set(self.required.len() as i64);
@@ -394,10 +391,6 @@ impl<
                                 continue;
                             }
 
-                            // Update stored validators
-                            let validators = self.supervisor.participants(view).unwrap();
-                            self.requester.reconcile(validators);
-
                             // If waiting for this notarization, remove it
                             self.required.remove(&Entry { task: Task::Notarization, view });
 
@@ -412,10 +405,6 @@ impl<
                             } else {
                                 continue;
                             }
-
-                            // Update stored validators
-                            let validators = self.supervisor.participants(view).unwrap();
-                            self.requester.reconcile(validators);
 
                             // If waiting for this nullification, remove it
                             self.required.remove(&Entry { task: Task::Nullification, view });
@@ -469,7 +458,7 @@ impl<
                         },
                     };
 
-                    match msg{
+                    match msg {
                         Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
                             let mut missing_notarizations = Vec::new();
@@ -518,7 +507,7 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            if !response.verify(&self.namespace, &identity) {
+                            if !response.verify(&mut self.context, &self.signing, &self.namespace) {
                                 warn!(sender = ?s, "blocking peer");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;

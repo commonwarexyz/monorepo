@@ -1,9 +1,10 @@
+use crate::SigningScheme;
 use commonware_consensus::{
     threshold_simplex::types::{Activity, Context},
     types::{Epoch, Round},
     Automaton as Au, Epochable, Relay as Re, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
+use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -24,7 +25,7 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<bool>,
     },
     Report {
-        activity: Activity<MinSig, D>,
+        activity: Activity<SigningScheme, D>,
     },
 }
 
@@ -95,7 +96,7 @@ impl<D: Digest> Re for Mailbox<D> {
 }
 
 impl<D: Digest> Reporter for Mailbox<D> {
-    type Activity = Activity<MinSig, D>;
+    type Activity = Activity<SigningScheme, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

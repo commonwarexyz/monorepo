@@ -64,6 +64,14 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
+use crate::{threshold_simplex::types::SigningScheme, types::Epoch};
+
+/// Supplies the signing scheme the marshal should use for a given epoch.
+pub trait SigningSchemeProvider<S: SigningScheme>: Send + Sync + 'static {
+    /// Return the signing scheme that corresponds to `epoch`.
+    fn for_epoch(&self, epoch: Epoch) -> Option<S>;
+}
+
 #[cfg(test)]
 pub mod mocks;
 
@@ -74,31 +82,24 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
+        SigningSchemeProvider,
     };
     use crate::{
         marshal::ingress::mailbox::Identifier,
-        threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
-            Notarization, Proposal,
+        threshold_simplex::{
+            self,
+            signing_scheme::bls12381_threshold,
+            types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::Round,
+        types::{Epoch, Round},
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
-    use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops::generate_shares,
-            primitives::{
-                group::Share,
-                ops::{partial_sign_message, threshold_signature_recover},
-                poly,
-                variant::{MinPk, Variant},
-            },
-        },
+        bls12381::primitives::variant::MinPk,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
+        Digestible, Hasher as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -112,6 +113,7 @@ mod tests {
     use rand::{seq::SliceRandom, Rng};
     use std::{
         collections::BTreeMap,
+        marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         time::Duration,
     };
@@ -120,8 +122,21 @@ mod tests {
     type B = Block<D>;
     type P = PublicKey;
     type V = MinPk;
-    type Sh = Share;
     type E = PrivateKey;
+    type S = bls12381_threshold::Scheme<V>;
+    type Pr = ConstantSigningSchemeProvider;
+
+    struct ConstantSigningSchemeProvider(S);
+    impl SigningSchemeProvider<S> for ConstantSigningSchemeProvider {
+        fn for_epoch(&self, _: Epoch) -> Option<S> {
+            Some(self.0.clone())
+        }
+    }
+    impl From<S> for ConstantSigningSchemeProvider {
+        fn from(scheme: S) -> Self {
+            Self(scheme)
+        }
+    }
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -146,18 +161,18 @@ mod tests {
         oracle: &mut Oracle<P>,
         coordinator: p2p::mocks::Coordinator<P>,
         secret: E,
-        identity: <V as Variant>::Public,
+        signing_provider: Pr,
     ) -> (
         Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<V, B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
-            identity,
+            signing_provider,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
-            codec_config: (),
+            block_codec_config: (),
             partition_prefix: format!("validator-{}", secret.public_key()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
@@ -169,6 +184,7 @@ mod tests {
             freezer_journal_compression: None,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             immutable_items_per_section: NZU64!(10),
+            _marker: PhantomData,
         };
 
         // Create the resolver
@@ -210,64 +226,36 @@ mod tests {
         (application, mailbox)
     }
 
-    fn make_finalization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Finalization<V, D> {
-        let proposal_msg = proposal.encode();
-
+    fn make_finalization(
+        proposal: Proposal<D>,
+        signing_schemes: &[S],
+        quorum: u32,
+    ) -> Finalization<S, D> {
         // Generate proposal signature
-        let proposal_partials: Vec<_> = shares
+        let finalizes = signing_schemes
             .iter()
             .take(quorum as usize)
-            .map(|s| {
-                partial_sign_message::<V>(s, Some(&finalize_namespace(NAMESPACE)), &proposal_msg)
-            })
-            .collect();
-        let proposal_signature =
-            threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+            .map(|signing| Finalize::sign(signing, NAMESPACE, proposal.clone()))
+            .collect::<Vec<_>>();
 
-        // Generate seed signature (for the view number)
-        let seed_msg = proposal.round.encode();
-        let seed_partials: Vec<_> = shares
-            .iter()
-            .take(quorum as usize)
-            .map(|s| partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg))
-            .collect();
-        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
-
-        Finalization {
-            proposal,
-            proposal_signature,
-            seed_signature,
-        }
+        // Generate certificate signatures
+        Finalization::from_finalizes(&signing_schemes[0], &finalizes, None).unwrap()
     }
 
-    fn make_notarization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Notarization<V, D> {
-        let proposal_msg = proposal.encode();
-
+    fn make_notarization(
+        proposal: Proposal<D>,
+        signing_schemes: &[S],
+        quorum: u32,
+    ) -> Notarization<S, D> {
         // Generate proposal signature
-        let proposal_partials: Vec<_> = shares
+        let notarizes = signing_schemes
             .iter()
             .take(quorum as usize)
-            .map(|s| {
-                partial_sign_message::<V>(s, Some(&notarize_namespace(NAMESPACE)), &proposal_msg)
-            })
-            .collect();
-        let proposal_signature =
-            threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+            .map(|signing| Notarize::sign(signing, NAMESPACE, proposal.clone()))
+            .collect::<Vec<_>>();
 
-        // Generate seed signature (for the view number)
-        let seed_msg = proposal.round.encode();
-        let seed_partials: Vec<_> = shares
-            .iter()
-            .take(quorum as usize)
-            .map(|s| partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg))
-            .collect();
-        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
-
-        Notarization {
-            proposal,
-            proposal_signature,
-            seed_signature,
-        }
+        // Generate certificate signatures
+        Notarization::from_notarizes(&signing_schemes[0], &notarizes).unwrap()
     }
 
     fn setup_network(context: deterministic::Context) -> Oracle<P> {
@@ -284,17 +272,14 @@ mod tests {
 
     fn setup_validators_and_shares(
         context: &mut deterministic::Context,
-    ) -> (Vec<E>, Vec<P>, <V as Variant>::Public, Vec<Sh>) {
-        let mut schemes = (0..NUM_VALIDATORS)
-            .map(|i| PrivateKey::from_seed(i as u64))
-            .collect::<Vec<_>>();
-        schemes.sort_by_key(|s| s.public_key());
-        let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+    ) -> (Vec<E>, Vec<P>, Vec<S>) {
+        let (schemes, peers, signing_schemes) =
+            threshold_simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(
+                context,
+                NUM_VALIDATORS,
+            );
 
-        let (identity, shares) = generate_shares::<_, V>(context, None, NUM_VALIDATORS, QUORUM);
-        let identity = *poly::public::<V>(&identity);
-
-        (schemes, peers, identity, shares)
+        (schemes, peers, signing_schemes)
     }
 
     async fn setup_network_links(oracle: &mut Oracle<P>, peers: &[P], link: Link) {
@@ -341,7 +326,7 @@ mod tests {
         );
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -353,7 +338,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    identity,
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 applications.insert(peers[i].clone(), application);
@@ -399,13 +384,13 @@ mod tests {
                     parent: height.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
-                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                let notarization = make_notarization(proposal.clone(), &signing_schemes, QUORUM);
                 actor
                     .report(Activity::Notarization(notarization.clone()))
                     .await;
 
                 // Finalize block by all validators
-                let fin = make_finalization(proposal, &shares, QUORUM);
+                let fin = make_finalization(proposal, &signing_schemes, QUORUM);
                 for actor in actors.iter_mut() {
                     // Always finalize 1) the last block in each epoch 2) the last block in the chain.
                     // Otherwise, finalize randomly.
@@ -448,7 +433,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -457,7 +442,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(vec![]),
                     secret.clone(),
-                    identity,
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -479,10 +464,10 @@ mod tests {
                 parent: 0,
                 payload: commitment,
             };
-            let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+            let notarization = make_notarization(proposal.clone(), &signing_schemes, QUORUM);
             actor.report(Activity::Notarization(notarization)).await;
 
-            let finalization = make_finalization(proposal, &shares, QUORUM);
+            let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
 
             let received_block = subscription_rx.await.unwrap();
@@ -496,7 +481,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -505,7 +490,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    identity,
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -539,10 +524,10 @@ mod tests {
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
-                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                let notarization = make_notarization(proposal.clone(), &signing_schemes, QUORUM);
                 actor.report(Activity::Notarization(notarization)).await;
 
-                let finalization = make_finalization(proposal, &shares, QUORUM);
+                let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
                 actor.report(Activity::Finalization(finalization)).await;
             }
 
@@ -564,7 +549,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -573,7 +558,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    identity,
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -606,10 +591,10 @@ mod tests {
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
-                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                let notarization = make_notarization(proposal.clone(), &signing_schemes, QUORUM);
                 actor.report(Activity::Notarization(notarization)).await;
 
-                let finalization = make_finalization(proposal, &shares, QUORUM);
+                let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
                 actor.report(Activity::Finalization(finalization)).await;
             }
 
@@ -624,7 +609,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -633,7 +618,7 @@ mod tests {
                     &mut oracle,
                     p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
-                    identity,
+                    signing_schemes[i].clone().into(),
                 )
                 .await;
                 actors.push(actor);
@@ -678,7 +663,7 @@ mod tests {
                 parent: 2,
                 payload: block3.digest(),
             };
-            let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
+            let notarization3 = make_notarization(proposal3.clone(), &signing_schemes, QUORUM);
             actor.report(Activity::Notarization(notarization3)).await;
             actor.verified(Round::from((0, 3)), block3.clone()).await;
 
@@ -694,7 +679,7 @@ mod tests {
                     parent: 3,
                     payload: block4.digest(),
                 },
-                &shares,
+                &signing_schemes,
                 QUORUM,
             );
             actor.report(Activity::Finalization(finalization4)).await;
@@ -722,7 +707,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, _peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             // Single validator actor
             let secret = schemes[0].clone();
@@ -731,7 +716,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                identity,
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -753,7 +738,7 @@ mod tests {
                 parent: 0,
                 payload: digest,
             };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
+            let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
 
             // Latest should now be the finalized block
@@ -779,7 +764,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, _peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             // Single validator actor
             let secret = schemes[0].clone();
@@ -788,7 +773,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                identity,
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -806,7 +791,7 @@ mod tests {
                     parent: 0,
                     payload: d1,
                 },
-                &shares,
+                &signing_schemes,
                 QUORUM,
             );
             actor.report(Activity::Finalization(f1)).await;
@@ -822,7 +807,7 @@ mod tests {
                     parent: 1,
                     payload: d2,
                 },
-                &shares,
+                &signing_schemes,
                 QUORUM,
             );
             actor.report(Activity::Finalization(f2)).await;
@@ -838,7 +823,7 @@ mod tests {
                     parent: 2,
                     payload: d3,
                 },
-                &shares,
+                &signing_schemes,
                 QUORUM,
             );
             actor.report(Activity::Finalization(f3)).await;
@@ -852,7 +837,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, _peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -860,7 +845,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
                 secret,
-                identity,
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -879,7 +864,7 @@ mod tests {
                 parent: 0,
                 payload: commitment,
             };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
+            let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
 
             // Get by height
@@ -906,7 +891,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let (schemes, peers, signing_schemes) = setup_validators_and_shares(&mut context);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -914,7 +899,7 @@ mod tests {
                 &mut oracle,
                 p2p::mocks::Coordinator::new(peers),
                 secret,
-                identity,
+                signing_schemes[0].clone().into(),
             )
             .await;
 
@@ -940,7 +925,7 @@ mod tests {
                 parent: 1,
                 payload: fin_commitment,
             };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
+            let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
             let got = actor
                 .get_block(&fin_commitment)

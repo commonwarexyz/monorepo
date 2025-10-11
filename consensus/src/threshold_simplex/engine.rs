@@ -3,11 +3,8 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{types::View, Automaton, Relay, Reporter, ThresholdSupervisor};
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Digest, Signer,
-};
+use crate::{threshold_simplex::types::SigningScheme, Automaton, Relay, Reporter};
+use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -19,54 +16,38 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Signer,
+    S: SigningScheme,
     B: Blocker<PublicKey = C::PublicKey>,
-    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C::PublicKey,
-        Identity = V::Public,
-        Seed = V::Signature,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
+    F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
-    voter_mailbox: voter::Mailbox<V, D>,
+    voter: voter::Actor<E, C, S, B, D, A, R, F>,
+    voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S>,
-    batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
+    batcher: batcher::Actor<E, C::PublicKey, S, B, D, F>,
+    batcher_mailbox: batcher::Mailbox<C::PublicKey, S, D>,
 
-    resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,
-    resolver_mailbox: resolver::Mailbox<V, D>,
+    resolver: resolver::Actor<E, C::PublicKey, S, B, D>,
+    resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Signer,
+        S: SigningScheme,
         B: Blocker<PublicKey = C::PublicKey>,
-        V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
-            Seed = V::Signature,
-            Index = View,
-            Share = group::Share,
-            Polynomial = Vec<V::Public>,
-            Identity = V::Public,
-            PublicKey = C::PublicKey,
-        >,
-    > Engine<E, C, B, V, D, A, R, F, S>
+        F: Reporter<Activity = Activity<S, D>>,
+    > Engine<E, C, S, B, D, A, R, F>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -74,9 +55,10 @@ impl<
         let (batcher, batcher_mailbox) = batcher::Actor::new(
             context.with_label("batcher"),
             batcher::Config {
+                participants: cfg.participants.clone(),
+                signing: cfg.signing.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
-                supervisor: cfg.supervisor.clone(),
                 epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
@@ -90,11 +72,12 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 crypto: cfg.crypto.clone(),
+                participants: cfg.participants.clone(),
+                signing: cfg.signing.clone(),
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
-                supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
@@ -115,7 +98,8 @@ impl<
             resolver::Config {
                 blocker: cfg.blocker,
                 crypto: cfg.crypto.public_key(),
-                supervisor: cfg.supervisor,
+                participants: cfg.participants,
+                signing: cfg.signing,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,

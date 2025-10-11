@@ -2,20 +2,28 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{
+    ed25519::{PrivateKey, PublicKey},
+    Hasher,
+};
 
 mod actor;
 pub use actor::Application;
 mod ingress;
-mod supervisor;
+mod reporter;
+
+pub type SigningScheme = commonware_consensus::threshold_simplex::signing_scheme::ed25519::Scheme;
 
 /// Configuration for the application.
-pub struct Config<P: PublicKey, H: Hasher> {
+pub struct Config<H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
     /// Participants active in consensus.
-    pub participants: Vec<P>,
+    pub participants: Vec<PublicKey>,
+
+    /// Our private key.
+    pub private_key: PrivateKey,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

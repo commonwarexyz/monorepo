@@ -2,15 +2,12 @@ mod actor;
 mod ingress;
 
 use crate::{
-    threshold_simplex::types::{Activity, Context},
+    threshold_simplex::types::{Activity, Context, SigningScheme},
     types::{Epoch, View},
-    Automaton, Relay, Reporter, ThresholdSupervisor,
+    Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Digest, Signer,
-};
+use commonware_cryptography::{Digest, Signer};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::{Mailbox, Message};
@@ -18,20 +15,20 @@ use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     C: Signer,
+    S: SigningScheme,
     B: Blocker,
-    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    F: Reporter<Activity = Activity<S, D>>,
 > {
     pub crypto: C,
+    pub participants: Vec<C::PublicKey>,
+    pub signing: S,
     pub blocker: B,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
-    pub supervisor: S,
 
     pub partition: String,
     pub epoch: Epoch,
@@ -53,6 +50,7 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
+            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -60,11 +58,10 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops,
-            primitives::{ops::threshold_signature_recover, variant::MinSig},
-        },
-        ed25519, Hasher as _, PrivateKeyExt as _, Sha256,
+        bls12381::primitives::variant::{MinPk, MinSig},
+        ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
+        sha256::Digest as Sha256Digest,
+        Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -74,10 +71,50 @@ mod tests {
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
-    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    type Fixture<S> = (Vec<EdPrivateKey>, Vec<EdPublicKey>, Vec<S>);
+
+    fn build_notarization<S: SigningScheme>(
+        schemes: &[S],
+        namespace: &[u8],
+        proposal: &Proposal<Sha256Digest>,
+        count: usize,
+    ) -> (
+        Vec<Notarize<S, Sha256Digest>>,
+        Notarization<S, Sha256Digest>,
+    ) {
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(count)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()))
+            .collect();
+        let certificate = Notarization::from_notarizes(&schemes[0], &votes)
+            .expect("notarization requires a quorum of votes");
+        (votes, certificate)
+    }
+
+    fn build_finalization<S: SigningScheme>(
+        schemes: &[S],
+        namespace: &[u8],
+        proposal: &Proposal<Sha256Digest>,
+        count: usize,
+    ) -> (
+        Vec<Finalize<S, Sha256Digest>>,
+        Finalization<S, Sha256Digest>,
+    ) {
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(count)
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()))
+            .collect();
+        let certificate = Finalization::from_finalizes(&schemes[0], &votes, None)
+            .expect("finalization requires a quorum of votes");
+        (votes, certificate)
+    }
 
     /// Trigger processing of an uninteresting view from the resolver after
     /// jumping ahead to a new finalize view:
@@ -85,8 +122,11 @@ mod tests {
     /// 1. Send a finalization for view 100.
     /// 2. Send a notarization from resolver for view 50 (should be ignored).
     /// 3. Send a finalization for view 300 (should be processed).
-    #[test_traced]
-    fn test_stale_backfill() {
+    fn stale_backfill<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
@@ -103,38 +143,19 @@ mod tests {
             network.start();
 
             // Get participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = ed25519::PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-
-            // Derive threshold shares
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
+            let signing = signing_schemes[0].clone();
             let validator = scheme.public_key();
-            let mut participants = BTreeMap::new();
-            participants.insert(
-                0,
-                (
-                    polynomial.clone(),
-                    validators.clone(),
-                    Some(shares[0].clone()),
-                ),
-            );
-            let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants,
+                participants: validators.clone(),
+                signing: signing.clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -150,11 +171,12 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
+                participants: validators.clone(),
+                signing: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
-                supervisor,
+                reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -249,24 +271,8 @@ mod tests {
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(Round::new(333, 100), 50, payload);
-            let partials: Vec<_> = shares
-                .iter()
-                .map(|share| {
-                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    (finalize.proposal_signature, notarize.seed_signature)
-                })
-                .collect();
-            let proposal_partials = partials
-                .iter()
-                .map(|(proposal_signature, _)| proposal_signature);
-            let proposal_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
-            let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let finalization =
-                Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
+            let (_, finalization) =
+                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -309,23 +315,8 @@ mod tests {
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
-            let partials: Vec<_> = shares
-                .iter()
-                .map(|share| {
-                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    (finalize.proposal_signature, notarize.seed_signature)
-                })
-                .collect();
-            let proposal_partials = partials
-                .iter()
-                .map(|(proposal_signature, _)| proposal_signature);
-            let proposal_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
-            let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+            let (_, notarization) =
+                build_notarization(&signing_schemes, &namespace, &proposal, threshold as usize);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
                 .await;
@@ -333,24 +324,8 @@ mod tests {
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(Round::new(333, 300), 100, payload);
-            let partials: Vec<_> = shares
-                .iter()
-                .map(|share| {
-                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
-                    (finalize.proposal_signature, notarize.seed_signature)
-                })
-                .collect();
-            let proposal_partials = partials
-                .iter()
-                .map(|(proposal_signature, _)| proposal_signature);
-            let proposal_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
-            let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature =
-                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let finalization =
-                Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
+            let (_, finalization) =
+                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -392,6 +367,13 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_stale_backfill() {
+        stale_backfill(bls_threshold_fixture::<MinPk, _>);
+        stale_backfill(bls_threshold_fixture::<MinSig, _>);
+        stale_backfill(ed25519_fixture);
+    }
+
     /// Process an interesting view below the oldest tracked view:
     ///
     /// 1. Advance last_finalized to a view 50.
@@ -401,8 +383,11 @@ mod tests {
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
-    #[test_traced]
-    fn test_append_old_interesting_view() {
+    fn append_old_interesting_view<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
@@ -420,37 +405,19 @@ mod tests {
             network.start();
 
             // Get participants
-            let mut private_keys = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let private_key = ed25519::PrivateKey::from_seed(i as u64);
-                validators.push(private_key.public_key());
-                private_keys.push(private_key);
-            }
-            validators.sort();
-            private_keys.sort_by_key(|s| s.public_key());
-
-            // Derive threshold shares
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
-            let private_key = private_keys[0].clone();
+            let private_key = schemes[0].clone();
+            let signing = signing_schemes[0].clone();
             let validator = private_key.public_key();
-            let mut participants = BTreeMap::new();
-            participants.insert(
-                0,
-                (
-                    polynomial.clone(),
-                    validators.clone(),
-                    Some(shares[0].clone()),
-                ),
-            );
-            let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants,
+                participants: validators.clone(),
+                signing: signing.clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -464,11 +431,12 @@ mod tests {
             actor.start();
             let voter_config = Config {
                 crypto: private_key.clone(),
+                participants: validators.clone(),
+                signing: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
-                supervisor: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{validator}"),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -492,7 +460,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = private_keys[1].public_key();
+            let peer = schemes[1].public_key();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -573,32 +541,13 @@ mod tests {
                 lf_target - 1,
                 Sha256::hash(b"test"),
             );
-            let finalization_lf_sigs = shares
-                .iter()
-                .take(threshold as usize)
-                .map(|s| {
-                    let notarize = Notarize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
-                    let finalize = Finalize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
-                    (finalize.proposal_signature, notarize.seed_signature)
-                })
-                .collect::<Vec<_>>();
-            let final_prop_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalization_lf_sigs.iter().map(|(ps, _)| ps),
-            )
-            .unwrap();
-            let final_seed_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalization_lf_sigs.iter().map(|(_, ss)| ss),
-            )
-            .unwrap();
-            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
-                proposal_lf,
-                final_prop_sig,
-                final_seed_sig,
-            ))
-            .encode()
-            .into();
+            let (_, finalization) = build_finalization(
+                &signing_schemes,
+                &namespace,
+                &proposal_lf,
+                threshold as usize,
+            );
+            let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -643,23 +592,12 @@ mod tests {
                 journal_floor_target - 1,
                 Sha256::hash(b"test2"),
             );
-            let notarization_jft_sigs = shares
-                .iter()
-                .take(threshold as usize)
-                .map(|s| Notarize::<MinSig, _>::sign(&namespace, s, proposal_jft.clone()))
-                .collect::<Vec<_>>();
-            let not_prop_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                notarization_jft_sigs.iter().map(|n| &n.proposal_signature),
-            )
-            .unwrap();
-            let not_seed_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                notarization_jft_sigs.iter().map(|n| &n.seed_signature),
-            )
-            .unwrap();
-            let notarization_for_floor =
-                Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
+            let (_, notarization_for_floor) = build_notarization(
+                &signing_schemes,
+                &namespace,
+                &proposal_jft,
+                threshold as usize,
+            );
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -688,23 +626,12 @@ mod tests {
                 problematic_view - 1,
                 Sha256::hash(b"test3"),
             );
-            let notarization_bft_sigs = shares
-                .iter()
-                .take(threshold as usize)
-                .map(|s| Notarize::<MinSig, _>::sign(&namespace, s, proposal_bft.clone()))
-                .collect::<Vec<_>>();
-            let not_prop_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                notarization_bft_sigs.iter().map(|n| &n.proposal_signature),
-            )
-            .unwrap();
-            let not_seed_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                notarization_bft_sigs.iter().map(|n| &n.seed_signature),
-            )
-            .unwrap();
-            let notarization_for_bft =
-                Notarization::<MinSig, _>::new(proposal_bft, not_prop_sig, not_seed_sig);
+            let (_, notarization_for_bft) = build_notarization(
+                &signing_schemes,
+                &namespace,
+                &proposal_bft,
+                threshold as usize,
+            );
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -725,32 +652,13 @@ mod tests {
 
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
-            let finalization_lf_sigs = shares
-                .iter()
-                .take(threshold as usize)
-                .map(|s| {
-                    let notarize = Notarize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
-                    let finalize = Finalize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
-                    (finalize.proposal_signature, notarize.seed_signature)
-                })
-                .collect::<Vec<_>>();
-            let final_prop_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalization_lf_sigs.iter().map(|(ps, _)| ps),
-            )
-            .unwrap();
-            let final_seed_sig = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalization_lf_sigs.iter().map(|(_, ss)| ss),
-            )
-            .unwrap();
-            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
-                proposal_lf,
-                final_prop_sig,
-                final_seed_sig,
-            ))
-            .encode()
-            .into();
+            let (_, finalization) = build_finalization(
+                &signing_schemes,
+                &namespace,
+                &proposal_lf,
+                threshold as usize,
+            );
+            let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -792,7 +700,17 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_finalization_without_notarization_certificate() {
+    fn test_append_old_interesting_view() {
+        append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
+        append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
+        append_old_interesting_view(ed25519_fixture);
+    }
+
+    fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"finalization_without_notarization".to_vec();
@@ -809,37 +727,16 @@ mod tests {
             network.start();
 
             // Get participants
-            let mut private_keys = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = ed25519::PrivateKey::from_seed(i as u64);
-                validators.push(scheme.public_key());
-                private_keys.push(scheme);
-            }
-            validators.sort();
-            private_keys.sort_by_key(|s| s.public_key());
-
-            // Derive threshold shares
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
-
-            // Setup the target Voter actor (validator 0)
-            let mut participants = BTreeMap::new();
-            participants.insert(
-                0,
-                (
-                    polynomial.clone(),
-                    validators.clone(),
-                    Some(shares[0].clone()),
-                ),
-            );
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
 
             // Setup application mock
-            let supervisor_cfg = mocks::supervisor::Config::<_, MinSig> {
+            let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants,
+                participants: validators.clone(),
+                signing: signing_schemes[0].clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_cfg);
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -854,12 +751,13 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                crypto: private_keys[0].clone(),
+                crypto: schemes[0].clone(),
+                participants: validators.clone(),
+                signing: signing_schemes[0].clone(),
                 blocker: oracle.control(validators[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
-                supervisor: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -919,23 +817,10 @@ mod tests {
                 view - 1,
                 Sha256::hash(b"finalize_without_notarization"),
             );
-            let finalizes: Vec<_> = shares
-                .iter()
-                .take(threshold as usize)
-                .map(|share| Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone()))
-                .collect();
-            let expected_proposal_signature = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalizes.iter().map(|f| &f.proposal_signature),
-            )
-            .unwrap();
-            let expected_seed_signature = threshold_signature_recover::<MinSig, _>(
-                threshold,
-                finalizes.iter().map(|f| &f.seed_signature),
-            )
-            .unwrap();
+            let (finalize_votes, expected_finalization) =
+                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
 
-            for finalize in finalizes.iter().cloned() {
+            for finalize in finalize_votes.iter().cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;
             }
 
@@ -953,16 +838,22 @@ mod tests {
             assert_eq!(finalized_view, Some(view));
 
             // Verify no notarization certificate was recorded
-            let notarizations = supervisor.notarizations.lock().unwrap();
+            let notarizations = reporter.notarizations.lock().unwrap();
             assert!(notarizations.is_empty());
 
             // Finalization must match the signatures recovered from finalize votes
-            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock().unwrap();
             let recorded = finalizations
                 .get(&view)
                 .expect("missing recorded finalization");
-            assert_eq!(recorded.proposal_signature, expected_proposal_signature);
-            assert_eq!(recorded.seed_signature, expected_seed_signature);
+            assert_eq!(recorded, &expected_finalization);
         });
+    }
+
+    #[test_traced]
+    fn test_finalization_without_notarization_certificate() {
+        finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519_fixture);
     }
 }
