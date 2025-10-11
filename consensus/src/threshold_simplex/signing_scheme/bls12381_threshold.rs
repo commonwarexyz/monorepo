@@ -994,9 +994,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
-            .is_none());
+        assert!(schemes[0].assemble_certificate(votes, None).is_none());
     }
 
     #[test]
@@ -1024,7 +1022,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
@@ -1063,7 +1061,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
@@ -1115,7 +1113,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
@@ -1167,7 +1165,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
@@ -1239,7 +1237,7 @@ mod tests {
             .collect();
 
         let notarization_certificate = schemes[0]
-            .assemble_certificate(notarize_votes.into_iter(), None)
+            .assemble_certificate(notarize_votes, None)
             .expect("assemble notarization");
 
         let finalize_votes: Vec<_> = schemes
@@ -1256,10 +1254,7 @@ mod tests {
             .collect();
 
         let finalization_certificate = schemes[0]
-            .assemble_certificate(
-                finalize_votes.into_iter(),
-                Some(notarization_certificate.clone()),
-            )
+            .assemble_certificate(finalize_votes, Some(notarization_certificate.clone()))
             .expect("assemble finalization");
 
         assert_eq!(
@@ -1293,7 +1288,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let randomness = schemes[0].randomness(&certificate);
@@ -1325,7 +1320,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let mut encoded = certificate.encode().freeze();
@@ -1397,7 +1392,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes.into_iter(), None)
+            .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
