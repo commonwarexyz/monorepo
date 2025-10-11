@@ -1743,11 +1743,15 @@ mod tests {
             // Wait for a delay sampled before the external send occurs
             let first = context.clone().spawn({
                 let mut results_tx = results_tx.clone();
-                |context| async move {
+                move |context| async move {
                     first_rx
                         .pace(&context, Duration::ZERO..Duration::ZERO)
                         .await
                         .unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real > first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim < first_wait);
                     results_tx.send(1).await.unwrap();
                 }
             });
@@ -1758,6 +1762,10 @@ mod tests {
                     .pace(&context, first_wait..(first_wait * 2))
                     .await
                     .unwrap();
+                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                assert!(elapsed_real >= first_wait);
+                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                assert!(elapsed_sim >= first_wait);
                 results_tx.send(2).await.unwrap();
             });
 
@@ -1771,12 +1779,6 @@ mod tests {
                 results.push(results_rx.next().await.unwrap());
             }
             assert_eq!(results, vec![1, 2]);
-
-            // Ensure time has elapsed
-            let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
-            assert!(elapsed_real >= first_wait);
-            let elapsed_sim = context.current().duration_since(start_sim).unwrap();
-            assert!(elapsed_sim >= first_wait && elapsed_sim <= first_wait * 3);
         });
     }
 
