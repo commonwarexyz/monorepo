@@ -61,6 +61,7 @@ fn bench_update(c: &mut Criterion) {
                                         pinned_nodes: vec![],
                                         pool: Some(pool),
                                     })
+                                    .unwrap()
                                 }
                                 _ => Mmr::<Sha256>::new(),
                             };

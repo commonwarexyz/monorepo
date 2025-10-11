@@ -170,7 +170,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pruned_to_pos: mmr_size,
             pinned_nodes,
             pool: config.thread_pool,
-        });
+        })?;
 
         Ok(Self {
             mem_mmr,
@@ -202,13 +202,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 .await?;
 
         if journal_size == 0 {
+            let mem_mmr = MemMmr::init(MemConfig {
+                nodes: vec![],
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: vec![],
+                pool: cfg.thread_pool,
+            })?;
             return Ok(Self {
-                mem_mmr: MemMmr::init(MemConfig {
-                    nodes: vec![],
-                    pruned_to_pos: Position::new(0),
-                    pinned_nodes: vec![],
-                    pool: cfg.thread_pool,
-                }),
+                mem_mmr,
                 journal,
                 journal_size,
                 metadata,
@@ -275,7 +276,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pruned_to_pos: journal_size,
             pinned_nodes,
             pool: cfg.thread_pool,
-        });
+        })?;
         let prune_pos = Position::new(metadata_prune_pos);
         Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
 
@@ -386,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
             pool: cfg.config.thread_pool,
-        });
+        })?;
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         if cfg.range.start < journal_size {
