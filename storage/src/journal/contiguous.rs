@@ -11,6 +11,11 @@
 //! internally maps positions to `(section, offset)` pairs in the underlying variable journal,
 //! creating new sections as needed when `items_per_section` is reached.
 //!
+//! # Performance
+//!
+//! The wrapper uses a companion [crate::journal::fixed::Journal] to store item offsets, enabling
+//! O(1) random access by position instead of requiring O(n) replay of entire sections.
+//!
 //! # Metadata
 //!
 //! To track partially complete sections across restarts, the wrapper uses a companion
@@ -29,7 +34,9 @@
 //!     let mut journal = Journal::init(context, Config{
 //!         partition: "partition".to_string(),
 //!         metadata_partition: "metadata".to_string(),
+//!         locations_partition: "locations".to_string(),
 //!         items_per_section: NZU64!(100),
+//!         locations_items_per_blob: NZU64!(1000),
 //!         compression: None,
 //!         codec_config: (),
 //!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -40,7 +47,7 @@
 //!     let pos = journal.append(128).await.unwrap();
 //!     assert_eq!(pos, 0);
 //!
-//!     // Read data by position
+//!     // Read data by position (O(1) lookup via locations journal)
 //!     let item = journal.read(0).await.unwrap();
 //!     assert_eq!(item, 128);
 //!
@@ -53,7 +60,7 @@
 //! });
 //! ```
 
-use super::{variable, Error};
+use super::{fixed, variable, Error};
 use crate::metadata::{self, Metadata};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -71,8 +78,14 @@ pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing metadata.
     pub metadata_partition: String,
 
+    /// The `commonware-runtime::Storage` partition to use for storing item locations (offsets).
+    pub locations_partition: String,
+
     /// The number of items to store in each section before creating a new one.
     pub items_per_section: NonZeroU64,
+
+    /// The number of location entries to store in each blob.
+    pub locations_items_per_blob: NonZeroU64,
 
     /// Optional compression level (using `zstd`) to apply to data before storing.
     pub compression: Option<u8>,
@@ -96,6 +109,10 @@ fn items_in_current_section_key() -> U64 {
 pub struct Journal<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> {
     /// The underlying variable journal.
     inner: variable::Journal<E, V>,
+
+    /// A fixed journal that maps position to offset within the section.
+    /// This allows O(1) lookup instead of replaying entire sections.
+    locations: fixed::Journal<E, u32>,
 
     /// Metadata store for tracking partial sections.
     metadata: Metadata<E, U64, u64>,
@@ -123,6 +140,16 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         };
         let inner = variable::Journal::init(context.with_label("journal"), variable_cfg).await?;
 
+        // Initialize the locations journal
+        let locations_cfg = fixed::Config {
+            partition: cfg.locations_partition,
+            items_per_blob: cfg.locations_items_per_blob,
+            buffer_pool: cfg.buffer_pool.clone(),
+            write_buffer: cfg.write_buffer,
+        };
+        let mut locations =
+            fixed::Journal::init(context.with_label("locations"), locations_cfg).await?;
+
         // Initialize metadata
         let metadata_cfg = metadata::Config {
             partition: cfg.metadata_partition,
@@ -130,7 +157,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         };
         let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
-        // Replay the journal to compute the current size
+        // Replay the journal to compute the current size and rebuild locations if needed
         let mut size = 0u64;
         let mut items_in_current_section = 0u64;
         let mut current_section = None;
@@ -141,7 +168,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             let replay = inner.replay(0, 0, buffer_size).await?;
             futures::pin_mut!(replay);
             while let Some(result) = replay.next().await {
-                let (section, _offset, _size, _item) = result?;
+                let (section, offset, _size, _item) = result?;
                 if current_section != Some(section) {
                     if current_section.is_some() {
                         // Moving to a new section, reset counter
@@ -151,6 +178,12 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
                 }
                 items_in_current_section += 1;
                 size += 1;
+
+                // Rebuild locations journal if it's behind
+                let locations_size = locations.size().await?;
+                if locations_size < size {
+                    locations.append(offset).await?;
+                }
             }
         }
 
@@ -167,6 +200,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
 
         Ok(Self {
             inner,
+            locations,
             metadata,
             items_per_section: cfg.items_per_section,
             size,
@@ -193,6 +227,9 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         // Append to the underlying variable journal
         let (offset, _size) = self.inner.append(section, item).await?;
 
+        // Store the offset in the locations journal for O(1) lookup
+        self.locations.append(offset).await?;
+
         trace!(pos, section, offset, "appended item");
         self.size += 1;
 
@@ -217,6 +254,8 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             let (current_section, _) = self.position_to_location(self.size - 1);
             self.inner.sync(current_section).await?;
         }
+        // Sync locations
+        self.locations.sync().await?;
         // Sync metadata
         self.metadata.sync().await?;
         Ok(())
@@ -233,25 +272,13 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             return Err(Error::ItemOutOfRange(pos));
         }
 
-        let (section, offset_within_section) = self.position_to_location(pos);
+        let (section, _offset_within_section) = self.position_to_location(pos);
 
-        // Replay the section to find the item at the given offset
-        let mut current_offset_count = 0u64;
-        let buffer_size = NonZeroUsize::new(4096).unwrap(); // Use a reasonable buffer size
-        let replay = self.inner.replay(section, 0, buffer_size).await?;
-        futures::pin_mut!(replay);
-        while let Some(result) = replay.next().await {
-            let (replay_section, _offset, _size, item) = result?;
-            if replay_section != section {
-                break;
-            }
-            if current_offset_count == offset_within_section {
-                return Ok(item);
-            }
-            current_offset_count += 1;
-        }
+        // Use the locations journal to get the offset directly (O(1) instead of O(n) replay)
+        let offset = self.locations.read(pos).await?;
+        let item = self.inner.get(section, offset).await?;
 
-        Err(Error::ItemOutOfRange(pos))
+        Ok(item)
     }
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
@@ -349,6 +376,9 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
 
         let (target_section, offset_within_section) = self.position_to_location(new_size);
 
+        // Rewind the locations journal first
+        self.locations.rewind(new_size).await?;
+
         // If rewinding to the start of a section or beyond, rewind the variable journal
         if offset_within_section == 0 {
             // Rewind to the start of the target section (which removes it and all following)
@@ -361,33 +391,14 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
                 self.inner.rewind(target_section, 0).await?;
             }
         } else {
-            // Rewinding to the middle of a section - need to replay to find the offset
-            let mut last_offset = 0u32;
-            let mut count = 0u64;
-            let buffer_size = NonZeroUsize::new(4096).unwrap();
-            {
-                let replay = self.inner.replay(target_section, 0, buffer_size).await?;
-                futures::pin_mut!(replay);
-                while let Some(result) = replay.next().await {
-                    let (section, offset, _size, _item) = result?;
-                    if section != target_section {
-                        break;
-                    }
-                    if count == offset_within_section {
-                        break;
-                    }
-                    last_offset = offset;
-                    count += 1;
-                }
-            }
-
-            // Rewind to after the target position by replaying to find size
-            if count == offset_within_section {
-                // We found the exact position, rewind to the next offset after it
+            // Rewinding to the middle of a section - use locations to find the exact offset
+            if new_size > 0 {
+                let last_offset = self.locations.read(new_size - 1).await?;
+                // Calculate the size to rewind to (after the last kept item)
                 let target_size = (last_offset as u64 + 1) * variable::ITEM_ALIGNMENT;
                 self.inner.rewind(target_section, target_size).await?;
             } else {
-                // Couldn't find the position, rewind to section start
+                // Rewinding to empty
                 self.inner.rewind(target_section, 0).await?;
             }
         }
@@ -410,6 +421,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
     /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         self.metadata.close().await?;
+        self.locations.close().await?;
         self.inner.close().await
     }
 
@@ -417,6 +429,7 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         // Close metadata (no destroy method, just close it)
         self.metadata.close().await?;
+        self.locations.destroy().await?;
         self.inner.destroy().await
     }
 }
@@ -436,7 +449,9 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             metadata_partition: "test_metadata".into(),
+            locations_partition: "test_locations".into(),
             items_per_section,
+            locations_items_per_blob: NZU64!(100),
             compression: None,
             codec_config: (),
             buffer_pool: commonware_runtime::buffer::PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
