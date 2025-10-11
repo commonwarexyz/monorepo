@@ -768,678 +768,664 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::Proposal, types::Round};
+    use crate::{
+        threshold_simplex::{
+            signing_scheme::{notarize_namespace, seed_namespace},
+            types::{Proposal, VoteContext},
+        },
+        types::Round,
+    };
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops::{evaluate_all, generate_shares},
-            primitives::variant::MinSig,
+            dkg::ops,
+            primitives::{
+                ops::partial_sign_message,
+                poly::Public,
+                variant::{MinPk, MinSig, Variant},
+            },
         },
         sha256::Digest as Sha256Digest,
+        Hasher, Sha256,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::quorum;
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
-    #[test]
-    fn vote_context_compiles() {
-        let round = Round::new(0, 0);
-        let payload = Sha256Digest::from([0u8; 32]);
-        let proposal = Proposal::new(round, round.view(), payload);
-        let ctx = VoteContext::Notarize {
-            proposal: &proposal,
-        };
-        match ctx {
-            VoteContext::Notarize { .. } => {}
-            _ => panic!("unexpected variant"),
-        }
+    const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
+
+    type Scheme<V> = super::Scheme<V>;
+    type Signature<V> = super::Signature<V>;
+
+    fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Vec<()>, Public<V>) {
+        assert!(n >= 2);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let threshold = quorum(n);
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
+
+        let participants = vec![(); n as usize];
+        let schemes = shares
+            .into_iter()
+            .map(|share| Scheme::new(&participants, &polynomial, share))
+            .collect();
+
+        (schemes, participants, polynomial)
+    }
+
+    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+        Proposal::new(
+            Round::new(round, view),
+            view.saturating_sub(1),
+            Sha256::hash(&[tag]),
+        )
+    }
+
+    fn sign_vote_roundtrip_for_each_context<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 7);
+        let scheme = &schemes[0];
+        assert!(scheme.can_sign());
+
+        let proposal = sample_proposal(0, 2, 1);
+        let notarize_vote = scheme.sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+        assert!(scheme.verify_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &notarize_vote
+        ));
+
+        let nullify_vote = scheme.sign_vote::<Sha256Digest>(
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+        );
+        assert!(scheme.verify_vote::<Sha256Digest>(
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+            &nullify_vote
+        ));
+
+        let finalize_vote = scheme.sign_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+        );
+        assert!(scheme.verify_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &finalize_vote
+        ));
     }
 
     #[test]
-    fn bls_scheme_stores_configuration() {
-        let mut rng = StdRng::seed_from_u64(7);
-        let threshold = 3;
-        let (polynomial, shares) =
-            generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-        let scheme: Scheme<MinSig> = Scheme::new(&[0; 4], &polynomial, shares[0].clone());
-
-        let identity = *polynomial.constant();
-        let polynomial = evaluate_all::<MinSig>(&polynomial, 4);
-
-        assert_eq!(scheme.polynomial().len(), polynomial.len());
-        assert!(*scheme.identity() == identity);
-        assert_eq!(shares.len(), 4); // ensure we used the DKG outputs
-        assert_eq!(scheme.share().unwrap().index, shares[0].index);
+    fn test_sign_vote_roundtrip_for_each_context() {
+        sign_vote_roundtrip_for_each_context::<MinPk>();
+        sign_vote_roundtrip_for_each_context::<MinSig>();
     }
 
-    // #[test]
-    // fn sign_vote_matches_notarize() {
-    //     let mut rng = StdRng::seed_from_u64(11);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(share.index, polynomial, identity, share.clone(), threshold);
+    fn verifier_cannot_sign<V: Variant>() {
+        let (_, participants, polynomial) = setup_signers::<V>(4, 11);
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(!verifier.can_sign());
 
-    //     let round = Round::new(0, 5);
-    //     let payload = Sha256Digest::from([1u8; 32]);
-    //     let proposal = Proposal::new(round, 4, payload);
-    //     let namespace = b"notarize";
+        let proposal = sample_proposal(0, 3, 2);
+        verifier.sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+    }
 
-    //     let vote = scheme
-    //         .sign_vote(VoteContext::Notarize {
-    //             namespace,
-    //             proposal: &proposal,
-    //         })
-    //         .expect("sign vote");
+    #[test]
+    #[should_panic(expected = "can only be called after checking can_sign")]
+    fn test_verifier_cannot_sign_min_pk() {
+        verifier_cannot_sign::<MinPk>();
+    }
 
-    //     // let legacy = types::Notarize::<MinSig, _>::sign(namespace, &share, proposal.clone());
-    //     // assert!(vote.signature.0 == legacy.proposal_signature.value);
-    //     // assert!(vote.signature.1 == legacy.seed_signature.value);
-    // }
+    #[test]
+    #[should_panic(expected = "can only be called after checking can_sign")]
+    fn test_verifier_cannot_sign_min_sig() {
+        verifier_cannot_sign::<MinSig>();
+    }
 
-    // #[test]
-    // fn sign_vote_matches_nullify() {
-    //     let mut rng = StdRng::seed_from_u64(13);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+    fn verifier_accepts_votes<V: Variant>() {
+        let (schemes, participants, polynomial) = setup_signers::<V>(4, 11);
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(!verifier.can_sign());
 
-    //     let round = Round::new(0, 7);
-    //     let namespace = b"nullify";
+        let proposal = sample_proposal(0, 3, 2);
+        let vote = schemes[1].sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(verifier.verify_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &vote
+        ));
+    }
 
-    //     let vote = scheme
-    //         .sign_vote::<Sha256Digest>(VoteContext::Nullify { namespace, round }, share.index)
-    //         .expect("sign vote");
+    #[test]
+    fn test_verifier_accepts_votes() {
+        verifier_accepts_votes::<MinPk>();
+        verifier_accepts_votes::<MinSig>();
+    }
 
-    //     let legacy = types::Nullify::<MinSig>::sign(namespace, &share, round);
-    //     assert!(vote.signature.0 == legacy.view_signature.value);
-    //     assert!(vote.signature.1 == legacy.seed_signature.value);
-    // }
+    fn verify_votes_filters_bad_signers<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(5, 13);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 5, 3);
 
-    // #[test]
-    // fn sign_vote_matches_finalize() {
-    //     let mut rng = StdRng::seed_from_u64(17);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let round = Round::new(0, 9);
-    //     let payload = Sha256Digest::from([2u8; 32]);
-    //     let proposal = Proposal::new(round, 8, payload);
-    //     let namespace = b"finalize";
+        let verification = schemes[0].verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes.clone(),
+        );
+        assert!(verification.invalid_signers.is_empty());
+        assert_eq!(verification.verified.len(), quorum);
 
-    //     let vote = scheme
-    //         .sign_vote(
-    //             VoteContext::Finalize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             share.index,
-    //         )
-    //         .expect("sign vote");
+        votes[0].signer = 999;
+        let verification = schemes[0].verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes,
+        );
+        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.verified.len(), quorum - 1);
+    }
 
-    //     let legacy = types::Finalize::<MinSig, _>::sign(namespace, &share, proposal.clone());
-    //     assert!(vote.signature.0 == legacy.proposal_signature.value);
-    //     let seed_ns = seed_namespace(namespace);
-    //     let seed_bytes = proposal.round.encode();
-    //     let expected_seed =
-    //         partial_sign_message::<MinSig>(&share, Some(seed_ns.as_ref()), seed_bytes.as_ref());
-    //     assert!(vote.signature.1 == expected_seed.value);
-    // }
+    #[test]
+    fn test_verify_votes_filters_bad_signers() {
+        verify_votes_filters_bad_signers::<MinPk>();
+        verify_votes_filters_bad_signers::<MinSig>();
+    }
 
-    // #[test]
-    // fn sign_vote_rejects_wrong_signer() {
-    //     let mut rng = StdRng::seed_from_u64(19);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+    fn assemble_certificate_requires_quorum<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 17);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 7, 4);
 
-    //     let round = Round::new(0, 1);
-    //     let payload = Sha256Digest::from([3u8; 32]);
-    //     let proposal = Proposal::new(round, 0, payload);
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum - 1)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let err = scheme
-    //         .sign_vote(
-    //             VoteContext::Notarize {
-    //                 namespace: b"ns",
-    //                 proposal: &proposal,
-    //             },
-    //             share.index + 1,
-    //         )
-    //         .expect_err("expected mismatch");
+        assert!(schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .is_none());
+    }
 
-    //     match err {
-    //         Error::SignerMismatch { expected, actual } => {
-    //             assert_eq!(expected, share.index);
-    //             assert_eq!(actual, share.index + 1);
-    //         }
-    //         other => panic!("unexpected error: {other:?}"),
-    //     }
-    // }
+    #[test]
+    fn test_assemble_certificate_requires_quorum() {
+        assemble_certificate_requires_quorum::<MinPk>();
+        assemble_certificate_requires_quorum::<MinSig>();
+    }
 
-    // #[test]
-    // fn vote_codec_roundtrip() {
-    //     let mut rng = StdRng::seed_from_u64(41);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+    fn verify_certificate<V: Variant>() {
+        let (schemes, participants, polynomial) = setup_signers::<V>(4, 19);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 9, 5);
 
-    //     let round = Round::new(0, 7);
-    //     let payload = Sha256Digest::from([2u8; 32]);
-    //     let proposal = Proposal::new(round, 6, payload);
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let vote = scheme
-    //         .sign_vote(
-    //             VoteContext::Notarize {
-    //                 namespace: b"codec-vote",
-    //                 proposal: &proposal,
-    //             },
-    //             share.index,
-    //         )
-    //         .expect("vote");
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    //     let encoded = vote.encode();
-    //     let decoded = <Vote<BlsThresholdScheme<MinSig>>>::decode(encoded).expect("decode");
-    //     assert_eq!(decoded, vote);
-    // }
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
 
-    // #[test]
-    // fn notarize_vote_codec_roundtrip() {
-    //     let mut rng = StdRng::seed_from_u64(43);
-    //     let threshold = 3usize;
-    //     let (public_poly, mut shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let share = shares.remove(0);
-    //     let scheme: BlsThresholdScheme<MinSig> =
-    //         BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+    #[test]
+    fn test_verify_certificate() {
+        verify_certificate::<MinPk>();
+        verify_certificate::<MinSig>();
+    }
 
-    //     let round = Round::new(0, 9);
-    //     let payload = Sha256Digest::from([9u8; 32]);
-    //     let proposal = Proposal::new(round, 8, payload);
+    fn verify_certificate_detects_corruption<V: Variant>() {
+        let (schemes, participants, polynomial) = setup_signers::<V>(4, 23);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 11, 6);
 
-    //     let vote = scheme
-    //         .sign_vote(
-    //             VoteContext::Notarize {
-    //                 namespace: b"codec-notarize-vote",
-    //                 proposal: &proposal,
-    //             },
-    //             share.index,
-    //         )
-    //         .expect("vote");
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let message: Notarize<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarize {
-    //         proposal: proposal.clone(),
-    //         vote,
-    //     };
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    //     let encoded = message.encode();
-    //     let decoded =
-    //         <Notarize<BlsThresholdScheme<MinSig>, Sha256Digest>>::decode(encoded).expect("decode");
-    //     assert_eq!(decoded.proposal, message.proposal);
-    //     assert_eq!(decoded.vote, message.vote);
-    // }
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
 
-    // #[test]
-    // fn notarization_certificate_codec_roundtrip() {
-    //     let threshold = 3usize;
-    //     let (schemes, _) = build_scheme_set(45, 4, threshold);
-    //     let round = Round::new(0, 30);
-    //     let payload = Sha256Digest::from([4u8; 32]);
-    //     let proposal = Proposal::new(round, 29, payload);
-    //     let namespace = b"codec-notarization";
+        let mut corrupted = certificate.clone();
+        corrupted.message_signature = corrupted.seed_signature;
+        assert!(
+            !Scheme::<V>::verifier(&participants, &polynomial).verify_certificate(
+                &mut thread_rng(),
+                NAMESPACE,
+                VoteContext::Notarize {
+                    proposal: &proposal,
+                },
+                &corrupted,
+            )
+        );
+    }
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Notarize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+    #[test]
+    fn test_verify_certificate_detects_corruption() {
+        verify_certificate_detects_corruption::<MinPk>();
+        verify_certificate_detects_corruption::<MinSig>();
+    }
 
-    //     let certificate = schemes[0]
-    //         .assemble_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &votes,
-    //         )
-    //         .expect("assemble");
+    fn certificate_codec_roundtrip<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(5, 29);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 13, 7);
 
-    //     let message: Notarization<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarization {
-    //         proposal: proposal.clone(),
-    //         certificate,
-    //     };
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let encoded = message.encode();
-    //     let decoded = <Notarization<BlsThresholdScheme<MinSig>, Sha256Digest>>::decode(encoded)
-    //         .expect("decode");
-    //     assert_eq!(decoded.proposal, message.proposal);
-    //     assert_eq!(decoded.certificate, message.certificate);
-    // }
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    // #[test]
-    // fn verify_votes_notarize_filters_invalid() {
-    //     let mut rng = StdRng::seed_from_u64(23);
-    //     let threshold = 3usize;
-    //     let (public_poly, shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 5, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 5);
-    //     let identity = *public_poly.constant();
+        let encoded = certificate.encode();
+        let decoded =
+            Signature::<V>::decode_cfg(encoded.freeze(), &()).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+    }
 
-    //     let schemes: Vec<_> = shares
-    //         .iter()
-    //         .map(|share| {
-    //             BlsThresholdScheme::<MinSig>::new(
-    //                 polynomial.clone(),
-    //                 identity,
-    //                 share.clone(),
-    //                 threshold,
-    //             )
-    //         })
-    //         .collect();
+    #[test]
+    fn test_certificate_codec_roundtrip() {
+        certificate_codec_roundtrip::<MinPk>();
+        certificate_codec_roundtrip::<MinSig>();
+    }
 
-    //     let round = Round::new(0, 12);
-    //     let payload = Sha256Digest::from([4u8; 32]);
-    //     let proposal = Proposal::new(round, 11, payload);
-    //     let namespace = b"verify-notarize";
+    fn scheme_clone_and_into_verifier<V: Variant>() {
+        let (schemes, participants, polynomial) = setup_signers::<V>(3, 31);
+        let signer = schemes[0].clone();
+        assert!(signer.can_sign());
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(3)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Notarize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+        let verifier = signer.clone().into_verifier();
+        assert!(!verifier.can_sign());
 
-    //     let verifier = &schemes[0];
+        let pure_verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(!pure_verifier.can_sign());
+    }
 
-    //     let verification = verifier.verify_votes(
-    //         VoteContext::Notarize {
-    //             namespace,
-    //             proposal: &proposal,
-    //         },
-    //         votes.clone(),
-    //     );
-    //     assert!(verification.invalid_signers.is_empty());
-    //     assert_eq!(verification.verified.len(), votes.len());
+    #[test]
+    fn test_scheme_clone_and_into_verifier() {
+        scheme_clone_and_into_verifier::<MinPk>();
+        scheme_clone_and_into_verifier::<MinSig>();
+    }
 
-    //     let mut corrupted = votes.clone();
-    //     corrupted[0].signer = 42;
-    //     let verification = verifier.verify_votes(
-    //         VoteContext::Notarize {
-    //             namespace,
-    //             proposal: &proposal,
-    //         },
-    //         corrupted,
-    //     );
-    //     assert_eq!(verification.invalid_signers, vec![42]);
-    //     assert_eq!(verification.verified.len(), votes.len() - 1);
-    // }
+    fn certificate_verifier_accepts_certificates<V: Variant>() {
+        let (schemes, _, polynomial) = setup_signers::<V>(4, 37);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 15, 8);
 
-    // #[test]
-    // fn assemble_certificate_notarize() {
-    //     let mut rng = StdRng::seed_from_u64(29);
-    //     let threshold = 3usize;
-    //     let (public_poly, shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let schemes: Vec<_> = shares
-    //         .iter()
-    //         .map(|share| {
-    //             BlsThresholdScheme::<MinSig>::new(
-    //                 polynomial.clone(),
-    //                 identity,
-    //                 share.clone(),
-    //                 threshold,
-    //             )
-    //         })
-    //         .collect();
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     let round = Round::new(0, 15);
-    //     let payload = Sha256Digest::from([5u8; 32]);
-    //     let proposal = Proposal::new(round, 14, payload);
-    //     let namespace = b"assemble-notarize";
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Notarize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+        let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
+        assert!(!certificate_verifier.can_sign());
+        assert!(certificate_verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
 
-    //     let certificate = schemes[0]
-    //         .assemble_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &votes,
-    //         )
-    //         .expect("assemble");
+    #[test]
+    fn test_certificate_verifier_accepts_certificates() {
+        certificate_verifier_accepts_certificates::<MinPk>();
+        certificate_verifier_accepts_certificates::<MinSig>();
+    }
 
-    //     let expected_proposal: Vec<_> = votes
-    //         .iter()
-    //         .map(|vote| PartialSignature::<MinSig> {
-    //             index: vote.signer,
-    //             value: vote.signature.0.clone(),
-    //         })
-    //         .collect();
-    //     let expected_seed: Vec<_> = votes
-    //         .iter()
-    //         .map(|vote| PartialSignature::<MinSig> {
-    //             index: vote.signer,
-    //             value: vote.signature.1.clone(),
-    //         })
-    //         .collect();
-    //     let expected = threshold_signature_recover_pair::<MinSig, _>(
-    //         threshold as u32,
-    //         expected_proposal.iter(),
-    //         expected_seed.iter(),
-    //     )
-    //     .expect("recover");
+    fn certificate_verifier_panics_on_vote<V: Variant>() {
+        let (schemes, _, polynomial) = setup_signers::<V>(4, 37);
+        let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
+        let proposal = sample_proposal(0, 15, 8);
+        let vote = schemes[1].sign_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+        );
 
-    //     assert_eq!(certificate.0, expected.0);
-    //     assert_eq!(certificate.1, expected.1);
-    // }
+        certificate_verifier.verify_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &vote,
+        );
+    }
 
-    // #[test]
-    // fn assemble_certificate_requires_quorum() {
-    //     let mut rng = StdRng::seed_from_u64(31);
-    //     let threshold = 3usize;
-    //     let (public_poly, shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
-    //     let identity = *public_poly.constant();
-    //     let schemes: Vec<_> = shares
-    //         .iter()
-    //         .map(|share| {
-    //             BlsThresholdScheme::<MinSig>::new(
-    //                 polynomial.clone(),
-    //                 identity,
-    //                 share.clone(),
-    //                 threshold,
-    //             )
-    //         })
-    //         .collect();
+    #[test]
+    #[should_panic(expected = "can only be called for signer and verifier")]
+    fn test_certificate_verifier_panics_on_vote_min_pk() {
+        certificate_verifier_panics_on_vote::<MinPk>();
+    }
 
-    //     let round = Round::new(0, 18);
-    //     let payload = Sha256Digest::from([6u8; 32]);
-    //     let proposal = Proposal::new(round, 17, payload);
-    //     let namespace = b"assemble-insufficient";
+    #[test]
+    #[should_panic(expected = "can only be called for signer and verifier")]
+    fn test_certificate_verifier_panics_on_vote_min_sig() {
+        certificate_verifier_panics_on_vote::<MinSig>();
+    }
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold - 1)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Notarize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+    fn assemble_certificate_reuses_notarization_seed<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(5, 41);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 17, 9);
 
-    //     let err = schemes[0]
-    //         .assemble_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &votes,
-    //         )
-    //         .expect_err("expected insufficient votes");
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    //     match err {
-    //         Error::InsufficientVotes { required, actual } => {
-    //             assert_eq!(required, threshold);
-    //             assert_eq!(actual, votes.len());
-    //         }
-    //         other => panic!("unexpected error: {other:?}"),
-    //     }
-    // }
+        let notarization_certificate = schemes[0]
+            .assemble_certificate(notarize_votes.into_iter(), None)
+            .expect("assemble notarization");
 
-    // fn build_scheme_set(
-    //     seed: u64,
-    //     n: usize,
-    //     threshold: usize,
-    // ) -> (Vec<BlsThresholdScheme<MinSig>>, Vec<Share>) {
-    //     let mut rng = StdRng::seed_from_u64(seed);
-    //     let (public_poly, shares) =
-    //         generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold as u32);
-    //     let polynomial = evaluate_all::<MinSig>(&public_poly, n as u32);
-    //     let identity = *public_poly.constant();
-    //     let schemes = shares
-    //         .iter()
-    //         .map(|share| {
-    //             BlsThresholdScheme::new(polynomial.clone(), identity, share.clone(), threshold)
-    //         })
-    //         .collect();
-    //     (schemes, shares)
-    // }
+        let finalize_votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    // #[test]
-    // fn verify_certificate_notarize_success_and_failure() {
-    //     let threshold = 3;
-    //     let (schemes, _) = build_scheme_set(33, 4, threshold);
-    //     let round = Round::new(0, 20);
-    //     let payload = Sha256Digest::from([7u8; 32]);
-    //     let proposal = Proposal::new(round, 19, payload);
-    //     let namespace = b"verify-cert-notarize";
+        let finalization_certificate = schemes[0]
+            .assemble_certificate(
+                finalize_votes.into_iter(),
+                Some(notarization_certificate.clone()),
+            )
+            .expect("assemble finalization");
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Notarize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+        assert_eq!(
+            finalization_certificate.seed_signature,
+            notarization_certificate.seed_signature
+        );
+    }
 
-    //     let certificate = schemes[0]
-    //         .assemble_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &votes,
-    //         )
-    //         .expect("assemble");
+    #[test]
+    fn test_assemble_certificate_reuses_notarization_seed() {
+        assemble_certificate_reuses_notarization_seed::<MinPk>();
+        assemble_certificate_reuses_notarization_seed::<MinSig>();
+    }
 
-    //     let randomness = schemes[1]
-    //         .verify_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &certificate,
-    //         )
-    //         .expect("verify");
-    //     let expected_seed = (proposal.round, certificate.1.clone());
-    //     assert_eq!(randomness, Some(expected_seed));
+    fn verify_certificate_returns_seed_randomness<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 43);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 19, 10);
 
-    //     let mut bad_certificate = certificate.clone();
-    //     let mut corrupted = bad_certificate.0.clone();
-    //     corrupted.add(&<MinSig as Variant>::Signature::one());
-    //     bad_certificate.0 = corrupted;
-    //     let err = schemes[1]
-    //         .verify_certificate(
-    //             VoteContext::Notarize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &bad_certificate,
-    //         )
-    //         .expect_err("expected invalid certificate");
-    //     assert!(matches!(err, Error::Threshold(_)));
-    // }
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
 
-    // #[test]
-    // fn verify_certificate_nullify_success_and_failure() {
-    //     let threshold = 3;
-    //     let (schemes, _) = build_scheme_set(35, 4, threshold);
-    //     let round = Round::new(0, 22);
-    //     let namespace = b"verify-cert-nullify";
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote::<Sha256Digest>(
-    //                     VoteContext::Nullify { namespace, round },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+        let randomness = schemes[0].randomness(&certificate);
+        assert_eq!(randomness, Some(certificate.seed_signature));
+    }
 
-    //     let certificate = schemes[0]
-    //         .assemble_certificate::<Sha256Digest>(VoteContext::Nullify { namespace, round }, &votes)
-    //         .expect("assemble");
+    #[test]
+    fn test_verify_certificate_returns_seed_randomness() {
+        verify_certificate_returns_seed_randomness::<MinPk>();
+        verify_certificate_returns_seed_randomness::<MinSig>();
+    }
 
-    //     let randomness = schemes[1]
-    //         .verify_certificate::<Sha256Digest>(
-    //             VoteContext::Nullify { namespace, round },
-    //             &certificate,
-    //         )
-    //         .expect("verify");
-    //     let expected_seed = (round, certificate.1.clone());
-    //     assert_eq!(randomness, Some(expected_seed));
+    fn certificate_decode_rejects_length_mismatch<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 47);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 21, 11);
 
-    //     let mut bad_certificate = certificate.clone();
-    //     let mut corrupted = bad_certificate.1.clone();
-    //     corrupted.add(&<MinSig as Variant>::Signature::one());
-    //     bad_certificate.1 = corrupted;
-    //     let err = schemes[1]
-    //         .verify_certificate::<Sha256Digest>(
-    //             VoteContext::Nullify { namespace, round },
-    //             &bad_certificate,
-    //         )
-    //         .expect_err("expected invalid certificate");
-    //     assert!(matches!(err, Error::Threshold(_)));
-    // }
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote::<Sha256Digest>(
+                    NAMESPACE,
+                    VoteContext::Nullify {
+                        round: proposal.round,
+                    },
+                )
+            })
+            .collect();
 
-    // #[test]
-    // fn verify_certificate_finalize_success_and_failure() {
-    //     let threshold = 3;
-    //     let (schemes, _) = build_scheme_set(37, 4, threshold);
-    //     let round = Round::new(0, 25);
-    //     let payload = Sha256Digest::from([8u8; 32]);
-    //     let proposal = Proposal::new(round, 24, payload);
-    //     let namespace = b"verify-cert-finalize";
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .take(threshold)
-    //         .map(|scheme| {
-    //             scheme
-    //                 .sign_vote(
-    //                     VoteContext::Finalize {
-    //                         namespace,
-    //                         proposal: &proposal,
-    //                     },
-    //                     scheme.share.index,
-    //                 )
-    //                 .expect("sign vote")
-    //         })
-    //         .collect();
+        let mut encoded = certificate.encode().freeze();
+        let truncated = encoded.split_to(encoded.len() - 1);
+        assert!(Signature::<V>::decode_cfg(truncated, &()).is_err());
+    }
 
-    //     let certificate = schemes[0]
-    //         .assemble_certificate(
-    //             VoteContext::Finalize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &votes,
-    //         )
-    //         .expect("assemble");
+    #[test]
+    fn test_certificate_decode_rejects_length_mismatch() {
+        certificate_decode_rejects_length_mismatch::<MinPk>();
+        certificate_decode_rejects_length_mismatch::<MinSig>();
+    }
 
-    //     let randomness = schemes[1]
-    //         .verify_certificate(
-    //             VoteContext::Finalize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &certificate,
-    //         )
-    //         .expect("verify");
-    //     let expected_seed = (proposal.round, certificate.1.clone());
-    //     assert_eq!(randomness, Some(expected_seed));
+    fn sign_vote_partial_matches_share<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(4, 53);
+        let scheme = &schemes[0];
+        let share = scheme.share().expect("has share");
 
-    //     let mut bad_certificate = certificate.clone();
-    //     let mut corrupted = bad_certificate.0.clone();
-    //     corrupted.add(&<MinSig as Variant>::Signature::one());
-    //     bad_certificate.0 = corrupted;
-    //     let err = schemes[1]
-    //         .verify_certificate(
-    //             VoteContext::Finalize {
-    //                 namespace,
-    //                 proposal: &proposal,
-    //             },
-    //             &bad_certificate,
-    //         )
-    //         .expect_err("expected invalid certificate");
-    //     assert!(matches!(err, Error::Threshold(_)));
-    // }
+        let proposal = sample_proposal(0, 23, 12);
+        let vote = scheme.sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+
+        let notarize_namespace = notarize_namespace(NAMESPACE);
+        let notarize_message = proposal.encode();
+        let expected_message = partial_sign_message::<V>(
+            share,
+            Some(notarize_namespace.as_ref()),
+            notarize_message.as_ref(),
+        )
+        .value;
+
+        let seed_namespace = seed_namespace(NAMESPACE);
+        let seed_message = proposal.round.encode();
+        let expected_seed =
+            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
+                .value;
+
+        assert_eq!(vote.signer, share.index);
+        assert_eq!(vote.signature.message_signature, expected_message);
+        assert_eq!(vote.signature.seed_signature, expected_seed);
+    }
+
+    #[test]
+    fn test_sign_vote_partial_matches_share() {
+        sign_vote_partial_matches_share::<MinPk>();
+        sign_vote_partial_matches_share::<MinSig>();
+    }
+
+    fn verify_certificate_detects_seed_corruption<V: Variant>() {
+        let (schemes, participants, polynomial) = setup_signers::<V>(4, 59);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 25, 13);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote::<Sha256Digest>(
+                    NAMESPACE,
+                    VoteContext::Nullify {
+                        round: proposal.round,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+            &certificate,
+        ));
+
+        let mut corrupted = certificate.clone();
+        corrupted.seed_signature = corrupted.message_signature;
+        assert!(!Scheme::<V>::verifier(&participants, &polynomial)
+            .verify_certificate::<_, Sha256Digest>(
+                &mut thread_rng(),
+                NAMESPACE,
+                VoteContext::Nullify {
+                    round: proposal.round,
+                },
+                &corrupted,
+            ));
+    }
+
+    #[test]
+    fn test_verify_certificate_detects_seed_corruption() {
+        verify_certificate_detects_seed_corruption::<MinPk>();
+        verify_certificate_detects_seed_corruption::<MinSig>();
+    }
 }
