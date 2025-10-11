@@ -300,13 +300,12 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
     use super::*;
     use crate::{deterministic, tokio, Metrics};
     use commonware_macros::test_traced;
     use futures::task::waker;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test_traced]
     fn test_create_pool() {
