@@ -1,4 +1,4 @@
-//! [Simplex](crate::simplex)-like BFT agreement with an embedded VRF and succinct consensus certificates.
+//! Simplex-like BFT agreement with an embedded VRF and succinct consensus certificates.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement with network-speed view (i.e. block time) latency and optimal finalization
@@ -7,9 +7,6 @@
 //! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
 //! (any certificate can be verified with just the static public key of the consensus instance) for each view
 //! with zero message overhead (natively integrated).
-//!
-//! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
-//! [crate::simplex]._
 //!
 //! # Features
 //!

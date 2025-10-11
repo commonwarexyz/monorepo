@@ -1,6 +1,6 @@
 //! Commit to a secret log and agree to its hash.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
+//! This example demonstrates how to build an application that employs [commonware_consensus::threshold_simplex].
 //! Whenever it is a participant's turn to build a block, they randomly generate a 16-byte secret message and send the
 //! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
 //! view.
@@ -12,9 +12,9 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids introducing
-//! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
-//! for the reader.
+//! This example demonstrates how [commonware_consensus::threshold_simplex] can minimally be used. It purposely avoids
+//! introducing logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as
+//! an exercise for the reader.
 //!
 //! # Usage (Run at Least 3 to Make Progress)
 //!
