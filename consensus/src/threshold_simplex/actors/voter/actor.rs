@@ -339,10 +339,13 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
 
         // Construct finalization
-        // FIXME: ideally we'd be able to reuse the seed signature from notarization if we have it
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.signing, &self.finalizes)
-            .expect("failed to recover threshold signature");
+        let finalization = Finalization::from_finalizes(
+            &self.signing,
+            &self.finalizes,
+            self.notarization.as_ref(),
+        )
+        .expect("failed to recover threshold signature");
         timer.observe();
 
         self.broadcast_finalization = true;

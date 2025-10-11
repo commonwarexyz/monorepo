@@ -243,7 +243,11 @@ impl SigningScheme for Scheme {
         VoteVerification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(
+        &self,
+        votes: I,
+        _certificate: Option<Self::Certificate>,
+    ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>,
     {

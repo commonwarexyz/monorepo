@@ -212,8 +212,17 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
 
     /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
     ///
+    /// `certificate` carries a previously recovered certificate for the same proposal (in
+    /// a different context), when available. Schemes such as threshold BLS can reuse part
+    /// of that certificate (e.g. the seed signature from a notarization) when assembling
+    /// a finalization certificate, while most other schemes may simply ignore it.
+    ///
     /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(
+        &self,
+        votes: I,
+        certificate: Option<Self::Certificate>,
+    ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>;
 
@@ -1133,7 +1142,7 @@ impl<S: SigningScheme, D: Digest> Notarization<S, D> {
         }
 
         let notarization_certificate =
-            signing.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
+            signing.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()), None)?;
 
         Some(Notarization {
             proposal,
@@ -1322,7 +1331,7 @@ impl<S: SigningScheme> Nullification<S> {
         }
 
         let nullification_certificate =
-            signing.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
+            signing.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()), None)?;
 
         Some(Nullification {
             round,
@@ -1508,7 +1517,16 @@ pub struct Finalization<S: SigningScheme, D: Digest> {
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from matching finalize votes.
-    pub fn from_finalizes(signing: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
+    ///
+    /// `notarization` carries an optional notarization certificate for the same proposal.
+    /// Schemes that embed a seed signature inside the notarization (e.g. threshold BLS)
+    /// can reuse it when aggregating finalize votes, while other schemes may simply
+    /// ignore the hint.
+    pub fn from_finalizes(
+        signing: &S,
+        finalizes: &[Finalize<S, D>],
+        notarization: Option<&Notarization<S, D>>,
+    ) -> Option<Self> {
         if finalizes.is_empty() {
             return None;
         }
@@ -1519,8 +1537,17 @@ impl<S: SigningScheme, D: Digest> Finalization<S, D> {
             return None;
         }
 
-        let finalization_certificate =
-            signing.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
+        if let Some(notarization) = notarization {
+            // Ensure the notarization matches the finalization proposal
+            if notarization.proposal != proposal {
+                return None;
+            }
+        }
+
+        let finalization_certificate = signing.assemble_certificate(
+            finalizes.iter().map(|n| n.vote.clone()),
+            notarization.map(|n| n.certificate.clone()),
+        )?;
 
         Some(Finalization {
             proposal,
@@ -2571,7 +2598,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
-        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes).unwrap();
+        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes, None).unwrap();
         let encoded = finalization.encode();
         let cfg = schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
@@ -2586,6 +2613,38 @@ mod tests {
 
         let ed_schemes = generate_ed25519_schemes(5);
         finalization_encode_decode(&ed_schemes);
+    }
+
+    fn finalization_rejects_mismatched_notarization<S: SigningScheme>(schemes: &[S]) {
+        let round = Round::new(0, 10);
+        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
+            .collect();
+
+        let other_proposal = Proposal::new(Round::new(0, 11), 5, sample_digest(2));
+        let notarization: Notarization<S, Sha256> = Notarization::from_notarizes(
+            &schemes[0],
+            &schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, NAMESPACE, other_proposal.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .expect("failed to build mismatched notarization");
+
+        assert!(
+            Finalization::from_finalizes(&schemes[0], &finalizes, Some(&notarization)).is_none()
+        );
+    }
+
+    #[test]
+    fn test_finalization_rejects_mismatched_notarization() {
+        let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 5);
+        finalization_encode_decode(&bls_threshold_schemes);
+
+        let ed_schemes = generate_ed25519_schemes(5);
+        finalization_rejects_mismatched_notarization(&ed_schemes);
     }
 
     fn backfiller_encode_decode<S: SigningScheme>(schemes: &[S]) {
@@ -2929,8 +2988,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
-        let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes).expect("quorum finalization");
+        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes, None)
+            .expect("quorum finalization");
         let mut rng = OsRng;
         assert!(finalization.verify(&mut rng, &schemes[0], NAMESPACE));
 

@@ -111,7 +111,7 @@ mod tests {
             .take(count)
             .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()))
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes)
+        let certificate = Finalization::from_finalizes(&schemes[0], &votes, None)
             .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }

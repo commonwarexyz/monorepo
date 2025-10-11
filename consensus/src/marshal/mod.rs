@@ -239,7 +239,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&signing_schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&signing_schemes[0], &finalizes, None).unwrap()
     }
 
     fn make_notarization(

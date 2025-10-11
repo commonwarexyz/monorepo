@@ -23,7 +23,8 @@ use commonware_cryptography::{
             group::Share,
             ops::{
                 aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
+                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover,
+                threshold_signature_recover_pair,
             },
             poly::{self, PartialSignature, Public},
             variant::Variant,
@@ -272,12 +273,40 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         }
     }
 
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(
+        &self,
+        votes: I,
+        certificate: Option<Self::Certificate>,
+    ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
         let threshold = self.threshold();
 
+        // We can re-use the notarization certificate's seed signature
+        if let Some(notarization_certificate) = certificate {
+            let message_partials: Vec<_> = votes
+                .into_iter()
+                .map(|vote| PartialSignature::<V> {
+                    index: vote.signer,
+                    value: vote.signature.message_signature,
+                })
+                .collect();
+
+            if message_partials.len() < threshold as usize {
+                return None;
+            }
+
+            let message_signature =
+                threshold_signature_recover::<V, _>(threshold, message_partials.iter()).ok()?;
+
+            return Some(Signature {
+                message_signature,
+                seed_signature: notarization_certificate.seed_signature,
+            });
+        }
+
+        // Otherwise we need to recover both signatures
         let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
