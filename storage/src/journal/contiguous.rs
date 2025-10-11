@@ -41,6 +41,8 @@
 //!         codec_config: (),
 //!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         write_buffer: NZUsize!(1024 * 1024),
+//!         tail: None,
+//!         tail_index: None,
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal (returns position)
