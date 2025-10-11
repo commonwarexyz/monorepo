@@ -307,14 +307,16 @@ pub trait Clock: Clone + Send + Sync + 'static {
     }
 }
 
-pub trait External: Clock + Clone + Send + Sync + 'static {
-    /// Defer completion of a future until a randomly selected delay within `range` has elapsed.
+/// Interface that runtimes can implement to constrain the latency a future
+/// takes to execute.
+pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+    /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
+    /// the future is not yet ready at the desired time of completion, the runtime will block until
+    /// the future is ready.
     ///
-    /// The returned future is always polled immediately so that it can register any wakers. If it
-    /// completes before the sampled delay expires, the runtime holds the result until then. Once
-    /// the delay passes, the runtime continues polling until the future is ready without yielding
-    /// `Poll::Pending` again.
-    fn constrain<'a, F, T>(
+    /// In [crate::deterministic], this is used to ensure interactions with external systems can
+    /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
+    fn pace<'a, F, T>(
         &'a self,
         future: F,
         _range: Range<Duration>,
@@ -327,23 +329,23 @@ pub trait External: Clock + Clone + Send + Sync + 'static {
     }
 }
 
-/// Extension trait that adds deadline-aware awaiting to [`Future`] values.
+/// Extension trait that makes it more ergonomic to use [Pacer].
 ///
-/// This inverts the call-site of [`Clock::constrain`] by letting the future itself request how the
+/// This inverts the call-site of [`Pacer::constrain`] by letting the future itself request how the
 /// runtime should delay completion relative to the clock.
 pub trait FutureExt: Future + Send + Sized {
-    /// Delay completion of the future until a random delay sampled from `range` on `clock`.
-    fn constrain<'a, E>(
+    /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
+    fn pace<'a, E>(
         self,
-        external: &'a E,
+        pacer: &'a E,
         range: Range<Duration>,
     ) -> impl Future<Output = Self::Output> + Send + 'a
     where
-        E: External + 'a,
+        E: Pacer + 'a,
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        external.constrain(self, range)
+        pacer.pace(self, range)
     }
 }
 

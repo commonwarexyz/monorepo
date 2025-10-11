@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, External, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Blocker, Clock, Error, Handle, ListenerOf, Model, Pacer, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -45,6 +45,7 @@ use futures::{
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use pin_project_lite::pin_project;
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -58,7 +59,7 @@ use std::{
     net::SocketAddr,
     ops::Range,
     pin::Pin,
-    sync::{Arc, Condvar, Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1061,58 +1062,6 @@ impl Sleeper {
     }
 }
 
-// Synchronization primitive that lets a thread block until a waker delivers a signal.
-struct Blocker {
-    // Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
-    state: Mutex<bool>,
-    // Condvar used to park and resume the thread when the signal flips to true.
-    cv: Condvar,
-}
-
-impl Blocker {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(false),
-            cv: Condvar::new(),
-        })
-    }
-
-    fn wait(&self) {
-        let mut signaled = self.state.lock().unwrap();
-        // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
-        while !*signaled {
-            signaled = self.cv.wait(signaled).unwrap();
-        }
-        // Reset the flag so subsequent waits park again until the next wake signal.
-        *signaled = false;
-    }
-}
-
-impl ArcWake for Blocker {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut signaled = arc_self.state.lock().unwrap();
-        *signaled = true;
-        // Notify a single waiter so the blocked thread re-checks the flag.
-        arc_self.cv.notify_one();
-    }
-}
-
-struct Awaiter<F: Future> {
-    executor: Weak<Executor>,
-    target: SystemTime,
-    future: Option<Pin<Box<F>>>,
-    ready: Option<F::Output>,
-    started: bool,
-    registered: bool,
-}
-
-impl<F: Future> Awaiter<F> {
-    /// Upgrade Weak reference to [Executor].
-    fn executor(&self) -> Arc<Executor> {
-        self.executor.upgrade().expect("executor already dropped")
-    }
-}
-
 struct Alarm {
     time: SystemTime,
     waker: Waker,
@@ -1161,66 +1110,67 @@ impl Future for Sleeper {
     }
 }
 
-impl<F> Future for Awaiter<F>
+pin_project! {
+    /// A future that resolves when a given target time is reached.
+    ///
+    /// If the future is not ready at the target time, the future is blocked until the target time is reached.
+    struct Waiter<F: Future> {
+        executor: Weak<Executor>,
+        target: SystemTime,
+        future: Option<Pin<Box<F>>>,
+        ready: Option<F::Output>,
+        started: bool,
+        registered: bool,
+    }
+}
+
+impl<F> Future for Waiter<F>
 where
     F: Future + Send,
 {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: Accessing fields through `this` does not move the pinned future. We only ever
-        // drop the pinned future in place by setting the `Option` to `None`.
-        let this = unsafe { self.get_unchecked_mut() };
-        if !this.started {
-            this.started = true;
+        let this = self.project();
+
+        // Poll once with a noop waker so the future can register interest or start work
+        // without being able to wake this task before the sampled delay expires. Any ready
+        // value is cached and only released after the clock reaches `self.target`.
+        if !*this.started {
+            *this.started = true;
             if let Some(future) = this.future.as_mut() {
-                // Poll once with a noop waker so the future can register interest or start work
-                // without being able to wake this task before the sampled delay expires. Any ready
-                // value is cached and only released after the clock reaches `self.target`.
                 let waker = noop_waker();
                 let mut cx_noop = task::Context::from_waker(&waker);
-                match future.as_mut().poll(&mut cx_noop) {
-                    Poll::Ready(value) => {
-                        this.future = None;
-                        this.ready = Some(value);
-                    }
-                    Poll::Pending => {}
+                if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
+                    *this.future = None;
+                    *this.ready = Some(value);
                 }
             }
         }
 
-        let executor = this.executor();
+        // Only allow the task to progress once the sampled delay has elapsed.
+        let executor = this.executor.upgrade().expect("executor already dropped");
         let current_time = *executor.time.lock().unwrap();
-        if this.registered && current_time >= this.target {
-            this.registered = false;
-        }
-
-        if current_time < this.target {
-            if !this.registered {
-                this.registered = true;
+        if current_time < *this.target {
+            // Register exactly once with the deterministic sleeper queue so the executor
+            // wakes us once the clock reaches the scheduled target time.
+            if !*this.registered {
+                *this.registered = true;
                 executor.sleeping.lock().unwrap().push(Alarm {
-                    time: this.target,
+                    time: *this.target,
                     waker: cx.waker().clone(),
                 });
             }
             return Poll::Pending;
         }
 
+        // If the underlying future completed during the noop pre-poll, surface the cached value.
         if let Some(value) = this.ready.take() {
             return Poll::Ready(value);
         }
 
-        if let Some(future) = this.future.as_mut() {
-            match future.as_mut().poll(cx) {
-                Poll::Ready(value) => {
-                    this.future = None;
-                    return Poll::Ready(value);
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        // After the delay passes, block the runtime thread until the future reports ready.
+        // Block the current thread until the future reschedules itself, keeping polling
+        // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
             let future = this
@@ -1231,7 +1181,7 @@ where
             let mut cx_block = task::Context::from_waker(&waker);
             match future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
-                    this.future = None;
+                    *this.future = None;
                     break Poll::Ready(value);
                 }
                 Poll::Pending => blocker.wait(),
@@ -1263,8 +1213,8 @@ impl Clock for Context {
     }
 }
 
-impl External for Context {
-    fn constrain<'a, F, T>(
+impl Pacer for Context {
+    fn pace<'a, F, T>(
         &'a self,
         future: F,
         range: Range<Duration>,
@@ -1273,8 +1223,9 @@ impl External for Context {
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        let Range { start, end } = range;
+        // Compute delay
         let executor = self.executor();
+        let Range { start, end } = range;
         let delay = if start < end {
             let mut rng = executor.rng.lock().unwrap();
             rng.gen_range(start..end)
@@ -1283,6 +1234,8 @@ impl External for Context {
         } else {
             panic!("invalid delay range");
         };
+
+        // Compute target time
         let target = executor
             .time
             .lock()
@@ -1291,7 +1244,7 @@ impl External for Context {
             .expect("overflow when setting wake time");
         drop(executor);
 
-        Awaiter {
+        Waiter {
             executor: self.executor.clone(),
             target,
             future: Some(Box::pin(future)),
@@ -1386,21 +1339,15 @@ impl crate::Storage for Context {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _, Storage,
+        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _,
+        Spawner, Storage,
     };
     use commonware_macros::test_traced;
     use futures::{
-        channel::oneshot,
+        channel::{mpsc, oneshot},
         future::pending,
-        task::{noop_waker, waker},
-    };
-    use rand::Rng;
-    use std::{
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc,
-        },
-        thread,
+        task::noop_waker,
+        SinkExt, StreamExt,
     };
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -1506,74 +1453,6 @@ mod tests {
             ..Config::default()
         };
         deterministic::Runner::new(cfg);
-    }
-
-    #[test]
-    fn test_blocker_waits_until_wake() {
-        let blocker = Blocker::new();
-        let started = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(AtomicBool::new(false));
-
-        let thread_blocker = blocker.clone();
-        let thread_started = started.clone();
-        let thread_completed = completed.clone();
-        let handle = thread::spawn(move || {
-            thread_started.store(true, Ordering::SeqCst);
-            thread_blocker.wait();
-            thread_completed.store(true, Ordering::SeqCst);
-        });
-
-        while !started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
-
-        assert!(!completed.load(Ordering::SeqCst));
-        waker(blocker.clone()).wake();
-        handle.join().unwrap();
-        assert!(completed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_blocker_handles_pre_wake() {
-        let blocker = Blocker::new();
-        waker(blocker.clone()).wake();
-
-        let completed = Arc::new(AtomicBool::new(false));
-        let thread_blocker = blocker.clone();
-        let thread_completed = completed.clone();
-        thread::spawn(move || {
-            thread_blocker.wait();
-            thread_completed.store(true, Ordering::SeqCst);
-        })
-        .join()
-        .unwrap();
-
-        assert!(completed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_blocker_reusable_across_signals() {
-        let blocker = Blocker::new();
-        let completed = Arc::new(AtomicUsize::new(0));
-
-        let thread_blocker = blocker.clone();
-        let thread_completed = completed.clone();
-        let handle = thread::spawn(move || {
-            for _ in 0..2 {
-                thread_blocker.wait();
-                thread_completed.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-
-        for expected in 1..=2 {
-            waker(blocker.clone()).wake();
-            while completed.load(Ordering::SeqCst) < expected {
-                thread::yield_now();
-            }
-        }
-
-        handle.join().unwrap();
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1726,61 +1605,74 @@ mod tests {
         });
     }
 
-    fn external_realtime_variable(seed: u64) -> String {
+    #[test]
+    fn test_external_realtime_variable() {
         // Initialize runtime
         let cfg = Config::default().with_realtime(true);
         let executor = deterministic::Runner::new(cfg);
 
-        // Create a deterministic ordering of tasks with variable latency
-        let mut rng = StdRng::seed_from_u64(seed);
-        let (first_tx, first_rx) = oneshot::channel();
-        let first_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
-        let (second_tx, second_rx) = oneshot::channel();
-        let second_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
-
-        // Create a thread that waits for 1 second
-        std::thread::spawn(move || {
-            std::thread::sleep(first_wait);
-            first_tx.send(()).unwrap();
-        });
-
-        // Create a thread
-        std::thread::spawn(move || {
-            std::thread::sleep(second_wait);
-            second_tx.send(()).unwrap();
-        });
-
         // Start runtime
         executor.start(|context| async move {
-            // Wait for a delay sampled before the external send occurs.
-            first_rx
-                .constrain(&context, Duration::ZERO..Duration::ZERO)
-                .await
-                .unwrap();
-            println!("first task finished");
+            // Initialize test
+            let start_real = SystemTime::now();
+            let start_sim = context.current();
+            let (first_tx, first_rx) = oneshot::channel();
+            let (second_tx, second_rx) = oneshot::channel();
+            let (mut results_tx, mut results_rx) = mpsc::channel(2);
 
-            // Wait for a delay sampled after the external send occurs.
-            second_rx
-                .constrain(&context, Duration::ZERO..(second_wait * 2))
-                .await
-                .unwrap();
-            println!("second task finished");
+            // Create a thread that waits for 1 second
+            let first_wait = Duration::from_secs(1);
+            std::thread::spawn(move || {
+                std::thread::sleep(first_wait);
+                first_tx.send(()).unwrap();
+            });
 
-            context.auditor().state()
-        })
-    }
+            // Create a thread
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::ZERO);
+                second_tx.send(()).unwrap();
+            });
 
-    #[test]
-    fn test_external_realtime_variable() {
-        let mut past_state = None;
-        for i in 0..10 {
-            let state = external_realtime_variable(i);
-            if let Some(past_state) = &past_state {
-                assert_eq!(state, *past_state);
-            } else {
-                past_state = Some(state);
+            // Wait for a delay sampled before the external send occurs
+            let first = context.clone().spawn({
+                let mut results_tx = results_tx.clone();
+                move |context| async move {
+                    first_rx
+                        .pace(&context, Duration::ZERO..Duration::ZERO)
+                        .await
+                        .unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real > first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim < first_wait);
+                    results_tx.send(1).await.unwrap();
+                }
+            });
+
+            // Wait for a delay sampled after the external send occurs
+            let second = context.clone().spawn(move |context| async move {
+                second_rx
+                    .pace(&context, first_wait..(first_wait * 2))
+                    .await
+                    .unwrap();
+                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                assert!(elapsed_real >= first_wait);
+                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                assert!(elapsed_sim >= first_wait);
+                results_tx.send(2).await.unwrap();
+            });
+
+            // Wait for both tasks to complete
+            second.await.unwrap();
+            first.await.unwrap();
+
+            // Ensure order is correct
+            let mut results = Vec::new();
+            for _ in 0..2 {
+                results.push(results_rx.next().await.unwrap());
             }
-        }
+            assert_eq!(results, vec![1, 2]);
+        });
     }
 
     #[test]
