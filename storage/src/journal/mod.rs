@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+pub mod contiguous;
 pub mod fixed;
 pub mod variable;
 
@@ -24,6 +25,23 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         fixed::Journal::append(self, op).await.map(|_| ())
+    }
+}
+
+impl<E, V> crate::adb::sync::Journal for contiguous::Journal<E, V>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    V: commonware_codec::Codec + Send + 'static,
+{
+    type Op = V;
+    type Error = Error;
+
+    async fn size(&self) -> Result<u64, Self::Error> {
+        contiguous::Journal::size(self).await
+    }
+
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        contiguous::Journal::append(self, op).await.map(|_| ())
     }
 }
 
@@ -64,4 +82,6 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
 }
