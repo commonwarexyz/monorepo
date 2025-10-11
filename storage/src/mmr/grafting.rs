@@ -9,10 +9,10 @@
 //! allows for shorter inclusion proofs over the combined trees compared to treating them as
 //! independent.
 //!
-//! One example use case is the [crate::adb::current::Current] authenticated database, where a MMR
-//! is built over a log of operations, and a merkle tree over a bitmap indicating the activity state
-//! of each operation. If we were to treat the two trees as independent, then an inclusion proof for
-//! an operation and its activity state would involve a full branch from each structure. When using
+//! One example use case is the [crate::adb::current] authenticated database, where a MMR is built
+//! over a log of operations, and a merkle tree over a bitmap indicating the activity state of each
+//! operation. If we were to treat the two trees as independent, then an inclusion proof for an
+//! operation and its activity state would involve a full branch from each structure. When using
 //! grafting, we can trim the branch from the base MMR at the point it "flows" up into the peak
 //! tree, reducing the size of the proof by a constant factor up to 2.
 //!

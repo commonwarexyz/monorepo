@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{Config, Current},
+    adb::current::{unordered::Current, Config},
     mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher as Standard},
     translator::TwoCap,
 };
