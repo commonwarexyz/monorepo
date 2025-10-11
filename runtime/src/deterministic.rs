@@ -1213,10 +1213,8 @@ where
                 .future
                 .as_mut()
                 .expect("future already polled at scheduled time");
-
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-
             match future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
                     *this.future = None;
