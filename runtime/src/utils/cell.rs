@@ -5,6 +5,7 @@ use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
+    ops::Range,
     time::{Duration, SystemTime},
 };
 
@@ -168,6 +169,23 @@ where
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         self.as_ref().sleep_until(deadline)
+    }
+}
+
+impl<C> crate::Pacer for Cell<C>
+where
+    C: crate::Pacer,
+{
+    fn pace<'a, F, T>(
+        &'a self,
+        range: Range<Duration>,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        self.as_ref().pace(range, future)
     }
 }
 
