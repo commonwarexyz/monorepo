@@ -91,23 +91,6 @@ impl<V: Variant> Scheme<V> {
         Self::CertificateVerifier { identity }
     }
 
-    pub fn into_verifier(self) -> Self {
-        match self {
-            Scheme::Signer {
-                identity,
-                polynomial,
-                threshold,
-                ..
-            } => Scheme::Verifier {
-                identity,
-                polynomial,
-                threshold,
-            },
-            Scheme::Verifier { .. } => self,
-            _ => panic!("cannot convert certificate verifier into verifier"),
-        }
-    }
-
     pub fn identity(&self) -> &V::Public {
         match self {
             Scheme::Signer { identity, .. } => identity,
@@ -182,6 +165,23 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Randomness = V::Signature;
 
     type CertificateCfg = ();
+
+    fn into_verifier(self) -> Self {
+        match self {
+            Scheme::Signer {
+                identity,
+                polynomial,
+                threshold,
+                ..
+            } => Scheme::Verifier {
+                identity,
+                polynomial,
+                threshold,
+            },
+            Scheme::Verifier { .. } => self,
+            _ => panic!("cannot convert certificate verifier into verifier"),
+        }
+    }
 
     fn can_sign(&self) -> bool {
         self.share().is_some()

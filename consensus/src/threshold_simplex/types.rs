@@ -158,9 +158,14 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         + Write
         + Read<Cfg = Self::CertificateCfg>;
 
-    type Randomness: EncodeSize + Write + Send;
+    type Randomness: Clone + EncodeSize + Write + Send;
 
     type CertificateCfg: Clone + Send + Sync;
+
+    /// Converts the scheme into a pure verifier.
+    ///
+    /// The returned instance should return `false` from `can_sign()`.
+    fn into_verifier(self) -> Self;
 
     /// Returns `true` if this instance holds the secrets required to author votes.
     fn can_sign(&self) -> bool;

@@ -230,7 +230,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::signing_scheme::seed_namespace, types::Round, Monitor};
+    use crate::{
+        threshold_simplex::{
+            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
+            signing_scheme::seed_namespace,
+        },
+        types::Round,
+        Monitor,
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
@@ -259,6 +266,12 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    type Fixture<S> = (
+        Vec<PrivateKey>,
+        Vec<<PrivateKey as commonware_cryptography::Signer>::PublicKey>,
+        Vec<S>,
+    );
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: PublicKey>(
@@ -346,7 +359,11 @@ mod tests {
         }
     }
 
-    fn all_online<V: Variant>() {
+    fn all_online<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -369,8 +386,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -582,11 +598,16 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online::<MinPk>();
-        all_online::<MinSig>();
+        all_online(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        all_online(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        all_online(|context, n| ed25519_fixture(context, n));
     }
 
-    fn observer<V: Variant>() {
+    fn observer<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n_active = 5;
         let required_containers = 100;
@@ -608,8 +629,7 @@ mod tests {
             network.start();
 
             // Register participants (active)
-            let (mut schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n_active);
+            let (mut schemes, validators, signing_schemes) = fixture(&mut context, n_active);
 
             let observer_signing_scheme = signing_schemes[0].clone().into_verifier();
 
@@ -737,11 +757,16 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer::<MinPk>();
-        observer::<MinSig>();
+        observer(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        observer(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        observer(|context, n| ed25519_fixture(context, n));
     }
 
-    fn unclean_shutdown<V: Variant>() {
+    fn unclean_shutdown<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut StdRng, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 100;
@@ -756,8 +781,7 @@ mod tests {
 
         // Create validator keys
         let mut rng = StdRng::seed_from_u64(0);
-        let (schemes, validators, signing_schemes) =
-            mocks::fixtures::bls_threshold_fixture::<V, _>(&mut rng, n);
+        let (schemes, validators, signing_schemes) = fixture(&mut rng, n);
 
         loop {
             let rng = rng.clone();
@@ -919,11 +943,16 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown::<MinPk>();
-        unclean_shutdown::<MinSig>();
+        unclean_shutdown(|rng, n| bls_threshold_fixture::<MinPk, _>(rng, n));
+        unclean_shutdown(|rng, n| bls_threshold_fixture::<MinSig, _>(rng, n));
+        unclean_shutdown(|rng, n| ed25519_fixture(rng, n));
     }
 
-    fn backfill<V: Variant>() {
+    fn backfill<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 100;
@@ -945,8 +974,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1168,11 +1196,16 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill::<MinPk>();
-        backfill::<MinSig>();
+        backfill(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        backfill(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        backfill(|context, n| ed25519_fixture(context, n));
     }
 
-    fn one_offline<V: Variant>() {
+    fn one_offline<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1196,8 +1229,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1419,11 +1451,16 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline::<MinPk>();
-        one_offline::<MinSig>();
+        one_offline(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        one_offline(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        one_offline(|context, n| ed25519_fixture(context, n));
     }
 
-    fn slow_validator<V: Variant>() {
+    fn slow_validator<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 50;
@@ -1445,8 +1482,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1590,11 +1626,16 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator::<MinPk>();
-        slow_validator::<MinSig>();
+        slow_validator(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        slow_validator(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        slow_validator(|context, n| ed25519_fixture(context, n));
     }
 
-    fn all_recovery<V: Variant>() {
+    fn all_recovery<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 100;
@@ -1616,8 +1657,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1787,11 +1827,16 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery::<MinPk>();
-        all_recovery::<MinSig>();
+        all_recovery(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        all_recovery(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        all_recovery(|context, n| ed25519_fixture(context, n));
     }
 
-    fn partition<V: Variant>() {
+    fn partition<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 10;
         let required_containers = 50;
@@ -1813,8 +1858,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1977,11 +2021,16 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_partition() {
-        partition::<MinPk>();
-        partition::<MinSig>();
+        partition(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        partition(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        partition(|context, n| ed25519_fixture(context, n));
     }
 
-    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
+    fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 50;
@@ -2006,8 +2055,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2120,8 +2168,13 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<MinPk>(0);
-        slow_and_lossy_links::<MinSig>(0);
+        slow_and_lossy_links(0, |context, n| {
+            bls_threshold_fixture::<MinPk, _>(context, n)
+        });
+        slow_and_lossy_links(0, |context, n| {
+            bls_threshold_fixture::<MinSig, _>(context, n)
+        });
+        slow_and_lossy_links(0, |context, n| ed25519_fixture(context, n));
     }
 
     #[test_traced]
@@ -2130,20 +2183,38 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
-            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_1 = slow_and_lossy_links(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            let pk_state_2 = slow_and_lossy_links(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
             assert_eq!(pk_state_1, pk_state_2);
 
-            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
-            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_1 = slow_and_lossy_links(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            let sig_state_2 = slow_and_lossy_links(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
             assert_eq!(sig_state_1, sig_state_2);
+
+            let ed_state_1 = slow_and_lossy_links(seed, |context, n| ed25519_fixture(context, n));
+            let ed_state_2 = slow_and_lossy_links(seed, |context, n| ed25519_fixture(context, n));
+            assert_eq!(ed_state_1, ed_state_2);
 
             // Sanity check that different types can't be identical
             assert_ne!(pk_state_1, sig_state_1);
+            assert_ne!(pk_state_1, ed_state_1);
+            assert_ne!(sig_state_1, ed_state_1);
         }
     }
 
-    fn conflicter<V: Variant>(seed: u64) {
+    fn conflicter<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2168,8 +2239,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2314,12 +2384,21 @@ mod tests {
     #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter::<MinPk>(seed);
-            conflicter::<MinSig>(seed);
+            conflicter(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            conflicter(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            conflicter(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn invalid<V: Variant>(seed: u64) {
+    fn invalid<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2344,8 +2423,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2475,12 +2553,21 @@ mod tests {
     #[ignore]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid::<MinPk>(seed);
-            invalid::<MinSig>(seed);
+            invalid(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            invalid(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            invalid(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn impersonator<V: Variant>(seed: u64) {
+    fn impersonator<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2505,8 +2592,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2635,12 +2721,21 @@ mod tests {
     #[ignore]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator::<MinPk>(seed);
-            impersonator::<MinSig>(seed);
+            impersonator(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            impersonator(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            impersonator(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn reconfigurer<V: Variant>(seed: u64) {
+    fn reconfigurer<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2665,8 +2760,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2794,12 +2888,21 @@ mod tests {
     #[ignore]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer::<MinPk>(seed);
-            reconfigurer::<MinSig>(seed);
+            reconfigurer(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            reconfigurer(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            reconfigurer(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn nuller<V: Variant>(seed: u64) {
+    fn nuller<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2824,8 +2927,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2963,12 +3065,21 @@ mod tests {
     #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller::<MinPk>(seed);
-            nuller::<MinSig>(seed);
+            nuller(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            nuller(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            nuller(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn outdated<V: Variant>(seed: u64) {
+    fn outdated<S, F>(seed: u64, mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 100;
@@ -2993,8 +3104,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3115,12 +3225,21 @@ mod tests {
     #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated::<MinPk>(seed);
-            outdated::<MinSig>(seed);
+            outdated(seed, |context, n| {
+                bls_threshold_fixture::<MinPk, _>(context, n)
+            });
+            outdated(seed, |context, n| {
+                bls_threshold_fixture::<MinSig, _>(context, n)
+            });
+            outdated(seed, |context, n| ed25519_fixture(context, n));
         }
     }
 
-    fn run_1k<V: Variant>() {
+    fn run_1k<S, F>(mut fixture: F)
+    where
+        S: SigningScheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 10;
         let required_containers = 1_000;
@@ -3143,8 +3262,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+            let (schemes, validators, signing_schemes) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3256,8 +3374,9 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_1k() {
-        run_1k::<MinPk>();
-        run_1k::<MinSig>();
+        run_1k(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
+        run_1k(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
+        run_1k(|context, n| ed25519_fixture(context, n));
     }
 
     fn tle<V: Variant>() {
@@ -3282,7 +3401,7 @@ mod tests {
 
             // Register participants
             let (schemes, validators, signing_schemes) =
-                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
+                bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators

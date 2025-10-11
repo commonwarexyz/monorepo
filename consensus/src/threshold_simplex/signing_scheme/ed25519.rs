@@ -50,12 +50,6 @@ impl Scheme {
             signer: None,
         }
     }
-
-    /// Converts the scheme into a pure verifier by removing the private key.
-    pub fn into_verifier(mut self) -> Self {
-        self.signer = None;
-        self
-    }
 }
 
 /// Multi-signature certificate formed by collecting Ed25519 signatures plus
@@ -128,6 +122,11 @@ impl SigningScheme for Scheme {
     type Randomness = ();
 
     type CertificateCfg = usize;
+
+    fn into_verifier(mut self) -> Self {
+        self.signer = None;
+        self
+    }
 
     fn can_sign(&self) -> bool {
         self.signer.is_some()
