@@ -1720,7 +1720,9 @@ mod tests {
 
         // Start runtime
         executor.start(|context| async move {
-            // Create a deterministic ordering of tasks with variable latency
+            // Initialize test
+            let start_real = SystemTime::now();
+            let start_sim = context.current();
             let (first_tx, first_rx) = oneshot::channel();
             let (second_tx, second_rx) = oneshot::channel();
             let (mut results_tx, mut results_rx) = mpsc::channel(2);
@@ -1767,7 +1769,11 @@ mod tests {
             }
             assert_eq!(results, vec![1, 2]);
 
-            context.auditor().state()
+            // Ensure time has elapsed
+            let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+            assert!(elapsed_real >= first_wait);
+            let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+            assert!(elapsed_sim >= first_wait && elapsed_sim <= first_wait * 3);
         });
     }
 
