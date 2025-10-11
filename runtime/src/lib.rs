@@ -316,6 +316,11 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     ///
     /// In [crate::deterministic], this is used to ensure interactions with external systems can
     /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
+    ///
+    /// # Warning
+    ///
+    /// Because `pace` will block if the future is not ready, it is important that the future's completion
+    /// doesn't require anything in the current thread to complete (or else it will deadlock).
     fn pace<'a, F, T>(
         &'a self,
         _range: Range<Duration>,
