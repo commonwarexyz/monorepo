@@ -110,7 +110,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::Position;
+    use crate::mmr::{mem::Mmr, Position};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -205,6 +205,7 @@ mod tests {
             test_digest::<H>(0),
             "root of empty MMR should be non-zero"
         );
+        assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Position::new(10), digests.iter());

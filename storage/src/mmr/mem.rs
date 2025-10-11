@@ -645,6 +645,12 @@ impl<H: CHasher> Mmr<H> {
         hasher.root(size, peaks)
     }
 
+    /// Returns the root that would be produced by calling `root` on an empty MMR.
+    pub fn empty_mmr_root(hasher: &mut H) -> H::Digest {
+        hasher.update(&0u64.to_be_bytes());
+        hasher.finalize()
+    }
+
     /// Return an inclusion proof for the element at location `loc`.
     ///
     /// # Errors
@@ -856,6 +862,7 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
+            assert_eq!(mmr.root(&mut hasher), Mmr::empty_mmr_root(hasher.inner()));
             assert!(matches!(mmr.pop(), Err(Empty)));
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");

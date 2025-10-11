@@ -257,6 +257,11 @@ impl<
         self.mmr.leaves()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {
@@ -402,7 +407,7 @@ impl<
         // previous commit becoming inactive.
         let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
-            if self.snapshot.keys() == 0 {
+            if self.is_empty() {
                 self.inactivity_floor_loc = self.op_count();
                 info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
@@ -792,7 +797,7 @@ pub(super) mod test {
             // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
-            assert_eq!(db.snapshot.keys(), 0);
+            assert!(db.is_empty());
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();
