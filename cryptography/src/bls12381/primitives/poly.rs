@@ -99,6 +99,7 @@ pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
 }
 
 /// A Barycentric Weight for interpolation at x=0.
+#[derive(Clone)]
 pub struct Weight(Scalar);
 
 impl Weight {

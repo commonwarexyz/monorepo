@@ -160,6 +160,7 @@ pub use dealer::Dealer;
 pub mod ops;
 pub mod player;
 pub use player::Player;
+
 pub mod types;
 
 #[derive(thiserror::Error, Debug)]
@@ -216,13 +217,16 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::{
-        bls12381::primitives::{
-            ops::{
-                partial_sign_proof_of_possession, threshold_signature_recover,
-                verify_proof_of_possession,
+        bls12381::{
+            dkg::player::FinalizeInput,
+            primitives::{
+                ops::{
+                    partial_sign_proof_of_possession, threshold_signature_recover,
+                    verify_proof_of_possession,
+                },
+                poly::{self, public},
+                variant::{MinPk, MinSig, Variant},
             },
-            poly::{self, public},
-            variant::{MinPk, MinSig, Variant},
         },
         ed25519::PrivateKey,
         PrivateKeyExt as _, Signer as _,
@@ -335,11 +339,12 @@ mod tests {
 
         // Distribute commitments to players and recover public key
         let mut outputs = HashMap::new();
-        for player in contributors.iter() {
+
+        for (i, player) in contributors.iter().enumerate() {
             let result = players
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), BTreeMap::new())
+                .finalize(FinalizeInput::from_arbiter_output(output.clone(), i as u32))
                 .unwrap();
             outputs.insert(player.clone(), result);
         }
@@ -453,11 +458,12 @@ mod tests {
 
         // Distribute commitments to players and recover public key
         let mut outputs = Vec::new();
-        for player in reshare_players.iter() {
+
+        for (i, player) in reshare_players.iter().enumerate() {
             let result = reshare_player_objs
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), BTreeMap::new())
+                .finalize(FinalizeInput::from_arbiter_output(output.clone(), i as u32))
                 .unwrap();
             assert_eq!(result.public, output.public);
             outputs.push(result);
@@ -1401,7 +1407,9 @@ mod tests {
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
-        player.finalize(commitments, reveals).unwrap();
+        player
+            .finalize(FinalizeInput::new(commitments, reveals))
+            .unwrap();
     }
 
     #[test]
@@ -1443,7 +1451,7 @@ mod tests {
         let last = (q - 1) as u32;
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let result = player.finalize(commitments, BTreeMap::new());
+        let result = player.finalize(FinalizeInput::new(commitments, BTreeMap::new()));
         assert!(matches!(result, Err(Error::MissingShare)));
     }
 
@@ -1482,7 +1490,7 @@ mod tests {
         }
 
         // Finalize player with reveal
-        let result = player.finalize(commitments, BTreeMap::new());
+        let result = player.finalize(FinalizeInput::new(commitments, BTreeMap::new()));
         assert!(matches!(result, Err(Error::InvalidCommitments)));
     }
 
@@ -1528,7 +1536,7 @@ mod tests {
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[1].clone());
-        let result = player.finalize(commitments, reveals);
+        let result = player.finalize(FinalizeInput::new(commitments, reveals));
         assert!(matches!(result, Err(Error::MisdirectedShare)));
     }
 
@@ -1573,7 +1581,7 @@ mod tests {
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
-        let result = player.finalize(commitments, reveals);
+        let result = player.finalize(FinalizeInput::new(commitments, reveals));
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
     }
 
@@ -1621,7 +1629,7 @@ mod tests {
         let mut share = shares[1].clone();
         share.index = 0;
         reveals.insert(last, share);
-        let result = player.finalize(commitments, reveals);
+        let result = player.finalize(FinalizeInput::new(commitments, reveals));
         assert!(matches!(result, Err(Error::ShareWrongCommitment)));
     }
 
@@ -1675,7 +1683,9 @@ mod tests {
         // Finalize player with equivocating reveal
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
-        let result = player.finalize(commitments, reveals).unwrap();
+        let result = player
+            .finalize(FinalizeInput::new(commitments, reveals))
+            .unwrap();
         assert_eq!(result.public, public);
     }
 
@@ -1720,7 +1730,7 @@ mod tests {
         commitments.insert(last, commitment);
 
         // Finalize player with equivocating reveal
-        let result = player.finalize(commitments, BTreeMap::new());
+        let result = player.finalize(FinalizeInput::new(commitments, BTreeMap::new()));
         assert!(matches!(result, Err(Error::MissingShare)));
     }
 }
