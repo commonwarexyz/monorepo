@@ -369,3 +369,425 @@ impl SigningScheme for Scheme {
         u32::MAX as usize
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        threshold_simplex::types::{Proposal, VoteContext},
+        types::Round,
+    };
+    use commonware_codec::{Decode, Encode};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, PrivateKeyExt, Sha256};
+    use commonware_utils::quorum;
+    use rand::{rngs::OsRng, thread_rng};
+
+    const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
+
+    fn generate_private_keys(n: usize) -> Vec<PrivateKey> {
+        let mut keys: Vec<_> = (0..n).map(|i| PrivateKey::from_seed(i as u64)).collect();
+        keys.sort_by_key(|key| key.public_key());
+        keys
+    }
+
+    fn participants(keys: &[PrivateKey]) -> Vec<PublicKey> {
+        keys.iter().map(|key| key.public_key()).collect()
+    }
+
+    fn signing_schemes(n: usize) -> (Vec<Scheme>, Vec<PublicKey>) {
+        let keys = generate_private_keys(n);
+        let participants = participants(&keys);
+        let schemes = keys
+            .into_iter()
+            .map(|key| Scheme::new(participants.clone(), key))
+            .collect();
+        (schemes, participants)
+    }
+
+    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+        Proposal::new(
+            Round::new(round, view),
+            view.saturating_sub(1),
+            Sha256::hash(&[tag]),
+        )
+    }
+
+    #[test]
+    fn test_sign_vote_roundtrip_for_each_context() {
+        let (schemes, _) = signing_schemes(4);
+        let scheme = &schemes[0];
+        assert!(scheme.can_sign());
+
+        let proposal = sample_proposal(0, 2, 1);
+        let vote = scheme.sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+        assert!(scheme.verify_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &vote
+        ));
+
+        let vote = scheme.sign_vote::<Sha256Digest>(
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+        );
+        assert!(scheme.verify_vote::<Sha256Digest>(
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+            &vote
+        ));
+
+        let vote = scheme.sign_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+        );
+        assert!(scheme.verify_vote(
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &vote
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "can only be called after checking can_sign")]
+    fn test_verifier_cannot_sign() {
+        let (schemes, _) = signing_schemes(3);
+        let verifier = schemes[0].clone().into_verifier();
+        assert!(!verifier.can_sign());
+
+        let proposal = sample_proposal(0, 3, 2);
+        verifier.sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+    }
+
+    #[test]
+    fn test_verify_votes_filters_bad_signers() {
+        let (schemes, _) = signing_schemes(5);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 5, 3);
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let scheme = &schemes[0];
+        let verification = scheme.verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes.clone(),
+        );
+        assert!(verification.invalid_signers.is_empty());
+        assert_eq!(verification.verified.len(), quorum);
+
+        votes[0].signer = 999;
+        let verification = scheme.verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes,
+        );
+        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.verified.len(), quorum - 1);
+    }
+
+    #[test]
+    fn test_assemble_certificate_sorts_signers() {
+        let (schemes, _) = signing_schemes(4);
+        let proposal = sample_proposal(0, 7, 4);
+
+        let votes = [
+            schemes[2].sign_vote(
+                NAMESPACE,
+                VoteContext::Finalize {
+                    proposal: &proposal,
+                },
+            ),
+            schemes[0].sign_vote(
+                NAMESPACE,
+                VoteContext::Finalize {
+                    proposal: &proposal,
+                },
+            ),
+            schemes[1].sign_vote(
+                NAMESPACE,
+                VoteContext::Finalize {
+                    proposal: &proposal,
+                },
+            ),
+        ];
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+        assert_eq!(certificate.signers, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_assemble_certificate_requires_quorum() {
+        let (schemes, _) = signing_schemes(4);
+        let proposal = sample_proposal(0, 9, 5);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(2)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        assert!(schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .is_none());
+    }
+
+    #[test]
+    fn test_assemble_certificate_rejects_duplicate_signers() {
+        let (schemes, _) = signing_schemes(3);
+        let proposal = sample_proposal(0, 11, 6);
+
+        let vote = schemes[0].sign_vote(
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+        );
+
+        let votes = vec![vote.clone(), vote];
+        assert!(schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .is_none());
+    }
+
+    #[test]
+    fn test_assemble_certificate_rejects_out_of_range_signer() {
+        let (schemes, _) = signing_schemes(4);
+        let proposal = sample_proposal(0, 13, 7);
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+        votes[0].signer = 42;
+
+        assert!(schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .is_none());
+    }
+
+    #[test]
+    fn test_verify_certificate_detects_corruption() {
+        let (schemes, participants) = signing_schemes(4);
+        let proposal = sample_proposal(0, 15, 8);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+
+        let verifier = Scheme::verifier(participants.clone());
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+
+        let mut corrupted = certificate.clone();
+        corrupted.signatures[0] = corrupted.signatures[1].clone();
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &corrupted,
+        ));
+    }
+
+    #[test]
+    fn test_certificate_codec_roundtrip() {
+        let (schemes, _) = signing_schemes(4);
+        let proposal = sample_proposal(0, 17, 9);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+        let encoded = certificate.encode();
+        let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_scheme_clone_and_into_verifier() {
+        let (schemes, participants) = signing_schemes(3);
+        let signer = schemes[0].clone();
+        assert!(signer.can_sign());
+
+        let verifier = signer.clone().into_verifier();
+        assert!(!verifier.can_sign());
+
+        let pure_verifier = Scheme::verifier(participants);
+        assert!(!pure_verifier.can_sign());
+    }
+
+    #[test]
+    fn test_certificate_decode_checks_sorted_unique_signers() {
+        let (schemes, participants) = signing_schemes(4);
+        let proposal = sample_proposal(0, 19, 10);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+
+        // Well-formed certificate decodes successfully.
+        let encoded = certificate.encode();
+        let mut cursor = &encoded[..];
+        let decoded =
+            Certificate::read_cfg(&mut cursor, &participants.len()).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+
+        // Duplicate signer indices fail to decode.
+        let duplicate = Certificate {
+            signers: vec![0, 0],
+            signatures: vec![
+                certificate.signatures[0].clone(),
+                certificate.signatures[0].clone(),
+            ],
+        };
+        let mut dup_bytes = Vec::new();
+        duplicate.write(&mut dup_bytes);
+        let mut dup_slice = dup_bytes.as_slice();
+        assert!(Certificate::read_cfg(&mut dup_slice, &participants.len()).is_err());
+
+        // Unsorted signer indices fail to decode.
+        let unsorted = Certificate {
+            signers: vec![1, 0],
+            signatures: vec![
+                certificate.signatures[1].clone(),
+                certificate.signatures[0].clone(),
+            ],
+        };
+        let mut unsorted_bytes = Vec::new();
+        unsorted.write(&mut unsorted_bytes);
+        let mut unsorted_slice = unsorted_bytes.as_slice();
+        assert!(Certificate::read_cfg(&mut unsorted_slice, &participants.len()).is_err());
+    }
+
+    #[test]
+    fn test_verify_certificate() {
+        let (schemes, participants) = signing_schemes(3);
+        let proposal = sample_proposal(0, 21, 11);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes.into_iter(), None)
+            .expect("assemble certificate");
+
+        let verifier = Scheme::verifier(participants);
+        assert!(verifier.verify_certificate(
+            &mut OsRng,
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+}
