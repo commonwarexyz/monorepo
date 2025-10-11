@@ -120,6 +120,12 @@
         <p>Generate bias-resistant randomness with untrusted contributors.</p>
 
         <h2>Blogs</h2>
+        <h3><a href="/blogs/reshare.html">Reconfiguration + Reshare over Consensus</a></h3>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">October 11, 2025</div>
+        </div>
+            <p>An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes. Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. <code>examples/reshare</code> shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch.</p>
         <h3><a href="/blogs/only-time-will-tell.html">Binding Timelock Encryption: Only Time Will Tell</a></h3>
         <div class="meta">
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
