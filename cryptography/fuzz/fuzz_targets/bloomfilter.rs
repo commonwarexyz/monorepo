@@ -25,11 +25,9 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let hashers = input.hashers.get();
-    let mut bf = BloomFilter::new(NonZeroU8::new(hashers).unwrap(), input.bits.into());
+    let cfg = (input.hashers, input.bits.into());
+    let mut bf = BloomFilter::new(input.hashers, input.bits.into());
     let mut model: HashSet<Vec<u8>> = HashSet::new();
-
-    let cfg = (hashers, input.bits.into());
 
     for op in input.ops.into_iter().take(64) {
         match op {
