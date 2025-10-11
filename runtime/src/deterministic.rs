@@ -1099,7 +1099,7 @@ impl ArcWake for Blocker {
 }
 
 pin_project! {
-    struct Awaiter<F: Future> {
+    struct Waiter<F: Future> {
         executor: Weak<Executor>,
         target: SystemTime,
         future: Option<Pin<Box<F>>>,
@@ -1157,7 +1157,7 @@ impl Future for Sleeper {
     }
 }
 
-impl<F> Future for Awaiter<F>
+impl<F> Future for Waiter<F>
 where
     F: Future + Send,
 {
@@ -1258,8 +1258,9 @@ impl Pacer for Context {
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        let Range { start, end } = range;
+        // Compute delay
         let executor = self.executor();
+        let Range { start, end } = range;
         let delay = if start < end {
             let mut rng = executor.rng.lock().unwrap();
             rng.gen_range(start..end)
@@ -1268,6 +1269,8 @@ impl Pacer for Context {
         } else {
             panic!("invalid delay range");
         };
+
+        // Compute target time
         let target = executor
             .time
             .lock()
@@ -1276,7 +1279,7 @@ impl Pacer for Context {
             .expect("overflow when setting wake time");
         drop(executor);
 
-        Awaiter {
+        Waiter {
             executor: self.executor.clone(),
             target,
             future: Some(Box::pin(future)),
