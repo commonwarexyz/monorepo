@@ -55,7 +55,7 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-/// The information required to verify a key value proof.
+/// The information required to verify a key value proof from a Current db.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
     /// The key whose value is being proven.
@@ -71,6 +71,9 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
     pub chunk: [u8; N],
 }
 
+/// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
+/// and only if the operation at location `loc` was active and has the value `element` in the
+/// Current db with the given `root`.
 fn verify_key_value_proof<H: CHasher, const N: usize>(
     hasher: &mut H,
     proof: &Proof<H::Digest>,
