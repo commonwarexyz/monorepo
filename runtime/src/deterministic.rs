@@ -59,7 +59,7 @@ use std::{
     net::SocketAddr,
     ops::Range,
     pin::Pin,
-    sync::{Arc, Condvar, Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
