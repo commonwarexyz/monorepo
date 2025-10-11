@@ -67,7 +67,7 @@ use commonware_runtime::{Metrics, Storage};
 use commonware_utils::sequence::U64;
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// Configuration for `contiguous::Journal`.
 #[derive(Clone)]
@@ -157,16 +157,20 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         };
         let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
 
-        // Replay the journal to compute the current size and rebuild locations if needed
+        // Compute the current size by replaying the journal
+        // We need to count all items to align with locations
         let mut size = 0u64;
         let mut items_in_current_section = 0u64;
         let mut current_section = None;
-
+        
         const BUFFER_SIZE: usize = 4096;
         let buffer_size = NonZeroUsize::new(BUFFER_SIZE).unwrap();
-        {
-            let replay = inner.replay(0, 0, buffer_size).await?;
+        
+        if let Some(oldest_section) = inner.oldest_section() {
+            // Replay from the oldest section to count all items
+            let replay = inner.replay(oldest_section, 0, buffer_size).await?;
             futures::pin_mut!(replay);
+            
             while let Some(result) = replay.next().await {
                 let (section, offset, _size, _item) = result?;
                 if current_section != Some(section) {
@@ -178,13 +182,24 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
                 }
                 items_in_current_section += 1;
                 size += 1;
-
+                
                 // Rebuild locations journal if it's behind
                 let locations_size = locations.size().await?;
                 if locations_size < size {
                     locations.append(offset).await?;
                 }
             }
+        }
+        
+        // Align locations with size - rewind if locations is ahead
+        let locations_size = locations.size().await?;
+        if locations_size > size {
+            warn!(
+                size,
+                locations_size, "rewinding misaligned locations journal"
+            );
+            locations.rewind(size).await?;
+            locations.sync().await?;
         }
 
         // Store the number of items in the current section
@@ -224,11 +239,15 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         let pos = self.size;
         let (section, offset_within_section) = self.position_to_location(pos);
 
-        // Append to the underlying variable journal
-        let (offset, _size) = self.inner.append(section, item).await?;
-
-        // Store the offset in the locations journal for O(1) lookup
-        self.locations.append(offset).await?;
+        // Append to the underlying variable journal and locations concurrently
+        use futures::try_join;
+        let (offset, _size) = {
+            let inner_fut = self.inner.append(section, item);
+            let (offset, size) = inner_fut.await?;
+            let locations_fut = self.locations.append(offset);
+            try_join!(async { Ok::<_, Error>((offset, size)) }, locations_fut)?;
+            (offset, size)
+        };
 
         trace!(pos, section, offset, "appended item");
         self.size += 1;
@@ -236,8 +255,12 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         // Update metadata with items in current section
         let items_in_section = (offset_within_section + 1) % self.items_per_section.get();
         if items_in_section == 0 {
-            // Section is complete, sync it
-            self.inner.sync(section).await?;
+            // Section is complete, sync both inner and locations
+            use futures::try_join;
+            try_join!(
+                self.inner.sync(section),
+                self.locations.sync()
+            )?;
             self.metadata.remove(&items_in_current_section_key());
         } else {
             self.metadata
@@ -249,15 +272,22 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
 
     /// Sync any pending updates to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync the current section if it exists
+        use futures::try_join;
+        
+        // Sync the current section, locations, and metadata concurrently
         if self.size > 0 {
             let (current_section, _) = self.position_to_location(self.size - 1);
-            self.inner.sync(current_section).await?;
+            try_join!(
+                self.inner.sync(current_section),
+                self.locations.sync(),
+                async { self.metadata.sync().await.map_err(Error::from) }
+            )?;
+        } else {
+            try_join!(
+                self.locations.sync(),
+                async { self.metadata.sync().await.map_err(Error::from) }
+            )?;
         }
-        // Sync locations
-        self.locations.sync().await?;
-        // Sync metadata
-        self.metadata.sync().await?;
         Ok(())
     }
 
@@ -294,40 +324,43 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
         assert!(start_pos <= self.size);
 
         let (start_section, start_offset_within_section) = self.position_to_location(start_pos);
+        
+        // The variable journal replay will handle multiple sections automatically
         let replay = self.inner.replay(start_section, 0, buffer).await?;
-
+        
         let items_per_section = self.items_per_section.get();
-
-        // Use an atomic counter for position tracking in the async closure
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Arc;
-
-        let current_pos = Arc::new(AtomicU64::new(0));
-        let skip_count = Arc::new(AtomicU64::new(start_offset_within_section));
-        let current_section_val = Arc::new(AtomicU64::new(start_section));
+        
+        // Use Rc<RefCell> to track mutable state across filter_map calls
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let current_section = Rc::new(RefCell::new(start_section));
+        let pos_in_section = Rc::new(RefCell::new(0u64));
+        let items_to_skip = Rc::new(RefCell::new(start_offset_within_section));
 
         Ok(replay.filter_map(move |result| {
-            let current_pos = current_pos.clone();
-            let skip_count = skip_count.clone();
-            let current_section_val = current_section_val.clone();
-
+            let current_section = current_section.clone();
+            let pos_in_section = pos_in_section.clone();
+            let items_to_skip = items_to_skip.clone();
+            
             async move {
                 match result {
                     Ok((section, _offset, _size, item)) => {
-                        // Update section if needed
-                        if section != current_section_val.load(Ordering::Relaxed) {
-                            current_section_val.store(section, Ordering::Relaxed);
-                            current_pos.store(0, Ordering::Relaxed);
+                        // Track section changes
+                        if section != *current_section.borrow() {
+                            *current_section.borrow_mut() = section;
+                            *pos_in_section.borrow_mut() = 0;
                         }
-
-                        if skip_count.load(Ordering::Relaxed) > 0 {
-                            skip_count.fetch_sub(1, Ordering::Relaxed);
-                            current_pos.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Skip items until we reach start position
+                        if *items_to_skip.borrow() > 0 {
+                            *items_to_skip.borrow_mut() -= 1;
+                            *pos_in_section.borrow_mut() += 1;
                             return None;
                         }
-                        let pos = section * items_per_section + current_pos.load(Ordering::Relaxed);
-                        current_pos.fetch_add(1, Ordering::Relaxed);
-                        Some(Ok((pos, item)))
+                        
+                        let global_pos = section * items_per_section + *pos_in_section.borrow();
+                        *pos_in_section.borrow_mut() += 1;
+                        Some(Ok((global_pos, item)))
                     }
                     Err(e) => Some(Err(e)),
                 }
@@ -348,6 +381,8 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
             }
         };
 
+        // For state sync scenarios, we may start at a non-aligned boundary
+        // The position is always based on the oldest section
         Ok(Some(oldest_section * self.items_per_section.get()))
     }
 
@@ -391,8 +426,12 @@ impl<E: Storage + Metrics + commonware_runtime::Clock, V: Codec> Journal<E, V> {
                 self.inner.rewind(target_section, 0).await?;
             }
         } else {
-            // Rewinding to the middle of a section - use locations to find the exact offset
-            if new_size > 0 {
+            // Rewinding to the middle of a section
+            // For state sync scenarios where we start at an unaligned point,
+            // we need to use metadata to know the offset in the first section
+            let oldest_section = self.inner.oldest_section().unwrap_or(0);
+            
+            if new_size > 0 && target_section >= oldest_section {
                 let last_offset = self.locations.read(new_size - 1).await?;
                 // Calculate the size to rewind to (after the last kept item)
                 let target_size = (last_offset as u64 + 1) * variable::ITEM_ALIGNMENT;
@@ -663,6 +702,51 @@ mod tests {
             journal.append(42u64).await.expect("Failed to append");
             journal.sync().await.expect("Failed to sync");
 
+            journal.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_unaligned_start() {
+        // Test scenario where journal starts at an unaligned point in the first section
+        // This simulates state sync scenarios
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(10)); // 10 items per section
+            
+            // Create initial journal and add some items
+            let mut journal: Journal<_, u64> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+            
+            // Add 7 items (unaligned - doesn't fill the first section)
+            for i in 0u64..7 {
+                journal.append(i * 10).await.expect("Failed to append");
+            }
+            
+            // Sync and close
+            journal.sync().await.expect("Failed to sync");
+            journal.close().await.expect("Failed to close");
+            
+            // Re-open journal (simulating recovery/restart)
+            let journal: Journal<_, u64> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+            
+            // Verify size is correct
+            let size = journal.size().await.expect("Failed to get size");
+            assert_eq!(size, 7);
+            
+            // Verify we can read all items
+            for i in 0u64..7 {
+                let item: u64 = journal.read(i).await.expect("Failed to read");
+                assert_eq!(item, i * 10);
+            }
+            
+            // Verify oldest_retained_pos works with unaligned data
+            let oldest = journal.oldest_retained_pos().await.expect("Failed to get oldest");
+            assert_eq!(oldest, Some(0));
+            
             journal.destroy().await.expect("Failed to destroy");
         });
     }
