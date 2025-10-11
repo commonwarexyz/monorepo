@@ -5,12 +5,13 @@ use crate::Runner;
 use crate::{Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::task::ArcWake;
 use rayon::{ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
 };
 
@@ -232,6 +233,42 @@ impl<T> RwLock<T> {
     }
 }
 
+// Synchronization primitive that lets a thread block until a waker delivers a signal.
+pub struct Blocker {
+    // Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
+    state: Mutex<bool>,
+    // Condvar used to park and resume the thread when the signal flips to true.
+    cv: Condvar,
+}
+
+impl Blocker {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+
+    pub fn wait(&self) {
+        let mut signaled = self.state.lock().unwrap();
+        // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
+        while !*signaled {
+            signaled = self.cv.wait(signaled).unwrap();
+        }
+        // Reset the flag so subsequent waits park again until the next wake signal.
+        *signaled = false;
+    }
+}
+
+impl ArcWake for Blocker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let mut signaled = arc_self.state.lock().unwrap();
+        *signaled = true;
+        // Notify a single waiter so the blocked thread re-checks the flag.
+        arc_self.cv.notify_one();
+    }
+}
+
 #[cfg(test)]
 async fn task(i: usize) -> usize {
     for _ in 0..5 {
@@ -261,9 +298,12 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
     use crate::{deterministic, tokio, Metrics};
     use commonware_macros::test_traced;
+    use futures::task::waker;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
     #[test_traced]
@@ -303,5 +343,73 @@ mod tests {
             // Check the value
             assert_eq!(*w, 101);
         });
+    }
+
+    #[test]
+    fn test_blocker_waits_until_wake() {
+        let blocker = Blocker::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+
+        let thread_blocker = blocker.clone();
+        let thread_started = started.clone();
+        let thread_completed = completed.clone();
+        let handle = std::thread::spawn(move || {
+            thread_started.store(true, Ordering::SeqCst);
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        });
+
+        while !started.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        assert!(!completed.load(Ordering::SeqCst));
+        waker(blocker.clone()).wake();
+        handle.join().unwrap();
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_handles_pre_wake() {
+        let blocker = Blocker::new();
+        waker(blocker.clone()).wake();
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        std::thread::spawn(move || {
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        })
+        .join()
+        .unwrap();
+
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_reusable_across_signals() {
+        let blocker = Blocker::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                thread_blocker.wait();
+                thread_completed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        for expected in 1..=2 {
+            waker(blocker.clone()).wake();
+            while completed.load(Ordering::SeqCst) < expected {
+                std::thread::yield_now();
+            }
+        }
+
+        handle.join().unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
     }
 }
