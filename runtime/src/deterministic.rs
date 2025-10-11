@@ -1371,15 +1371,16 @@ impl crate::Storage for Context {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _, Storage,
+        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _,
+        Spawner, Storage,
     };
     use commonware_macros::test_traced;
     use futures::{
-        channel::oneshot,
+        channel::{mpsc, oneshot},
         future::pending,
         task::{noop_waker, waker},
+        try_join, SinkExt, StreamExt,
     };
-    use rand::Rng;
     use std::{
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1711,61 +1712,63 @@ mod tests {
         });
     }
 
-    fn external_realtime_variable(seed: u64) -> String {
+    #[test]
+    fn test_external_realtime_variable() {
         // Initialize runtime
         let cfg = Config::default().with_realtime(true);
         let executor = deterministic::Runner::new(cfg);
 
-        // Create a deterministic ordering of tasks with variable latency
-        let mut rng = StdRng::seed_from_u64(seed);
-        let (first_tx, first_rx) = oneshot::channel();
-        let first_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
-        let (second_tx, second_rx) = oneshot::channel();
-        let second_wait = Duration::from_millis(rng.gen_range(100u64..1000u64));
-
-        // Create a thread that waits for 1 second
-        std::thread::spawn(move || {
-            std::thread::sleep(first_wait);
-            first_tx.send(()).unwrap();
-        });
-
-        // Create a thread
-        std::thread::spawn(move || {
-            std::thread::sleep(second_wait);
-            second_tx.send(()).unwrap();
-        });
-
         // Start runtime
         executor.start(|context| async move {
-            // Wait for a delay sampled before the external send occurs.
-            first_rx
-                .pace(&context, Duration::ZERO..Duration::ZERO)
-                .await
-                .unwrap();
-            println!("first task finished");
+            // Create a deterministic ordering of tasks with variable latency
+            let (first_tx, first_rx) = oneshot::channel();
+            let (second_tx, second_rx) = oneshot::channel();
+            let (mut results_tx, mut results_rx) = mpsc::channel(2);
 
-            // Wait for a delay sampled after the external send occurs.
-            second_rx
-                .pace(&context, Duration::ZERO..(second_wait * 2))
-                .await
-                .unwrap();
-            println!("second task finished");
+            // Create a thread that waits for 1 second
+            let first_wait = Duration::from_secs(1);
+            std::thread::spawn(move || {
+                std::thread::sleep(first_wait);
+                first_tx.send(()).unwrap();
+            });
+
+            // Create a thread
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::ZERO);
+                second_tx.send(()).unwrap();
+            });
+
+            // Wait for a delay sampled before the external send occurs
+            let first = context.clone().spawn({
+                let mut results_tx = results_tx.clone();
+                |context| async move {
+                    first_rx
+                        .pace(&context, Duration::ZERO..Duration::ZERO)
+                        .await
+                        .unwrap();
+                    results_tx.send(1).await.unwrap();
+                }
+            });
+
+            // Wait for a delay sampled after the external send occurs
+            let second = context.clone().spawn(move |context| async move {
+                second_rx
+                    .pace(&context, first_wait..(first_wait * 2))
+                    .await
+                    .unwrap();
+                results_tx.send(2).await.unwrap();
+            });
+            try_join!(first, second).unwrap();
+
+            // Ensure order is correct
+            let mut results = Vec::new();
+            for _ in 0..2 {
+                results.push(results_rx.next().await.unwrap());
+            }
+            assert_eq!(results, vec![1, 2]);
 
             context.auditor().state()
-        })
-    }
-
-    #[test]
-    fn test_external_realtime_variable() {
-        let mut past_state = None;
-        for i in 0..10 {
-            let state = external_realtime_variable(i);
-            if let Some(past_state) = &past_state {
-                assert_eq!(state, *past_state);
-            } else {
-                past_state = Some(state);
-            }
-        }
+        });
     }
 
     #[test]
