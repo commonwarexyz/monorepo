@@ -15,7 +15,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Aborter, Panicker},
+    utils::{signal::Stopper, Children, Panicker},
     Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -340,7 +340,7 @@ impl crate::Runner for Runner {
             name: label.name(),
             executor: executor.clone(),
             network,
-            children: Arc::new(Mutex::new(Vec::new())),
+            children: Arc::new(Children::new()),
             model: Model::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
@@ -369,14 +369,26 @@ cfg_if::cfg_if! {
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<Aborter>>>,
+    children: Arc<Children>,
     model: Model,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            children: Children::branch(&self.children),
+            model: self.model,
+        }
+    }
 }
 
 impl Context {
@@ -416,22 +428,19 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
+        // Split the supervision tree so the spawned child receives its own descendant list
+        // while the parent keeps its original abort handles. The returned triple provides
+        // the optional parent supervisor list (if the child is supervised), the new child's
+        // aborter list, and the branch that should be installed on the child context.
+        let (parent_children, children, child_children) =
+            self.children.split_for_child(self.model.is_supervised());
+        self.children = child_children;
 
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.model.is_dedicated();
         let blocking = self.model.is_blocking();
         self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
 
         // Spawn the task
         let future = f(self);

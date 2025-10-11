@@ -12,10 +12,122 @@ use std::{
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex, Once, Weak},
     task::{Context, Poll},
 };
 use tracing::error;
+
+/// Tracks abort handles for a task along with any supervised descendants.
+///
+/// `Children` instances form a lightweight supervision tree. Each branch owns
+/// its own descendant list and optionally shares the parent's supervisor list,
+/// so clones inherit supervision without giving siblings mutable access to one
+/// another's children.
+pub struct Children {
+    inner: Mutex<ChildrenInner>,
+}
+
+/// Inner state for every `Children` handle that references the same supervision branch.
+struct ChildrenInner {
+    /// Abort handles for tasks spawned directly under this branch. Whenever the branch
+    /// completes or is aborted we drain this list and cancel descendants.
+    owned: Arc<Mutex<Vec<Aborter>>>,
+    /// Optional pointer to the parent's abort list when this branch is supervised. Newly
+    /// spawned children register their abort handles here so the parent can cascade aborts.
+    supervisor: Option<Arc<Mutex<Vec<Aborter>>>>,
+    /// Weak references to clones that are tracking this branch and need to be retargeted
+    /// whenever `split_for_child` splits the tree (e.g. pre-built actors).
+    tracked_clones: Vec<Weak<Children>>,
+}
+
+impl Children {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(ChildrenInner {
+                owned: Arc::new(Mutex::new(Vec::new())),
+                supervisor: None,
+                tracked_clones: Vec::new(),
+            }),
+        }
+    }
+
+    /// Returns a new clone that shares this branch's supervision state. Used when
+    /// a context is cloned (or `with_label`) so pre-built actors inherit the same
+    /// descendant/supervisor lists.
+    pub fn branch(source: &Arc<Self>) -> Arc<Self> {
+        let (owned, supervisor) = {
+            let inner = source.inner.lock().unwrap();
+            (inner.owned.clone(), inner.supervisor.clone())
+        };
+        let branch = Arc::new(Self {
+            inner: Mutex::new(ChildrenInner {
+                owned,
+                supervisor,
+                tracked_clones: Vec::new(),
+            }),
+        });
+        source
+            .inner
+            .lock()
+            .unwrap()
+            .tracked_clones
+            .push(Arc::downgrade(&branch));
+        branch
+    }
+
+    /// Prepares a branch for spawning a child. This splits the supervision tree so the
+    /// newly spawned context receives a fresh descendant list while the parent keeps its
+    /// original abort handles. Returns `(parent_supervisor, child_owned, child_branch)`.
+    /// The first element is the optional abort list the parent uses to supervise the new
+    /// child, the second is the descendant list that should be passed to the handle for
+    /// cascading aborts and the third is the branch that must be installed on the child
+    /// context.
+    #[allow(clippy::type_complexity)]
+    pub fn split_for_child(
+        self: &Arc<Self>,
+        supervised: bool,
+    ) -> (
+        Option<Arc<Mutex<Vec<Aborter>>>>,
+        Arc<Mutex<Vec<Aborter>>>,
+        Arc<Self>,
+    ) {
+        // Capture the current branch state and detach any pre-built clones so we can
+        // retarget them after the child branch is created.
+        let (supervisor, tracked_clones, child_owned) = {
+            let mut inner = self.inner.lock().unwrap();
+            let parent_list = inner.owned.clone();
+            let supervisor = supervised.then_some(parent_list.clone());
+            let tracked_clones = std::mem::take(&mut inner.tracked_clones);
+            inner.supervisor = supervisor.clone();
+            let new_owned = Arc::new(Mutex::new(Vec::new()));
+
+            // Parent keeps using the same `owned` pointer, clones will be updated below.
+            // Descendants spawned by the new child branch should populate this fresh list.
+            inner.owned = new_owned.clone();
+            (supervisor, tracked_clones, new_owned)
+        };
+
+        // Retarget any pre-built clones so they continue to share supervision with the
+        // freshly spawned child branch.
+        for weak in tracked_clones {
+            if let Some(clone) = weak.upgrade() {
+                let mut inner = clone.inner.lock().unwrap();
+                inner.owned = child_owned.clone();
+                inner.supervisor = supervisor.clone();
+            }
+        }
+
+        let child = Arc::new(Self {
+            inner: Mutex::new(ChildrenInner {
+                owned: child_owned.clone(),
+                supervisor: supervisor.clone(),
+                tracked_clones: Vec::new(),
+            }),
+        });
+
+        (supervisor, child_owned, child)
+    }
+}
 
 /// Handle to a spawned task.
 pub struct Handle<T>
