@@ -142,7 +142,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             #[cfg(feature = "std")]
             debug!(size = ?self.size, "invalid proof size");
             return false;
@@ -178,7 +178,7 @@ impl<D: Digest> Proof<D> {
             return self.size == Position::new(0)
                 && *root == hasher.root(Position::new(0), core::iter::empty());
         }
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             return false;
         }
 
@@ -269,6 +269,9 @@ impl<D: Digest> Proof<D> {
         // Get the positions of all nodes that should be pinned.
         let start_pos = Position::try_from(range.start)?;
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
+        if !self.size.is_valid_size() {
+            return Err(Error::InvalidProof);
+        }
 
         // Get all positions required for the proof.
         let required_positions = nodes_required_for_range_proof(self.size, range)?;
@@ -358,7 +361,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_valid_size() {
             return Err(ReconstructionError::InvalidSize);
         }
 
