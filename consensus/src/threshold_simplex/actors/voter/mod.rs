@@ -369,9 +369,9 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
-        stale_backfill(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
-        stale_backfill(|context, n| ed25519_fixture(context, n));
+        stale_backfill(bls_threshold_fixture::<MinPk, _>);
+        stale_backfill(bls_threshold_fixture::<MinSig, _>);
+        stale_backfill(ed25519_fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -701,9 +701,9 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(|context, n| bls_threshold_fixture::<MinPk, _>(context, n));
-        append_old_interesting_view(|context, n| bls_threshold_fixture::<MinSig, _>(context, n));
-        append_old_interesting_view(|context, n| ed25519_fixture(context, n));
+        append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
+        append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
+        append_old_interesting_view(ed25519_fixture);
     }
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
@@ -852,12 +852,8 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(|context, n| {
-            bls_threshold_fixture::<MinPk, _>(context, n)
-        });
-        finalization_without_notarization_certificate(|context, n| {
-            bls_threshold_fixture::<MinSig, _>(context, n)
-        });
-        finalization_without_notarization_certificate(|context, n| ed25519_fixture(context, n));
+        finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519_fixture);
     }
 }
