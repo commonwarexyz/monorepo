@@ -308,7 +308,8 @@ pub trait Clock: Clone + Send + Sync + 'static {
 }
 
 /// Interface that runtimes can implement to constrain the latency a future
-/// takes to execute.
+/// takes to execute (allowing a runtime to "pace" the execution of a future
+/// driven by an external process).
 pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
     /// the future is not yet ready at the desired time of completion, the runtime will block until
