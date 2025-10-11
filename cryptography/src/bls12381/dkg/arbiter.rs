@@ -44,7 +44,11 @@ use crate::{
             ops::{construct_public, recover_public, verify_commitment, verify_share},
             Error,
         },
-        primitives::{group::Share, poly, variant::Variant},
+        primitives::{
+            group::Share,
+            poly::{self, Weight},
+            variant::Variant,
+        },
     },
     PublicKey,
 };
@@ -56,6 +60,9 @@ use std::collections::{BTreeMap, HashSet};
 pub struct Output<V: Variant> {
     /// The group polynomial output by the DKG/Resharing procedure.
     pub public: poly::Public<V>,
+
+    /// Barycentric Weights for Lagrange interpolation
+    pub weights: Option<BTreeMap<u32, Weight>>,
 
     /// `2f + 1` commitments used to derive group polynomial.
     pub commitments: BTreeMap<u32, poly::Public<V>>,
@@ -243,7 +250,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Recover group
-        let public = match self.previous {
+        let (public, weights) = match self.previous {
             Some(previous) => {
                 match recover_public::<V>(
                     &previous,
@@ -251,12 +258,12 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                     self.player_threshold,
                     self.concurrency,
                 ) {
-                    Ok(public) => public,
+                    Ok((public, weights)) => (public, Some(weights)),
                     Err(e) => return (Err(e), self.disqualified),
                 }
             }
             None => match construct_public::<V>(commitments.values(), self.player_threshold) {
-                Ok(public) => public,
+                Ok(public) => (public, None),
                 Err(e) => return (Err(e), self.disqualified),
             },
         };
@@ -266,6 +273,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             Ok(Output {
                 public,
                 commitments,
+                weights,
                 reveals,
             }),
             self.disqualified,

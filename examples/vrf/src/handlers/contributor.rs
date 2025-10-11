@@ -3,7 +3,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            player::Output,
+            player::{FinalizeInput, Output},
             types::{Ack, Share},
             Dealer, Player,
         },
@@ -424,7 +424,8 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                     if should_deal && !commitments.contains_key(&me_idx) {
                         warn!(round, "commitment not included");
                     }
-                    let Ok(output) = player_obj.finalize(commitments, reveals) else {
+                    let Ok(output) = player_obj.finalize(FinalizeInput::new(commitments, reveals))
+                    else {
                         warn!(round, "failed to finalize round");
                         return (round, None);
                     };
