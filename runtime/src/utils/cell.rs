@@ -176,7 +176,7 @@ impl<C> crate::Pacer for Cell<C>
 where
     C: crate::Pacer,
 {
-    fn constrain<'a, F, T>(
+    fn pace<'a, F, T>(
         &'a self,
         future: F,
         range: Range<Duration>,
@@ -185,7 +185,7 @@ where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().constrain(future, range)
+        self.as_ref().pace(future, range)
     }
 }
 

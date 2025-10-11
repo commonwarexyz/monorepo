@@ -316,7 +316,7 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     ///
     /// In [crate::deterministic], this is used to ensure interactions with external systems can
     /// be interacted with deterministically. In [crate::tokio], this is not implemented (a no-op).
-    fn constrain<'a, F, T>(
+    fn pace<'a, F, T>(
         &'a self,
         future: F,
         _range: Range<Duration>,
@@ -335,7 +335,7 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
 /// runtime should delay completion relative to the clock.
 pub trait FutureExt: Future + Send + Sized {
     /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
-    fn constrain<'a, E>(
+    fn pace<'a, E>(
         self,
         pacer: &'a E,
         range: Range<Duration>,
@@ -345,7 +345,7 @@ pub trait FutureExt: Future + Send + Sized {
         Self: Send + 'a,
         Self::Output: Send + 'a,
     {
-        pacer.constrain(self, range)
+        pacer.pace(self, range)
     }
 }
 

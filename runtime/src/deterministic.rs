@@ -1249,7 +1249,7 @@ impl Clock for Context {
 }
 
 impl Pacer for Context {
-    fn constrain<'a, F, T>(
+    fn pace<'a, F, T>(
         &'a self,
         future: F,
         range: Range<Duration>,
@@ -1739,14 +1739,14 @@ mod tests {
         executor.start(|context| async move {
             // Wait for a delay sampled before the external send occurs.
             first_rx
-                .constrain(&context, Duration::ZERO..Duration::ZERO)
+                .pace(&context, Duration::ZERO..Duration::ZERO)
                 .await
                 .unwrap();
             println!("first task finished");
 
             // Wait for a delay sampled after the external send occurs.
             second_rx
-                .constrain(&context, Duration::ZERO..(second_wait * 2))
+                .pace(&context, Duration::ZERO..(second_wait * 2))
                 .await
                 .unwrap();
             println!("second task finished");
