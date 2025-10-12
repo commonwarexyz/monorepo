@@ -145,7 +145,7 @@ impl<
                 Operation::Delete(key) => {
                     let old_loc =
                         Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
-                    callback(false, Some(old_loc));
+                    callback(false, old_loc);
                 }
                 Operation::Update(data) => {
                     let old_loc =
@@ -640,28 +640,28 @@ impl<
         Ok(())
     }
 
-    /// Delete `key` that is known to be in the snapshot, returning the location that was previously
+    /// Delete `key` from the snapshot if it exists, returning the location that was previously
     /// associated with it. For use by log-replay.
     async fn replay_delete(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: Location,
-    ) -> Result<Location, Error> {
+    ) -> Result<Option<Location>, Error> {
         // Get a cursor to look for the key, which should be in the snapshot.
-        let mut cursor = snapshot
-            .get_mut(key)
-            .expect("replay shouldn't try to delete a key that isn't in the snapshot");
+        let Some(mut cursor) = snapshot.get_mut(key) else {
+            return Ok(None);
+        };
 
         // Find the matching key among all conflicts, then delete it.
-        let (loc, _, _, _) = Self::find_update_op(log, &mut cursor, key)
-            .await?
-            .expect("replay shouldn't try to delete a key that isn't in the snapshot - case 2");
+        let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? else {
+            return Ok(None);
+        };
 
         assert!(loc < delete_loc);
         cursor.delete();
 
-        Ok(loc)
+        Ok(Some(loc))
     }
 
     /// Return the root of the db.
