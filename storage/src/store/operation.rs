@@ -660,7 +660,7 @@ mod tests {
     use commonware_utils::sequence::U64;
 
     #[test]
-    fn test_to_key() {
+    fn test_operation_to_key() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_value() {
+    fn test_operation_to_value() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_value() {
+    fn test_operation_into_value() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keyless_append() {
+    fn test_operation_keyless_append() {
         let append_op = Keyless::Append(U64::new(12345));
 
         let encoded = append_op.encode();
@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keyless_commit() {
+    fn test_operation_keyless_commit() {
         let metadata = Some(U64::new(12345));
         let commit_op = Keyless::<U64>::Commit(metadata.clone());
 
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keyless_invalid_context() {
+    fn test_operation_keyless_invalid_context() {
         let invalid = vec![0xFF; 1];
         let decoded = Keyless::<U64>::decode(invalid.as_ref());
         assert!(matches!(
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_operation_basic() {
+    fn test_operation_ordered_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
