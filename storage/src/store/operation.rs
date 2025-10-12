@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_array_display() {
+    fn test_operation_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
         let update_op = Fixed::Update(key.clone(), value.clone());
@@ -810,16 +810,14 @@ mod tests {
         let value = U64::new(5678);
         let key2 = U64::new(999);
         let update_op = FixedOrdered::Update(OrderedKeyData {
-            key,
-            value,
-            next_key: key2,
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key2.clone(),
         });
-
-        let encoded = update_op.encode();
-        assert_eq!(encoded.len(), FixedOrdered::<U64, U64>::SIZE);
-
-        let decoded = FixedOrdered::<U64, U64>::decode(encoded).unwrap();
-        assert_eq!(update_op, decoded);
+        assert_eq!(
+            format!("{update_op}"),
+            format!("[key:{key} next_key:{key2} value:{}]", hex(&value.encode()))
+        );
     }
 
     #[test]
@@ -832,6 +830,21 @@ mod tests {
         assert_eq!(encoded.len(), Fixed::<U64, U64>::SIZE);
 
         let decoded = Fixed::<U64, U64>::decode(encoded).unwrap();
+        assert_eq!(update_op, decoded);
+
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let key2 = U64::new(999);
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key,
+            value,
+            next_key: key2,
+        });
+
+        let encoded = update_op.encode();
+        assert_eq!(encoded.len(), FixedOrdered::<U64, U64>::SIZE);
+
+        let decoded = FixedOrdered::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
     }
 
