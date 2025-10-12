@@ -8,8 +8,8 @@ use super::Aborter;
 /// registers a new child node beneath the current node, while spawning a task transfers ownership
 /// of that node to the spawned task. When a context finishes or is aborted, the runtime drains the
 /// node and aborts all descendant tasks.
-#[derive(Default)]
 pub(crate) struct SupervisionTree {
+    _parent: Option<Arc<SupervisionTree>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
     tasks: Mutex<Vec<Aborter>>,
 }
@@ -18,6 +18,7 @@ impl SupervisionTree {
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
+            _parent: None,
             children: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
         })
@@ -26,6 +27,7 @@ impl SupervisionTree {
     /// Creates a new child node registered under the provided parent.
     pub(crate) fn child(parent: &Arc<Self>) -> Arc<Self> {
         let child = Arc::new(Self {
+            _parent: Some(parent.clone()),
             children: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
         });

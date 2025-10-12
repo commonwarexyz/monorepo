@@ -1603,6 +1603,45 @@ mod tests {
         });
     }
 
+    fn test_supervision_tree_sparse_clone_chain<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        use futures::future::pending;
+
+        runner.start(|context| async move {
+            let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
+            let (leaf_handle_tx, leaf_handle_rx) = oneshot::channel();
+
+            let parent = context.clone().spawn({
+                move |context| async move {
+                    let clone1 = context.clone();
+                    let clone2 = clone1.clone();
+                    let clone3 = clone2.clone();
+
+                    let leaf = clone3.clone().spawn({
+                        move |_| async move {
+                            leaf_started_tx.send(()).unwrap();
+                            pending::<()>().await;
+                        }
+                    });
+
+                    leaf_handle_tx
+                        .send(leaf)
+                        .unwrap_or_else(|_| panic!("leaf handle receiver dropped"));
+                    pending::<()>().await;
+                }
+            });
+
+            leaf_started_rx.await.unwrap();
+            let leaf_handle = leaf_handle_rx.await.unwrap();
+
+            parent.abort();
+            assert!(parent.await.is_err());
+            assert!(leaf_handle.await.is_err());
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -2069,6 +2108,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_supervision_tree_sparse_clone_chain() {
+        let runner = deterministic::Runner::default();
+        test_supervision_tree_sparse_clone_chain(runner);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -2343,6 +2388,12 @@ mod tests {
     fn test_tokio_supervision_tree_clone_chain() {
         let runner = tokio::Runner::default();
         test_supervision_tree_clone_chain(runner);
+    }
+
+    #[test]
+    fn test_tokio_supervision_tree_sparse_clone_chain() {
+        let runner = tokio::Runner::default();
+        test_supervision_tree_sparse_clone_chain(runner);
     }
 
     #[test]
