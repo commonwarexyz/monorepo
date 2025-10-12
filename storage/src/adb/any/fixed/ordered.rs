@@ -145,7 +145,7 @@ impl<
                 Operation::Delete(key) => {
                     let old_loc =
                         Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
-                    callback(false, old_loc);
+                    callback(false, Some(old_loc));
                 }
                 Operation::Update(data) => {
                     let old_loc =
@@ -191,11 +191,13 @@ impl<
             .snapshot
             .get_mut(key)
             .expect("key should be known to exist");
-        if cursor.find(|&loc| *loc == old_loc) {
-            cursor.update(new_loc);
-            return Ok(());
-        }
-        unreachable!("prev_key with given old_loc should have been found");
+        assert!(
+            cursor.find(|&loc| *loc == old_loc),
+            "prev_key with given old_loc should have been found"
+        );
+        cursor.update(new_loc);
+
+        Ok(())
     }
 
     /// Find and return the data from the update operation for `key`, if it exists. The cursor is
@@ -354,13 +356,14 @@ impl<
             .snapshot
             .get_mut(&prev_key_data.key)
             .expect("prev_key already known to exist");
-        if cursor.find(|&l| *l == loc) {
-            cursor.update(next_loc + 1);
-            callback(Some(loc));
-            return Ok(UpdateLocResult::NotExists(prev_key_data));
-        }
+        assert!(
+            cursor.find(|&l| *l == loc),
+            "prev_key should have been found"
+        );
+        cursor.update(next_loc + 1);
+        callback(Some(loc));
 
-        unreachable!("prev_key should have been found");
+        Ok(UpdateLocResult::NotExists(prev_key_data))
     }
 
     /// Get the update operation corresponding to a location from the snapshot.
@@ -442,36 +445,11 @@ impl<
         // If we get here, then `key` must precede the first key in the snapshot, in which case we
         // have to cycle around to the very last key.
         let iter = self.snapshot.last_translated_key();
-        let span = Self::find_span(&self.log, iter, key).await?;
-        if let Some(span) = span {
-            return Ok(Some(span));
-        }
+        let span = Self::find_span(&self.log, iter, key)
+            .await?
+            .expect("a span that includes any given key should always exist if db is non-empty");
 
-        // A span that includes any given key should always exist.
-        unreachable!("get_span: span should have been found");
-    }
-
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-
-        assert!(loc < self.op_count());
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        Ok(self.log.read(*loc).await?.into_value())
+        Ok(Some(span))
     }
 
     /// Get the value, next-key, and location of the active operation for `key` in the db, or None
@@ -645,9 +623,7 @@ impl<
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
-        let Some(prev_key) = prev_key else {
-            unreachable!("prev_key should have been found");
-        };
+        let prev_key = prev_key.expect("prev_key should have been found");
 
         let loc = self.op_count();
         callback(true, Some(prev_key.0));
@@ -664,28 +640,28 @@ impl<
         Ok(())
     }
 
-    /// Delete `key` from the snapshot if it exists, returning the location that was previously
+    /// Delete `key` that is known to be in the snapshot, returning the location that was previously
     /// associated with it. For use by log-replay.
     async fn replay_delete(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return Ok(None);
-        };
+    ) -> Result<Location, Error> {
+        // Get a cursor to look for the key, which should be in the snapshot.
+        let mut cursor = snapshot
+            .get_mut(key)
+            .expect("replay shouldn't try to delete a key that isn't in the snapshot");
 
         // Find the matching key among all conflicts, then delete it.
-        if let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(loc < delete_loc);
-            cursor.delete();
-            return Ok(Some(loc));
-        }
+        let (loc, _, _, _) = Self::find_update_op(log, &mut cursor, key)
+            .await?
+            .expect("replay shouldn't try to delete a key that isn't in the snapshot - case 2");
 
-        // The key isn't in the conflicting keys, so this is a no-op.
-        Ok(None)
+        assert!(loc < delete_loc);
+        cursor.delete();
+
+        Ok(loc)
     }
 
     /// Return the root of the db.
