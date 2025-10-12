@@ -641,19 +641,20 @@ impl<
     }
 
     /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it. For use by log-replay.
+    /// associated with it. For use by log-replay. Because of pruning, it's possible that certain
+    /// keys deleted by reply might not exist in the snapshot.
     async fn replay_delete(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        // Get a cursor to look for the key, which should be in the snapshot.
+        // Get a cursor to look for the key if it exists in the snapshot.
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return Ok(None);
         };
 
-        // Find the matching key among all conflicts, then delete it.
+        // Find the matching key among all conflicts if it exists, then delete it.
         let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? else {
             return Ok(None);
         };
