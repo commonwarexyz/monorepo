@@ -6,7 +6,7 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Automaton, Epochable, Relay, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, PrivateKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -19,7 +19,7 @@ use futures::{
 pub enum Message<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// A request for the genesis payload.
@@ -55,7 +55,7 @@ where
 pub struct Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     sender: mpsc::Sender<Message<H, C, V>>,
@@ -64,7 +64,7 @@ where
 impl<H, C, V> Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new application mailbox.
@@ -76,7 +76,7 @@ where
 impl<H, C, V> Automaton for Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Digest = H::Digest;
@@ -126,7 +126,7 @@ where
 impl<H, C, V> Relay for Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Digest = H::Digest;
@@ -142,7 +142,7 @@ where
 impl<H, C, V> Reporter for Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Activity = Block<H, C, V>;

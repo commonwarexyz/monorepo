@@ -10,7 +10,7 @@ use commonware_cryptography::{
         dkg::player::Output,
         primitives::{group::Share, poly::Public, variant::Variant},
     },
-    Digestible, Hasher, PrivateKey,
+    Digestible, Hasher, Signer,
 };
 use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
@@ -23,7 +23,7 @@ use tracing::info;
 pub struct Actor<E, H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
@@ -36,7 +36,7 @@ impl<E, H, C, V> Actor<E, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore,
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].

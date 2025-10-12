@@ -10,6 +10,7 @@ use tracing::Level;
 
 mod application;
 mod dkg;
+mod engine;
 mod orchestrator;
 mod setup;
 mod utils;

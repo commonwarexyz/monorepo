@@ -7,7 +7,7 @@ use commonware_cryptography::{
         dkg::types::{Ack, Share},
         primitives::{group, poly::Public, variant::Variant},
     },
-    PrivateKey, Signature,
+    Signature, Signer,
 };
 
 /// The namespace used when signing [DealOutcome]s.
@@ -17,7 +17,7 @@ pub const OUTCOME_NAMESPACE: &[u8] = b"RESHARE_OUTCOME";
 ///
 /// [Dealer]: commonware_cryptography::bls12381::dkg::Dealer
 #[derive(Clone)]
-pub struct DealOutcome<C: PrivateKey, V: Variant> {
+pub struct DealOutcome<C: Signer, V: Variant> {
     /// The public key of the dealer.
     pub dealer: C::PublicKey,
 
@@ -37,8 +37,8 @@ pub struct DealOutcome<C: PrivateKey, V: Variant> {
     pub reveals: Vec<group::Share>,
 }
 
-impl<C: PrivateKey, V: Variant> DealOutcome<C, V> {
-    /// Creates a new [DealOutcome], signing its inner payload with the [Dealer]'s [PrivateKey].
+impl<C: Signer, V: Variant> DealOutcome<C, V> {
+    /// Creates a new [DealOutcome], signing its inner payload with the [Dealer]'s [Signer].
     ///
     /// [Dealer]: commonware_cryptography::bls12381::dkg::Dealer
     pub fn new(
@@ -88,7 +88,7 @@ impl<C: PrivateKey, V: Variant> DealOutcome<C, V> {
     }
 }
 
-impl<C: PrivateKey, V: Variant> Write for DealOutcome<C, V> {
+impl<C: Signer, V: Variant> Write for DealOutcome<C, V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.dealer.write(buf);
         self.dealer_signature.write(buf);
@@ -99,7 +99,7 @@ impl<C: PrivateKey, V: Variant> Write for DealOutcome<C, V> {
     }
 }
 
-impl<C: PrivateKey, V: Variant> EncodeSize for DealOutcome<C, V> {
+impl<C: Signer, V: Variant> EncodeSize for DealOutcome<C, V> {
     fn encode_size(&self) -> usize {
         self.dealer.encode_size()
             + self.dealer_signature.encode_size()
@@ -110,7 +110,7 @@ impl<C: PrivateKey, V: Variant> EncodeSize for DealOutcome<C, V> {
     }
 }
 
-impl<C: PrivateKey, V: Variant> Read for DealOutcome<C, V> {
+impl<C: Signer, V: Variant> Read for DealOutcome<C, V> {
     type Cfg = usize;
 
     fn read_cfg(

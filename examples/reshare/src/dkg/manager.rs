@@ -15,7 +15,7 @@ use commonware_cryptography::{
         },
         primitives::{group, poly::Public, variant::Variant},
     },
-    Hasher, PrivateKey, Verifier,
+    Hasher, Signer, Verifier,
 };
 use commonware_p2p::{
     utils::mux::{MuxHandle, SubReceiver, SubSender},
@@ -43,7 +43,7 @@ const CONCURRENCY: usize = 1;
 pub struct DkgManager<'ctx, V, P, S, R>
 where
     V: Variant,
-    P: PrivateKey,
+    P: Signer,
     S: Sender<PublicKey = P::PublicKey>,
     R: Receiver<PublicKey = P::PublicKey>,
 {
@@ -73,7 +73,7 @@ where
 }
 
 /// Metadata associated with a [Dealer].
-struct DealerMetadata<P: PrivateKey, V: Variant> {
+struct DealerMetadata<P: Signer, V: Variant> {
     /// The [Dealer] object.
     dealer: Dealer<P::PublicKey, V>,
     /// The [Dealer]'s commitment.
@@ -97,7 +97,7 @@ pub enum RoundResult<V: Variant> {
 impl<'ctx, V, P, S, R> DkgManager<'ctx, V, P, S, R>
 where
     V: Variant,
-    P: PrivateKey,
+    P: Signer,
     S: Sender<PublicKey = P::PublicKey>,
     R: Receiver<PublicKey = P::PublicKey>,
 {

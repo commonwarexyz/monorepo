@@ -12,40 +12,40 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
-    Committable, Hasher, PrivateKey,
+    Committable, Hasher, Signer,
 };
 use commonware_p2p::{
-    authenticated::discovery::Oracle,
     utils::mux::{MuxHandle, Muxer},
-    Receiver, Sender,
+    Blocker, Receiver, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, tokio, ContextCell, Handle, Metrics, Spawner,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::Quota;
+use governor::{clock::Clock as GClock, Quota};
+use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::info;
 
 const METADATA_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// Configuration for the orchestrator.
-pub struct Config<V, C, H, A>
+pub struct Config<B, V, C, H, A>
 where
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    pub oracle: Oracle<C::PublicKey>,
+    pub oracle: B,
     pub signer: C,
     pub application: A,
     pub marshal: marshal::Mailbox<V, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
-    pub validators: Vec<C::PublicKey>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
 
@@ -53,23 +53,24 @@ where
     pub partition_prefix: String,
 }
 
-pub struct Actor<V, C, H, A>
+pub struct Actor<E, B, V, C, H, A>
 where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    context: ContextCell<tokio::Context>,
+    context: ContextCell<E>,
     mailbox: mpsc::Receiver<EpochTransition<V, H, C::PublicKey>>,
     signer: C,
     application: A,
 
-    oracle: Oracle<C::PublicKey>,
+    oracle: B,
     marshal: marshal::Mailbox<V, Block<H, C, V>>,
 
     namespace: Vec<u8>,
-    validators: Vec<C::PublicKey>,
     muxer_size: usize,
     partition_prefix: String,
 
@@ -77,17 +78,16 @@ where
     engine: Option<Handle<()>>,
 }
 
-impl<V, C, H, A> Actor<V, C, H, A>
+impl<E, B, V, C, H, A> Actor<E, B, V, C, H, A>
 where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: PrivateKey,
+    C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    pub fn new(
-        context: tokio::Context,
-        config: Config<V, C, H, A>,
-    ) -> (Self, Mailbox<V, H, C::PublicKey>) {
+    pub fn new(context: E, config: Config<B, V, C, H, A>) -> (Self, Mailbox<V, H, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         (
@@ -99,7 +99,6 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 namespace: config.namespace,
-                validators: config.validators,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 epoch: 0,
@@ -192,9 +191,6 @@ where
         .await
         .expect("failed to initialize orchestrator metadata");
 
-        // Register all possible validators
-        self.oracle.register(0, self.validators.clone()).await;
-
         // Enter the initial epoch
         let (initial_epoch, initial_seed) = metadata
             .get(&METADATA_KEY)
@@ -243,7 +239,7 @@ where
         polynomial: Public<V>,
         share: Option<group::Share>,
         participants: Vec<C::PublicKey>,
-        metadata: &mut Metadata<ContextCell<tokio::Context>, FixedBytes<1>, (Epoch, H::Digest)>,
+        metadata: &mut Metadata<ContextCell<E>, FixedBytes<1>, (Epoch, H::Digest)>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,

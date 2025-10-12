@@ -5,7 +5,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
+    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
 };
 
 /// A block in the reshare chain.
@@ -13,7 +13,7 @@ use commonware_cryptography::{
 pub struct Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// The parent digest.
@@ -29,7 +29,7 @@ where
 impl<H, C, V> Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new [Block].
@@ -49,7 +49,7 @@ where
 impl<H, C, V> Write for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     fn write(&self, buf: &mut impl BufMut) {
@@ -62,7 +62,7 @@ where
 impl<H, C, V> EncodeSize for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     fn encode_size(&self) -> usize {
@@ -73,7 +73,7 @@ where
 impl<H, C, V> Read for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Cfg = usize;
@@ -90,7 +90,7 @@ where
 impl<H, C, V> Digestible for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Digest = H::Digest;
@@ -106,7 +106,7 @@ where
 impl<H, C, V> Committable for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Commitment = H::Digest;
@@ -119,7 +119,7 @@ where
 impl<H, C, V> ConsensusBlock for Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     fn parent(&self) -> Self::Commitment {
@@ -135,7 +135,7 @@ where
 pub fn genesis_block<H, C, V>() -> Block<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     Block::new(H::empty(), 0, None)

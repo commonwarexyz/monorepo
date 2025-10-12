@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_consensus::{marshal, types::Round};
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
+    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{
@@ -22,7 +22,7 @@ use tracing::{info, warn};
 pub struct Actor<E, H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
@@ -33,7 +33,7 @@ impl<E, H, C, V> Actor<E, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new application [Actor] and its associated [Mailbox].

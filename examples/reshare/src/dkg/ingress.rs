@@ -4,7 +4,7 @@
 
 use crate::{application::Block, dkg::DealOutcome};
 use commonware_consensus::Reporter;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, PrivateKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -17,7 +17,7 @@ use futures::{
 pub enum Message<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
@@ -38,7 +38,7 @@ where
 pub struct Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     sender: mpsc::Sender<Message<H, C, V>>,
@@ -47,7 +47,7 @@ where
 impl<H, C, V> Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     /// Create a new mailbox.
@@ -72,7 +72,7 @@ where
 impl<H, C, V> Reporter for Mailbox<H, C, V>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
 {
     type Activity = Block<H, C, V>;

@@ -31,6 +31,9 @@ commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 clap = { workspace = true, features = ["derive"] }
 
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
 [[bin]]
 name = "commonware-reshare"
 bench = false
