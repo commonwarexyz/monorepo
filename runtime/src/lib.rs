@@ -1550,50 +1550,56 @@ mod tests {
 
     fn test_supervision_tree_clone_chain<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock + Metrics,
+        R::Context: Spawner + Clock,
     {
-        use futures::{channel::mpsc, StreamExt};
-        use std::sync::{Arc, Mutex};
+        use futures::future::pending;
 
         runner.start(|context| async move {
-            let handles: Arc<Mutex<Vec<Handle<()>>>> = Arc::new(Mutex::new(Vec::new()));
-            let (mut started_tx, mut started_rx) = mpsc::channel(3);
+            let (parent_started_tx, parent_started_rx) = oneshot::channel();
+            let (child_started_tx, child_started_rx) = oneshot::channel();
+            let (grandchild_started_tx, grandchild_started_rx) = oneshot::channel();
+            let (child_handle_tx, child_handle_rx) = oneshot::channel();
+            let (grandchild_handle_tx, grandchild_handle_rx) = oneshot::channel();
 
-            let handles_root = handles.clone();
-            let parent = context.clone().spawn(move |context| async move {
-                let handles = handles_root.clone();
-                let mut started_tx_child = started_tx.clone();
-
-                let child_handle = context.clone().spawn(move |context| async move {
-                    let handles = handles.clone();
-                    let mut started_tx_grandchild = started_tx_child.clone();
-
-                    let grandchild_handle =
-                        context.with_label("grandchild").spawn(|_| async move {
-                            started_tx_grandchild.send(()).await.unwrap();
-                            futures::future::pending::<()>().await;
-                        });
-                    handles.lock().unwrap().push(grandchild_handle);
-                    started_tx_child.send(()).await.unwrap();
-                    futures::future::pending::<()>().await;
-                });
-
-                handles.lock().unwrap().push(child_handle);
-                started_tx.send(()).await.unwrap();
-                futures::future::pending::<()>().await;
+            let parent = context.clone().spawn({
+                move |context| async move {
+                    let child = context.clone().spawn({
+                        move |context| async move {
+                            let grandchild = context.clone().spawn({
+                                move |_| async move {
+                                    grandchild_started_tx.send(()).unwrap();
+                                    pending::<()>().await;
+                                }
+                            });
+                            assert!(
+                                grandchild_handle_tx.send(grandchild).is_ok(),
+                                "grandchild handle receiver dropped"
+                            );
+                            child_started_tx.send(()).unwrap();
+                            pending::<()>().await;
+                        }
+                    });
+                    assert!(
+                        child_handle_tx.send(child).is_ok(),
+                        "child handle receiver dropped"
+                    );
+                    parent_started_tx.send(()).unwrap();
+                    pending::<()>().await;
+                }
             });
 
-            for _ in 0..3 {
-                started_rx.next().await.unwrap();
-            }
+            parent_started_rx.await.unwrap();
+            child_started_rx.await.unwrap();
+            grandchild_started_rx.await.unwrap();
+
+            let child_handle = child_handle_rx.await.unwrap();
+            let grandchild_handle = grandchild_handle_rx.await.unwrap();
 
             parent.abort();
             assert!(parent.await.is_err());
 
-            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
-            for handle in handles {
-                assert!(handle.await.is_err());
-            }
+            assert!(child_handle.await.is_err());
+            assert!(grandchild_handle.await.is_err());
         });
     }
 
