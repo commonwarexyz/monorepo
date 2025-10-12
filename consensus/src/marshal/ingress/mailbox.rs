@@ -46,6 +46,11 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     }
 }
 
+/// An error indicating that the mailbox is closed because the receiver was dropped.
+#[derive(Debug, thiserror::Error)]
+#[error("mailbox closed")]
+pub struct Closed;
+
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
 ///
 /// These messages are sent from the consensus engine and other parts of the
@@ -122,26 +127,16 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<(u64, B::Commitment)> {
+    ) -> Result<Option<(u64, B::Commitment)>, Closed> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
+        self.sender
             .send(Message::GetInfo {
                 identifier: identifier.into(),
                 response: tx,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get info message to actor: receiver dropped");
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get info: receiver dropped");
-                None
-            }
-        }
+            .map_err(|_| Closed)?;
+        rx.await.map_err(|_| Closed)
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -149,26 +144,16 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_block(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<B> {
+    ) -> Result<Option<B>, Closed> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
+        self.sender
             .send(Message::GetBlock {
                 identifier: identifier.into(),
                 response: tx,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get block message to actor: receiver dropped");
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get block: receiver dropped");
-                None
-            }
-        }
+            .map_err(|_| Closed)?;
+        rx.await.map_err(|_| Closed)
     }
 
     /// A request to retrieve a block by its commitment.
@@ -186,43 +171,33 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        if self
+        // Ignore the result.
+        // If the channel is closed, the returned `oneshot::Receiver` will result in an error.
+        let _ = self
             .sender
             .send(Message::Subscribe {
                 round,
                 commitment,
                 response: tx,
             })
-            .await
-            .is_err()
-        {
-            error!("failed to send subscribe message to actor: receiver dropped");
-        }
+            .await;
         rx
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
-        if self
-            .sender
+    pub async fn broadcast(&mut self, block: B) -> Result<(), Closed> {
+        self.sender
             .send(Message::Broadcast { block })
             .await
-            .is_err()
-        {
-            error!("failed to send broadcast message to actor: receiver dropped");
-        }
+            .map_err(|_| Closed)
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
+    pub async fn verified(&mut self, round: Round, block: B) -> Result<(), Closed> {
+        self.sender
             .send(Message::Verified { round, block })
             .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
+            .map_err(|_| Closed)
     }
 }
 
