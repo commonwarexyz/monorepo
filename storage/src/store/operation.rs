@@ -716,6 +716,34 @@ mod tests {
     }
 
     #[test]
+    fn test_into_value() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let update_op = Fixed::Update(key.clone(), value.clone());
+        assert_eq!(value, update_op.into_value().unwrap());
+
+        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_value());
+
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.into_value());
+
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
+        assert_eq!(value, update_op.into_value().unwrap());
+
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_value());
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.into_value());
+    }
+
+    #[test]
     fn test_operation_array_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
