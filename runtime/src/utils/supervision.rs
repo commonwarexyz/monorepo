@@ -9,6 +9,9 @@ use super::Aborter;
 /// of that node to the spawned task. When a context finishes or is aborted, the runtime drains the
 /// node and aborts all descendant tasks.
 pub(crate) struct SupervisionTree {
+    // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
+    // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
+    // pointers that cannot be upgraded during abort cascades.
     _parent: Option<Arc<SupervisionTree>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
     tasks: Mutex<Vec<Aborter>>,
