@@ -15,7 +15,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Aborter, Panicker},
+    utils::{signal::Stopper, Panicker, SupervisionTree},
     Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -340,7 +340,7 @@ impl crate::Runner for Runner {
             name: label.name(),
             executor: executor.clone(),
             network,
-            children: Arc::new(Mutex::new(Vec::new())),
+            tree: SupervisionTree::root(),
             model: Model::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
@@ -369,14 +369,26 @@ cfg_if::cfg_if! {
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<Aborter>>>,
+    tree: Arc<SupervisionTree>,
     model: Model,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+            tree: SupervisionTree::child(&self.tree),
+            model: self.model,
+        }
+    }
 }
 
 impl Context {
@@ -416,26 +428,21 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
+        // Track supervision before resetting configuration.
+        let supervised = self.model.is_supervised();
+        let parent_tree = self.tree.clone();
+        let child_tree = SupervisionTree::child(&parent_tree);
 
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.model.is_dedicated();
         let blocking = self.model.is_blocking();
         self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
+        self.tree = child_tree.clone();
 
         // Spawn the task
         let future = f(self);
-        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), child_tree);
         if dedicated {
             thread::spawn({
                 // Ensure the task can access the tokio runtime
@@ -457,8 +464,10 @@ impl crate::Spawner for Context {
         }
 
         // Register this child with the parent
-        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-            parent_children.lock().unwrap().push(aborter);
+        if supervised {
+            if let Some(aborter) = handle.aborter() {
+                parent_tree.register_task(aborter);
+            }
         }
 
         handle

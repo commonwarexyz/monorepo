@@ -1,4 +1,7 @@
-use crate::{utils::extract_panic_message, Error};
+use crate::{
+    utils::{extract_panic_message, SupervisionTree},
+    Error,
+};
 use futures::{
     channel::oneshot,
     future::{select, Either},
@@ -35,7 +38,7 @@ where
         f: F,
         metric: MetricHandle,
         panicker: Panicker,
-        children: Arc<Mutex<Vec<Aborter>>>,
+        tree: Arc<SupervisionTree>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -61,18 +64,11 @@ where
         };
 
         // Make the future abortable
-        let abortable = {
-            let metric = metric.clone();
-            Abortable::new(wrapped, abort_registration).map(move |_| {
-                // Abort all children
-                for aborter in children.lock().unwrap().drain(..) {
-                    aborter.abort();
-                }
-
-                // Mark the task as finished
-                metric.finish();
-            })
-        };
+        let metric_handle = metric.clone();
+        let abortable = Abortable::new(wrapped, abort_registration).map(move |_| {
+            tree.abort_descendants();
+            metric_handle.finish();
+        });
 
         (
             abortable,

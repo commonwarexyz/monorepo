@@ -488,7 +488,7 @@ mod tests {
 
     fn test_clock_sleep<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Clock + Metrics,
     {
         runner.start(|context| async move {
             // Capture initial time
@@ -504,7 +504,7 @@ mod tests {
 
     fn test_clock_sleep_until<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Clock + Metrics,
     {
         runner.start(|context| async move {
             // Trigger sleep
@@ -1548,6 +1548,55 @@ mod tests {
         });
     }
 
+    fn test_supervision_tree_clone_chain<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock + Metrics,
+    {
+        use futures::{channel::mpsc, StreamExt};
+        use std::sync::{Arc, Mutex};
+
+        runner.start(|context| async move {
+            let handles: Arc<Mutex<Vec<Handle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+            let (mut started_tx, mut started_rx) = mpsc::channel(3);
+
+            let handles_root = handles.clone();
+            let parent = context.clone().spawn(move |context| async move {
+                let handles = handles_root.clone();
+                let mut started_tx_child = started_tx.clone();
+
+                let child_handle = context.clone().spawn(move |context| async move {
+                    let handles = handles.clone();
+                    let mut started_tx_grandchild = started_tx_child.clone();
+
+                    let grandchild_handle =
+                        context.with_label("grandchild").spawn(|_| async move {
+                            started_tx_grandchild.send(()).await.unwrap();
+                            futures::future::pending::<()>().await;
+                        });
+                    handles.lock().unwrap().push(grandchild_handle);
+                    started_tx_child.send(()).await.unwrap();
+                    futures::future::pending::<()>().await;
+                });
+
+                handles.lock().unwrap().push(child_handle);
+                started_tx.send(()).await.unwrap();
+                futures::future::pending::<()>().await;
+            });
+
+            for _ in 0..3 {
+                started_rx.next().await.unwrap();
+            }
+
+            parent.abort();
+            assert!(parent.await.is_err());
+
+            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+            for handle in handles {
+                assert!(handle.await.is_err());
+            }
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -2008,6 +2057,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_supervision_tree_clone_chain() {
+        let runner = deterministic::Runner::default();
+        test_supervision_tree_clone_chain(runner);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -2276,6 +2331,12 @@ mod tests {
     fn test_tokio_clone_context_no_child_inheritance() {
         let runner = tokio::Runner::default();
         test_clone_context_no_child_inheritance(runner);
+    }
+
+    #[test]
+    fn test_tokio_supervision_tree_clone_chain() {
+        let runner = tokio::Runner::default();
+        test_supervision_tree_clone_chain(runner);
     }
 
     #[test]

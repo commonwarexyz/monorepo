@@ -34,7 +34,7 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter, Panicker,
+        Panicker, SupervisionTree,
     },
     Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
@@ -696,14 +696,26 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<Aborter>>>,
+    tree: Arc<SupervisionTree>,
     model: Model,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            tree: SupervisionTree::child(&self.tree),
+            model: self.model,
+        }
+    }
 }
 
 impl Context {
@@ -749,7 +761,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                children: Arc::new(Mutex::new(Vec::new())),
+                tree: SupervisionTree::root(),
                 model: Model::default(),
             },
             executor,
@@ -804,7 +816,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                children: Arc::new(Mutex::new(Vec::new())),
+                tree: SupervisionTree::root(),
                 model: Model::default(),
             },
             executor,
@@ -858,29 +870,26 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
+        // Track supervision before resetting configuration.
+        let supervised = self.model.is_supervised();
+        let parent_tree = self.tree.clone();
+        let child_tree = SupervisionTree::child(&parent_tree);
 
         // Set up the task
         let executor = self.executor();
         self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
+        self.tree = child_tree.clone();
 
         // Spawn the task (we don't care about Model)
         let future = f(self);
-        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), child_tree);
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
-        // Register this child with the parent
-        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-            parent_children.lock().unwrap().push(aborter);
+        // Register this child with the parent if supervision is enabled.
+        if supervised {
+            if let Some(aborter) = handle.aborter() {
+                parent_tree.register_task(aborter);
+            }
         }
 
         handle
