@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_array_basic() {
+    fn test_operation_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_array_codec() {
+    fn test_operation_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
         let update_op = Fixed::Update(key, value);
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_operation_array_basic() {
+    fn test_ordered_operation_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
