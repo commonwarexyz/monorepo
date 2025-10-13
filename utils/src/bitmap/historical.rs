@@ -392,12 +392,6 @@ impl<const N: usize> Historical<N> {
         let target_pruned = diff.metadata.pruned_chunks;
         let newer_pruned = newer_state.pruned_chunks();
 
-        // Invariant: Pruning only increases over time
-        assert!(
-            target_pruned <= newer_pruned,
-            "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
-        );
-
         // Phase 1: Restore pruned chunks
         assert!(
             target_pruned <= newer_pruned,
