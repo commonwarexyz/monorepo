@@ -163,7 +163,7 @@ impl<
         };
 
         // Find the matching key among all conflicts, then update its location.
-        if let Some((loc, _, _)) = Self::find_update_op(log, &mut cursor, key).await? {
+        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
             assert!(new_loc > loc);
             cursor.update(new_loc);
             return Ok(Some(loc));
@@ -175,24 +175,24 @@ impl<
         Ok(None)
     }
 
-    /// Find and return the data from the update operation for `key`, if it exists. The cursor is
+    /// Find and return the location of the update operation for `key`, if it exists. The cursor is
     /// positioned at the matching location, and can be used to update or delete the key.
     async fn find_update_op(
         log: &Journal<E, Operation<K, V>>,
         cursor: &mut impl Cursor<Value = Location>,
         key: &K,
-    ) -> Result<Option<(Location, K, V)>, Error> {
+    ) -> Result<Option<Location>, Error> {
         while let Some(&loc) = cursor.next() {
-            let (k, v) = Self::get_update_op(log, loc).await?;
+            let (k, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
-                return Ok(Some((loc, k, v)));
+                return Ok(Some(loc));
             }
         }
 
         Ok(None)
     }
 
-    /// Get the update operation corresponding to a location from the snapshot.
+    /// Get the update operation from `log` corresponding to a known location.
     ///
     /// # Warning
     ///
@@ -319,7 +319,7 @@ impl<
         };
 
         // Find the matching key among all conflicts, then delete it.
-        if let Some((loc, _, _)) = Self::find_update_op(log, &mut cursor, key).await? {
+        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
             assert!(loc < delete_loc);
             cursor.delete();
             return Ok(Some(loc));

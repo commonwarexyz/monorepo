@@ -52,7 +52,7 @@ pub struct Any<
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
-    /// # Invariant
+    /// # Invariants
     ///
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
@@ -72,7 +72,7 @@ pub struct Any<
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
-    /// # Invariant
+    /// # Invariants
     ///
     /// Only references operations of type [Operation::Update].
     pub(super) snapshot: Index<T, Location>,
@@ -200,17 +200,17 @@ impl<
         Ok(())
     }
 
-    /// Find and return the data from the update operation for `key`, if it exists. The cursor is
+    /// Find and return the update update operation for `key`, if it exists. The cursor is
     /// positioned at the matching location, and can be used to update or delete the key.
     async fn find_update_op(
         log: &Journal<E, Operation<K, V>>,
         cursor: &mut impl Cursor<Value = Location>,
         key: &K,
-    ) -> Result<Option<(Location, K, V, K)>, Error> {
+    ) -> Result<Option<Location>, Error> {
         while let Some(&loc) = cursor.next() {
             let data = Self::get_update_op(log, loc).await?;
             if data.key == *key {
-                return Ok(Some((loc, data.key, data.value, data.next_key)));
+                return Ok(Some(loc));
             }
         }
 
@@ -232,7 +232,7 @@ impl<
         };
 
         // Find the matching key among all conflicts, then update its location.
-        if let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? {
+        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
             assert!(new_loc > loc);
             cursor.update(new_loc);
             return Ok(Some(loc));
@@ -297,8 +297,8 @@ impl<
                     .await;
             };
 
-            // Iterate over conflicts in the snapshot to try and find the key, or its predecessor if it
-            // doesn't exist.
+            // Iterate over conflicts in the snapshot entry to try and find the key, or its
+            // predecessor if it doesn't exist.
             while let Some(&loc) = cursor.next() {
                 let data = Self::get_update_op(&self.log, loc).await?;
                 if data.key == *key {
@@ -366,7 +366,7 @@ impl<
         Ok(UpdateLocResult::NotExists(prev_key_data))
     }
 
-    /// Get the update operation corresponding to a location from the snapshot.
+    /// Get the update operation from `log` corresponding to a known location.
     ///
     /// # Warning
     ///
@@ -404,7 +404,7 @@ impl<
         key: &K,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         for &loc in iter {
-            // Iterate over all conflicting keys in the snapshot to find the span.
+            // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(log, loc).await?;
             if data.key >= data.next_key {
                 // cyclic span case
@@ -573,7 +573,7 @@ impl<
                 return Ok(());
             };
 
-            // Iterate over all conflicting keys in the snapshot to delete the key if it exists, and
+            // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
             // potentially find the previous key.
             while let Some(&loc) = cursor.next() {
                 let data = Self::get_update_op(&self.log, loc).await?;
@@ -655,7 +655,7 @@ impl<
         };
 
         // Find the matching key among all conflicts if it exists, then delete it.
-        let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? else {
+        let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? else {
             return Ok(None);
         };
 

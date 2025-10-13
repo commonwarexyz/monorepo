@@ -203,7 +203,6 @@ fn fuzz(data: FuzzInput) {
 
             match expected_state.get(key) {
                 Some(expected_value) => {
-                    assert!(result.is_some(), "Lost value for key {key:?} at end");
                     let v = result.expect("get should not fail");
                     let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                     assert_eq!(
