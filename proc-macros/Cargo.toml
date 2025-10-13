@@ -1,5 +1,5 @@
 [package]
-name = "commonware-macros"
+name = "commonware-proc-macros"
 edition.workspace = true
 publish = true
 version.workspace = true
@@ -12,17 +12,12 @@ documentation = "https://docs.rs/commonware-macros"
 
 [lib]
 bench = false
-proc-macro = false
+proc-macro = true
 
 [dependencies]
-commonware-proc-macros = { workspace = true }
-
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-futures = { workspace = true }
-
-[dev-dependencies]
-futures-timer = "3.0.3"
+syn = { version = "1.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
 
 # `futures-timer` is exercised only in doctests, so cargo-udeps flags it falsely.
 [package.metadata.cargo-udeps.ignore]
