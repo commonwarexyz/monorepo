@@ -57,7 +57,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(super) mmr: Mmr<E, H>,
+    mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -67,7 +67,7 @@ pub struct Any<
     /// - An operation's location is always equal to the number of the MMR leaf storing the digest
     ///   of the operation.
     /// - The log is never pruned beyond the inactivity floor.
-    pub(super) log: Journal<E, Operation<K, V>>,
+    log: Journal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -75,18 +75,18 @@ pub struct Any<
     /// # Invariants
     ///
     /// Only references operations of type [Operation::Update].
-    pub(super) snapshot: Index<T, Location>,
+    snapshot: Index<T, Location>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(super) inactivity_floor_loc: Location,
+    inactivity_floor_loc: Location,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
-    pub(super) steps: u64,
+    steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(super) hasher: Standard<H>,
+    hasher: Standard<H>,
 }
 
 impl<
@@ -124,7 +124,7 @@ impl<
     /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
     /// status updates. The first argument of the callback is the activity status of the operation,
     /// and the second argument is the location of the operation it inactivates (if any).
-    pub(super) async fn build_snapshot_from_log<F>(
+    async fn build_snapshot_from_log<F>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, Location>,
@@ -454,7 +454,7 @@ impl<
 
     /// Get the value, next-key, and location of the active operation for `key` in the db, or None
     /// if it has no value.
-    pub(super) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
+    async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
             let data = Self::get_update_op(&self.log, loc).await?;
             if data.key == *key {
@@ -495,7 +495,7 @@ impl<
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
     /// invoked with the old location of the affected key (if any).
-    pub(super) async fn update_with_callback(
+    async fn update_with_callback(
         &mut self,
         key: K,
         value: V,
@@ -559,7 +559,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
     /// invoked with the old location of the affected key (if any).
-    pub(super) async fn delete_with_callback(
+    async fn delete_with_callback(
         &mut self,
         key: K,
         mut callback: impl FnMut(bool, Option<Location>),
@@ -676,7 +676,7 @@ impl<
 
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
     /// until the next successful `commit`.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
@@ -774,7 +774,7 @@ impl<
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
-    pub(crate) async fn move_op_if_active(
+    async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
         old_loc: Location,
