@@ -804,7 +804,7 @@ impl<const N: usize> Historical<N> {
         if chunk_idx >= current_pruned {
             let bitmap_idx = chunk_idx - current_pruned;
             if bitmap_idx < self.current.chunks_len() {
-                return Some(*self.current.get_chunk_by_index(bitmap_idx));
+                return Some(*self.current.get_chunk(bitmap_idx));
             }
         }
         None

@@ -267,32 +267,10 @@ impl<const N: usize> Prunable<N> {
         BitMap::<N>::chunk(bit)
     }
 
-    /// Convert a bit into the number of the chunk it belongs to,
-    /// ignoring any pruning. This is an alias for `unpruned_chunk`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `bit / CHUNK_SIZE_BITS > usize::MAX`.
-    #[inline]
-    pub fn raw_chunk_index(bit: u64) -> usize {
-        Self::unpruned_chunk(bit)
-    }
-
     /// Get a reference to a chunk by its index in the current bitmap
     /// Note this is an index into the chunks, not a bit.
     #[inline]
     pub fn get_chunk(&self, chunk: usize) -> &[u8; N] {
-        self.bitmap.get_chunk(chunk)
-    }
-
-    /// Get a reference to a chunk by its index in the bitmap (not accounting for pruning).
-    /// This is useful for directly accessing chunks by their logical index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chunk index is out of bounds.
-    #[inline]
-    pub fn get_chunk_by_index(&self, chunk: usize) -> &[u8; N] {
         self.bitmap.get_chunk(chunk)
     }
 
