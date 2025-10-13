@@ -1953,7 +1953,7 @@ mod test {
                     db.delete(key).await.unwrap();
                 }
                 assert_eq!(keys.len(), 0);
-                assert_eq!(db.is_empty(), true);
+                assert!(db.is_empty());
                 assert_eq!(db.get_span(&Digest::random(rng)).await.unwrap(), None);
             }
 
