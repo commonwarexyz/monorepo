@@ -296,16 +296,20 @@ impl TryFrom<Position> for Location {
     /// This computation is O(log2(n)) in the given position.
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
+        // Reject positions beyond the valid MMR range. This ensures `pos + 1` won't overflow below.
         if *pos > MAX_POSITION {
             return Err(LocationError::Overflow(pos));
         }
+        // Position 0 is always the first leaf at location 0.
         if *pos == 0 {
             return Ok(Self(0));
         }
 
-        // Won't overflow since pos <= MAX_POSITION
+        // Find the height of the perfect binary tree containing this position.
+        // Safe: pos + 1 cannot overflow since pos <= MAX_POSITION (checked above).
         let start = u64::MAX >> (pos + 1).leading_zeros();
         let height = start.trailing_ones();
+        // Height 0 means this position is a peak (not a leaf in a tree).
         if height == 0 {
             return Err(LocationError::NonLeaf(pos));
         }
@@ -420,6 +424,10 @@ mod tests {
         let overflow_pos = Position::new(u64::MAX);
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
         assert_eq!(err, LocationError::Overflow(overflow_pos));
+
+        // MAX_POSITION doesn't overflow and isn't a leaf
+        let result = Location::try_from(MAX_POSITION);
+        assert_eq!(result, Err(LocationError::NonLeaf(MAX_POSITION)));
 
         let overflow_pos = MAX_POSITION + 1;
         let err = Location::try_from(overflow_pos).expect_err("should overflow");
