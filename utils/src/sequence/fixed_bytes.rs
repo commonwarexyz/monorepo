@@ -69,6 +69,12 @@ impl<const N: usize> Display for FixedBytes<N> {
     }
 }
 
+impl<const N: usize> From<[u8; N]> for FixedBytes<N> {
+    fn from(value: [u8; N]) -> Self {
+        Self::new(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +95,9 @@ mod tests {
         let value = [1, 2, 3, 4];
         let bytes = FixedBytes::new(value);
         assert_eq!(bytes.as_ref(), &value);
+
+        let bytes_into = value.into();
+        assert_eq!(bytes, bytes_into);
 
         let slice = [1, 2, 3, 4];
         let bytes_from_slice = FixedBytes::decode(slice.as_ref()).unwrap();
