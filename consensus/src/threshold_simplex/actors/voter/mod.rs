@@ -128,7 +128,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -272,7 +272,7 @@ mod tests {
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(Round::new(333, 100), 50, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
+                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -316,7 +316,7 @@ mod tests {
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
-                build_notarization(&signing_schemes, &namespace, &proposal, threshold as usize);
+                build_notarization(&signing_schemes, &namespace, &proposal, quorum as usize);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
                 .await;
@@ -325,7 +325,7 @@ mod tests {
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(Round::new(333, 300), 100, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
+                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -389,7 +389,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
         let activity_timeout: View = 10;
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -541,12 +541,8 @@ mod tests {
                 lf_target - 1,
                 Sha256::hash(b"test"),
             );
-            let (_, finalization) = build_finalization(
-                &signing_schemes,
-                &namespace,
-                &proposal_lf,
-                threshold as usize,
-            );
+            let (_, finalization) =
+                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -592,12 +588,8 @@ mod tests {
                 journal_floor_target - 1,
                 Sha256::hash(b"test2"),
             );
-            let (_, notarization_for_floor) = build_notarization(
-                &signing_schemes,
-                &namespace,
-                &proposal_jft,
-                threshold as usize,
-            );
+            let (_, notarization_for_floor) =
+                build_notarization(&signing_schemes, &namespace, &proposal_jft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -626,12 +618,8 @@ mod tests {
                 problematic_view - 1,
                 Sha256::hash(b"test3"),
             );
-            let (_, notarization_for_bft) = build_notarization(
-                &signing_schemes,
-                &namespace,
-                &proposal_bft,
-                threshold as usize,
-            );
+            let (_, notarization_for_bft) =
+                build_notarization(&signing_schemes, &namespace, &proposal_bft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -652,12 +640,8 @@ mod tests {
 
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
-            let (_, finalization) = build_finalization(
-                &signing_schemes,
-                &namespace,
-                &proposal_lf,
-                threshold as usize,
-            );
+            let (_, finalization) =
+                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -712,7 +696,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -818,7 +802,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, threshold as usize);
+                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;

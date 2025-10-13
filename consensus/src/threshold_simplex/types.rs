@@ -2848,10 +2848,10 @@ mod tests {
     fn notarization_verify_wrong_scheme<S: SigningScheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(3));
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
@@ -2878,10 +2878,10 @@ mod tests {
     fn notarization_verify_wrong_namespace<S: SigningScheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(4));
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
@@ -2903,14 +2903,14 @@ mod tests {
         notarization_verify_wrong_namespace(&ed_schemes);
     }
 
-    fn notarization_threshold_recover_insufficient_signatures<S: SigningScheme>(schemes: &[S]) {
-        let threshold = quorum(schemes.len() as u32);
-        assert!(threshold > 1, "test requires quorum larger than one");
+    fn notarization_recover_insufficient_signatures<S: SigningScheme>(schemes: &[S]) {
+        let quorum = quorum(schemes.len() as u32);
+        assert!(quorum > 1, "test requires quorum larger than one");
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(5));
         let notarizes: Vec<_> = schemes
             .iter()
-            .take((threshold - 1) as usize)
+            .take((quorum - 1) as usize)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
@@ -2921,12 +2921,12 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_recover_insufficient_signatures() {
+    fn test_notarization_recover_insufficient_signatures() {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 224);
-        notarization_threshold_recover_insufficient_signatures(&bls_threshold_schemes);
+        notarization_recover_insufficient_signatures(&bls_threshold_schemes);
 
         let ed_schemes = generate_ed25519_schemes(5);
-        notarization_threshold_recover_insufficient_signatures(&ed_schemes);
+        notarization_recover_insufficient_signatures(&ed_schemes);
     }
 
     fn conflicting_notarize_detection<S: SigningScheme>(scheme: &S, wrong_scheme: &S) {
@@ -2981,10 +2981,10 @@ mod tests {
     fn finalization_verify_wrong_scheme<S: SigningScheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(9));
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
@@ -3042,20 +3042,20 @@ mod tests {
         round: Round,
         parent_view: View,
         payload_val: u8,
-        threshold: u32,
+        quorum: u32,
     ) -> Notarization<S, Sha256> {
         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
     fn batch_verifier_add_notarize<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
         let round = Round::new(0, 1);
         let notarize1 = create_notarize(&schemes[0], round, 0, 1);
@@ -3085,7 +3085,7 @@ mod tests {
         verifier.add(Voter::Notarize(notarize_diff.clone()), false);
         assert_eq!(verifier.notarizes.len(), 2);
 
-        let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round2 = Round::new(0, 2);
         let notarize_non_leader = create_notarize(&schemes[1], round2, 1, 3);
         let notarize_leader = create_notarize(&schemes[0], round2, 1, 3);
@@ -3111,8 +3111,8 @@ mod tests {
     }
 
     fn batch_verifier_set_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
         let round = Round::new(0, 1);
         let leader_notarize = create_notarize(&schemes[0], round, 0, 1);
@@ -3145,8 +3145,8 @@ mod tests {
     }
 
     fn batch_verifier_ready_and_verify_notarizes<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(0, 1);
         let notarizes: Vec<_> = schemes
@@ -3183,7 +3183,7 @@ mod tests {
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());
 
-        let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round2 = Round::new(0, 2);
         let leader_vote = create_notarize(&schemes[0], round2, 1, 10);
         let mut faulty_vote = create_notarize(&schemes[1], round2, 1, 10);
@@ -3208,8 +3208,8 @@ mod tests {
     }
 
     fn batch_verifier_add_nullify<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let nullify = create_nullify(&schemes[0], round);
 
@@ -3229,8 +3229,8 @@ mod tests {
     }
 
     fn batch_verifier_ready_and_verify_nullifies<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(0, 1);
         let nullifies: Vec<_> = schemes
@@ -3264,8 +3264,8 @@ mod tests {
     }
 
     fn batch_verifier_add_finalize<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let finalize_a = create_finalize(&schemes[0], round, 0, 1);
         let finalize_b = create_finalize(&schemes[1], round, 0, 2);
@@ -3300,8 +3300,8 @@ mod tests {
     }
 
     fn batch_verifier_ready_and_verify_finalizes<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(0, 1);
         let finalizes: Vec<_> = schemes
@@ -3388,8 +3388,8 @@ mod tests {
     }
 
     fn batch_verifier_leader_proposal_filters_messages<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let proposal_a = Proposal::new(round, 0, sample_digest(10));
         let proposal_b = Proposal::new(round, 0, sample_digest(20));
@@ -3443,9 +3443,9 @@ mod tests {
     }
 
     fn batch_verifier_add_recovered_message_panics<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
-        let notarization = create_notarization(&schemes, Round::new(0, 1), 0, 1, threshold);
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let notarization = create_notarization(&schemes, Round::new(0, 1), 0, 1, quorum);
         verifier.add(Voter::Notarization(notarization), false);
     }
 
@@ -3462,8 +3462,8 @@ mod tests {
     }
 
     fn batch_verifier_notarizes_force_flag<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(0, 1);
         let leader_vote = create_notarize(&schemes[0], round, 0, 1);
@@ -3493,13 +3493,13 @@ mod tests {
     }
 
     fn batch_verifier_ready_notarizes_without_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
 
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| create_notarize(scheme, round, 0, 1))
             .collect();
 
@@ -3526,12 +3526,12 @@ mod tests {
     }
 
     fn batch_verifier_ready_finalizes_without_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(threshold as usize)
+            .take(quorum as usize)
             .map(|scheme| create_finalize(scheme, round, 0, 1))
             .collect();
 
@@ -3558,8 +3558,8 @@ mod tests {
     }
 
     fn batch_verifier_verify_notarizes_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
         verifier.set_leader_proposal(leader_proposal);
@@ -3575,8 +3575,8 @@ mod tests {
     }
 
     fn batch_verifier_verify_nullifies_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
@@ -3593,8 +3593,8 @@ mod tests {
     }
 
     fn batch_verifier_verify_finalizes_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         verifier.set_leader(0);
         assert!(verifier.finalizes.is_empty());
@@ -3612,8 +3612,8 @@ mod tests {
     }
 
     fn batch_verifier_ready_notarizes_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(0, 1);
 
@@ -3630,7 +3630,7 @@ mod tests {
         assert!(failed_once.is_empty());
         assert_eq!(verifier.notarizes_verified, 2);
 
-        for scheme in schemes.iter().take(threshold as usize).skip(2) {
+        for scheme in schemes.iter().take(quorum as usize).skip(2) {
             assert!(!verifier.ready_notarizes());
             verifier.add(Voter::Notarize(create_notarize(scheme, round, 0, 1)), false);
         }
@@ -3645,14 +3645,14 @@ mod tests {
     }
 
     fn batch_verifier_ready_nullifies_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
 
         verifier.add(Voter::Nullify(create_nullify(&schemes[0], round)), true);
         assert_eq!(verifier.nullifies_verified, 1);
 
-        for scheme in schemes.iter().take(threshold as usize).skip(1) {
+        for scheme in schemes.iter().take(quorum as usize).skip(1) {
             assert!(!verifier.ready_nullifies());
             verifier.add(Voter::Nullify(create_nullify(scheme, round)), false);
         }
@@ -3667,8 +3667,8 @@ mod tests {
     }
 
     fn batch_verifier_ready_finalizes_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
-        let threshold = quorum(schemes.len() as u32);
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let quorum = quorum(schemes.len() as u32);
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
         let leader_finalize = create_finalize(&schemes[0], round, 0, 1);
         verifier.set_leader(leader_finalize.signer());
@@ -3676,7 +3676,7 @@ mod tests {
         verifier.add(Voter::Finalize(leader_finalize), true);
         assert_eq!(verifier.finalizes_verified, 1);
 
-        for scheme in schemes.iter().take(threshold as usize).skip(1) {
+        for scheme in schemes.iter().take(quorum as usize).skip(1) {
             assert!(!verifier.ready_finalizes());
             verifier.add(Voter::Finalize(create_finalize(scheme, round, 0, 1)), false);
         }
@@ -3693,29 +3693,32 @@ mod tests {
     fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: SigningScheme + Clone>(
         schemes: Vec<S>,
     ) {
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         assert!(
-            schemes.len() > threshold as usize,
+            schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
 
+        // Pre-load the leader vote as if it had already been processed.
         let leader_vote = create_notarize(&schemes[0], round, 0, 1);
         verifier.set_leader(leader_vote.signer());
         verifier.add(Voter::Notarize(leader_vote.clone()), false);
         verifier.notarizes_force = false;
 
-        for scheme in schemes.iter().take(threshold as usize) {
+        // Mark enough verified notarizes to satisfy the quorum outright.
+        for scheme in schemes.iter().take(quorum as usize) {
             verifier.add(Voter::Notarize(create_notarize(scheme, round, 0, 1)), true);
         }
-        assert_eq!(verifier.notarizes_verified, threshold as usize);
+        assert_eq!(verifier.notarizes_verified, quorum as usize);
         assert!(
             !verifier.ready_notarizes(),
             "Should not be ready if quorum already met by verified messages"
         );
 
-        let extra_vote = create_notarize(&schemes[threshold as usize], round, 0, 1);
+        // Additional pending votes must not flip readiness in this situation.
+        let extra_vote = create_notarize(&schemes[quorum as usize], round, 0, 1);
         verifier.add(Voter::Notarize(extra_vote), false);
         assert!(
             !verifier.ready_notarizes(),
@@ -3734,24 +3737,26 @@ mod tests {
     fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: SigningScheme + Clone>(
         schemes: Vec<S>,
     ) {
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         assert!(
-            schemes.len() > threshold as usize,
+            schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
 
-        for scheme in schemes.iter().take(threshold as usize) {
+        // First mark a quorum's worth of verified nullifies.
+        for scheme in schemes.iter().take(quorum as usize) {
             verifier.add(Voter::Nullify(create_nullify(scheme, round)), true);
         }
-        assert_eq!(verifier.nullifies_verified, threshold as usize);
+        assert_eq!(verifier.nullifies_verified, quorum as usize);
         assert!(
             !verifier.ready_nullifies(),
             "Should not be ready if quorum already met by verified messages"
         );
 
-        let extra_nullify = create_nullify(&schemes[threshold as usize], round);
+        // Pending messages alone cannot transition the batch to ready.
+        let extra_nullify = create_nullify(&schemes[quorum as usize], round);
         verifier.add(Voter::Nullify(extra_nullify), false);
         assert!(
             !verifier.ready_nullifies(),
@@ -3770,28 +3775,31 @@ mod tests {
     fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: SigningScheme + Clone>(
         schemes: Vec<S>,
     ) {
-        let threshold = quorum(schemes.len() as u32);
+        let quorum = quorum(schemes.len() as u32);
         assert!(
-            schemes.len() > threshold as usize,
+            schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(threshold));
+        let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
 
+        // Prime the leader state so the quorum is already satisfied by verified finalizes.
         let leader_finalize = create_finalize(&schemes[0], round, 0, 1);
         verifier.set_leader(leader_finalize.signer());
         verifier.set_leader_proposal(leader_finalize.proposal.clone());
 
-        for scheme in schemes.iter().take(threshold as usize) {
+        // Feed exactly the number of verified finalizes required to hit the quorum.
+        for scheme in schemes.iter().take(quorum as usize) {
             verifier.add(Voter::Finalize(create_finalize(scheme, round, 0, 1)), true);
         }
-        assert_eq!(verifier.finalizes_verified, threshold as usize);
+        assert_eq!(verifier.finalizes_verified, quorum as usize);
         assert!(
             !verifier.ready_finalizes(),
             "Should not be ready if quorum already met by verified messages"
         );
 
-        let extra_finalize = create_finalize(&schemes[threshold as usize], round, 0, 1);
+        // Ensure additional pending finalizes do not incorrectly trigger readiness.
+        let extra_finalize = create_finalize(&schemes[quorum as usize], round, 0, 1);
         verifier.add(Voter::Finalize(extra_finalize), false);
         assert!(
             !verifier.ready_finalizes(),

@@ -363,7 +363,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -513,7 +513,7 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < threshold as usize {
+                        if notarizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -552,7 +552,7 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < threshold as usize {
+                        if finalizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -1205,7 +1205,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1389,7 +1389,7 @@ mod tests {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
-                        if nullifies < threshold as usize {
+                        if nullifies < quorum as usize {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }

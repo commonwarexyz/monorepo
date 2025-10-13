@@ -268,7 +268,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         // Construct notarization
         let mut timer = self.recover_latency.timer();
         let notarization = Notarization::from_notarizes(&self.signing, &self.notarizes)
-            .expect("failed to recover threshold signature");
+            .expect("failed to recover notarization certificate");
         timer.observe();
 
         self.broadcast_notarization = true;
@@ -297,7 +297,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         // Construct nullification
         let mut timer = self.recover_latency.timer();
         let nullification = Nullification::from_nullifies(&self.signing, &self.nullifies)
-            .expect("failed to recover threshold signature");
+            .expect("failed to recover nullification certificate");
         timer.observe();
 
         self.broadcast_nullification = true;
@@ -345,7 +345,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
             &self.finalizes,
             self.notarization.as_ref(),
         )
-        .expect("failed to recover threshold signature");
+        .expect("failed to recover finalization certificate");
         timer.observe();
 
         self.broadcast_finalization = true;
@@ -465,7 +465,7 @@ impl<
         );
         context.register(
             "recover_latency",
-            "threshold signature recover latency",
+            "certificate recover latency",
             recover_latency.clone(),
         );
         // TODO(#1833): Metrics should use the post-start context
