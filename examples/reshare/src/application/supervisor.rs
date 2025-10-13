@@ -56,11 +56,12 @@ impl<V: Variant, P: PublicKey> Supervisor<V, P> {
 impl<V: Variant, P: PublicKey> p2p::Coordinator for Supervisor<V, P> {
     type PublicKey = P;
 
-    fn peers(&self) -> &Vec<Self::PublicKey> {
-        &self.participants
+    fn peers(&self) -> &[Self::PublicKey] {
+        self.participants.as_ref()
     }
 
     fn peer_set_id(&self) -> u64 {
+        // In this example, we only have one static peer set.
         0
     }
 }
@@ -73,7 +74,7 @@ impl<V: Variant, P: PublicKey> commonware_consensus::Supervisor for Supervisor<V
         unimplemented!("only defined in threshold supervisor")
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
         Some(&self.participants)
     }
 

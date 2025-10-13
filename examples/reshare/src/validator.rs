@@ -99,7 +99,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         mailbox_size: 200,
         requester_config: requester::Config {
             public_key: config.p2p_key.public_key(),
-            rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            rate_limit: Quota::per_second(NonZeroU32::new(8).unwrap()),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
         },
@@ -144,7 +144,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::application::Block;
+    use crate::{application::Block, utils::BLOCKS_PER_EPOCH};
     use commonware_consensus::marshal::ingress::handler;
     use commonware_cryptography::{
         bls12381::{
@@ -634,12 +634,12 @@ mod test {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_unclean_shutdown() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let required_container = 100;
+        let required_container = BLOCKS_PER_EPOCH;
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);

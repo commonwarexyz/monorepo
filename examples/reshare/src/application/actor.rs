@@ -124,6 +124,10 @@ where
                             }
 
                             // Ask the DKG actor for a result to include
+                            //
+                            // This approach does allow duplicate commitments to be proposed, but
+                            // the arbiter handles this by choosing the first commitment it sees
+                            // from any given dealer.
                             let reshare = context
                                 .timeout(Duration::from_millis(5), async move { dkg.act().await })
                                 .await

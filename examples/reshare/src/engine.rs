@@ -100,12 +100,19 @@ where
         let identity = *public::<V>(&config.polynomial);
         let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
 
-        let (dkg, dkg_mailbox) = dkg::Actor::new(
+        let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
-            config.signer.clone(),
-            config.num_participants_per_epoch,
-            MAILBOX_SIZE,
-        );
+            dkg::Config {
+                signer: config.signer.clone(),
+                num_participants_per_epoch: config.num_participants_per_epoch,
+                mailbox_size: MAILBOX_SIZE,
+                partition_prefix: config.partition_prefix.clone(),
+                log_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
+                locations_items_per_blob: IMMUTABLE_ITEMS_PER_SECTION,
+                buffer_pool: buffer_pool.clone(),
+            },
+        )
+        .await;
 
         let (application, application_mailbox) =
             application::Actor::new(context.with_label("application"), MAILBOX_SIZE);
