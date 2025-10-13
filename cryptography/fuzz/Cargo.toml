@@ -118,3 +118,10 @@ path = "fuzz_targets/metamorph_lthash.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bloomfilter_decode"
+path = "fuzz_targets/bloomfilter_decode.rs"
+test = false
+doc = false
+bench = false
