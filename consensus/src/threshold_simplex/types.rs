@@ -55,6 +55,9 @@ pub trait Attributable {
 }
 
 /// Identifies the signing domain for a vote or certificate.
+///
+/// Implementations use the context to derive domain-separated message bytes for both
+/// individual votes and recovered certificates.
 #[derive(Copy, Clone)]
 pub enum VoteContext<'a, D: Digest> {
     /// Signing context for notarize votes and certificates, carrying the proposal.
@@ -275,8 +278,11 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
 /// signing schemes.
 #[derive(Clone, Debug)]
 pub struct Participants<P: PublicKey + Eq + Hash> {
+    /// Sorted list of participant public keys.
     keys: Vec<P>,
+    /// Reverse lookup from public key to signer index.
     index_by_key: HashMap<P, u32>,
+    /// Quorum (2f+1) computed from the participant set.
     quorum: u32,
 }
 
@@ -339,21 +345,32 @@ impl<P: PublicKey + Eq + Hash> From<Vec<P>> for Participants<P> {
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 /// The verifier retains a clone of the active [`SigningScheme`] so it can batch-verify votes on demand.
 pub struct BatchVerifier<S: SigningScheme, D: Digest> {
+    /// Signing scheme used to verify votes and assemble certificates.
     signing: S,
 
+    /// Required quorum size. `None` disables quorum-based readiness.
     quorum: Option<usize>,
 
+    /// Current leader index.
     leader: Option<u32>,
+    /// Proposal associated with the current leader.
     leader_proposal: Option<Proposal<D>>,
 
+    /// Pending notarize votes waiting to be verified.
     notarizes: Vec<Notarize<S, D>>,
+    /// Forces notarize verification as soon as possible (set when the leader proposal is known).
     notarizes_force: bool,
+    /// Count of already-verified notarize votes.
     notarizes_verified: usize,
 
+    /// Pending nullify votes waiting to be verified.
     nullifies: Vec<Nullify<S>>,
+    /// Count of already-verified nullify votes.
     nullifies_verified: usize,
 
+    /// Pending finalize votes waiting to be verified.
     finalizes: Vec<Finalize<S, D>>,
+    /// Count of already-verified finalize votes.
     finalizes_verified: usize,
 }
 
@@ -370,6 +387,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         Self {
             signing,
 
+            // Store quorum as usize to simplify comparisons against queue lengths.
             quorum: quorum.map(|q| q as usize),
 
             leader: None,
@@ -1137,6 +1155,7 @@ impl<S: SigningScheme, D: Digest> Notarization<S, D> {
 
         let proposal = notarizes[0].proposal.clone();
 
+        // All votes must endorse the same proposal to be aggregated into a single certificate.
         if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
             return None;
         }
@@ -1326,6 +1345,7 @@ impl<S: SigningScheme> Nullification<S> {
 
         let round = nullifies[0].round;
 
+        // Nullify votes must all target the same round.
         if nullifies.iter().skip(1).any(|n| n.round != round) {
             return None;
         }
@@ -1533,6 +1553,7 @@ impl<S: SigningScheme, D: Digest> Finalization<S, D> {
 
         let proposal = finalizes[0].proposal.clone();
 
+        // Finalize votes must agree on the exact proposal that is being committed.
         if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
             return None;
         }

@@ -22,7 +22,9 @@ use std::collections::BTreeSet;
 /// key so it can produce votes as well as batch-verify signatures from peers.
 #[derive(Clone, Debug)]
 pub struct Scheme {
+    /// Participant set (sorted) used for signer indexing and batch verification.
     participants: Participants<PublicKey>,
+    /// Optional local signing key paired with its participant index.
     signer: Option<(u32, PrivateKey)>,
 }
 
@@ -44,6 +46,7 @@ impl Scheme {
         }
     }
 
+    /// Builds a pure verifier that can authenticate votes without signing.
     pub fn verifier(participants: Vec<PublicKey>) -> Self {
         Self {
             participants: participants.into(),
@@ -222,6 +225,7 @@ impl SigningScheme for Scheme {
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
+            // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
                 if !public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);

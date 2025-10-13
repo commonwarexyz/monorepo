@@ -47,22 +47,31 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Scheme<V: Variant> {
     Signer {
+        /// Aggregate public identity shared by the committee.
         identity: V::Public,
+        /// Evaluated public polynomial for each participant index.
         polynomial: Vec<V::Public>,
+        /// Local share used to author partial signatures.
         share: Share,
+        /// Quorum threshold derived from the participant set.
         threshold: u32,
     },
     Verifier {
+        /// Aggregate public identity shared by the committee.
         identity: V::Public,
+        /// Evaluated public polynomial for each participant index.
         polynomial: Vec<V::Public>,
+        /// Quorum threshold derived from the participant set.
         threshold: u32,
     },
     CertificateVerifier {
+        /// Aggregate public identity shared by the committee.
         identity: V::Public,
     },
 }
 
 impl<V: Variant> Scheme<V> {
+    /// Constructs a signer instance with a private share and evaluated public polynomial.
     pub fn new<P>(participants: &[P], polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
@@ -76,6 +85,7 @@ impl<V: Variant> Scheme<V> {
         }
     }
 
+    /// Produces a verifier that can authenticate votes but does not hold signing state.
     pub fn verifier<P>(participants: &[P], polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
@@ -88,10 +98,12 @@ impl<V: Variant> Scheme<V> {
         }
     }
 
+    /// Creates a verifier that only checks recovered certificates.
     pub fn certificate_verifier(identity: V::Public) -> Self {
         Self::CertificateVerifier { identity }
     }
 
+    /// Returns the shared public identity for this scheme.
     pub fn identity(&self) -> &V::Public {
         match self {
             Scheme::Signer { identity, .. } => identity,
@@ -100,6 +112,7 @@ impl<V: Variant> Scheme<V> {
         }
     }
 
+    /// Returns the local share if this instance can sign.
     pub fn share(&self) -> Option<&Share> {
         match self {
             Scheme::Signer { share, .. } => Some(share),
@@ -107,6 +120,7 @@ impl<V: Variant> Scheme<V> {
         }
     }
 
+    /// Evaluated public polynomial used to validate partial signatures.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
             Scheme::Signer { polynomial, .. } => polynomial,
@@ -115,6 +129,7 @@ impl<V: Variant> Scheme<V> {
         }
     }
 
+    /// Quorum threshold implied by the participant set.
     pub fn threshold(&self) -> u32 {
         match self {
             Scheme::Signer { threshold, .. } => *threshold,
