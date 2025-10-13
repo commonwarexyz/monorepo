@@ -1,12 +1,17 @@
-//! Simplex-like BFT agreement with an embedded VRF and succinct consensus certificates.
+//! Simplex-like BFT agreement with pluggable signature schemes and scheme-dependent certificate formats.
 //!
-//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
-//! simple and fast BFT agreement with network-speed view (i.e. block time) latency and optimal finalization
-//! latency in a partially synchronous setting. Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
-//! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum) to generate both
-//! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
-//! (any certificate can be verified with just the static public key of the consensus instance) for each view
-//! with zero message overhead (natively integrated).
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides simple and
+//! fast BFT agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
+//! partially synchronous setting. Cryptography is abstracted behind the [`SigningScheme`] trait, letting
+//! deployments plug in different vote/certificate schemes. The following signing schemes are currently
+//! implemented:
+//!
+//! * **BLS12-381 threshold signatures** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
+//! beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
+//! certificate can be verified with just the static public key of the consensus instance) for each view with
+//! zero message overhead (natively integrated).
+//! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
+//! same interface but without succinct certificate aggregation or randomness.
 //!
 //! # Features
 //!
@@ -16,8 +21,8 @@
 //! * Decoupled Block Broadcast and Sync
 //! * Lazy Message Verification
 //! * Flexible Block Format
-//! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
-//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
+//! * Scheme-dependent consensus certificates for notarization, nullification, and finality
+//! * Embedded VRF for leader election and post-facto randomness (exposed by the BLS threshold scheme)
 //!
 //! # Design
 //!
@@ -92,24 +97,24 @@
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
-//! * If leader `l`, broadcast `(part(v), notarize(c,v))`
+//! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
 //!
-//! Upon receiving first `(part(v), notarize(c,v))` from `l`:
+//! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
+//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
 //!
-//! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
+//! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
-//! * Broadcast `(seed(v), notarization(c,v))` (even if we have not verified `c`)
-//! * If have not broadcast `(part(v), nullify(v))`, broadcast `finalize(c,v)`
+//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
-//! Upon receiving `2f+1` `(part(v), nullify(v))`:
-//! * Broadcast `(seed(v), nullification(v))`
+//! Upon receiving `2f+1` `nullify(v)`:
+//! * Broadcast `nullification(v)`
 //!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
 //!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
 //!       instead.
@@ -117,16 +122,16 @@
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
-//! * Broadcast `(seed(v), finalization(c,v))` (even if we have not verified `c`)
+//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast `(part(v), nullify(v))`
-//! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
-//!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
+//! * Broadcast `nullify(v)`
+//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
+//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! #### Embedded VRF
+//! #### Embedded VRF (BLS Threshold Scheme)
 //!
-//! When broadcasting any `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
+//! When the BLS threshold signing scheme is in use, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial
 //! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
 //! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
 //! whether or not a block was notarized in said view `v`.
@@ -136,18 +141,20 @@
 //! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
 //! is used as a seed in `v`).
 //!
-//! #### Succinct Consensus Certificates
+//! #### Consensus Certificates
 //!
-//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
-//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
-//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
-//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
-//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
-//! to operate a lite client).
+//! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence (i.e. consensus certificates) whose
+//! concrete representation is dictated by the active signing scheme. These certificates are produced as soon as `2f+1` vote messages
+//! (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are collected and they can be used to secure interoperability between different
+//! consensus instances and user interactions with an infrastructure provider.
 //!
-//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
-//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
-//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//! * With **BLS12-381 threshold signatures**, each broadcast vote carries a partial signature for a static group public key (derived
+//!   from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)). Once a
+//!   quorum (`2f+1`) is collected, these partials aggregate into a succinct certificate that can be verified using only the committee
+//!   public key. Because the public key is static, any of these certificates can be verified by an external process without following
+//!   the consensus instance and/or tracking the current set of participants (as is typically required to operate a lite client).
+//! * With **Ed25519 quorum signatures**, certificates consist of the individual signatures from the quorum. While larger, they preserve
+//!   the same interface and can be validated against the ordered participant set exported by the scheme.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -206,6 +213,11 @@ pub(crate) fn interesting(
     true
 }
 
+/// Selects the leader for a given view using scheme-provided randomness when available.
+///
+/// If the active [`SigningScheme`] exposes randomness (e.g. BLS threshold certificates),
+/// the randomness is encoded and reduced modulo the number of participants. Otherwise we
+/// fall back to simple round-robin using the view number.
 pub fn select_leader<S, P>(
     participants: &[P],
     view: View,

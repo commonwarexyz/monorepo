@@ -63,7 +63,7 @@ struct Round<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> {
 
     round: Rnd,
 
-    // Leader is set as soon as we know the seed for the view.
+    // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<(P, u32)>,
 
     // We explicitly distinguish between the proposal being verified (we checked it)
