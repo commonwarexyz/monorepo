@@ -96,7 +96,9 @@ pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     Poly::from_iter(coeffs)
 }
 
-/// Create a new scalar polynomial with a particular value for the constant coefficient.
+/// Returns a new scalar polynomial with a particular value for the constant coefficient.
+///
+/// This does the same thing as [new_from] otherwise.
 pub fn new_with_constant(
     degree: u32,
     mut rng: impl CryptoRngCore,
