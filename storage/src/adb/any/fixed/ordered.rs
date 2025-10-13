@@ -200,7 +200,7 @@ impl<
         Ok(())
     }
 
-    /// Find and return the update update operation for `key`, if it exists. The cursor is
+    /// Find and return the location of the update operation for `key`, if it exists. The cursor is
     /// positioned at the matching location, and can be used to update or delete the key.
     async fn find_update_op(
         log: &Journal<E, Operation<K, V>>,
