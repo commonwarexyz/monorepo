@@ -14,7 +14,7 @@ pub(crate) struct SupervisionTree {
     // pointers that cannot be upgraded during abort cascades.
     _parent: Option<Arc<SupervisionTree>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
-    tasks: Mutex<Vec<Aborter>>,
+    task: Mutex<Option<Aborter>>,
 }
 
 impl SupervisionTree {
@@ -23,7 +23,7 @@ impl SupervisionTree {
         Arc::new(Self {
             _parent: None,
             children: Mutex::new(Vec::new()),
-            tasks: Mutex::new(Vec::new()),
+            task: Mutex::new(None),
         })
     }
 
@@ -32,7 +32,7 @@ impl SupervisionTree {
         let child = Arc::new(Self {
             _parent: Some(parent.clone()),
             children: Mutex::new(Vec::new()),
-            tasks: Mutex::new(Vec::new()),
+            task: Mutex::new(None),
         });
         parent.children.lock().unwrap().push(Arc::downgrade(&child));
         child
@@ -40,17 +40,19 @@ impl SupervisionTree {
 
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(&self, aborter: Aborter) {
-        self.tasks.lock().unwrap().push(aborter);
+        let mut task = self.task.lock().unwrap();
+        assert!(task.is_none(), "task aborter already registered");
+        *task = Some(aborter);
     }
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
     pub(crate) fn abort_descendants(&self) {
         // Drain the tasks list first so repeated calls are idempotent.
-        let tasks = {
-            let mut tasks = self.tasks.lock().unwrap();
-            std::mem::take(&mut *tasks)
+        let task = {
+            let mut task = self.task.lock().unwrap();
+            task.take()
         };
-        for aborter in tasks {
+        if let Some(aborter) = task {
             aborter.abort();
         }
 

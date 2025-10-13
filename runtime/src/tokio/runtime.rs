@@ -430,7 +430,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration.
         let supervised = self.model.is_supervised();
-        let tree = self.tree.clone();
+        let parent_tree = self.tree.clone();
+        let child_tree = SupervisionTree::child(&parent_tree);
+        self.tree = child_tree.clone();
 
         // Set up the task
         let executor = self.executor.clone();
@@ -440,7 +442,8 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let future = f(self);
-        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), tree.clone());
+        let (f, handle) =
+            Handle::init(future, metric, executor.panicker.clone(), child_tree.clone());
         if dedicated {
             thread::spawn({
                 // Ensure the task can access the tokio runtime
@@ -464,7 +467,7 @@ impl crate::Spawner for Context {
         // Register this child with the parent
         if supervised {
             if let Some(aborter) = handle.aborter() {
-                tree.register_task(aborter);
+                child_tree.register_task(aborter);
             }
         }
 
