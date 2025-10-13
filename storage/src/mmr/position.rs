@@ -4,6 +4,11 @@ use core::{
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
+/// Maximum valid [Position] value that can exist in a valid MMR.
+///
+/// This value corresponds to the last node in an MMR with the maximum number of leaves.
+pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 63) - 2
+
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
@@ -241,6 +246,7 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
+    use crate::mmr::{MAX_LOCATION, MAX_POSITION};
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -347,5 +353,41 @@ mod tests {
         // Test sub assignment
         pos -= 3;
         assert_eq!(pos, 12u64);
+    }
+
+    #[test]
+    fn test_max_position() {
+        // The constraint is: MMR_size must have top bit clear (< 2^63)
+        // For N leaves: MMR_size = 2*N - popcount(N)
+        // Worst case (maximum size) is when N is a power of 2: MMR_size = 2*N - 1
+
+        // Maximum N where 2*N - 1 < 2^63:
+        //   2*N - 1 < 2^63
+        //   2*N < 2^63 + 1
+        //   N <= 2^62
+        let max_leaves = 1u64 << 62;
+
+        // For N = 2^62 leaves:
+        // MMR_size = 2 * 2^62 - 1 = 2^63 - 1
+        let mmr_size_at_max = 2 * max_leaves - 1;
+        assert_eq!(mmr_size_at_max, (1u64 << 63) - 1);
+        assert_eq!(mmr_size_at_max.leading_zeros(), 1); // Top bit clear ✓
+
+        // Last position (0-indexed) = MMR_size - 1 = 2^63 - 2
+        let expected_max_pos = mmr_size_at_max - 1;
+        assert_eq!(MAX_POSITION, expected_max_pos);
+        assert_eq!(MAX_POSITION, (1u64 << 63) - 2);
+
+        // Verify the constraint: a position at MAX_POSITION + 1 would require
+        // an MMR_size >= 2^63, which violates the "top bit clear" requirement
+        let hypothetical_mmr_size = MAX_POSITION + 2; // Would need this many nodes
+        assert_eq!(hypothetical_mmr_size, 1u64 << 63);
+        assert_eq!(hypothetical_mmr_size.leading_zeros(), 0); // Top bit NOT clear ✗
+
+        // Verify relationship with MAX_LOCATION
+        // Converting MAX_LOCATION to position should give a value < MAX_POSITION
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
+        let last_leaf_pos = Position::try_from(max_loc).unwrap();
+        assert!(*last_leaf_pos < MAX_POSITION);
     }
 }

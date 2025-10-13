@@ -1,4 +1,5 @@
 use super::position::Position;
+use crate::mmr::MAX_POSITION;
 use core::{
     convert::TryFrom,
     fmt,
@@ -285,33 +286,36 @@ impl SubAssign<u64> for Location {
 }
 
 impl TryFrom<Position> for Location {
-    type Error = NonLeafPositionError;
+    type Error = LocationError;
 
     /// Attempt to derive the [Location] of a given node [Position].
     ///
-    /// Returns an error if the position does not correspond to an MMR leaf.
+    /// Returns an error if the position does not correspond to an MMR leaf or if position
+    /// overflow occurs.
     ///
     /// This computation is O(log2(n)) in the given position.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pos` is too large (top 2 bits should be 0).
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
+        if *pos > MAX_POSITION {
+            return Err(LocationError::Overflow(pos));
+        }
         if *pos == 0 {
             return Ok(Self(0));
         }
 
-        let start = u64::MAX >> (*pos.checked_add(1).expect("leaf pos overflow")).leading_zeros();
+        // Won't overflow since pos <= MAX_POSITION
+        let start = u64::MAX >> (pos + 1).leading_zeros();
         let height = start.trailing_ones();
-        assert!(height > 1, "leaf pos overflow");
+        if height == 0 {
+            return Err(LocationError::NonLeaf(pos));
+        }
         let mut two_h = 1 << (height - 1);
         let mut cur_node = start - 1;
         let mut leaf_loc_floor = 0u64;
 
         while two_h > 1 {
             if cur_node == *pos {
-                return Err(NonLeafPositionError { pos });
+                return Err(LocationError::NonLeaf(pos));
             }
             let left_pos = cur_node - two_h;
             two_h >>= 1;
@@ -330,19 +334,14 @@ impl TryFrom<Position> for Location {
     }
 }
 
-/// Error returned when attempting to interpret a non-leaf position as a [Location].
+/// Error returned when attempting to convert a [Position] to a [Location].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-#[error("Position({}) is not a leaf", *pos)]
-pub struct NonLeafPositionError {
-    pos: Position,
-}
+pub enum LocationError {
+    #[error("Position({}) is not a leaf", {0})]
+    NonLeaf(Position),
 
-impl NonLeafPositionError {
-    /// The offending position.
-    #[inline]
-    pub const fn position(self) -> Position {
-        self.pos
-    }
+    #[error("Position({}) causes overflow", {0})]
+    Overflow(Position),
 }
 
 /// Extension trait for converting `Range<Location>` into other range types.
@@ -361,7 +360,7 @@ impl LocationRangeExt for Range<Location> {
 #[cfg(test)]
 mod tests {
     use super::{Location, MAX_LOCATION};
-    use crate::mmr::position::Position;
+    use crate::mmr::{position::Position, LocationError, MAX_POSITION};
 
     // Test that the [Location::try_from] function returns the correct location for leaf positions.
     #[test]
@@ -412,8 +411,19 @@ mod tests {
         ];
         for &pos in CASES {
             let err = Location::try_from(pos).expect_err("position is not a leaf");
-            assert_eq!(err.position(), pos);
+            assert_eq!(err, LocationError::NonLeaf(pos));
         }
+    }
+
+    #[test]
+    fn test_try_from_position_error_overflow() {
+        let overflow_pos = Position::new(u64::MAX);
+        let err = Location::try_from(overflow_pos).expect_err("should overflow");
+        assert_eq!(err, LocationError::Overflow(overflow_pos));
+
+        let overflow_pos = MAX_POSITION + 1;
+        let err = Location::try_from(overflow_pos).expect_err("should overflow");
+        assert_eq!(err, LocationError::Overflow(overflow_pos));
     }
 
     #[test]
