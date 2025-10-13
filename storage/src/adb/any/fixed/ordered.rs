@@ -1116,8 +1116,12 @@ mod test {
                 Any::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
                     .await
                     .unwrap();
-            let key1 = FixedBytes::<2>::new([1u8, 0u8]);
-            let key2 = FixedBytes::<2>::new([1u8, 1u8]);
+            let key1 = FixedBytes::<2>::new([1u8, 1u8]);
+            let key2 = FixedBytes::<2>::new([1u8, 3u8]);
+            // Create some keys that will not be added to the snapshot.
+            let early_key = FixedBytes::<2>::new([0u8, 2u8]);
+            let late_key = FixedBytes::<2>::new([3u8, 0u8]);
+            let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
 
             db.update(key1.clone(), 1).await.unwrap();
             db.update(key2.clone(), 2).await.unwrap();
@@ -1126,10 +1130,16 @@ mod test {
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
             db.delete(key1.clone()).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key2.clone());
 
             db.delete(key2.clone()).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
@@ -1146,11 +1156,17 @@ mod test {
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
             // Delete the keys in opposite order from earlier.
             db.delete(key2.clone()).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
             db.delete(key1.clone()).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
