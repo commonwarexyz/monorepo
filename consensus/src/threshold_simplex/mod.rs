@@ -7,11 +7,11 @@
 //! implemented:
 //!
 //! * **BLS12-381 threshold signatures** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
-//! beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
-//! certificate can be verified with just the static public key of the consensus instance) for each view with
-//! zero message overhead (natively integrated).
+//!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
+//!   certificate can be verified with just the static public key of the consensus instance) for each view with
+//!   zero message overhead (natively integrated).
 //! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
-//! same interface but without succinct certificate aggregation or randomness.
+//!   same interface but without succinct certificate aggregation or randomness.
 //!
 //! # Features
 //!
