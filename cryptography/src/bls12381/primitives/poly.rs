@@ -408,6 +408,8 @@ pub mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
     use commonware_codec::{Decode, Encode};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     #[test]
     fn poly_degree() {
@@ -562,5 +564,13 @@ pub mod tests {
         let encoded = original.encode();
         let decoded = Poly::<Scalar>::decode_cfg(encoded, &(original.required() as usize)).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_new_with_constant() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let constant = Scalar::from_rand(&mut rng);
+        let poly = new_with_constant(5, &mut rng, constant.clone());
+        assert_eq!(poly.constant(), &constant);
     }
 }
