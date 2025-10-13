@@ -217,7 +217,7 @@ impl<
         Ok(None)
     }
 
-    /// Update the location of `key` to `nex_loc` in the snapshot and return its old location, or
+    /// Update the location of `key` to `next_loc` in the snapshot and return its old location, or
     /// insert it if the key isn't already present. For use by log-replay.
     async fn replay_update(
         snapshot: &mut Index<T, Location>,
@@ -641,8 +641,9 @@ impl<
     }
 
     /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it. For use by log-replay. Because of pruning, it's possible that certain
-    /// keys deleted by reply might not exist in the snapshot.
+    /// associated with it. For use by log-replay. Because replay begins from the inactivity floor,
+    /// it's possible that certain keys referenced by subsequent delete operations might not have
+    /// been previously added to the snapshot, so we do not treat not-found as a consistency error.
     async fn replay_delete(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
