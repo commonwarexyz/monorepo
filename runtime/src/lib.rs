@@ -1831,6 +1831,42 @@ mod tests {
         });
     }
 
+    fn test_detached_can_spawn_after_parent_exit<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clone,
+    {
+        runner.start(|context| async move {
+            let (go_tx, go_rx) = oneshot::channel();
+            let (child_tx, child_rx) = oneshot::channel();
+
+            let handle = context.spawn(move |context| {
+                let go_rx = go_rx;
+                let child_tx = child_tx;
+                async move {
+                    let _ = context.detached().spawn(move |detached_ctx| {
+                        let go_rx = go_rx;
+                        let child_tx = child_tx;
+                        async move {
+                            // Wait for the parent to finish so the detached task runs post-drop.
+                            go_rx.await.unwrap();
+
+                            let child = detached_ctx.clone().spawn(move |_| async move {
+                                child_tx.send(()).unwrap();
+                            });
+                            child
+                                .await
+                                .expect("detached spawn should succeed after parent exit");
+                        }
+                    });
+                }
+            });
+
+            handle.await.unwrap();
+            go_tx.send(()).unwrap();
+            child_rx.await.unwrap();
+        });
+    }
+
     fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -2264,6 +2300,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_detached_can_spawn_after_parent_exit() {
+        let executor = deterministic::Runner::default();
+        test_detached_can_spawn_after_parent_exit(executor);
+    }
+
+    #[test]
     fn test_deterministic_circular_reference_prevents_cleanup() {
         let executor = deterministic::Runner::default();
         test_circular_reference_prevents_cleanup(executor);
@@ -2556,6 +2598,12 @@ mod tests {
     fn test_tokio_spawn_detached() {
         let executor = tokio::Runner::default();
         test_spawn_detached(executor);
+    }
+
+    #[test]
+    fn test_tokio_detached_can_spawn_after_parent_exit() {
+        let executor = tokio::Runner::default();
+        test_detached_can_spawn_after_parent_exit(executor);
     }
 
     #[test]
