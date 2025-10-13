@@ -251,3 +251,72 @@ where
 
     Ok((proof, ops))
 }
+
+/// Generic helper: iterate through locations and find the first that matches a predicate.
+///
+/// This helper reads operations from the log at each location and applies a predicate function
+/// to determine if the operation matches the search criteria. Returns the first match.
+pub(super) async fn find_in_iter<E, Op, F, R>(
+    log: &Journal<E, Op>,
+    iter: impl Iterator<Item = &Location>,
+    mut predicate: F,
+) -> Result<Option<(Location, R)>, Error>
+where
+    E: Storage + Clock + Metrics,
+    Op: OperationTrait,
+    F: FnMut(Op) -> Option<R>,
+{
+    for &loc in iter {
+        let op = log.read(*loc).await?;
+        if let Some(result) = predicate(op) {
+            return Ok(Some((loc, result)));
+        }
+    }
+    Ok(None)
+}
+
+/// Generic helper: iterate through cursor and find the first that matches a predicate.
+///
+/// Similar to `find_in_iter` but works with a cursor, which allows for mutation operations
+/// like update or delete after finding the matching element.
+pub(super) async fn find_in_cursor<E, Op, F, R>(
+    log: &Journal<E, Op>,
+    cursor: &mut impl crate::index::Cursor<Value = Location>,
+    mut predicate: F,
+) -> Result<Option<(Location, R)>, Error>
+where
+    E: Storage + Clock + Metrics,
+    Op: OperationTrait,
+    F: FnMut(Op) -> Option<R>,
+{
+    while let Some(&loc) = cursor.next() {
+        let op = log.read(*loc).await?;
+        if let Some(result) = predicate(op) {
+            return Ok(Some((loc, result)));
+        }
+    }
+    Ok(None)
+}
+
+/// Generic helper: reduce over an iterator with an accumulator.
+///
+/// This helper reads operations from the log at each location and applies a fold function
+/// to accumulate results across all locations.
+pub(super) async fn fold_iter<E, Op, F, Acc>(
+    log: &Journal<E, Op>,
+    iter: impl Iterator<Item = &Location>,
+    init: Acc,
+    mut f: F,
+) -> Result<Acc, Error>
+where
+    E: Storage + Clock + Metrics,
+    Op: OperationTrait,
+    F: FnMut(Acc, Location, Op) -> Acc,
+{
+    let mut acc = init;
+    for &loc in iter {
+        let op = log.read(*loc).await?;
+        acc = f(acc, loc, op);
+    }
+    Ok(acc)
+}

@@ -3,7 +3,8 @@
 use crate::{
     adb::{
         any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
+            find_in_cursor, find_in_iter, historical_proof, init_mmr_and_log, prune_db, Config,
+            SNAPSHOT_READ_BUFFER_SIZE,
         },
         Error,
     },
@@ -182,32 +183,18 @@ impl<
         cursor: &mut impl Cursor<Value = Location>,
         key: &K,
     ) -> Result<Option<(Location, K, V)>, Error> {
-        while let Some(&loc) = cursor.next() {
-            let (k, v) = Self::get_update_op(log, loc).await?;
+        find_in_cursor(log, cursor, |op| {
+            let Operation::Update(k, v) = op else {
+                unreachable!("location does not reference update operation");
+            };
             if k == *key {
-                return Ok(Some((loc, k, v)));
+                Some((k, v))
+            } else {
+                None
             }
-        }
-
-        Ok(None)
-    }
-
-    /// Get the update operation corresponding to a location from the snapshot.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the location does not reference an update operation. This should never happen
-    /// unless the snapshot is buggy, or this method is being used to look up an operation
-    /// independent of the snapshot contents.
-    async fn get_update_op(
-        log: &Journal<E, Operation<K, V>>,
-        loc: Location,
-    ) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(*loc).await? else {
-            unreachable!("location does not reference update operation. loc={loc}");
-        };
-
-        Ok((k, v))
+        })
+        .await
+        .map(|op| op.map(|(loc, (k, v))| (loc, k, v)))
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -241,14 +228,14 @@ impl<
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
-        for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, loc).await?;
-            if k == *key {
-                return Ok(Some((v, loc)));
-            }
-        }
-
-        Ok(None)
+        find_in_iter(&self.log, self.snapshot.get(key), |op| {
+            let Operation::Update(k, v) = op else {
+                unreachable!("location does not reference update operation");
+            };
+            (k == *key).then_some(v)
+        })
+        .await
+        .map(|opt| opt.map(|(loc, v)| (v, loc)))
     }
 
     /// Get the number of operations that have been applied to this db, including those that are not

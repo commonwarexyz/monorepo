@@ -7,7 +7,8 @@
 use crate::{
     adb::{
         any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
+            find_in_cursor, find_in_iter, fold_iter, historical_proof, init_mmr_and_log, prune_db,
+            Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
         Error,
     },
@@ -164,19 +165,17 @@ impl<
         log: &Journal<E, Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
-        let mut last_key: Option<(Location, KeyData<K, V>)> = None;
-        for &loc in iter {
-            let data = Self::get_update_op(log, loc).await?;
-            if let Some(ref other_key) = last_key {
-                if data.key > other_key.1.key {
-                    last_key = Some((loc, data));
-                }
-            } else {
-                last_key = Some((loc, data));
+        fold_iter(log, iter, None, |max, loc, op| {
+            let Operation::Update(data) = op else {
+                unreachable!("location does not reference update operation");
+            };
+            match max {
+                None => Some((loc, data)),
+                Some((_, ref max_data)) if data.key > max_data.key => Some((loc, data)),
+                other => other,
             }
-        }
-
-        Ok(last_key)
+        })
+        .await
     }
 
     /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
@@ -206,15 +205,14 @@ impl<
         log: &Journal<E, Operation<K, V>>,
         cursor: &mut impl Cursor<Value = Location>,
         key: &K,
-    ) -> Result<Option<(Location, K, V, K)>, Error> {
-        while let Some(&loc) = cursor.next() {
-            let data = Self::get_update_op(log, loc).await?;
-            if data.key == *key {
-                return Ok(Some((loc, data.key, data.value, data.next_key)));
-            }
-        }
-
-        Ok(None)
+    ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        find_in_cursor(log, cursor, |op| {
+            let Operation::Update(data) = op else {
+                unreachable!("location does not reference update operation");
+            };
+            (data.key == *key).then_some(data)
+        })
+        .await
     }
 
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
@@ -232,7 +230,7 @@ impl<
         };
 
         // Find the matching key among all conflicts, then update its location.
-        if let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? {
+        if let Some((loc, _)) = Self::find_update_op(log, &mut cursor, key).await? {
             assert!(new_loc > loc);
             cursor.update(new_loc);
             return Ok(Some(loc));
@@ -403,23 +401,20 @@ impl<
         iter: impl Iterator<Item = &Location>,
         key: &K,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
-        for &loc in iter {
-            // Iterate over all conflicting keys in the snapshot to find the span.
-            let data = Self::get_update_op(log, loc).await?;
-            if data.key >= data.next_key {
-                // cyclic span case
-                if *key >= data.key || *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
+        find_in_iter(log, iter, |op| {
+            let Operation::Update(data) = op else {
+                unreachable!("location does not reference update operation");
+            };
+            let in_span = if data.key >= data.next_key {
+                // Cyclic span: [key, ∞) ∪ [∞, next_key)
+                *key >= data.key || *key < data.next_key
             } else {
-                // normal span case
-                if *key >= data.key && *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
-            }
-        }
-
-        Ok(None)
+                // Normal span: [key, next_key)
+                *key >= data.key && *key < data.next_key
+            };
+            in_span.then_some(data)
+        })
+        .await
     }
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
@@ -455,14 +450,14 @@ impl<
     /// Get the value, next-key, and location of the active operation for `key` in the db, or None
     /// if it has no value.
     pub(super) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
-        for &loc in self.snapshot.get(key) {
-            let data = Self::get_update_op(&self.log, loc).await?;
-            if data.key == *key {
-                return Ok(Some((data.value, data.next_key, loc)));
-            }
-        }
-
-        Ok(None)
+        find_in_iter(&self.log, self.snapshot.get(key), |op| {
+            let Operation::Update(data) = op else {
+                unreachable!("location does not reference update operation");
+            };
+            (data.key == *key).then_some((data.value, data.next_key))
+        })
+        .await
+        .map(|opt| opt.map(|(loc, (v, nk))| (v, nk, loc)))
     }
 
     /// Get the number of operations that have been applied to this db, including those that are not
@@ -655,7 +650,7 @@ impl<
         };
 
         // Find the matching key among all conflicts if it exists, then delete it.
-        let Some((loc, _, _, _)) = Self::find_update_op(log, &mut cursor, key).await? else {
+        let Some((loc, _)) = Self::find_update_op(log, &mut cursor, key).await? else {
             return Ok(None);
         };
 
@@ -774,7 +769,7 @@ impl<
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
-    pub(crate) async fn move_op_if_active(
+    async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
         old_loc: Location,
