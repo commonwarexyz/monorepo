@@ -45,6 +45,12 @@ impl SupervisionTree {
         *task = Some(aborter);
     }
 
+    /// Removes any child references that no longer have strong owners.
+    fn prune_children(&self) {
+        let mut children = self.children.lock().unwrap();
+        children.retain(|child| child.strong_count() > 0);
+    }
+
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
     pub(crate) fn abort_descendants(&self) {
         // Drain the tasks list first so repeated calls are idempotent.
@@ -65,6 +71,14 @@ impl SupervisionTree {
             if let Some(child) = child.upgrade() {
                 child.abort_descendants();
             }
+        }
+    }
+}
+
+impl Drop for SupervisionTree {
+    fn drop(&mut self) {
+        if let Some(parent) = self._parent.as_ref() {
+            parent.prune_children();
         }
     }
 }
