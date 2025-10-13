@@ -11,6 +11,9 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod dkg;
+#[allow(dead_code)]
+#[cfg(feature = "std")]
+pub mod dkg2;
 pub mod primitives;
 mod scheme;
 pub mod tle;
