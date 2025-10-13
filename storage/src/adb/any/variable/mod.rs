@@ -408,11 +408,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == delete_loc {
-                cursor.delete();
-                return;
-            }
+        if cursor.find(|&loc| loc == delete_loc) {
+            cursor.delete();
         }
     }
 
@@ -428,11 +425,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                cursor.update(new_loc);
-                return;
-            }
+        if cursor.find(|&loc| loc == old_loc) {
+            cursor.update(new_loc);
         }
     }
 
