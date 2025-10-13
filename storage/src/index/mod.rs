@@ -69,6 +69,37 @@ pub trait Cursor {
 
     /// Removes anything in the cursor that satisfies the predicate.
     fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool);
+
+    /// Advances the cursor until finding a value matching the predicate.
+    ///
+    /// Returns `true` if a matching value is found, with the cursor positioned at that element.
+    /// Returns `false` if no match is found and the cursor is exhausted.
+    ///
+    /// After a successful find (returning `true`), the cursor is positioned at the found element,
+    /// allowing operations like `update()` or `delete()` to be called on it without requiring
+    /// another call to `next()`.
+    ///
+    /// This method follows similar semantics to `Iterator::find`, consuming items until a match is
+    /// found or the iterator is exhausted.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let mut cursor = index.get_mut(&key)?;
+    /// if cursor.find(|&value| value == 42) {
+    ///     // Cursor is positioned at the element with value 42
+    ///     cursor.update(100); // Update it to 100
+    /// }
+    /// ```
+    fn find(&mut self, predicate: impl Fn(&Self::Value) -> bool) -> bool {
+        loop {
+            match self.next() {
+                Some(value) if predicate(value) => return true,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
 }
 
 /// A memory-efficient index that maps translated keys to arbitrary values.
@@ -206,6 +237,67 @@ mod tests {
             assert_eq!(index.keys(), 0);
             run_index_basic(&mut index);
             assert_eq!(index.keys(), 0);
+        });
+    }
+
+    fn run_index_cursor_find<I: Index<Value = u64>>(index: &mut I) {
+        let key = b"test_key";
+
+        // Insert multiple values with collisions
+        index.insert(key, 10);
+        index.insert(key, 20);
+        index.insert(key, 30);
+        index.insert(key, 40);
+
+        // Test finding an element that exists
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert!(cursor.find(|&v| v == 30));
+            // Cursor should be positioned at 30, so we can update it
+            cursor.update(35);
+        }
+
+        // Verify the update worked
+        let values: Vec<u64> = index.get(key).copied().collect();
+        assert!(values.contains(&35));
+        assert!(!values.contains(&30));
+
+        // Test finding an element that doesn't exist
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert!(!cursor.find(|&v| v == 100));
+            // Cursor should be exhausted, so next() returns None
+            assert!(cursor.next().is_none());
+        }
+
+        // Test finding and deleting
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert!(cursor.find(|&v| v == 20));
+            cursor.delete();
+        }
+
+        // Verify the delete worked
+        let values: Vec<u64> = index.get(key).copied().collect();
+        assert!(!values.contains(&20));
+        assert_eq!(values.len(), 3); // 10, 35, 40
+    }
+
+    #[test_traced]
+    fn test_unordered_index_cursor_find() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_find(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_cursor_find() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_find(&mut index);
         });
     }
 
@@ -793,12 +885,9 @@ mod tests {
                 let mut index = index_clone.lock().unwrap();
                 let mut updated = false;
                 if let Some(mut cursor) = index.get_mut(b"test_key2") {
-                    while let Some(value) = cursor.next() {
-                        if *value == 200 {
-                            cursor.update(250);
-                            updated = true;
-                            break;
-                        }
+                    if cursor.find(|&value| value == 200) {
+                        cursor.update(250);
+                        updated = true;
                     }
                 }
                 updated

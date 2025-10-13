@@ -158,15 +158,14 @@ where
         (
             database.root(&mut hasher),
             database.lower_bound(),
-            database.op_count().saturating_sub(1),
+            database.op_count(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound,
-            upper_bound,
+            range: lower_bound..upper_bound,
         },
     };
 
@@ -437,10 +436,9 @@ where
                 match client_result {
                     Ok((client_addr, sink, stream)) => {
                         let state = state.clone();
-                        let context = context.clone();
                         context.with_label("client").spawn(move|context|async move {
                             if let Err(e) =
-                                handle_client::<DB, _>(context, state.clone(), sink, stream, client_addr).await
+                                handle_client::<DB, _>(context, state, sink, stream, client_addr).await
                             {
                                 error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                             }

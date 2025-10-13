@@ -6,10 +6,15 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::{
+    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
+    Channel,
+};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner,
+};
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -27,14 +32,15 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: ContextCell<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
+    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    info_verifier: InfoVerifier<C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -50,8 +56,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
-        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
@@ -59,7 +65,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
-                mailbox_size: cfg.mailbox_size,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
@@ -78,7 +83,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 cfg,
 
                 channels,
@@ -86,6 +91,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                info_verifier,
             },
             oracle,
         )
@@ -120,7 +126,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(self) {
@@ -140,6 +146,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
+                info_verifier: self.info_verifier,
             },
         );
         let mut spawner_task =

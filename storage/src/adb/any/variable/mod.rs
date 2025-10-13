@@ -188,9 +188,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let db = Self {
             mmr,
             log,
-            log_size: Location::new(0),
-            inactivity_floor_loc: Location::new(0),
-            oldest_retained_loc: Location::new(0),
+            log_size: Location::new_unchecked(0),
+            inactivity_floor_loc: Location::new_unchecked(0),
+            oldest_retained_loc: Location::new_unchecked(0),
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
             uncommitted_ops: 0,
@@ -237,7 +237,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
-                            self.log_size = Location::new(section * self.log_items_per_section);
+                            self.log_size =
+                                Location::new_unchecked(section * self.log_items_per_section);
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
@@ -363,13 +364,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
-    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    /// Get the value of the operation with location `loc` in the db.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than or equal to the number of operations in the log.
+    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
         assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
@@ -401,11 +410,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == delete_loc {
-                cursor.delete();
-                return;
-            }
+        if cursor.find(|&loc| loc == delete_loc) {
+            cursor.delete();
         }
     }
 
@@ -421,21 +427,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                cursor.update(new_loc);
-                return;
-            }
+        if cursor.find(|&loc| loc == old_loc) {
+            cursor.update(new_loc);
         }
     }
 
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. The
-    /// location is assumed valid.
+    /// Get the value of the operation with location `loc` in the db if it matches `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than or equal to the number of operations in the log.
+    /// Panics if `loc` >= self.op_count().
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
         assert!(loc < self.op_count());
 
         match self.locations.read(*loc).await {
@@ -582,7 +592,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
     ///
-    /// # Warning
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= [Self::op_count].
+    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    ///
+    /// # Panics
     ///
     /// Panics if there are uncommitted operations.
     pub async fn proof(
@@ -597,23 +613,32 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
     /// operations.
     ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` or `start_loc` >
+    /// self.op_count().
+    /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof
+    /// has been pruned.
     ///
     /// # Panics
     ///
-    /// - Panics if `start_loc` greater than or equal to `op_count`.
-    /// - Panics if `op_count` is greater than the number of operations.
+    /// Panics if there are uncommitted operations.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        assert!(op_count <= self.op_count());
-        assert!(start_loc < op_count);
-
+        if op_count > self.op_count() {
+            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
+        }
+        if start_loc >= op_count {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
+        let mmr_size = Position::try_from(op_count)?;
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let mmr_size = Position::from(op_count);
-
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
@@ -670,7 +695,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((Location::new(last_commit), metadata)))
+        Ok(Some((Location::new_unchecked(last_commit), metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -751,10 +776,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Prune historical operations. This does not affect the db's root or current snapshot.
     ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
+    ///
     /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        let target_prune_pos = Position::try_from(target_prune_loc)?;
+
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());
@@ -779,7 +810,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
-        self.oldest_retained_loc = Location::new(section_with_target * self.log_items_per_section);
+        self.oldest_retained_loc =
+            Location::new_unchecked(section_with_target * self.log_items_per_section);
 
         debug!(
             log_size = ?self.log_size,
@@ -793,7 +825,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 .prune(*self.oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
-                .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
+                .prune_to_pos(&mut self.hasher, target_prune_pos)
                 .map_err(Error::Mmr),
         )?;
 
@@ -873,7 +905,7 @@ pub(super) mod test {
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
 
-    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -927,7 +959,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &empty_proof,
-                Location::new(0),
+                Location::new_unchecked(0),
                 &[] as &[Operation<Digest, Digest>],
                 &empty_root
             ));
@@ -947,9 +979,46 @@ pub(super) mod test {
             assert!(!verify_proof(
                 &mut hasher,
                 &empty_proof,
-                Location::new(0),
+                Location::new_unchecked(0),
                 &[] as &[Operation<Digest, Digest>],
                 &root
+            ));
+
+            // Single op proof should verify.
+            let (proof, ops) = db
+                .proof(Location::new_unchecked(0), NZU64!(1))
+                .await
+                .unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &root
+            ));
+
+            // Add one more op.
+            db.commit(None).await.unwrap();
+            // Historical proof from larger db should match proof from smaller db.
+            let (proof2, ops2) = db
+                .historical_proof(
+                    Location::new_unchecked(1),
+                    Location::new_unchecked(0),
+                    NZU64!(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(proof, proof2);
+            assert_eq!(ops, ops2);
+
+            // Proof will not verify against the root of the bigger db.
+            let root2 = db.root(&mut hasher);
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(0),
+                &ops,
+                &root2
             ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
@@ -999,12 +1068,12 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.inactivity_floor_loc, Location::new(0));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
             db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
             db.raise_inactivity_floor(None, 3).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(3));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(3));
             assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
 
@@ -1014,7 +1083,7 @@ pub(super) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 8); // 4 updates, 3 deletions, 1 commit
-            assert_eq!(db.inactivity_floor_loc, Location::new(3));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(3));
 
             db.sync().await.unwrap();
 
@@ -1045,7 +1114,7 @@ pub(super) mod test {
             // Make sure we can still get the metadata.
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(8), metadata))
+                Some((Location::new_unchecked(8), metadata))
             );
 
             // Re-activate the keys by updating them.
@@ -1067,7 +1136,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 19);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new(18), None))
+                Some((Location::new_unchecked(18), None))
             );
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
@@ -1126,17 +1195,23 @@ pub(super) mod test {
             }
 
             assert_eq!(db.op_count(), 1477);
-            assert_eq!(db.inactivity_floor_loc, Location::new(0));
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(0)); // no pruning yet
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(0)
+            ); // no pruning yet
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1478));
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1145,13 +1220,13 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1478));
             assert_eq!(db.snapshot.items(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(None, 3000).await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(4478));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4478));
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
@@ -1183,11 +1258,14 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for loc in *start_loc..*end_loc {
-                let (proof, log) = db.proof(Location::new(loc), max_ops).await.unwrap();
+                let (proof, log) = db
+                    .proof(Location::new_unchecked(loc), max_ops)
+                    .await
+                    .unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
-                    Location::new(loc),
+                    Location::new_unchecked(loc),
                     &log,
                     &root
                 ));
@@ -1350,13 +1428,16 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
                 Location::try_from(db.mmr.size()).ok(),
-                Some(Location::new(2787))
+                Some(Location::new_unchecked(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1480));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1480));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
             db.close().await.unwrap();
 
@@ -1365,11 +1446,14 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
                 Location::try_from(db.mmr.size()).ok(),
-                Some(Location::new(2787))
+                Some(Location::new_unchecked(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1480));
-            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(1480));
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                Location::new_unchecked(1477)
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();

@@ -30,8 +30,8 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// configured to provide 8 cores.
 const THREADS: usize = 8;
 
-fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg, ())> {
-    KConfig::<(commonware_codec::RangeCfg, ())> {
+fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
+    KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,

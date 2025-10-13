@@ -4,7 +4,7 @@
 //! - This wrapper tracks a synthetic global `size` (next append location) and maps it to
 //!   sections via `items_per_section` when appending.
 //! - Callers must prepare the variable journal (e.g., `init_sync`) and compute the initial
-//!   `size` from a replay that considers only `[lower_bound, upper_bound]`.
+//!   `size` from a replay that considers only `[range.start, range.end)`.
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
 use crate::{adb::sync, journal::variable, store::operation::Variable};
@@ -30,7 +30,8 @@ where
     items_per_section: NonZeroU64,
 
     /// Logical next append location (number of ops present).
-    /// Invariant: computed by caller so `lower_bound <= size <= upper_bound + 1`.
+    /// Invariant: computed by caller so `range.start <= size <= range.end`
+    /// for the sync range.
     size: u64,
 }
 

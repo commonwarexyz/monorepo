@@ -4,10 +4,11 @@ use crate::authenticated::{
         actors::{peer, router, tracker},
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -20,13 +21,13 @@ pub struct Actor<
     St: Stream,
     C: PublicKey,
 > {
-    context: E,
+    context: ContextCell<E>,
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
     allowed_ping_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    receiver: mpsc::Receiver<Message<Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -41,7 +42,7 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -62,11 +63,11 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
@@ -76,21 +77,21 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
+        spawn_cell!(self.context, self.run(tracker, router).await)
     }
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {
@@ -133,7 +134,7 @@ impl<
                             let channels = router.ready(peer.clone(), messenger).await;
 
                             // Register peer with tracker
-                            tracker.connect(peer.clone(), peer_mailbox).await;
+                            tracker.connect(peer.clone(), peer_mailbox);
 
                             // Run peer
                             let e = peer_actor.run(peer.clone(), connection, channels).await;

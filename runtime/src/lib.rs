@@ -122,94 +122,58 @@ pub trait Runner {
 
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Enqueue a task to be executed.
+    /// Return a [`Spawner`] whose tasks remain supervised by the current context.
     ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
+    /// Tasks spawned with this configuration are cancelled automatically once the current task
+    /// finishes (whether by completing or being aborted). Cancellation still requires the task to
+    /// yield, so a blocking task that never yields cannot be stopped.
     ///
-    /// Spawned tasks consume the context used to create them. This ensures that context cannot
-    /// be shared between tasks and that a task's context always comes from somewhere.
+    /// This is the default behavior.
+    fn supervised(self) -> Self;
+
+    /// Return a [`Spawner`] that launches tasks detached from the current context.
+    ///
+    /// Detached tasks continue running even after the current task exits. Prefer this only when
+    /// the parent task is not responsible for managing the child task.
+    ///
+    /// This is not the default behavior. See [`Spawner::supervised`] for more information.
+    fn detached(self) -> Self;
+
+    /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
+    ///
+    /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
+    /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
+    /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
+    /// [`Spawner::dedicated`] instead.
+    ///
+    /// The shared executor with `blocking == false` is the default spawn mode.
+    fn shared(self, blocking: bool) -> Self;
+
+    /// Return a [`Spawner`] that runs tasks on a dedicated thread when the runtime supports it.
+    ///
+    /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
+    /// shared executor.
+    ///
+    /// This is not the default behavior. See [`Spawner::shared`] for more information.
+    fn dedicated(self) -> Self;
+
+    /// Spawn a task for execution with the current configuration.
+    ///
+    /// Unlike directly awaiting a future, the task starts running immediately even if the caller
+    /// never awaits the returned [`Handle`].
+    ///
+    /// Spawning consumes the context so that each task receives its own [`Spawner`]; contexts are
+    /// never implicitly shared between tasks.
+    ///
+    /// # Spawn Configuration Reset
+    ///
+    /// When a context passes through [`Spawner::spawn`], its configuration resets to the default
+    /// (shared executor, `blocking == false`). Child tasks can therefore assume they start from a
+    /// clean configuration without needing to inspect how they were spawned.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    /// Enqueue a task to be executed (without consuming the context).
-    ///
-    /// The semantics are the same as [Spawner::spawn].
-    ///
-    /// # Warning
-    ///
-    /// If this function is used to spawn multiple tasks from the same context (including child
-    /// tasks), the runtime will panic to prevent accidental misuse.
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    /// Enqueue a child task to be executed that will be automatically aborted when the
-    /// parent task completes or is aborted.
-    ///
-    /// The spawned task will be tracked as a child of the current task. When
-    /// the parent task completes (either successfully or via abort), all child
-    /// tasks will be automatically aborted.
-    ///
-    /// # Context cloning and children
-    ///
-    /// When a context is cloned (via `Clone::clone`) or a new context is created (via methods
-    /// like `with_label`), you get another reference to the same context. However:
-    /// - Tasks spawned with `spawn` from any context (original or cloned) are always independent
-    /// - Only tasks spawned with `spawn_child` become children of the current task
-    /// - Child tasks are tied to the task that spawned them, not to the context itself
-    ///
-    /// # Note
-    ///
-    /// Only async tasks can be spawned as children, since blocking tasks cannot be
-    /// aborted and therefore can't support parent-child relationships.
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    /// Enqueue a blocking task to be executed.
-    ///
-    /// This method is designed for synchronous, potentially long-running operations. Tasks can either
-    /// be executed in a shared thread (tasks that are expected to finish on their own) or a dedicated
-    /// thread (tasks that are expected to run indefinitely).
-    ///
-    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
-    /// result.
-    ///
-    /// # Motivation
-    ///
-    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
-    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
-    /// of said runtimes.
-    ///
-    /// # Warning
-    ///
-    /// Blocking tasks cannot be aborted.
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static;
-
-    /// Enqueue a blocking task to be executed (without consuming the context).
-    ///
-    /// The semantics are the same as [Spawner::spawn_blocking].
-    ///
-    /// # Warning
-    ///
-    /// If this function is used to spawn multiple tasks from the same context,
-    /// the runtime will panic to prevent accidental misuse.
-    fn spawn_blocking_ref<F, T>(
-        &mut self,
-        dedicated: bool,
-    ) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and waits for all outstanding tasks
@@ -503,7 +467,6 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
-        panic::{catch_unwind, AssertUnwindSafe},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -595,11 +558,18 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort<R: Runner>(runner: R)
+    fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
+            let context = if dedicated {
+                assert!(!blocking);
+                context.dedicated()
+            } else {
+                context.shared(blocking)
+            };
+
             let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -611,28 +581,83 @@ mod tests {
     }
 
     fn test_panic_aborts_root<R: Runner>(runner: R) {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.start(|_| async move {
-                panic!("blah");
-            });
-        }));
+        let result: Result<(), Error> = runner.start(|_| async move {
+            panic!("blah");
+        });
         result.unwrap_err();
     }
 
     fn test_panic_aborts_spawn<R: Runner>(runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
-        let result = runner.start(|context| async move {
-            let result = context.spawn(|_| async move {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
                 panic!("blah");
             });
-            assert!(matches!(result.await, Err(Error::Exited)));
-            Result::<(), Error>::Ok(())
-        });
 
-        // Ensure panic was caught
-        result.unwrap();
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let result = context.clone().spawn(|_| async move {
+                panic!("blah");
+            });
+            result.await
+        });
+        assert!(matches!(result, Err(Error::Exited)));
+    }
+
+    fn test_multiple_panics<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
+                panic!("boom 1");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 2");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 3");
+            });
+
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    fn test_multiple_panics_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let (res1, res2, res3) = runner.start(|context| async move {
+            let handle1 = context.clone().spawn(|_| async move {
+                panic!("boom 1");
+            });
+            let handle2 = context.clone().spawn(|_| async move {
+                panic!("boom 2");
+            });
+            let handle3 = context.clone().spawn(|_| async move {
+                panic!("boom 3");
+            });
+
+            join!(handle1, handle2, handle3)
+        });
+        assert!(matches!(res1, Err(Error::Exited)));
+        assert!(matches!(res2, Err(Error::Exited)));
+        assert!(matches!(res3, Err(Error::Exited)));
     }
 
     fn test_select<R: Runner>(runner: R) {
@@ -1250,48 +1275,17 @@ mod tests {
         });
     }
 
-    fn test_spawn_ref<R: Runner>(runner: R)
+    fn test_spawn_dedicated<R: Runner>(runner: R)
     where
         R::Context: Spawner,
     {
-        runner.start(|mut context| async move {
-            let handle = context.spawn_ref();
-            let result = handle(async move { 42 }).await;
-            assert!(matches!(result, Ok(42)));
+        runner.start(|context| async move {
+            let handle = context.dedicated().spawn(|_| async move { 42 });
+            assert!(matches!(handle.await, Ok(42)));
         });
     }
 
-    fn test_spawn_ref_duplicate<R: Runner>(runner: R)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|mut context| async move {
-            let handle = context.spawn_ref();
-            let result = handle(async move { 42 }).await;
-            assert!(matches!(result, Ok(42)));
-
-            // Ensure context is consumed
-            let handle = context.spawn_ref();
-            let result = handle(async move { 42 }).await;
-            assert!(matches!(result, Ok(42)));
-        });
-    }
-
-    fn test_spawn_duplicate<R: Runner>(runner: R)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|mut context| async move {
-            let handle = context.spawn_ref();
-            let result = handle(async move { 42 }).await;
-            assert!(matches!(result, Ok(42)));
-
-            // Ensure context is consumed
-            context.spawn(|_| async move { 42 });
-        });
-    }
-
-    fn test_spawn_child<R: Runner>(runner: R)
+    fn test_spawn_supervised<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1303,7 +1297,7 @@ mod tests {
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child that completes immediately
-                let handle = context.spawn_child(|_| async {});
+                let handle = context.spawn(|_| async {});
 
                 // Store child handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1329,7 +1323,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_abort_on_parent_abort<R: Runner>(runner: R)
+    fn test_spawn_supervised_abort_on_parent_abort<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1340,7 +1334,7 @@ mod tests {
             let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child task that hangs forever, should be aborted when parent aborts
-                let handle = context.spawn_child(|_| pending::<()>());
+                let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1364,7 +1358,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_abort_on_parent_completion<R: Runner>(runner: R)
+    fn test_spawn_supervised_abort_on_parent_completion<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1375,7 +1369,7 @@ mod tests {
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.spawn(move |context| async move {
                 // Spawn child task that hangs forever, should be aborted when parent completes
-                let handle = context.spawn_child(|_| pending::<()>());
+                let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1396,7 +1390,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_cascading_abort<R: Runner>(runner: R)
+    fn test_spawn_supervised_cascading_abort<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1419,9 +1413,9 @@ mod tests {
                     for _ in 0..3 {
                         let handles2 = handles.clone();
                         let mut initialized_tx2 = initialized_tx.clone();
-                        let handle = context.clone().spawn_child(move |context| async move {
+                        let handle = context.clone().spawn(move |context| async move {
                             for _ in 0..2 {
-                                let handle = context.clone().spawn_child(|_| async {
+                                let handle = context.clone().spawn(|_| async {
                                     pending::<()>().await;
                                 });
                                 handles2.lock().unwrap().push(handle);
@@ -1458,7 +1452,7 @@ mod tests {
         });
     }
 
-    fn test_child_survives_sibling_completion<R: Runner>(runner: R, use_spawn_ref: bool)
+    fn test_child_survives_sibling_completion<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1469,26 +1463,20 @@ mod tests {
             let (sibling_complete_tx, sibling_complete_rx) = oneshot::channel();
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
 
-            let parent = context.spawn(move |mut context| async move {
+            let parent = context.spawn(move |context| async move {
                 // Spawn a child task
-                context.clone().spawn_child(|_| async move {
+                context.clone().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
                 });
 
-                // Spawn an independent sibling task using spawn or spawn_ref based on parameter
-                let sibling_task = async move {
+                // Spawn an independent sibling task
+                context.spawn(move |_| async move {
                     sibling_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     sibling_complete_rx.await.unwrap();
-                };
-
-                if use_spawn_ref {
-                    context.spawn_ref()(sibling_task);
-                } else {
-                    context.spawn(|_| sibling_task);
-                }
+                });
 
                 // Wait for signal to complete
                 parent_complete_rx.await.unwrap();
@@ -1526,7 +1514,7 @@ mod tests {
             let cloned_context = context.clone();
             let parent = cloned_context.spawn(move |context| async move {
                 // Spawn a child task
-                context.spawn_child(|_| async move {
+                context.spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     child_complete_rx.await.unwrap();
                 });
@@ -1565,74 +1553,95 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.spawn_blocking(dedicated, |_| 42);
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared(true)
+            };
+
+            let handle = context.spawn(|_| async move { 42 });
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
     }
 
-    fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
+    fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
-        runner.start(|mut context| async move {
-            let spawn = context.spawn_blocking_ref(dedicated);
-            let handle = spawn(|| 42);
-            let result = handle.await;
-            assert!(matches!(result, Ok(42)));
+        runner.start(|context| async move {
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared(true)
+            };
+
+            context.clone().spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
+
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
         });
     }
 
-    fn test_spawn_blocking_ref_duplicate<R: Runner>(runner: R, dedicated: bool)
+    fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
-        runner.start(|mut context| async move {
-            let spawn = context.spawn_blocking_ref(dedicated);
-            let result = spawn(|| 42).await;
-            assert!(matches!(result, Ok(42)));
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared(true)
+            };
 
-            // Ensure context is consumed
-            context.spawn_blocking(dedicated, |_| 42);
+            let handle = context.clone().spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
+            handle.await
         });
+        assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
+    fn test_spawn_blocking_supervised_panics<R: Runner>(runner: R)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            // Create task
-            let (sender, mut receiver) = oneshot::channel();
-            let handle = context.spawn_blocking(dedicated, move |_| {
-                // Wait for abort to be called
-                loop {
-                    if receiver.try_recv().is_ok() {
-                        break;
-                    }
-                }
+            let handle = context.shared(true).spawn(|_| async move {});
+            let _ = handle.await;
+        });
+    }
 
-                // Perform a long-running operation
-                let mut count = 0;
-                loop {
-                    count += 1;
-                    if count >= 100_000_000 {
-                        break;
-                    }
-                }
-                count
+    fn test_spawn_detached<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            // Setup channels
+            let (inner_tx, inner_rx) = oneshot::channel();
+            let (outer_tx, outer_rx) = oneshot::channel();
+
+            // Spawn task
+            let handle = context.spawn(move |context| async move {
+                // Spawn detached task
+                context.detached().spawn(|_| async move {
+                    inner_rx.await.unwrap();
+                    outer_tx.send(()).unwrap();
+                });
             });
 
-            // Abort the task
-            //
-            // If there was an `.await` prior to sending a message over the oneshot, this test
-            // could deadlock (depending on the runtime implementation) because the blocking task
-            // would never yield (preventing send from being called).
-            handle.abort();
-            sender.send(()).unwrap();
+            // Wait for task to finish
+            handle.await.unwrap();
 
-            // Wait for the task to complete
-            assert!(matches!(handle.await, Ok(100_000_000)));
+            // Send message to detached task
+            inner_tx.send(()).unwrap();
+
+            // Wait for detached task to respond
+            outer_rx.await.unwrap();
         });
     }
 
@@ -1831,12 +1840,21 @@ mod tests {
     #[test]
     fn test_deterministic_spawn_abort() {
         let executor = deterministic::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_root() {
         let runner = deterministic::Runner::default();
+        test_panic_aborts_root(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_deterministic_panic_aborts_root_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let runner = deterministic::Runner::new(cfg);
         test_panic_aborts_root(runner);
     }
 
@@ -1845,6 +1863,27 @@ mod tests {
     fn test_deterministic_panic_aborts_spawn() {
         let executor = deterministic::Runner::default();
         test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    fn test_deterministic_panic_aborts_spawn_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let executor = deterministic::Runner::new(cfg);
+        test_panic_aborts_spawn_caught(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn test_deterministic_multiple_panics() {
+        let executor = deterministic::Runner::default();
+        test_multiple_panics(executor);
+    }
+
+    #[test]
+    fn test_deterministic_multiple_panics_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let executor = deterministic::Runner::new(cfg);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -1927,55 +1966,39 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_ref() {
+    fn test_deterministic_spawn_dedicated() {
         let executor = deterministic::Runner::default();
-        test_spawn_ref(executor);
+        test_spawn_dedicated(executor);
     }
 
     #[test]
-    #[should_panic]
-    fn test_deterministic_spawn_ref_duplicate() {
-        let executor = deterministic::Runner::default();
-        test_spawn_ref_duplicate(executor);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_spawn_duplicate() {
-        let executor = deterministic::Runner::default();
-        test_spawn_duplicate(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_child() {
+    fn test_deterministic_spawn_supervised() {
         let runner = deterministic::Runner::default();
-        test_spawn_child(runner);
+        test_spawn_supervised(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_child_abort_on_parent_abort() {
+    fn test_deterministic_spawn_supervised_abort_on_parent_abort() {
         let runner = deterministic::Runner::default();
-        test_spawn_child_abort_on_parent_abort(runner);
+        test_spawn_supervised_abort_on_parent_abort(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_child_abort_on_parent_completion() {
+    fn test_deterministic_spawn_supervised_abort_on_parent_completion() {
         let runner = deterministic::Runner::default();
-        test_spawn_child_abort_on_parent_completion(runner);
+        test_spawn_supervised_abort_on_parent_completion(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_child_cascading_abort() {
+    fn test_deterministic_spawn_supervised_cascading_abort() {
         let runner = deterministic::Runner::default();
-        test_spawn_child_cascading_abort(runner);
+        test_spawn_supervised_cascading_abort(runner);
     }
 
     #[test]
     fn test_deterministic_child_survives_sibling_completion() {
-        for use_spawn_ref in [false, true] {
-            let runner = deterministic::Runner::default();
-            test_child_survives_sibling_completion(runner, use_spawn_ref);
-        }
+        let runner = deterministic::Runner::default();
+        test_child_survives_sibling_completion(runner);
     }
 
     #[test]
@@ -1997,38 +2020,37 @@ mod tests {
     fn test_deterministic_spawn_blocking_panic() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                let handle = context.spawn_blocking(dedicated, |_| {
-                    panic!("blocking task panicked");
-                });
-                handle.await.unwrap();
-            });
+            test_spawn_blocking_panic(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking_panic_caught() {
+        for dedicated in [false, true] {
+            let cfg = deterministic::Config::default().with_catch_panics(true);
+            let executor = deterministic::Runner::new(cfg);
+            test_spawn_blocking_panic_caught(executor, dedicated);
+        }
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking_supervised_ignored() {
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking_supervised_panics(executor);
     }
 
     #[test]
     fn test_deterministic_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = deterministic::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 
     #[test]
-    fn test_deterministic_spawn_blocking_ref() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking_ref(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_spawn_blocking_ref_duplicate() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking_ref_duplicate(executor, dedicated);
-        }
+    fn test_deterministic_spawn_detached() {
+        let executor = deterministic::Runner::default();
+        test_spawn_detached(executor);
     }
 
     #[test]
@@ -2089,19 +2111,50 @@ mod tests {
     #[test]
     fn test_tokio_spawn_abort() {
         let executor = tokio::Runner::default();
-        test_spawn_abort(executor);
+        test_spawn_abort(executor, false, false);
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_tokio_panic_aborts_root() {
         let executor = tokio::Runner::default();
         test_panic_aborts_root(executor);
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
+    fn test_tokio_panic_aborts_root_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
+        test_panic_aborts_root(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
     fn test_tokio_panic_aborts_spawn() {
         let executor = tokio::Runner::default();
         test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    fn test_tokio_panic_aborts_spawn_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
+        test_panic_aborts_spawn_caught(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn test_tokio_multiple_panics() {
+        let executor = tokio::Runner::default();
+        test_multiple_panics(executor);
+    }
+
+    #[test]
+    fn test_tokio_multiple_panics_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -2184,55 +2237,39 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_ref() {
+    fn test_tokio_spawn_dedicated() {
         let executor = tokio::Runner::default();
-        test_spawn_ref(executor);
+        test_spawn_dedicated(executor);
     }
 
     #[test]
-    #[should_panic]
-    fn test_tokio_spawn_ref_duplicate() {
-        let executor = tokio::Runner::default();
-        test_spawn_ref_duplicate(executor);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_spawn_duplicate() {
-        let executor = tokio::Runner::default();
-        test_spawn_duplicate(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_child() {
+    fn test_tokio_spawn_supervised() {
         let runner = tokio::Runner::default();
-        test_spawn_child(runner);
+        test_spawn_supervised(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_child_abort_on_parent_abort() {
+    fn test_tokio_spawn_supervised_abort_on_parent_abort() {
         let runner = tokio::Runner::default();
-        test_spawn_child_abort_on_parent_abort(runner);
+        test_spawn_supervised_abort_on_parent_abort(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_child_abort_on_parent_completion() {
+    fn test_tokio_spawn_supervised_abort_on_parent_completion() {
         let runner = tokio::Runner::default();
-        test_spawn_child_abort_on_parent_completion(runner);
+        test_spawn_supervised_abort_on_parent_completion(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_child_cascading_abort() {
+    fn test_tokio_spawn_supervised_cascading_abort() {
         let runner = tokio::Runner::default();
-        test_spawn_child_cascading_abort(runner);
+        test_spawn_supervised_cascading_abort(runner);
     }
 
     #[test]
     fn test_tokio_child_survives_sibling_completion() {
-        for use_spawn_ref in [false, true] {
-            let runner = tokio::Runner::default();
-            test_child_survives_sibling_completion(runner, use_spawn_ref);
-        }
+        let runner = tokio::Runner::default();
+        test_child_survives_sibling_completion(runner);
     }
 
     #[test]
@@ -2250,42 +2287,41 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blocking task panicked")]
     fn test_tokio_spawn_blocking_panic() {
         for dedicated in [false, true] {
             let executor = tokio::Runner::default();
-            executor.start(|context| async move {
-                let handle = context.spawn_blocking(dedicated, |_| {
-                    panic!("blocking task panicked");
-                });
-                let result = handle.await;
-                assert!(matches!(result, Err(Error::Exited)));
-            });
+            test_spawn_blocking_panic(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_panic_caught() {
+        for dedicated in [false, true] {
+            let cfg = tokio::Config::default().with_catch_panics(true);
+            let executor = tokio::Runner::new(cfg);
+            test_spawn_blocking_panic_caught(executor, dedicated);
+        }
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_supervised_ignored() {
+        let executor = tokio::Runner::default();
+        test_spawn_blocking_supervised_panics(executor);
     }
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        for dedicated in [false, true] {
+        for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = tokio::Runner::default();
-            test_spawn_blocking_abort(executor, dedicated);
+            test_spawn_abort(executor, dedicated, blocking);
         }
     }
 
     #[test]
-    fn test_tokio_spawn_blocking_ref() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking_ref(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_spawn_blocking_ref_duplicate() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking_ref_duplicate(executor, dedicated);
-        }
+    fn test_tokio_spawn_detached() {
+        let executor = tokio::Runner::default();
+        test_spawn_detached(executor);
     }
 
     #[test]
