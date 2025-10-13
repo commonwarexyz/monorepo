@@ -27,11 +27,17 @@ impl Position {
         self.0
     }
 
-    /// Return `self + rhs` returning `None` on overflow.
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => {
+                if value <= MAX_POSITION.0 {
+                    Some(Self(value))
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     }
@@ -45,10 +51,15 @@ impl Position {
         }
     }
 
-    /// Return `self + rhs` saturating at `u64::MAX`.
+    /// Return `self + rhs` saturating at [MAX_POSITION].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
-        Self(self.0.saturating_add(rhs))
+        let result = self.0.saturating_add(rhs);
+        if result > MAX_POSITION.0 {
+            MAX_POSITION
+        } else {
+            Self(result)
+        }
     }
 
     /// Return `self - rhs` saturating at zero.
@@ -279,7 +290,19 @@ mod tests {
     fn test_checked_add() {
         let pos = Position::new(10);
         assert_eq!(pos.checked_add(5).unwrap(), 15);
+
+        // Overflow returns None
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
+
+        // Exceeding MAX_POSITION returns None
+        assert!(MAX_POSITION.checked_add(1).is_none());
+        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
+
+        // At MAX_POSITION is OK
+        assert_eq!(
+            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
+            MAX_POSITION
+        );
     }
 
     #[test]
@@ -293,7 +316,15 @@ mod tests {
     fn test_saturating_add() {
         let pos = Position::new(10);
         assert_eq!(pos.saturating_add(5), 15);
-        assert_eq!(Position::new(u64::MAX).saturating_add(1), u64::MAX);
+
+        // Saturates at MAX_POSITION, not u64::MAX
+        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
+        assert_eq!(
+            Position::new(*MAX_POSITION - 5).saturating_add(10),
+            MAX_POSITION
+        );
     }
 
     #[test]
