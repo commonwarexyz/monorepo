@@ -874,25 +874,25 @@ impl crate::Spawner for Context {
         if self.tree.is_aborted() {
             return Handle::closed(metric);
         }
-        let tree = SupervisionTree::child(&self.tree);
-        self.tree = Arc::clone(&tree);
-
-        // Set up the task
-        let executor = self.executor();
         let supervised = self.model.is_supervised();
         self.model = Model::default();
+        let tree = if supervised {
+            SupervisionTree::child(&self.tree)
+        } else {
+            SupervisionTree::root()
+        };
+        self.tree = Arc::clone(&tree);
 
         // Spawn the task (we don't care about Model)
+        let executor = self.executor();
         let future = f(self);
         let (f, handle) =
             Handle::init(future, metric, executor.panicker.clone(), Arc::clone(&tree));
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
         // Register this child with the parent if supervision is enabled.
-        if supervised {
-            if let Some(aborter) = handle.aborter() {
-                tree.register_task(aborter);
-            }
+        if let Some(aborter) = handle.aborter() {
+            tree.register_task(aborter);
         }
 
         handle
