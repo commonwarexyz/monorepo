@@ -470,7 +470,7 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, Ordering},
+            atomic::{AtomicU32, AtomicUsize, Ordering},
             Arc, Mutex,
         },
         task::{Context as TContext, Poll, Waker},
@@ -556,6 +556,43 @@ mod tests {
                 }
             });
         });
+    }
+
+    fn test_supervised_spawn_uses_child_tree<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        runner.start({
+            let counter = counter.clone();
+            move |context| {
+                let counter = counter.clone();
+                async move {
+                    let parent_counter = counter.clone();
+                    let parent_handle = context.supervised().spawn(move |ctx| {
+                        let parent_counter = parent_counter.clone();
+                        async move {
+                            let child_counter = parent_counter.clone();
+                            let child_handle = ctx.supervised().spawn(move |child_ctx| {
+                                let child_counter = child_counter.clone();
+                                async move {
+                                    let _ = child_ctx;
+                                    child_counter.fetch_add(1, Ordering::Relaxed);
+                                }
+                            });
+
+                            child_handle.await.unwrap();
+                            parent_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+
+                    parent_handle.await.unwrap();
+                }
+            }
+        });
+
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
     fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
@@ -1932,6 +1969,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_supervised_spawn_uses_child_tree() {
+        let executor = deterministic::Runner::default();
+        test_supervised_spawn_uses_child_tree(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_abort() {
         let executor = deterministic::Runner::default();
         test_spawn_abort(executor, false, false);
@@ -2212,6 +2255,12 @@ mod tests {
     fn test_tokio_root_finishes() {
         let executor = tokio::Runner::default();
         test_root_finishes(executor);
+    }
+
+    #[test]
+    fn test_tokio_supervised_spawn_uses_child_tree() {
+        let executor = tokio::Runner::default();
+        test_supervised_spawn_uses_child_tree(executor);
     }
 
     #[test]
