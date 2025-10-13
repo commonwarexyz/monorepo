@@ -342,8 +342,7 @@ impl<const N: usize> Historical<N> {
         Some(state)
     }
 
-    /// Efficiently push bits to extend the bitmap to target length.
-    /// Optimized to push entire chunks when possible.
+    /// Push bits to extend the bitmap to target length.
     fn push_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
         while state.len() < target_len {
             let remaining = target_len - state.len();
@@ -359,7 +358,7 @@ impl<const N: usize> Historical<N> {
         }
     }
 
-    /// Efficiently pop bits to shrink the bitmap to target length.
+    /// Pop bits to shrink the bitmap to target length.
     /// Optimized to pop entire chunks when possible.
     fn pop_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
         while state.len() > target_len {
