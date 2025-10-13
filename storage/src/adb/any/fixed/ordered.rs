@@ -217,29 +217,29 @@ impl<
         Ok(None)
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
+    /// Update the location of `key` to `nex_loc` in the snapshot and return its old location, or
     /// insert it if the key isn't already present. For use by log-replay.
     async fn replay_update(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        new_loc: Location,
+        next_loc: Location,
     ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+        let Some(mut cursor) = snapshot.get_mut_or_insert(key, next_loc) else {
             return Ok(None);
         };
 
         // Find the matching key among all conflicts, then update its location.
         if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(new_loc > loc);
-            cursor.update(new_loc);
+            assert!(next_loc > loc);
+            cursor.update(next_loc);
             return Ok(Some(loc));
         }
 
         // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_loc);
+        cursor.insert(next_loc);
 
         Ok(None)
     }
@@ -257,7 +257,7 @@ impl<
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
-        assert_ne!(self.snapshot.keys(), 0);
+        assert!(!self.is_empty(), "snapshot should not be empty");
         let iter = self.snapshot.prev_translated_key(key);
         if let Some((loc, prev_key)) = Self::last_key_in_iter(&self.log, iter).await? {
             callback(Some(loc));
@@ -276,7 +276,7 @@ impl<
         Ok(UpdateLocResult::NotExists(last_key))
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot, and update the location of
+    /// Update the location of `key` to `next_loc` in the snapshot, and update the location of
     /// previous key to `next_loc + 1` if its next key will need to be updated to `key`. Returns an
     /// UpdateLocResult indicating the specific outcome.
     async fn update_loc(
@@ -425,7 +425,7 @@ impl<
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
-        if self.snapshot.keys() == 0 {
+        if self.is_empty() {
             return Ok(None);
         }
 
@@ -502,7 +502,7 @@ impl<
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<(), Error> {
         let next_loc = self.op_count();
-        if self.snapshot.keys() == 0 {
+        if self.is_empty() {
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
@@ -604,7 +604,7 @@ impl<
         self.apply_op(Operation::Delete(key.clone())).await?;
         self.steps += 1;
 
-        if self.snapshot.keys() == 0 {
+        if self.is_empty() {
             // This was the last key in the DB so there is no span to update.
             return Ok(());
         }
@@ -736,7 +736,7 @@ impl<
         // previous commit becoming inactive.
         let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
-            if self.snapshot.keys() == 0 {
+            if self.is_empty() {
                 self.inactivity_floor_loc = self.op_count();
                 info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
@@ -1953,7 +1953,7 @@ mod test {
                     db.delete(key).await.unwrap();
                 }
                 assert_eq!(keys.len(), 0);
-                assert_eq!(db.snapshot.keys(), 0);
+                assert_eq!(db.is_empty(), true);
                 assert_eq!(db.get_span(&Digest::random(rng)).await.unwrap(), None);
             }
 
