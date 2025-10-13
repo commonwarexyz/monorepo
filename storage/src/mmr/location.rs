@@ -337,10 +337,10 @@ impl TryFrom<Position> for Location {
 /// Error returned when attempting to convert a [Position] to a [Location].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub enum LocationError {
-    #[error("Position({}) is not a leaf", {0})]
+    #[error("{0} is not a leaf")]
     NonLeaf(Position),
 
-    #[error("Position({}) causes overflow", {0})]
+    #[error("{0} > MAX_LOCATION")]
     Overflow(Position),
 }
 
