@@ -1,4 +1,5 @@
 use crate::{
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{self, any::fixed::unordered::Any},
     index::Unordered as Index,
     journal::fixed,
