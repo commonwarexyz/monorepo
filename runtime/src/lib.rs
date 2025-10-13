@@ -558,6 +558,61 @@ mod tests {
         });
     }
 
+    fn test_supervised_after_abort_graceful<R>(runner: R)
+    where
+        R: Runner,
+        R::Context: Spawner + Clone,
+    {
+        runner.start(|context| async move {
+            let handle = context.clone().supervised().spawn(|ctx| async move { ctx });
+            let aborted_context = handle.await.unwrap();
+
+            // Cloning an aborted context succeeds.
+            let clone = aborted_context.clone();
+
+            // Spawning from an aborted context should behave as if already aborted.
+            let run_count = Arc::new(AtomicUsize::new(0));
+
+            let supervised_handle = clone.clone().supervised().spawn({
+                let run_count = run_count.clone();
+                move |_| {
+                    let run_count = run_count.clone();
+                    async move {
+                        run_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            assert!(
+                matches!(supervised_handle.await, Err(Error::Closed)),
+                "expected supervised spawn from aborted context to close immediately"
+            );
+            assert_eq!(
+                run_count.load(Ordering::Relaxed),
+                0,
+                "supervised task should not run after parent aborts"
+            );
+
+            let detached_handle = clone.detached().spawn({
+                let run_count = run_count.clone();
+                move |_| {
+                    let run_count = run_count.clone();
+                    async move {
+                        run_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            assert!(
+                matches!(detached_handle.await, Err(Error::Closed)),
+                "expected detached spawn from aborted context to close immediately"
+            );
+            assert_eq!(
+                run_count.load(Ordering::Relaxed),
+                0,
+                "detached task should not run after parent aborts"
+            );
+        });
+    }
+
     fn test_supervised_spawn_uses_child_tree<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -1975,6 +2030,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_supervised_after_abort_graceful() {
+        let executor = deterministic::Runner::default();
+        test_supervised_after_abort_graceful(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_abort() {
         let executor = deterministic::Runner::default();
         test_spawn_abort(executor, false, false);
@@ -2261,6 +2322,12 @@ mod tests {
     fn test_tokio_supervised_spawn_uses_child_tree() {
         let executor = tokio::Runner::default();
         test_supervised_spawn_uses_child_tree(executor);
+    }
+
+    #[test]
+    fn test_tokio_supervised_after_abort_graceful() {
+        let executor = tokio::Runner::default();
+        test_supervised_after_abort_graceful(executor);
     }
 
     #[test]

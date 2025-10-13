@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, Weak,
+};
 
 use super::Aborter;
 
@@ -16,6 +19,7 @@ pub(crate) struct SupervisionTree {
     index: Mutex<Option<usize>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
     task: Mutex<Option<Aborter>>,
+    aborted: AtomicBool,
 }
 
 impl SupervisionTree {
@@ -26,29 +30,47 @@ impl SupervisionTree {
             index: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
+            aborted: AtomicBool::new(false),
         })
     }
 
     /// Creates a new child node registered under the provided parent.
     pub(crate) fn child(parent: &Arc<Self>) -> Arc<Self> {
+        let aborted = parent.aborted.load(Ordering::Acquire);
+
         let child = Arc::new(Self {
             _parent: Some(parent.clone()),
             index: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
+            aborted: AtomicBool::new(aborted),
         });
-        let mut children = parent.children.lock().unwrap();
-        let slot = children.len();
-        children.push(Arc::downgrade(&child));
-        *child.index.lock().unwrap() = Some(slot);
+
+        if !aborted {
+            let mut children = parent.children.lock().unwrap();
+            let slot = children.len();
+            children.push(Arc::downgrade(&child));
+            *child.index.lock().unwrap() = Some(slot);
+        }
+
         child
     }
 
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(&self, aborter: Aborter) {
+        if self.aborted.load(Ordering::Acquire) {
+            aborter.abort();
+            return;
+        }
+
         let mut task = self.task.lock().unwrap();
         assert!(task.is_none(), "task aborter already registered");
         *task = Some(aborter);
+    }
+
+    /// Returns whether this node has already been aborted.
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::Acquire)
     }
 
     /// Removes a child entry from the local children list, maintaining contiguous indices.
@@ -71,6 +93,10 @@ impl SupervisionTree {
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
     pub(crate) fn abort_descendants(&self) {
+        if self.aborted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
         // Drain the tasks list first so repeated calls are idempotent.
         let task = {
             let mut task = self.task.lock().unwrap();

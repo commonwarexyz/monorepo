@@ -431,6 +431,7 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration.
         let supervised = self.model.is_supervised();
         let tree = SupervisionTree::child(&self.tree);
+        let tree_aborted = tree.is_aborted();
         self.tree = Arc::clone(&tree);
 
         // Set up the task
@@ -443,6 +444,12 @@ impl crate::Spawner for Context {
         let future = f(self);
         let (f, handle) =
             Handle::init(future, metric, executor.panicker.clone(), Arc::clone(&tree));
+        if tree_aborted {
+            handle.abort();
+            drop(f);
+            return handle;
+        }
+
         if dedicated {
             thread::spawn({
                 // Ensure the task can access the tokio runtime

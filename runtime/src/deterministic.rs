@@ -873,6 +873,7 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration.
         let supervised = self.model.is_supervised();
         let tree = SupervisionTree::child(&self.tree);
+        let tree_aborted = tree.is_aborted();
         self.tree = Arc::clone(&tree);
 
         // Set up the task
@@ -881,12 +882,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let future = f(self);
-        let (f, handle) = Handle::init(
-            future,
-            metric,
-            executor.panicker.clone(),
-            Arc::clone(&tree),
-        );
+        let (f, handle) =
+            Handle::init(future, metric, executor.panicker.clone(), Arc::clone(&tree));
+        if tree_aborted {
+            handle.abort();
+            drop(f);
+            return handle;
+        }
+
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
         // Register this child with the parent if supervision is enabled.
