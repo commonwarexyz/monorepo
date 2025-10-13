@@ -43,7 +43,7 @@ fn fuzz(input: FuzzInput) {
                 }
             }
             Op::DecodeCfg(data, hashers, bits) => {
-                let cfg = (hashers.into(), bits.into());
+                let cfg = (hashers, bits.into());
                 _ = BloomFilter::decode_cfg(&data[..], &cfg);
             }
             Op::Encode(_item) => {
