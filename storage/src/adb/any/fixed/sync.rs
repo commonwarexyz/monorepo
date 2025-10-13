@@ -275,7 +275,7 @@ mod tests {
     use crate::{
         adb::{
             self,
-            any::fixed::{
+            any::fixed::unordered::{
                 test::{
                     any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
                     AnyTest,
@@ -291,7 +291,7 @@ mod tests {
         },
         journal::{self, fixed},
         mmr::iterator::nodes_to_pin,
-        store::operation::Fixed,
+        store::operation::{Fixed, FixedOperation as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{

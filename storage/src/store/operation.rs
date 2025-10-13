@@ -42,6 +42,28 @@ pub enum Error {
     InvalidCommitFloorOp,
 }
 
+/// Methods common to fixed-size operation types.
+pub trait FixedOperation: Read<Cfg = ()> + Write + FixedSize + Sized {
+    /// The key type for this operation.
+    type Key: Array;
+
+    /// The value type for this operation.
+    type Value: CodecFixed;
+
+    /// Returns the commit floor location if this operation is a commit operation with a floor
+    /// value, None otherwise.
+    fn commit_floor(&self) -> Option<Location>;
+
+    /// Returns the key if this operation involves a key, None otherwise.
+    fn key(&self) -> Option<&Self::Key>;
+
+    /// Returns the value if this operation involves a value, None otherwise.
+    fn value(&self) -> Option<&Self::Value>;
+
+    /// Consumes the operation and returns the value if this operation involves a value, None otherwise.
+    fn into_value(self) -> Option<Self::Value>;
+}
+
 /// An operation applied to an authenticated database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Fixed<K: Array, V: CodecFixed> {
@@ -54,65 +76,6 @@ pub enum Fixed<K: Array, V: CodecFixed> {
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
     CommitFloor(Location),
-}
-
-/// Operations for keyless stores.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Keyless<V: Codec> {
-    /// Wraps the value appended to the database by this operation.
-    Append(V),
-
-    /// Indicates the database has been committed.
-    Commit(Option<V>),
-}
-
-impl<V: Codec> Keyless<V> {
-    /// Returns the value (if any) wrapped by this operation.
-    pub fn into_value(self) -> Option<V> {
-        match self {
-            Keyless::Append(value) => Some(value),
-            Keyless::Commit(value) => value,
-        }
-    }
-}
-
-/// An operation applied to an authenticated database with a variable size value.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Variable<K: Array, V: Codec> {
-    // Operations for immutable stores.
-    Set(K, V),
-    Commit(Option<V>),
-    // Operations for mutable stores.
-    Delete(K),
-    Update(K, V),
-    CommitFloor(Option<V>, Location),
-}
-
-impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
-    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
-}
-
-impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Variable::Delete(_) => K::SIZE,
-            Variable::Update(_, v) => K::SIZE + v.encode_size(),
-            Variable::CommitFloor(v, floor_loc) => {
-                v.encode_size() + UInt(**floor_loc).encode_size()
-            }
-            Variable::Set(_, v) => K::SIZE + v.encode_size(),
-            Variable::Commit(v) => v.encode_size(),
-        }
-    }
-}
-
-impl<V: Codec> EncodeSize for Keyless<V> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Keyless::Append(v) => v.encode_size(),
-            Keyless::Commit(v) => v.encode_size(),
-        }
-    }
 }
 
 impl<K: Array, V: CodecFixed> Fixed<K, V> {
@@ -128,51 +91,18 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
             "array size too small for commit op"
         );
     }
+}
 
-    /// If this is a [Fixed::Update] or [Fixed::Delete] operation, returns the key.
-    /// Otherwise, returns None.
-    pub fn key(&self) -> Option<&K> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(key) => Some(key),
-            Fixed::Update(key, _) => Some(key),
-            Fixed::CommitFloor(_) => None,
-        }
-    }
-
-    /// If this is a [Fixed::Update] operation, returns the value.
-    /// Otherwise, returns None.
-    pub fn value(&self) -> Option<&V> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(_) => None,
-            Fixed::Update(_, value) => Some(value),
-            Fixed::CommitFloor(_) => None,
-        }
-    }
-
-    /// If this is a [Fixed::Update] operation, returns the value.
-    /// Otherwise, returns None.
-    pub fn into_value(self) -> Option<V> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
-        match self {
-            Fixed::Delete(_) => None,
-            Fixed::Update(_, value) => Some(value),
-            Fixed::CommitFloor(_) => None,
-        }
-    }
+/// An operation applied to an authenticated database with a variable size value.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum Variable<K: Array, V: Codec> {
+    // Operations for immutable stores.
+    Set(K, V),
+    Commit(Option<V>),
+    // Operations for mutable stores.
+    Delete(K),
+    Update(K, V),
+    CommitFloor(Option<V>, Location),
 }
 
 impl<K: Array, V: Codec> Variable<K, V> {
@@ -210,17 +140,100 @@ impl<K: Array, V: Codec> Variable<K, V> {
     }
 }
 
-impl<V: Codec> Write for Keyless<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match &self {
-            Keyless::Append(value) => {
-                APPEND_CONTEXT.write(buf);
-                value.write(buf);
+/// Operations for keyless stores.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum Keyless<V: Codec> {
+    /// Wraps the value appended to the database by this operation.
+    Append(V),
+
+    /// Indicates the database has been committed.
+    Commit(Option<V>),
+}
+
+impl<V: Codec> Keyless<V> {
+    /// Returns the value (if any) wrapped by this operation.
+    pub fn into_value(self) -> Option<V> {
+        match self {
+            Keyless::Append(value) => Some(value),
+            Keyless::Commit(value) => value,
+        }
+    }
+}
+
+impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
+    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
+}
+
+impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Fixed<K, V> {
+    type Key = K;
+    type Value = V;
+
+    fn commit_floor(&self) -> Option<Location> {
+        match self {
+            Fixed::CommitFloor(loc) => Some(*loc),
+            _ => None,
+        }
+    }
+
+    fn key(&self) -> Option<&Self::Key> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(key) => Some(key),
+            Fixed::Update(key, _) => Some(key),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+
+    fn value(&self) -> Option<&Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(_) => None,
+            Fixed::Update(_, value) => Some(value),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+
+    fn into_value(self) -> Option<Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Fixed::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            Fixed::Delete(_) => None,
+            Fixed::Update(_, value) => Some(value),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+}
+
+impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Variable::Delete(_) => K::SIZE,
+            Variable::Update(_, v) => K::SIZE + v.encode_size(),
+            Variable::CommitFloor(v, floor_loc) => {
+                v.encode_size() + UInt(**floor_loc).encode_size()
             }
-            Keyless::Commit(metadata) => {
-                COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-            }
+            Variable::Set(_, v) => K::SIZE + v.encode_size(),
+            Variable::Commit(v) => v.encode_size(),
+        }
+    }
+}
+
+impl<V: Codec> EncodeSize for Keyless<V> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Keyless::Append(v) => v.encode_size(),
+            Keyless::Commit(v) => v.encode_size(),
         }
     }
 }
@@ -279,14 +292,17 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     }
 }
 
-impl<V: Codec> Read for Keyless<V> {
-    type Cfg = <V as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
-            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
-            e => Err(CodecError::InvalidEnum(e)),
+impl<V: Codec> Write for Keyless<V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match &self {
+            Keyless::Append(value) => {
+                APPEND_CONTEXT.write(buf);
+                value.write(buf);
+            }
+            Keyless::Commit(metadata) => {
+                COMMIT_CONTEXT.write(buf);
+                metadata.write(buf);
+            }
         }
     }
 }
@@ -375,17 +391,14 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
     }
 }
 
-impl<V: Codec> Display for Keyless<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Keyless::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
-            Keyless::Commit(value) => {
-                if let Some(value) = value {
-                    write!(f, "[commit {}]", hex(&value.encode()))
-                } else {
-                    write!(f, "[commit]")
-                }
-            }
+impl<V: Codec> Read for Keyless<V> {
+    type Cfg = <V as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
+            e => Err(CodecError::InvalidEnum(e)),
         }
     }
 }
@@ -422,6 +435,21 @@ impl<K: Array, V: Codec> Display for Variable<K, V> {
                     )
                 } else {
                     write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
+        }
+    }
+}
+
+impl<V: Codec> Display for Keyless<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Keyless::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
+            Keyless::Commit(value) => {
+                if let Some(value) = value {
+                    write!(f, "[commit {}]", hex(&value.encode()))
+                } else {
+                    write!(f, "[commit]")
                 }
             }
         }

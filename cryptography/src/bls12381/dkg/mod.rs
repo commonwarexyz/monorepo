@@ -136,6 +136,19 @@
 //! require an extra round of broadcast ([GJKR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
 //! [BK25](https://eprint.iacr.org/2025/819)).
 //!
+//! ## Share Reveals
+//!
+//! In order to prevent malicious dealers from withholding shares from players, we
+//! require the dealers reveal the shares for which they did not receive acks.
+//! Because of the synchrony assumption above, this will only happen if either:
+//! - the dealer is malicious, not sending a share, but honestly revealing,
+//! - or, the player is malicious, not sending an ack when they should.
+//!
+//! Thus, for honest players, in the worst case, `f` reveals get created, because
+//! they correctly did not ack the `f` malicious dealers who failed to send them
+//! a share. In that case, their final share remains secret, because it is the linear
+//! combination of at least `f + 1` shares received from dealers.
+//!
 //! # Example
 //!
 //! For a complete example of how to instantiate this crate, check out [commonware-vrf](https://docs.rs/commonware-vrf).
