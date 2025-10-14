@@ -569,101 +569,13 @@ impl<const N: usize> Historical<N> {
         }
     }
 
-    /// Build a reverse diff from a batch before applying it.
-    ///
-    /// # Purpose
-    ///
-    /// A reverse diff describes the state BEFORE this commit. When we later want to
-    /// reconstruct the historical state at this commit, we start with the current state
-    /// and apply reverse diffs backward, "undoing" each subsequent commit.
-    ///
-    /// # What We Capture
-    ///
-    /// We capture old chunk data for any chunks that will change. **Important**: We only
-    /// see the batch's final state, not intermediate operations.
-    ///
-    /// - **Modified chunks**: Chunks with bits in `modified_bits` (final modifications only)
-    /// - **Appended chunks**: Chunks created/extended by final `appended_bits` vector
-    /// - **Popped chunks**: Chunks that will be truncated (comparing `projected_len` vs `base_len`)
-    /// - **Pruned chunks**: Chunks in `chunks_to_prune` map
-    ///
-    /// # How De-duplication Works
-    ///
-    /// Because the batch de-duplicates during operations, we automatically capture the
-    /// minimal diff:
-    ///
-    /// ```text
-    /// Example: What capture sees after: push(A), push(B), pop(), set_bit(5, true)
-    ///
-    /// Batch final state:
-    ///   - appended_bits = [A]  (B was popped)
-    ///   - modified_bits = {5: true}
-    ///   - projected_len = base_len + 1
-    ///
-    /// Captured chunks:
-    ///   - Chunk containing bit 5: Modified (from modified_bits)
-    ///   - Chunk containing bit base_len: Modified or Added (from appended_bits)
-    ///
-    /// NOT captured:
-    ///   - Bit B: never in final state, so no chunk captured for it
-    /// ```
-    ///
-    /// # Capture Order and Precedence
-    ///
-    /// The capture order ensures correct handling when a chunk is affected by multiple operations:
-    ///
-    /// 1. **`capture_modified_chunks` first** (strictest invariants)
-    ///    - Captures chunks modified via explicit `set_bit()` calls
-    ///    - Uses `expect()` because modified bits MUST exist in base bitmap
-    ///    - Has "precedence" because it runs first with `or_insert_with()`
-    ///
-    /// 2. **`capture_appended_chunks` second**
-    ///    - Captures chunks created or extended by `push()` operations
-    ///    - Uses `or_insert_with()` → won't overwrite chunks from step 1
-    ///    - Gracefully handles both existing chunks (→ `Modified`) and new chunks (→ `Added`)
-    ///
-    /// 3. **`capture_popped_chunks` third**
-    ///    - Captures chunks truncated by `pop()` operations
-    ///    - Uses `or_insert_with()` → won't overwrite chunks from steps 1-2
-    ///    - Also uses `expect()` because popped bits MUST have existed
-    ///
-    /// 4. **`capture_pruned_chunks` last** (overwrites)
-    ///    - Captures chunks removed from the beginning via `prune_to_bit()`
-    ///    - Uses `insert()` to OVERWRITE previous entries
-    ///    - Pruned chunks MUST be marked `Pruned`, not `Modified`
-    ///
-    /// # Example: Overlapping Operations
-    ///
-    /// ```text
-    /// Start: len = 35 (chunk 1 has 3 bits: [32, 33, 34])
-    /// Batch:
-    ///   - set_bit(33, true)  → bit 33 goes in modified_bits
-    ///   - push(29)           → bits [35..63] fill chunk 1 and create chunk 2
-    ///
-    /// Chunk 1 is affected by BOTH modified_bits AND appended_bits.
-    ///
-    /// Capture sequence:
-    ///   1. capture_modified_chunks: Captures chunk 1 → Modified(old_chunk_1_data)
-    ///   2. capture_appended_chunks: Tries chunk 1, but already captured → skipped
-    ///   3. capture_appended_chunks: Captures chunk 2 → Added
-    ///
-    /// Result: Chunk 1 is Modified (correct), chunk 2 is Added (correct)
-    /// ```
-    ///
-    /// # Why This Order?
-    ///
-    /// - **Fail-fast on violations**: `capture_modified_chunks` runs first with strict checks
-    /// - **Avoid redundant work**: Once a chunk is captured, later steps skip it
-    /// - **Correct change types**: Each chunk gets the most specific classification
-    /// - **Pruning overrides all**: Pruned chunks must be marked `Pruned` regardless of other changes
+    /// Build a reverse diff from a batch.
     fn build_reverse_diff(&self, batch: &Batch<N>) -> CommitDiff<N> {
         let mut changes = BTreeMap::new();
-
         self.capture_modified_chunks(batch, &mut changes);
         self.capture_appended_chunks(batch, &mut changes);
         self.capture_popped_chunks(batch, &mut changes);
         self.capture_pruned_chunks(batch, &mut changes);
-
         CommitDiff {
             metadata: CommitMetadata {
                 len: batch.base_len,
@@ -689,7 +601,7 @@ impl<const N: usize> Historical<N> {
                 // at batch creation. Since current hasn't changed yet (we're still
                 // building the diff), the chunk MUST exist.
                 let old_chunk = self
-                    .get_chunk_if_exists(chunk_idx)
+                    .get_chunk(chunk_idx)
                     .expect("chunk must exist for modified bit");
                 ChunkDiff::Modified(old_chunk)
             });
@@ -720,7 +632,7 @@ impl<const N: usize> Historical<N> {
             // Use or_insert_with so we don't overwrite chunks already captured
             // by capture_modified_chunks (which runs first and takes precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
-                if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
+                if let Some(old_chunk) = self.get_chunk(chunk_idx) {
                     // Chunk existed before: store its old data
                     ChunkDiff::Modified(old_chunk)
                 } else {
@@ -753,7 +665,7 @@ impl<const N: usize> Historical<N> {
         for chunk_idx in new_last_chunk..=old_last_chunk {
             changes.entry(chunk_idx).or_insert_with(|| {
                 let old_chunk = self
-                    .get_chunk_if_exists(chunk_idx)
+                    .get_chunk(chunk_idx)
                     .expect("chunk must exist in base bitmap for popped bits");
 
                 // Determine if this chunk is partially kept or completely removed
@@ -784,7 +696,7 @@ impl<const N: usize> Historical<N> {
     ///
     /// Returns `Some(chunk_data)` if the chunk exists in the current bitmap,
     /// or `None` if it's out of bounds or pruned.
-    fn get_chunk_if_exists(&self, chunk_idx: usize) -> Option<[u8; N]> {
+    fn get_chunk(&self, chunk_idx: usize) -> Option<[u8; N]> {
         let current_pruned = self.current.pruned_chunks();
         if chunk_idx >= current_pruned {
             let bitmap_idx = chunk_idx - current_pruned;
@@ -1204,14 +1116,6 @@ mod tests {
     use super::*;
 
     /// Test basic batch lifecycle: creation, operations, commit, and abort.
-    ///
-    /// Covers:
-    /// - Empty initialization
-    /// - Basic push operations and commits
-    /// - Batch abort (drop without commit)
-    /// - Read-through semantics (modifications visible in batch, committed to current)
-    /// - Method chaining API
-    /// - Empty batch commits
     #[test]
     fn test_batch_lifecycle_and_operations() {
         // Empty initialization
