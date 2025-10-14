@@ -173,6 +173,11 @@ impl<
         self.any.op_count()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.any.is_empty()
+    }
+
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
     pub fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
