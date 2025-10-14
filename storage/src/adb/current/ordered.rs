@@ -1456,27 +1456,30 @@ pub mod test {
             let partition = "exclusion_proofs";
             let mut db = open_db(context.clone(), partition).await;
 
-            let k = Sha256::fill(0x10);
+            let key_exists_1 = Sha256::fill(0x10);
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root(&mut hasher).await.unwrap();
-            let (empty_proof, empty_info) = db.exclusion_proof(hasher.inner(), &k).await.unwrap();
+            let (empty_proof, empty_info) = db
+                .exclusion_proof(hasher.inner(), &key_exists_1)
+                .await
+                .unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &empty_proof,
-                &k,
+                &key_exists_1,
                 empty_info.clone(),
                 &empty_root,
             ));
 
-            // Add one key and test exclusion proving over the single-key database case.
+            // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
-            db.update(k, v1).await.unwrap();
+            db.update(key_exists_1, v1).await.unwrap();
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
-            let result = db.exclusion_proof(hasher.inner(), &k).await;
+            let result = db.exclusion_proof(hasher.inner(), &key_exists_1).await;
             assert!(matches!(result, Err(Error::KeyExists)));
 
             // Generate some valid exclusion proofs for keys on either side.
@@ -1514,7 +1517,7 @@ pub mod test {
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k,
+                &key_exists_1,
                 info.clone(),
                 &root,
             ));
@@ -1526,16 +1529,16 @@ pub mod test {
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k,
+                &key_exists_1,
                 corrupt_info,
                 &root,
             ));
 
             // Add a second key and test exclusion proving over the two-key database case.
-            let k2 = Sha256::fill(0x30);
+            let key_exists_2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
 
-            db.update(k2, v2).await.unwrap();
+            db.update(key_exists_2, v2).await.unwrap();
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
 
@@ -1580,15 +1583,36 @@ pub mod test {
             assert_eq!(proof, new_proof);
             assert_eq!(info, new_info);
 
-            // Test the inner span.
+            // Test the inner span [k, k2).
             let (proof, info) = db
                 .exclusion_proof(hasher.inner(), &middle_key)
                 .await
                 .unwrap();
+            // `k` should fail since it's in the db.
+            assert!(!CurrentTest::verify_exclusion_proof(
+                hasher.inner(),
+                &proof,
+                &key_exists_1,
+                info.clone(),
+                &root,
+            ));
+            // `middle_key` should succeed since it's in range.
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &middle_key,
+                info.clone(),
+                &root,
+            ));
+            // `k2` should fail since it's in the db and outside its range.
+            let ExclusionProofInfo::KeyValue(ref kv_info) = info else {
+                panic!("expected KeyValue variant");
+            };
+            assert_eq!(kv_info.next_key, Some(key_exists_2));
+            assert!(!CurrentTest::verify_exclusion_proof(
+                hasher.inner(),
+                &proof,
+                &key_exists_2,
                 info.clone(),
                 &root,
             ));
@@ -1620,27 +1644,32 @@ pub mod test {
 
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
-            db.delete(k).await.unwrap();
-            db.delete(k2).await.unwrap();
+            db.delete(key_exists_1).await.unwrap();
+            db.delete(key_exists_2).await.unwrap();
             db.sync().await.unwrap();
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
+            assert!(db.is_empty());
+            assert_ne!(db.op_count(), 0);
             assert_ne!(root, empty_root);
 
-            let (proof, info) = db.exclusion_proof(hasher.inner(), &k).await.unwrap();
+            let (proof, info) = db
+                .exclusion_proof(hasher.inner(), &key_exists_1)
+                .await
+                .unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k,
+                &key_exists_1,
                 info.clone(),
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k2,
+                &key_exists_2,
                 info.clone(),
                 &root,
             ));
@@ -1649,21 +1678,21 @@ pub mod test {
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &empty_proof, // wrong proof
-                &k,
+                &key_exists_1,
                 info.clone(),
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k,
+                &key_exists_1,
                 info,
                 &empty_root, // wrong root
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
-                &k,
+                &key_exists_1,
                 empty_info, // wrong info
                 &root,
             ));
