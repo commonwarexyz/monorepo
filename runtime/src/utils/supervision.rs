@@ -15,8 +15,7 @@ pub(crate) struct SupervisionTree {
     // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
     // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
     // pointers that cannot be upgraded during abort cascades.
-    parent: Option<Arc<SupervisionTree>>,
-    index: Mutex<Option<usize>>,
+    _parent: Option<Arc<SupervisionTree>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
     task: Mutex<Option<Aborter>>,
     aborted: AtomicBool,
@@ -26,8 +25,7 @@ impl SupervisionTree {
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            parent: None,
-            index: Mutex::new(None),
+            _parent: None,
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
             aborted: AtomicBool::new(false),
@@ -39,8 +37,7 @@ impl SupervisionTree {
         let aborted = parent.aborted.load(Ordering::Acquire);
 
         let child = Arc::new(Self {
-            parent: Some(parent.clone()),
-            index: Mutex::new(None),
+            _parent: Some(parent.clone()),
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
             aborted: AtomicBool::new(aborted),
@@ -48,9 +45,12 @@ impl SupervisionTree {
 
         if !aborted {
             let mut children = parent.children.lock().unwrap();
-            let slot = children.len();
+
+            // Clean up any dead children while we have the lock.
+            children.retain(|weak| weak.strong_count() > 0);
+
+            // Push new item
             children.push(Arc::downgrade(&child));
-            *child.index.lock().unwrap() = Some(slot);
         }
 
         child
@@ -71,24 +71,6 @@ impl SupervisionTree {
     /// Returns whether this node has already been aborted.
     pub(crate) fn is_aborted(&self) -> bool {
         self.aborted.load(Ordering::Acquire)
-    }
-
-    /// Removes a child entry from the local children list, maintaining contiguous indices.
-    fn remove_child(&self, index: usize) {
-        let mut children = self.children.lock().unwrap();
-        if index >= children.len() {
-            return;
-        }
-
-        let hole = index;
-        children.swap_remove(hole);
-        while hole < children.len() {
-            if let Some(child) = children[hole].upgrade() {
-                *child.index.lock().unwrap() = Some(hole);
-                break;
-            }
-            children.swap_remove(hole);
-        }
     }
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
@@ -113,25 +95,8 @@ impl SupervisionTree {
         };
         for child in children {
             if let Some(child) = child.upgrade() {
-                *child.index.lock().unwrap() = None;
                 child.abort_descendants();
             }
-        }
-    }
-}
-
-impl Drop for SupervisionTree {
-    fn drop(&mut self) {
-        let Some(parent) = self.parent.as_ref() else {
-            return;
-        };
-
-        let index = {
-            let mut index = self.index.lock().unwrap();
-            index.take()
-        };
-        if let Some(index) = index {
-            parent.remove_child(index);
         }
     }
 }
