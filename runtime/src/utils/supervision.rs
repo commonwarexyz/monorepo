@@ -70,7 +70,7 @@ impl SupervisionTree {
     }
 
     /// Creates a new child node registered under the provided parent.
-    pub(crate) fn child(parent: &Arc<Self>) -> Arc<Self> {
+    pub(crate) fn child(parent: &Arc<Self>) -> (Arc<Self>, bool) {
         let mut parent_inner = parent.inner.lock().unwrap();
         let child = Arc::new(Self {
             inner: Mutex::new(SupervisionTreeInner::new(
@@ -83,7 +83,7 @@ impl SupervisionTree {
             parent_inner.register_child(&child);
         }
 
-        child
+        (child, parent_inner.aborted)
     }
 
     /// Records a supervised task so it can be aborted alongside the current context.
@@ -96,11 +96,6 @@ impl SupervisionTree {
             }
         };
         aborter.abort();
-    }
-
-    /// Returns whether this node has already been aborted.
-    pub(crate) fn is_aborted(&self) -> bool {
-        self.inner.lock().unwrap().aborted
     }
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.

@@ -380,12 +380,13 @@ pub struct Context {
 
 impl Clone for Context {
     fn clone(&self) -> Self {
+        let (tree, _) = SupervisionTree::child(&self.tree);
         Self {
             name: self.name.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            tree: SupervisionTree::child(&self.tree),
+            tree,
             execution: self.execution,
         }
     }
@@ -419,12 +420,12 @@ impl crate::Spawner for Context {
         let (_, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration.
-        if self.tree.is_aborted() {
-            return Handle::closed(metric);
-        }
         let past = self.execution;
         self.execution = Execution::default();
-        let tree = SupervisionTree::child(&self.tree);
+        let (tree, aborted) = SupervisionTree::child(&self.tree);
+        if aborted {
+            return Handle::closed(metric);
+        }
         self.tree = Arc::clone(&tree);
 
         // Spawn the task
