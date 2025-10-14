@@ -1230,7 +1230,7 @@ impl Pacer for Context {
             let mut rng = executor.rng.lock().unwrap();
             rng.gen_range(start..end)
         } else if start == end {
-            Duration::ZERO
+            start
         } else {
             panic!("invalid delay range");
         };
