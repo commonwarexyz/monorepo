@@ -171,7 +171,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// including your own shard.
     ///
     /// Calls to this function with the same commitment, but with different shards,
-    /// or shards in a different should also result in the same output data, or in failure.
+    /// or shards in a different order should also result in the same output data, or in failure.
     /// In other words, when using the decoding function in a broader system, you
     /// get a guarantee that every participant decoding will see the same final
     /// data, even if they receive different shards, or receive them in a different order.
