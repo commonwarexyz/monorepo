@@ -1,8 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, where values can have varying sizes.
 //!
-//! _If the values you wish to store all have the same size, use the [crate::adb::any::fixed::Any]
-//! db instead._
+//! _If the values you wish to store all have the same size, use the dbs in [crate::adb::any::fixed]
+//! instead for better performance._
 
 use crate::{
     adb::{align_mmr_and_locations, Error},
@@ -410,11 +410,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == delete_loc {
-                cursor.delete();
-                return;
-            }
+        if cursor.find(|&loc| loc == delete_loc) {
+            cursor.delete();
         }
     }
 
@@ -430,11 +427,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return;
         };
 
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                cursor.update(new_loc);
-                return;
-            }
+        if cursor.find(|&loc| loc == old_loc) {
+            cursor.update(new_loc);
         }
     }
 
