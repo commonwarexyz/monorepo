@@ -25,7 +25,7 @@ impl PeakIterator {
     /// # Panics
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
-    /// [Position::is_valid_size] first.
+    /// [Position::is_mmr_size] first.
     pub fn new(size: Position) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
