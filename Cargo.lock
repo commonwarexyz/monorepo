@@ -2883,6 +2883,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "macros-test"
+version = "0.0.62"
+dependencies = [
+ "commonware-macros",
+ "futures",
+ "futures-timer",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "matchers"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
