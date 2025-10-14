@@ -142,7 +142,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_mmr_size() {
             #[cfg(feature = "std")]
             debug!(size = ?self.size, "invalid proof size");
             return false;
@@ -178,7 +178,7 @@ impl<D: Digest> Proof<D> {
             return self.size == Position::new(0)
                 && *root == hasher.root(Position::new(0), core::iter::empty());
         }
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_mmr_size() {
             return false;
         }
 
@@ -257,6 +257,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// # Errors
     ///
+    /// Returns [Error::InvalidSize] if the proof size is not a valid MMR size.
     /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
     /// positions count.
@@ -358,7 +359,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if !PeakIterator::check_validity(self.size) {
+        if !self.size.is_mmr_size() {
             return Err(ReconstructionError::InvalidSize);
         }
 
@@ -458,6 +459,7 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Errors
 ///
+/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
 /// Returns [Error::Empty] if the range is empty.
 /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
@@ -466,6 +468,9 @@ pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
 ) -> Result<Vec<Position>, Error> {
+    if !size.is_mmr_size() {
+        return Err(Error::InvalidSize(*size));
+    }
     if range.is_empty() {
         return Err(Error::Empty);
     }
@@ -555,6 +560,7 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// # Errors
 ///
+/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
 /// Returns [Error::Empty] if locations is empty.
 /// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
@@ -563,6 +569,9 @@ pub(crate) fn nodes_required_for_multi_proof(
     size: Position,
     locations: &[Location],
 ) -> Result<BTreeSet<Position>, Error> {
+    if !size.is_mmr_size() {
+        return Err(Error::InvalidSize(*size));
+    }
     // Collect all required node positions
     //
     // TODO(#1472): Optimize this loop
@@ -1197,6 +1206,39 @@ mod tests {
     }
 
     #[test]
+    fn test_proving_extract_pinned_nodes_invalid_size() {
+        // Test that extract_pinned_nodes returns an error for invalid MMR size
+        let mut mmr = Mmr::new();
+        let mut hasher: Standard<Sha256> = Standard::new();
+
+        // Build MMR with 10 elements
+        for i in 0..10 {
+            let digest = test_digest(i);
+            mmr.add(&mut hasher, &digest);
+        }
+
+        // Generate a valid proof
+        let range = Location::new_unchecked(5)..Location::new_unchecked(8);
+        let mut proof = mmr.range_proof(range.clone()).unwrap();
+
+        // Verify the proof works with valid size
+        assert!(proof.extract_pinned_nodes(range.clone()).is_ok());
+
+        // Test various invalid sizes
+        const INVALID_SIZES: [u64; 5] = [2, 5, 6, 9, u64::MAX];
+        for invalid_size in INVALID_SIZES {
+            proof.size = Position::new(invalid_size);
+            let result = proof.extract_pinned_nodes(range.clone());
+            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == invalid_size));
+        }
+
+        // Test with MSB set (invalid due to leading zero requirement)
+        proof.size = Position::new(1u64 << 63);
+        let result = proof.extract_pinned_nodes(range);
+        assert!(matches!(result, Err(Error::InvalidSize(s)) if s == 1u64 << 63));
+    }
+
+    #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr = Mmr::default();
@@ -1561,5 +1603,21 @@ mod tests {
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION in multi-proof"
         );
+    }
+
+    #[test]
+    fn test_invalid_size_validation() {
+        // Test that invalid sizes are rejected
+        let loc = Location::new_unchecked(0);
+        let range = loc..loc + 1;
+
+        const INVALID_SIZES: [u64; 5] = [2, 5, 6, 9, u64::MAX];
+        for size in INVALID_SIZES {
+            let result = nodes_required_for_range_proof(Position::new(size), range.clone());
+            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
+
+            let result = nodes_required_for_multi_proof(Position::new(size), &[loc]);
+            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
+        }
     }
 }
