@@ -1157,13 +1157,6 @@ mod tests {
     }
 
     /// Test batch operations: push, pop, prune, push_byte, push_chunk, and get_chunk.
-    ///
-    /// Covers:
-    /// - Pop operations (return value, length changes)
-    /// - Bitmap chunk pruning (prune_to_bit)
-    /// - Bulk operations (push_byte, push_chunk)
-    /// - Chunk retrieval with modifications (get_chunk with read-through)
-    /// - Modifications combined with appends in same batch
     #[test]
     fn test_batch_operations_push_pop_prune() {
         let mut historical: Historical<4> = Historical::new();
@@ -1242,13 +1235,7 @@ mod tests {
         assert_eq!(historical.pruned_chunks(), 1); // First chunk pruned
     }
 
-    /// Test commit history management: validation, pruning, queries, and clearing.
-    ///
-    /// Covers:
-    /// - Monotonic commit number validation
-    /// - Pruning commits (prune_commits_before)
-    /// - Commit queries (earliest_commit, latest_commit, commit_exists)
-    /// - Clearing all history (clear_history)
+    /// Test commit history management.
     #[test]
     fn test_commit_history_management() {
         let mut historical: Historical<4> = Historical::new();
@@ -1332,12 +1319,6 @@ mod tests {
     }
 
     /// Test historical reconstruction with bit modifications across multiple commits.
-    ///
-    /// Covers:
-    /// - Reconstructing states with simple bit modifications
-    /// - Multiple successive modifications across commits
-    /// - Combining modifications with appends
-    /// - Verifying each historical state independently
     #[test]
     fn test_historical_reconstruction_with_modifications() {
         let mut historical: Historical<4> = Historical::new();
@@ -1439,11 +1420,6 @@ mod tests {
     }
 
     /// Test historical reconstruction with length-changing operations (appends and pops).
-    ///
-    /// Covers:
-    /// - Pure append operations
-    /// - Pop operations followed by appends
-    /// - Verifying length changes across commits
     #[test]
     fn test_historical_reconstruction_with_length_changes() {
         let mut historical: Historical<4> = Historical::new();
@@ -1506,11 +1482,6 @@ mod tests {
     }
 
     /// Test historical reconstruction with bitmap chunk pruning.
-    ///
-    /// Covers:
-    /// - Reconstructing state before pruning (restores pruned chunks)
-    /// - Reconstructing state after pruning (maintains pruning)
-    /// - Verifying chunk data integrity across pruning boundaries
     #[test]
     fn test_historical_reconstruction_with_pruning() {
         let mut historical: Historical<4> = Historical::new();
@@ -1555,10 +1526,6 @@ mod tests {
     }
 
     /// Test edge cases in historical reconstruction.
-    ///
-    /// Covers:
-    /// - Querying nonexistent commits (returns None)
-    /// - Reconstructing after commit history pruning
     #[test]
     fn test_historical_reconstruction_edge_cases() {
         let mut historical: Historical<4> = Historical::new();
@@ -1599,10 +1566,6 @@ mod tests {
     }
 
     /// Test batch modifications on appended bits (regression tests).
-    ///
-    /// Covers:
-    /// - Modifying a bit immediately after appending it in the same batch
-    /// - Push, modify, then pop sequence (ensures no dangling modifications)
     #[test]
     fn test_batch_modifications_on_appended_bits() {
         let mut historical: Historical<4> = Historical::new();
@@ -1629,10 +1592,6 @@ mod tests {
     }
 
     /// Test pop() behavior with batch modifications (regression tests).
-    ///
-    /// Covers:
-    /// - pop() returns the modified value, not the original
-    /// - Reading popped bits fails with proper error
     #[test]
     fn test_pop_behavior_with_modifications() {
         let mut historical: Historical<4> = Historical::new();
