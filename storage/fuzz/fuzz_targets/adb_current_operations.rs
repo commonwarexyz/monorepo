@@ -214,15 +214,15 @@ fn fuzz(data: FuzzInput) {
                     let root = db.root(&mut hasher).await.expect("Root computation should not fail");
 
                     if let Ok(res) = db
-                        .range_proof(hasher.inner(), Location::from(start_loc), *max_ops)
+                        .range_proof(hasher.inner(), start_loc, *max_ops)
                         .await {
 
                         let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                             &mut hasher,
                             &proof,
-                            start_loc.into(),
+                            start_loc,
                             &res.1,
-                            &chunks,
+                            chunks,
                             &root
                         );
 
