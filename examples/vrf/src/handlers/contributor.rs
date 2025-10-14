@@ -14,10 +14,10 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Spawner};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, set::Set};
 use futures::{channel::mpsc, SinkExt};
 use rand_core::CryptoRngCore;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
@@ -28,8 +28,7 @@ pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
     t: u32,
-    contributors: Vec<C::PublicKey>,
-    contributors_ordered: HashMap<C::PublicKey, u32>,
+    contributors: Set<C::PublicKey>,
 
     corrupt: bool,
     lazy: bool,
@@ -45,17 +44,11 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         crypto: C,
         dkg_phase_timeout: Duration,
         arbiter: C::PublicKey,
-        mut contributors: Vec<C::PublicKey>,
+        contributors: Set<C::PublicKey>,
         corrupt: bool,
         lazy: bool,
         forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output<MinSig>)>) {
-        contributors.sort();
-        let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
-            .iter()
-            .enumerate()
-            .map(|(idx, pk)| (pk.clone(), idx as u32))
-            .collect();
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
@@ -65,7 +58,6 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                 arbiter,
                 t: quorum(contributors.len() as u32),
                 contributors,
-                contributors_ordered,
 
                 corrupt,
                 lazy,
@@ -85,7 +77,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
     ) -> (u64, Option<Output<MinSig>>) {
         // Configure me
         let me = self.crypto.public_key();
-        let me_idx = *self.contributors_ordered.get(&me).unwrap();
+        let me_idx = self.contributors.binary_search(&me).unwrap() as u32;
 
         // Wait for start message from arbiter
         let (public, round) = loop {
