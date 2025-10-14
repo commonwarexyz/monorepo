@@ -222,9 +222,9 @@ impl<D: Digest> Proof<D> {
             for req_pos in required {
                 // There must exist a digest for each required position (by
                 // construction of `node_digests`)
-                let Some(digest) = node_digests.get(req_pos) else {
-                    return false;
-                };
+                let digest = node_digests
+                    .get(req_pos)
+                    .expect("must exist by construction of node_digests");
                 digests.push(*digest);
             }
             let proof = Proof {
@@ -462,6 +462,7 @@ impl<D: Digest> Proof<D> {
 /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
+/// Returns [Error::InvalidRange] if the range is invalid.
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
