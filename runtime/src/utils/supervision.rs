@@ -1,7 +1,11 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::{
+    mem,
+    sync::{Arc, Mutex, Weak},
+};
 
 use super::Aborter;
 
+/// Interior state guarded by the [`SupervisionTree`] lock.
 struct SupervisionTreeInner {
     // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
     // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
@@ -10,6 +14,41 @@ struct SupervisionTreeInner {
     children: Vec<Weak<SupervisionTree>>,
     task: Option<Aborter>,
     aborted: bool,
+}
+
+impl SupervisionTreeInner {
+    fn new(parent: Option<Arc<SupervisionTree>>, aborted: bool) -> Self {
+        Self {
+            _parent: parent,
+            children: Vec::new(),
+            task: None,
+            aborted,
+        }
+    }
+
+    fn register_child(&mut self, child: &Arc<SupervisionTree>) {
+        self.children.retain(|weak| weak.strong_count() > 0);
+        self.children.push(Arc::downgrade(child));
+    }
+
+    fn set_task(&mut self, aborter: Aborter) -> Result<(), Aborter> {
+        if self.aborted {
+            return Err(aborter);
+        }
+        assert!(self.task.is_none(), "task aborter already registered");
+        self.task = Some(aborter);
+        Ok(())
+    }
+
+    fn capture(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>)> {
+        if self.aborted {
+            return None;
+        }
+        self.aborted = true;
+        let task = self.task.take();
+        let children = mem::take(&mut self.children);
+        Some((task, children))
+    }
 }
 
 /// Tracks the supervision relationships between runtime contexts.
@@ -26,53 +65,37 @@ impl SupervisionTree {
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(SupervisionTreeInner {
-                _parent: None,
-                children: Vec::new(),
-                task: None,
-                aborted: false,
-            }),
+            inner: Mutex::new(SupervisionTreeInner::new(None, false)),
         })
     }
 
     /// Creates a new child node registered under the provided parent.
     pub(crate) fn child(parent: &Arc<Self>) -> Arc<Self> {
         let mut parent_inner = parent.inner.lock().unwrap();
-        let aborted = parent_inner.aborted;
-
         let child = Arc::new(Self {
-            inner: Mutex::new(SupervisionTreeInner {
-                _parent: Some(parent.clone()),
-                children: Vec::new(),
-                task: None,
-                aborted,
-            }),
+            inner: Mutex::new(SupervisionTreeInner::new(
+                Some(parent.clone()),
+                parent_inner.aborted,
+            )),
         });
 
-        if !aborted {
-            // Clean up any dead children while we have the lock.
-            parent_inner.children.retain(|weak| weak.strong_count() > 0);
-
-            // Push new item
-            parent_inner.children.push(Arc::downgrade(&child));
+        if !parent_inner.aborted {
+            parent_inner.register_child(&child);
         }
-
-        drop(parent_inner);
 
         child
     }
 
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(&self, aborter: Aborter) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.aborted {
-            drop(inner);
-            aborter.abort();
-            return;
-        }
-
-        assert!(inner.task.is_none(), "task aborter already registered");
-        inner.task = Some(aborter);
+        let aborter = {
+            let mut inner = self.inner.lock().unwrap();
+            match inner.set_task(aborter) {
+                Ok(()) => return,
+                Err(aborter) => aborter,
+            }
+        };
+        aborter.abort();
     }
 
     /// Returns whether this node has already been aborted.
@@ -82,16 +105,14 @@ impl SupervisionTree {
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
     pub(crate) fn abort_descendants(&self) {
-        let (task, children) = {
+        let result = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.aborted {
-                return;
-            }
-            inner.aborted = true;
-            let task = inner.task.take();
-            let children = std::mem::take(&mut inner.children);
-            (task, children)
+            inner.capture()
         };
+        let Some((task, children)) = result else {
+            return;
+        };
+
         if let Some(aborter) = task {
             aborter.abort();
         }
