@@ -122,23 +122,6 @@ pub trait Runner {
 
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Return a [`Spawner`] whose tasks remain supervised by the current context.
-    ///
-    /// Tasks spawned with this configuration are cancelled automatically once the current task
-    /// finishes (whether by completing or being aborted). Cancellation still requires the task to
-    /// yield, so a blocking task that never yields cannot be stopped.
-    ///
-    /// This is the default behavior.
-    fn supervised(self) -> Self;
-
-    /// Return a [`Spawner`] that launches tasks detached from the current context.
-    ///
-    /// Detached tasks continue running even after the current task exits. Prefer this only when
-    /// the parent task is not responsible for managing the child task.
-    ///
-    /// This is not the default behavior. See [`Spawner::supervised`] for more information.
-    fn detached(self) -> Self;
-
     /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
     ///
     /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
@@ -564,7 +547,7 @@ mod tests {
         R::Context: Spawner + Clone,
     {
         runner.start(|context| async move {
-            let handle = context.clone().supervised().spawn(|ctx| async move { ctx });
+            let handle = context.clone().spawn(|ctx| async move { ctx });
             let aborted_context = handle.await.unwrap();
 
             // Cloning an aborted context succeeds.
@@ -573,7 +556,7 @@ mod tests {
             // Spawning from an aborted context should behave as if already aborted.
             let run_count = Arc::new(AtomicUsize::new(0));
 
-            let supervised_handle = clone.clone().supervised().spawn({
+            let supervised_handle = clone.clone().spawn({
                 let run_count = run_count.clone();
                 move |_| {
                     let run_count = run_count.clone();
@@ -592,7 +575,7 @@ mod tests {
                 "supervised task should not run after parent aborts"
             );
 
-            let detached_handle = clone.detached().spawn({
+            let detached_handle = clone.spawn({
                 let run_count = run_count.clone();
                 move |_| {
                     let run_count = run_count.clone();
@@ -625,11 +608,11 @@ mod tests {
                 let counter = counter.clone();
                 async move {
                     let parent_counter = counter.clone();
-                    let parent_handle = context.supervised().spawn(move |ctx| {
+                    let parent_handle = context.spawn(move |ctx| {
                         let parent_counter = parent_counter.clone();
                         async move {
                             let child_counter = parent_counter.clone();
-                            let child_handle = ctx.supervised().spawn(move |child_ctx| {
+                            let child_handle = ctx.spawn(move |child_ctx| {
                                 let child_counter = child_counter.clone();
                                 async move {
                                     let _ = child_ctx;
@@ -1802,71 +1785,6 @@ mod tests {
         });
     }
 
-    fn test_spawn_detached<R: Runner>(runner: R)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|context| async move {
-            // Setup channels
-            let (inner_tx, inner_rx) = oneshot::channel();
-            let (outer_tx, outer_rx) = oneshot::channel();
-
-            // Spawn task
-            let handle = context.spawn(move |context| async move {
-                // Spawn detached task
-                context.detached().spawn(|_| async move {
-                    inner_rx.await.unwrap();
-                    outer_tx.send(()).unwrap();
-                });
-            });
-
-            // Wait for task to finish
-            handle.await.unwrap();
-
-            // Send message to detached task
-            inner_tx.send(()).unwrap();
-
-            // Wait for detached task to respond
-            outer_rx.await.unwrap();
-        });
-    }
-
-    fn test_detached_can_spawn_after_parent_exit<R: Runner>(runner: R)
-    where
-        R::Context: Spawner + Clone,
-    {
-        runner.start(|context| async move {
-            let (go_tx, go_rx) = oneshot::channel();
-            let (child_tx, child_rx) = oneshot::channel();
-
-            let handle = context.spawn(move |context| {
-                let go_rx = go_rx;
-                let child_tx = child_tx;
-                async move {
-                    let _ = context.detached().spawn(move |detached_ctx| {
-                        let go_rx = go_rx;
-                        let child_tx = child_tx;
-                        async move {
-                            // Wait for the parent to finish so the detached task runs post-drop.
-                            go_rx.await.unwrap();
-
-                            let child = detached_ctx.clone().spawn(move |_| async move {
-                                child_tx.send(()).unwrap();
-                            });
-                            child
-                                .await
-                                .expect("detached spawn should succeed after parent exit");
-                        }
-                    });
-                }
-            });
-
-            handle.await.unwrap();
-            go_tx.send(()).unwrap();
-            child_rx.await.unwrap();
-        });
-    }
-
     fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -2294,18 +2212,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_detached() {
-        let executor = deterministic::Runner::default();
-        test_spawn_detached(executor);
-    }
-
-    #[test]
-    fn test_deterministic_detached_can_spawn_after_parent_exit() {
-        let executor = deterministic::Runner::default();
-        test_detached_can_spawn_after_parent_exit(executor);
-    }
-
-    #[test]
     fn test_deterministic_circular_reference_prevents_cleanup() {
         let executor = deterministic::Runner::default();
         test_circular_reference_prevents_cleanup(executor);
@@ -2592,18 +2498,6 @@ mod tests {
             let executor = tokio::Runner::default();
             test_spawn_abort(executor, dedicated, blocking);
         }
-    }
-
-    #[test]
-    fn test_tokio_spawn_detached() {
-        let executor = tokio::Runner::default();
-        test_spawn_detached(executor);
-    }
-
-    #[test]
-    fn test_tokio_detached_can_spawn_after_parent_exit() {
-        let executor = tokio::Runner::default();
-        test_detached_can_spawn_after_parent_exit(executor);
     }
 
     #[test]

@@ -95,14 +95,6 @@ impl<C> crate::Spawner for Cell<C>
 where
     C: crate::Spawner,
 {
-    fn supervised(self) -> Self {
-        Self::Present(self.into().supervised())
-    }
-
-    fn detached(self) -> Self {
-        Self::Present(self.into().detached())
-    }
-
     fn dedicated(self) -> Self {
         Self::Present(self.into().dedicated())
     }

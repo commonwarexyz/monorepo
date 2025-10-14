@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Panicker, SupervisionTree,
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -702,7 +702,7 @@ pub struct Context {
     network: Arc<Network>,
     storage: Arc<Storage>,
     tree: Arc<SupervisionTree>,
-    model: Model,
+    execution: Execution,
 }
 
 impl Clone for Context {
@@ -713,7 +713,7 @@ impl Clone for Context {
             network: self.network.clone(),
             storage: self.storage.clone(),
             tree: SupervisionTree::child(&self.tree),
-            model: self.model,
+            execution: self.execution,
         }
     }
 }
@@ -762,7 +762,7 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 tree: SupervisionTree::root(),
-                model: Model::default(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -817,7 +817,7 @@ impl Context {
                 network: Arc::new(network),
                 storage: checkpoint.storage,
                 tree: SupervisionTree::root(),
-                model: Model::default(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -841,23 +841,13 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn supervised(mut self) -> Self {
-        self.model.supervised();
-        self
-    }
-
-    fn detached(mut self) -> Self {
-        self.model.detached();
-        self
-    }
-
     fn dedicated(mut self) -> Self {
-        self.model.dedicated();
+        self.execution = Execution::Dedicated;
         self
     }
 
     fn shared(mut self, blocking: bool) -> Self {
-        self.model.shared(blocking);
+        self.execution = Execution::Shared(blocking);
         self
     }
 
@@ -874,13 +864,8 @@ impl crate::Spawner for Context {
         if self.tree.is_aborted() {
             return Handle::closed(metric);
         }
-        let supervised = self.model.is_supervised();
-        self.model = Model::default();
-        let tree = if supervised {
-            SupervisionTree::child(&self.tree)
-        } else {
-            SupervisionTree::root()
-        };
+        self.execution = Execution::default();
+        let tree = SupervisionTree::child(&self.tree);
         self.tree = Arc::clone(&tree);
 
         // Spawn the task (we don't care about Model)

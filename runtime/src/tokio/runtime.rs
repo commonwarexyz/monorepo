@@ -16,7 +16,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, Panicker, SupervisionTree},
-    Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
+    Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -341,7 +341,7 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
             tree: SupervisionTree::root(),
-            model: Model::default(),
+            execution: Execution::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -375,7 +375,7 @@ pub struct Context {
     storage: Storage,
     network: Network,
     tree: Arc<SupervisionTree>,
-    model: Model,
+    execution: Execution,
 }
 
 impl Clone for Context {
@@ -386,7 +386,7 @@ impl Clone for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             tree: SupervisionTree::child(&self.tree),
-            model: self.model,
+            execution: self.execution,
         }
     }
 }
@@ -399,23 +399,13 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn supervised(mut self) -> Self {
-        self.model.supervised();
-        self
-    }
-
-    fn detached(mut self) -> Self {
-        self.model.detached();
-        self
-    }
-
     fn dedicated(mut self) -> Self {
-        self.model.dedicated();
+        self.execution = Execution::Dedicated;
         self
     }
 
     fn shared(mut self, blocking: bool) -> Self {
-        self.model.shared(blocking);
+        self.execution = Execution::Shared(blocking);
         self
     }
 
@@ -432,15 +422,9 @@ impl crate::Spawner for Context {
         if self.tree.is_aborted() {
             return Handle::closed(metric);
         }
-        let dedicated = self.model.is_dedicated();
-        let blocking = self.model.is_blocking();
-        let supervised = self.model.is_supervised();
-        self.model = Model::default();
-        let tree = if supervised {
-            SupervisionTree::child(&self.tree)
-        } else {
-            SupervisionTree::root()
-        };
+        let past = self.execution;
+        self.execution = Execution::default();
+        let tree = SupervisionTree::child(&self.tree);
         self.tree = Arc::clone(&tree);
 
         // Spawn the task
@@ -449,7 +433,7 @@ impl crate::Spawner for Context {
         let (f, handle) =
             Handle::init(future, metric, executor.panicker.clone(), Arc::clone(&tree));
 
-        if dedicated {
+        if matches!(past, Execution::Dedicated) {
             thread::spawn({
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
@@ -457,7 +441,7 @@ impl crate::Spawner for Context {
                     handle.block_on(f);
                 }
             });
-        } else if blocking {
+        } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
