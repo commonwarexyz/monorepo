@@ -1,6 +1,6 @@
-//! A historical wrapper around [Prunable] that maintains snapshots via diff-based batching.
+//! A historical wrapper around [crate::bitmap::Prunable] that maintains snapshots via diff-based batching.
 //!
-//! The Historical bitmap maintains one full [Prunable] bitmap (the current/head state).
+//! The Historical bitmap maintains one full [crate::bitmap::Prunable] bitmap (the current/head state).
 //! All historical states and batch mutations are represented as diffs, not full bitmap clones.
 //!
 //! # Examples

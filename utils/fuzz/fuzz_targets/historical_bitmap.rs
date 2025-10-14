@@ -44,20 +44,11 @@ enum BatchOp {
     PruneToChunk { chunk: u8 },
 }
 
-/// A commit containing a sequence of operations
-#[derive(Arbitrary, Debug, Clone)]
-struct Commit {
-    /// Commit number
-    commit_number: u64,
-    /// Operations to perform in this batch
-    operations: Vec<BatchOp>,
-}
-
-/// Fuzz input containing commits
+/// Fuzz input containing commits (each commit is a sequence of operations)
 #[derive(Debug)]
 struct FuzzInput {
-    /// Commits to execute
-    commits: Vec<Commit>,
+    /// Commits to execute (each Vec<BatchOp> is one commit)
+    commits: Vec<Vec<BatchOp>>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -72,74 +63,59 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             for _ in 0..num_ops {
                 operations.push(BatchOp::arbitrary(u)?);
             }
-            commits.push(Commit {
-                commit_number: 0, // Will be normalized
-                operations,
-            });
+            commits.push(operations);
         }
 
         Ok(FuzzInput { commits })
     }
 }
 
-/// Give each commit a monotonically increasing commit number.
-fn normalize_commits(commits: &mut [Commit]) {
-    for (i, commit) in commits.iter_mut().enumerate() {
-        commit.commit_number = i as u64;
-    }
-}
-
 /// Apply a single operation to both batch and ground truth
-///
-/// Returns true if the operation was applied, false if it was skipped due to bounds
 fn apply_op(
     batch: &mut commonware_utils::bitmap::historical::BatchGuard<4>,
     ground_truth: &mut Prunable<4>,
     op: &BatchOp,
     current_len: &mut u64,
     current_pruned: &mut usize,
-) -> bool {
+) {
     match op {
         BatchOp::Push(value) => {
             batch.push(*value);
             ground_truth.push(*value);
             *current_len += 1;
-            true
         }
 
         BatchOp::Pop => {
             // Can't pop from empty bitmap
             if *current_len == 0 {
-                return false;
+                return;
             }
 
             // Can't pop into pruned region
             let chunk_idx = Prunable::<4>::unpruned_chunk(*current_len - 1);
             if chunk_idx < *current_pruned {
-                return false;
+                return;
             }
 
             batch.pop();
             ground_truth.pop();
             *current_len -= 1;
-            true
         }
 
         BatchOp::SetBit { bit, value } => {
             // Bit must be within bounds
             if *bit >= *current_len {
-                return false;
+                return;
             }
 
             // Bit's chunk must not be pruned
             let chunk_idx = Prunable::<4>::unpruned_chunk(*bit);
             if chunk_idx < *current_pruned {
-                return false;
+                return;
             }
 
             batch.set_bit(*bit, *value);
             ground_truth.set_bit(*bit, *value);
-            true
         }
 
         BatchOp::PruneToChunk { chunk } => {
@@ -147,29 +123,25 @@ fn apply_op(
 
             // Can't prune past current pruned point
             if target_chunk <= *current_pruned {
-                return false;
+                return;
             }
 
             // Can't prune at or beyond the last chunk (must keep at least some data)
             let total_chunks = (*current_len / CHUNK_SIZE_BITS) as usize;
             if total_chunks == 0 || target_chunk >= total_chunks {
-                return false;
+                return;
             }
 
             let prune_to_bit = (target_chunk as u64) * CHUNK_SIZE_BITS;
             batch.prune_to_bit(prune_to_bit);
             ground_truth.prune_to_bit(prune_to_bit);
             *current_pruned = target_chunk;
-            true
         }
     }
 }
 
 /// Main fuzzer function
-fn fuzz(mut input: FuzzInput) {
-    // Normalize commit numbers to ensure monotonicity
-    normalize_commits(&mut input.commits);
-
+fn fuzz(input: FuzzInput) {
     // Initialize Historical and ground truth storage
     let mut bitmap: BitMap<4> = BitMap::new();
     let mut checkpoints: Vec<(u64, Prunable<4>)> = Vec::new();
@@ -178,8 +150,8 @@ fn fuzz(mut input: FuzzInput) {
     let mut ground_truth = Prunable::<4>::new();
 
     // Process each commit
-    for commit in &input.commits {
-        let commit_number = commit.commit_number;
+    for (commit_number, commit) in input.commits.iter().enumerate() {
+        let commit_number = commit_number as u64;
 
         // Track state within this batch
         let mut current_len = ground_truth.len();
@@ -189,7 +161,7 @@ fn fuzz(mut input: FuzzInput) {
         let mut batch = bitmap.start_batch();
 
         // Apply operations
-        for op in &commit.operations {
+        for op in commit {
             apply_op(
                 &mut batch,
                 &mut ground_truth,
