@@ -313,6 +313,9 @@ cfg_if::cfg_if! {
         /// Interface that runtimes can implement to constrain the latency a future
         /// takes to execute (allowing a runtime to "pace" the execution of a future
         /// driven by an external process).
+        ///
+        /// **Applications built on top of `commonware-runtime` (with no external processes) should never need
+        /// to use this trait.**
         pub trait Pacer: Clock + Clone + Send + Sync + 'static {
             /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
             /// the future is not yet ready at the desired time of completion, the runtime will block until

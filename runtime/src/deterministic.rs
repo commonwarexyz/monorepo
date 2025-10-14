@@ -4,6 +4,20 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
+//! # Pacer
+//!
+//! When testing an application that interacts with some external process, it can appear to
+//! the runtime that progress has stalled because no pending tasks can make progress (i.e. progress
+//! depends on an event unknown to the runtime). To support testing these applications, the runtime
+//! can be built with the `pacer` feature enabled to execute tasks (often annotated with `pace()`) at
+//! "realtime" rather than "simulated time".
+//!
+//! "Realtime" here means the runtime sleeps for [Config::cycle] after each iteration of the event loop
+//! (rather than just incrementing the current time). This means that time could drift from elapsed time
+//! as a function of how long it takes to process tasks in a given iteration.
+//!
+//! **Applications built entirely with runtime should never need to enable this feature.**
+//!
 //! # Example
 //!
 //! ```rust
@@ -267,8 +281,8 @@ pub struct Executor {
 impl Executor {
     /// Advance simulated time by [Config::cycle].
     ///
-    /// When built with the `pacer` feature, block the current thread for [Config::cycle] to let
-    /// external processes make progress before resuming execution.
+    /// When built with the `pacer` feature, sleep for [Config::cycle] to let
+    /// external processes make progress.
     fn advance_time(&self) -> SystemTime {
         #[cfg(feature = "pacer")]
         std::thread::sleep(self.cycle);
