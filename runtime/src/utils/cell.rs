@@ -2,10 +2,11 @@ use crate::{signal, Error, Handle, SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
+#[cfg(feature = "pacer")]
+use std::ops::Range;
 use std::{
     future::Future,
     net::SocketAddr,
-    ops::Range,
     time::{Duration, SystemTime},
 };
 
@@ -172,6 +173,7 @@ where
     }
 }
 
+#[cfg(feature = "pacer")]
 impl<C> crate::Pacer for Cell<C>
 where
     C: crate::Pacer,

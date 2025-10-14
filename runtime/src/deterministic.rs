@@ -22,6 +22,8 @@
 //! });
 //! ```
 
+#[cfg(feature = "pacer")]
+use crate::Pacer;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -36,7 +38,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Blocker, Clock, Error, Handle, ListenerOf, Model, Pacer, Panicked, METRICS_PREFIX,
+    Blocker, Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -51,13 +53,16 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+#[cfg(feature = "pacer")]
+use rand::Rng;
 use sha2::{Digest as _, Sha256};
+#[cfg(feature = "pacer")]
+use std::ops::Range;
 use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
-    ops::Range,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -1213,6 +1218,7 @@ where
     }
 }
 
+#[cfg(feature = "pacer")]
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,
@@ -1338,9 +1344,10 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "pacer")]
+    use crate::FutureExt;
     use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, FutureExt, Metrics, Runner as _,
-        Spawner, Storage,
+        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Spawner, Storage,
     };
     use commonware_macros::test_traced;
     use futures::{
@@ -1605,6 +1612,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "pacer")]
     #[test]
     fn test_external_realtime_variable() {
         // Initialize runtime

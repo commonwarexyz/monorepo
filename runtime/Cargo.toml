@@ -33,7 +33,8 @@ libc = { workspace = true }
 sysinfo = { workspace = true }
 
 [features]
-default = []
+default = ["pacer"]
+pacer = []
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 
