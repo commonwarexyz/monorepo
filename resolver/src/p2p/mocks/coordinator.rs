@@ -73,7 +73,7 @@ impl<P: PublicKey> Coordinator<P> {
 impl<P: PublicKey> crate::p2p::Coordinator for Coordinator<P> {
     type PublicKey = P;
 
-    fn peers(&self) -> &Vec<Self::PublicKey> {
+    fn peers(&self) -> &[Self::PublicKey] {
         // Still using the hack for testing purposes
         let peers = self.get_peers();
         Box::leak(Box::new(peers))

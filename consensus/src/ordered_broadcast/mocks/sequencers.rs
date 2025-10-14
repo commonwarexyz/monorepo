@@ -32,7 +32,7 @@ impl<P: PublicKey> Supervisor for Sequencers<P> {
         unimplemented!()
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
         Some(&self.participants)
     }
 

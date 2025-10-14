@@ -106,7 +106,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
         unimplemented!("only defined in supertrait")
     }
 
-    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (_, _, p, _))) => p,
             None => {
