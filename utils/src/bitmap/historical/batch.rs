@@ -44,33 +44,33 @@ use std::collections::BTreeMap;
 ///    - These are modifications to the base bitmap, never to appended bits
 ///    - Appended bits are modified by directly updating the `appended_bits` vector
 /// 4. **No overlap**: A bit is either in `modified_bits` OR `appended_bits`, never both
-pub(crate) struct Batch<const N: usize> {
+pub(super) struct Batch<const N: usize> {
     /// Bitmap state when batch started (immutable).
-    pub(crate) base_len: u64,
-    pub(crate) base_pruned_chunks: usize,
+    pub(super) base_len: u64,
+    pub(super) base_pruned_chunks: usize,
 
     /// What the bitmap will look like after commit (mutable).
-    pub(crate) projected_len: u64,
-    pub(crate) projected_pruned_chunks: usize,
+    pub(super) projected_len: u64,
+    pub(super) projected_pruned_chunks: usize,
 
     /// Modifications to bits that existed in the bitmap (not appended bits).
     /// Contains offsets in [0, projected_len - appended_bits.len()).
     /// Maps: bit -> new_value
-    pub(crate) modified_bits: BTreeMap<u64, bool>,
+    pub(super) modified_bits: BTreeMap<u64, bool>,
 
     /// New bits pushed in this batch (in order).
     /// Logical position: [projected_len - appended_bits.len(), projected_len)
-    pub(crate) appended_bits: Vec<bool>,
+    pub(super) appended_bits: Vec<bool>,
 
     /// Old chunk data for chunks being pruned.
     /// Captured eagerly during `prune_to_bit()` for historical reconstruction.
-    pub(crate) chunks_to_prune: BTreeMap<usize, [u8; N]>,
+    pub(super) chunks_to_prune: BTreeMap<usize, [u8; N]>,
 }
 
 #[must_use = "batches must be committed or explicitly dropped"]
 pub struct BatchGuard<'a, const N: usize> {
-    pub(crate) bitmap: &'a mut BitMap<N>,
-    pub(crate) committed: bool,
+    pub(super) bitmap: &'a mut BitMap<N>,
+    pub(super) committed: bool,
 }
 
 impl<'a, const N: usize> BatchGuard<'a, N> {

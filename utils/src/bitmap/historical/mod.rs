@@ -82,11 +82,11 @@
 //! assert_eq!(bitmap.commits().count(), 3);
 //! ```
 
-pub mod batch;
-pub mod bitmap;
-mod error;
+mod batch;
 pub use batch::BatchGuard;
+mod bitmap;
 pub use bitmap::BitMap;
+mod error;
 pub use error::Error;
 
 #[cfg(test)]
