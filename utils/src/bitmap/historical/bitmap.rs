@@ -1,5 +1,5 @@
-use super::{batch::Batch, Error, Prunable};
-use crate::bitmap::historical::BatchGuard;
+use super::{batch::Batch, Error};
+use crate::bitmap::{historical::BatchGuard, Prunable};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]

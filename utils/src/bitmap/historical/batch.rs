@@ -1,5 +1,5 @@
-use super::{Error, Prunable};
-use crate::bitmap::historical::BitMap;
+use super::Error;
+use crate::bitmap::{historical::BitMap, Prunable};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]

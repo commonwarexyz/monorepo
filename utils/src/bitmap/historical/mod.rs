@@ -82,25 +82,12 @@
 //! assert_eq!(bitmap.commits().count(), 3);
 //! ```
 
-use super::Prunable;
-
 pub mod batch;
 pub mod bitmap;
-
+mod error;
 pub use batch::BatchGuard;
 pub use bitmap::BitMap;
-
-/// Errors that can occur in Historical bitmap operations.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum Error {
-    /// Commit numbers must be strictly monotonically increasing.
-    #[error("commit number ({attempted}) <= previous commit ({previous})")]
-    NonMonotonicCommit { previous: u64, attempted: u64 },
-
-    /// Error from the underlying Prunable bitmap.
-    #[error("prunable error: {0}")]
-    Prunable(#[from] super::prunable::Error),
-}
+pub use error::Error;
 
 #[cfg(test)]
 mod tests;

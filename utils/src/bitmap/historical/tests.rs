@@ -1,4 +1,5 @@
 use super::*;
+use crate::bitmap::Prunable;
 
 /// Test basic batch lifecycle: creation, operations, commit, and abort.
 #[test]
