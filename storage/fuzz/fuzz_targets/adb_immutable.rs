@@ -5,7 +5,7 @@ use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::{
+    log_db::adb::{
         immutable::{Config, Immutable},
         verify_proof,
     },

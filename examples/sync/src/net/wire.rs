@@ -5,7 +5,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{
-    adb::sync::Target,
+    log_db::adb::sync::Target,
     mmr::{Location, Proof},
 };
 use std::num::NonZeroU64;

@@ -4,12 +4,11 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    log_db::adb::{
         self,
         any::fixed::{unordered::Any, Config},
     },
     mmr::{Location, Proof, StandardHasher as Standard},
-    store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::Fixed<Key, Value>;
+pub type Operation = commonware_storage::log_db::operation::Fixed<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
@@ -73,7 +72,7 @@ where
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), adb::Error> {
         for operation in operations {
             match operation {
                 Operation::Update(key, value) => {
@@ -90,7 +89,7 @@ where
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+    async fn commit(&mut self) -> Result<(), adb::Error> {
         self.commit().await
     }
 

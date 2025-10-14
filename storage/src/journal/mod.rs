@@ -10,7 +10,7 @@ use thiserror::Error;
 pub mod fixed;
 pub mod variable;
 
-impl<E, Op> crate::adb::sync::Journal for fixed::Journal<E, Op>
+impl<E, Op> crate::log_db::adb::sync::Journal for fixed::Journal<E, Op>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,

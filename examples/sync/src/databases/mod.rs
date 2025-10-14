@@ -3,7 +3,7 @@
 use crate::Key;
 use commonware_codec::{Encode, Read};
 use commonware_storage::{
-    adb,
+    log_db::adb,
     mmr::{Location, Proof, StandardHasher as Standard},
 };
 use std::{future::Future, num::NonZeroU64};

@@ -16,7 +16,7 @@ pub mod mmr;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod adb;
+        pub mod log_db;
         pub mod archive;
         pub mod bmt;
         pub mod cache;
@@ -26,7 +26,6 @@ cfg_if::cfg_if! {
         pub mod metadata;
         pub mod ordinal;
         pub mod rmap;
-        pub mod store;
         pub mod translator;
     }
 }

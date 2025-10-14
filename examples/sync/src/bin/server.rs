@@ -1,5 +1,6 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::fixed::unordered::Any] database.
+//! [commonware_storage::log_db::adb::any::fixed::unordered::Any] database to a remote client's
+//! database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
@@ -8,7 +9,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
+use commonware_storage::{log_db::adb::sync::Target, mmr::StandardHasher as Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},

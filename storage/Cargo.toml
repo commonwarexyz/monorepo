@@ -49,7 +49,7 @@ crate-type = ["rlib", "cdylib"]
 [[bench]]
 name = "adb"
 harness = false
-path = "src/adb/benches/bench.rs"
+path = "src/log_db/adb/benches/bench.rs"
 
 [[bench]]
 name="archive"
@@ -99,4 +99,4 @@ path = "src/rmap/benches/bench.rs"
 [[bench]]
 name="store"
 harness = false
-path = "src/store/benches/bench.rs"
+path = "src/log_db/benches/bench.rs"

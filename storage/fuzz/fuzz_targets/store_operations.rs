@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
+    log_db::store::{Config, Store},
     mmr::Location,
-    store::{Config, Store},
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};

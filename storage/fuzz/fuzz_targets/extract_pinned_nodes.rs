@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256;
 use commonware_storage::{
-    adb::verify::extract_pinned_nodes,
+    log_db::adb::verify::extract_pinned_nodes,
     mmr::{Location, Proof},
 };
 use libfuzzer_sys::fuzz_target;

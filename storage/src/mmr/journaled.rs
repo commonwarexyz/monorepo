@@ -5,11 +5,11 @@
 //! pruned.
 
 use crate::{
-    adb::any::fixed::sync::{init_journal, init_journal_at_size},
     journal::{
         fixed::{Config as JConfig, Journal},
         Error as JError,
     },
+    log_db::adb::any::fixed::sync::{init_journal, init_journal_at_size},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
@@ -337,8 +337,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<H::Digest>,
-    ) -> Result<Self, crate::adb::Error> {
-        let journal = init_journal(
+    ) -> Result<Self, crate::log_db::adb::Error> {
+        let journal: Journal<E, H::Digest> = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,

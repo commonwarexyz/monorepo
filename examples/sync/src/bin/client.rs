@@ -1,14 +1,14 @@
-//! This client binary creates or opens an [commonware_storage::adb::any] database and
-//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
-//! sync target updates from the server, and continuously syncs to demonstrate that sync works
-//! with both empty and already-initialized databases.
+//! This client binary creates or opens an [commonware_storage::log_db::adb::any] database and
+//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and sync
+//! target updates from the server, and continuously syncs to demonstrate that sync works with both
+//! empty and already-initialized databases.
 
 use clap::{Arg, Command};
 use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::{adb::sync, mmr::StandardHasher};
+use commonware_storage::{log_db::adb::sync, mmr::StandardHasher};
 use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };

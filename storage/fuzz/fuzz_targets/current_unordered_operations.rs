@@ -4,7 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{unordered::Current, Config},
+    log_db::adb::{
+        self,
+        current::{unordered::Current, Config},
+    },
     mmr::{hasher::Hasher as MmrHasher, Location, Position, Proof, StandardHasher as Standard},
     translator::TwoCap,
 };
@@ -278,7 +281,7 @@ fn fuzz(data: FuzzInput) {
                                 }
                             }
                         }
-                        Err(commonware_storage::adb::Error::KeyNotFound) => {
+                        Err(adb::Error::KeyNotFound) => {
                             let expected_value = expected_state.get(key);
                             if let Some(Some(_)) = expected_value {
                                 panic!("Key {key:?} should exist but proof generation failed");
