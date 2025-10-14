@@ -124,7 +124,7 @@ impl<H: CHasher> Mmr<H> {
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_valid_size() {
+        if !size.is_mmr_size() {
             return Err(Error::InvalidSize(*size));
         }
 
@@ -337,7 +337,7 @@ impl<H: CHasher> Mmr<H> {
             if new_size < self.pruned_to_pos {
                 return Err(ElementPruned(new_size));
             }
-            if new_size.is_valid_size() {
+            if new_size.is_mmr_size() {
                 break;
             }
             new_size -= 1;
@@ -1035,7 +1035,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1001 {
                 assert!(
-                    mmr.size().is_valid_size(),
+                    mmr.size().is_mmr_size(),
                     "mmr of size {} should be valid",
                     mmr.size()
                 );
@@ -1043,7 +1043,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !Position::new(size).is_valid_size(),
+                        !Position::new(size).is_mmr_size(),
                         "mmr of size {size} should be invalid",
                     );
                 }

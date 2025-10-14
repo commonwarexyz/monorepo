@@ -74,7 +74,7 @@ impl PeakIterator {
         // below, since we no longer have a log(n) bound on the number of iterations.
         assert_ne!(size.leading_zeros(), 0, "overflow");
 
-        while !size.is_valid_size() {
+        while !size.is_mmr_size() {
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             size -= 1;
         }
@@ -256,41 +256,6 @@ mod tests {
             }
             last_leaf_pos = *leaf_pos;
         }
-    }
-
-    #[test]
-    fn test_is_valid() {
-        // Build an MMR one node at a time and check that the validity check is correct for all
-        // sizes up to the current size.
-        let mut mmr = Mmr::new();
-        let mut size_to_check = Position::new(0);
-        let mut hasher = Standard::<Sha256>::new();
-        let digest = [1u8; 32];
-        for _i in 0..10000 {
-            while size_to_check != mmr.size() {
-                assert!(
-                    !size_to_check.is_valid_size(),
-                    "size_to_check: {} {}",
-                    size_to_check,
-                    mmr.size()
-                );
-                size_to_check += 1;
-            }
-            assert!(size_to_check.is_valid_size());
-            mmr.add(&mut hasher, &digest);
-            size_to_check += 1;
-        }
-
-        // Test overflow boundaries.
-        assert!(!Position::new(u64::MAX).is_valid_size());
-        assert!(Position::new(u64::MAX >> 1).is_valid_size());
-        assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
-
-        let largest_valid_size = Position::new(u64::MAX >> 1);
-        assert_eq!(
-            PeakIterator::to_nearest_size(largest_valid_size),
-            largest_valid_size
-        );
     }
 
     #[test]
