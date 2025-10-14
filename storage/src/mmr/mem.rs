@@ -351,16 +351,24 @@ impl<H: CHasher> Mmr<H> {
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
     /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - Panics if `pos` does not correspond to a leaf, or if the leaf has been pruned.
+    /// Returns [Error::ElementPruned] if the leaf has been pruned.
+    /// Returns [Error::PositionNotLeaf] if `pos` does not correspond to a leaf.
+    /// Returns [Error::InvalidPosition] if `pos` is out of bounds.
     ///
-    /// - This method will change the root and invalidate any previous inclusion proofs.
+    /// # Warning
     ///
-    /// - Use of this method will prevent using this structure as a base mmr for grafting.
-    pub fn update_leaf(&mut self, hasher: &mut impl Hasher<H>, pos: Position, element: &[u8]) {
+    /// This method will change the root and invalidate any previous inclusion proofs.
+    /// Use of this method will prevent using this structure as a base mmr for grafting.
+    pub fn update_leaf(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        pos: Position,
+        element: &[u8],
+    ) -> Result<(), Error> {
         if pos < self.pruned_to_pos {
-            panic!("element pruned: pos={pos}");
+            return Err(Error::ElementPruned(pos));
         }
 
         // Update the digest of the leaf node.
@@ -377,7 +385,7 @@ impl<H: CHasher> Mmr<H> {
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
                 if parent_pos == pos {
-                    panic!("pos was not for a leaf");
+                    return Err(Error::PositionNotLeaf(pos));
                 }
                 let sibling_digest = self.get_node_unchecked(sibling_pos);
                 digest = if sibling_pos == parent_pos - 1 {
@@ -389,39 +397,43 @@ impl<H: CHasher> Mmr<H> {
                 index = self.pos_to_index(parent_pos);
                 self.nodes[index] = digest;
             }
-            return;
+            return Ok(());
         }
 
-        panic!("invalid pos {pos}:{}", self.size())
+        Err(Error::InvalidPosition(pos))
     }
 
     /// Batch update the digests of multiple retained leaves.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any of the updated leaves has been pruned.
+    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<H>,
         updates: &[(Position, T)],
-    ) {
+    ) -> Result<(), Error> {
+        for (pos, _) in updates {
+            if *pos < self.pruned_to_pos {
+                return Err(Error::ElementPruned(*pos));
+            }
+        }
+
         #[cfg(feature = "std")]
         if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.update_leaf_parallel(hasher, updates);
-            return;
+            return Ok(());
         }
 
         for (pos, element) in updates {
-            if *pos < self.pruned_to_pos {
-                panic!("element pruned: pos={pos}");
-            }
-
             // Update the digest of the leaf node and mark its ancestors as dirty.
             let digest = hasher.leaf_digest(*pos, element.as_ref());
             let index = self.pos_to_index(*pos);
             self.nodes[index] = digest;
             self.mark_dirty(*pos);
         }
+
+        Ok(())
     }
 
     /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
@@ -1176,14 +1188,16 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
+                    .unwrap();
                 let updated_root = mmr.root(&mut hasher);
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
+                    .unwrap();
                 let restored_root = mmr.root(&mut hasher);
                 assert_eq!(root, restored_root);
             }
@@ -1192,14 +1206,13 @@ mod tests {
             mmr.prune_to_pos(leaves[150]);
             for &leaf_pos in &leaves[150..=190] {
                 mmr.prune_to_pos(leaf_pos);
-                mmr.update_leaf(&mut hasher, leaf_pos, &element);
+                mmr.update_leaf(&mut hasher, leaf_pos, &element).unwrap();
             }
         });
     }
 
     #[test]
-    #[should_panic(expected = "pos was not for a leaf")]
-    fn test_mem_mmr_update_leaf_panic_invalid() {
+    fn test_mem_mmr_update_leaf_error_not_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
@@ -1208,13 +1221,13 @@ mod tests {
             let mut mmr = Mmr::new();
             compute_big_mmr(&mut hasher, &mut mmr);
             let not_a_leaf_pos = Position::new(2);
-            mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+            let result = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+            assert!(matches!(result, Err(Error::PositionNotLeaf(_))));
         });
     }
 
     #[test]
-    #[should_panic(expected = "element pruned")]
-    fn test_mem_mmr_update_leaf_panic_pruned() {
+    fn test_mem_mmr_update_leaf_error_pruned() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
@@ -1223,7 +1236,8 @@ mod tests {
             let mut mmr = Mmr::new();
             compute_big_mmr(&mut hasher, &mut mmr);
             mmr.prune_all();
-            mmr.update_leaf(&mut hasher, Position::new(0), &element);
+            let result = mmr.update_leaf(&mut hasher, Position::new(0), &element);
+            assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
 
@@ -1268,7 +1282,7 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             updates.push((leaves[leaf], &element));
         }
-        mmr.update_leaf_batched(hasher, &updates);
+        mmr.update_leaf_batched(hasher, &updates).unwrap();
 
         mmr.sync(hasher);
         let updated_root = mmr.root(hasher);
@@ -1284,7 +1298,7 @@ mod tests {
             let element = hasher.inner().finalize();
             updates.push((leaves[leaf], element));
         }
-        mmr.update_leaf_batched(hasher, &updates);
+        mmr.update_leaf_batched(hasher, &updates).unwrap();
 
         mmr.sync(hasher);
         let restored_root = mmr.root(hasher);

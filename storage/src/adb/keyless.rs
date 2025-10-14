@@ -383,8 +383,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Get the value at location `loc` in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.size`.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc < self.size);
+        if loc >= self.size {
+            return Err(Error::LocationOutOfBounds(loc, self.size));
+        }
         let offset = self.locations.read(*loc).await?;
 
         let section = *loc / self.log_items_per_section;
@@ -423,11 +429,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to blob boundaries in the underlying journals.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `loc` is beyond the last commit point.
+    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new_unchecked(0)));
+        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondCommit(loc, last_commit));
+        }
 
         // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
@@ -680,7 +689,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     #[cfg(test)]
     /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
     pub(super) async fn simulate_prune_failure(mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new_unchecked(0)));
+        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondCommit(loc, last_commit));
+        }
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
@@ -1454,6 +1466,84 @@ mod test {
                 db.last_commit_loc(),
                 Some(new_committed_size - 1),
                 "Last commit location should be correct after multiple appends"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_keyless_db_get_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test getting from empty database
+            let result = db.get(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some values
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 8];
+            db.append(v1.clone()).await.unwrap();
+            db.append(v2.clone()).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations - should succeed
+            assert_eq!(db.get(Location::new_unchecked(0)).await.unwrap().unwrap(), v1);
+            assert_eq!(db.get(Location::new_unchecked(1)).await.unwrap().unwrap(), v2);
+
+            // Test getting out of bounds location
+            let result = db.get(Location::new_unchecked(3)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(3) && size == Location::new_unchecked(3))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_keyless_db_prune_beyond_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test pruning empty database (no commits)
+            let result = db.prune(Location::new_unchecked(1)).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                    if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
+            );
+
+            // Add values and commit
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 8];
+            let v3 = vec![3u8; 8];
+            db.append(v1.clone()).await.unwrap();
+            db.append(v2.clone()).await.unwrap();
+            db.commit(None).await.unwrap();
+            db.append(v3.clone()).await.unwrap();
+
+            // op_count is 4 (v1, v2, commit, v3), last_commit_loc is 2
+            let last_commit = db.last_commit_loc().unwrap();
+            assert_eq!(last_commit, Location::new_unchecked(2));
+
+            // Test valid prune (at last commit)
+            assert!(db.prune(last_commit).await.is_ok());
+
+            // Add more and commit again
+            db.commit(None).await.unwrap();
+            let new_last_commit = db.last_commit_loc().unwrap();
+
+            // Test pruning beyond last commit
+            let beyond = Location::new_unchecked(*new_last_commit + 1);
+            let result = db.prune(beyond).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                    if prune_loc == beyond && commit_loc == new_last_commit)
             );
 
             db.destroy().await.unwrap();

@@ -224,7 +224,7 @@ impl<D: Digest> Proof<D> {
                 // construction of `node_digests`)
                 let digest = node_digests
                     .get(req_pos)
-                    .expect("missing digest for required position");
+                    .expect("must exist by construction of node_digests");
                 digests.push(*digest);
             }
             let proof = Proof {
@@ -511,21 +511,18 @@ pub(crate) fn nodes_required_for_range_proof(
             positions.push(peak.0);
         }
     }
-    let Some(start_tree_with_element) = start_tree_with_element else {
-        panic!("invalid range: start tree missing");
-    };
-    let Some(end_tree_with_element) = end_tree_with_element else {
-        panic!("invalid range: end tree missing");
-    };
+
+    // We checked above that all range elements are in this MMR, so some mountain must contain
+    // the first and last elements in the range.
+    let (start_tree_peak, start_tree_height) =
+        start_tree_with_element.expect("start_tree_with_element is Some");
+    let (end_tree_peak, end_tree_height) =
+        end_tree_with_element.expect("end_tree_with_element is Some");
 
     // Include the positions of any left-siblings of each node on the path from peak to
     // leftmost-leaf, and right-siblings for the path from peak to rightmost-leaf. These are
     // added in order of decreasing parent position.
-    let left_path_iter = PathIterator::new(
-        start_element_pos,
-        start_tree_with_element.0,
-        start_tree_with_element.1,
-    );
+    let left_path_iter = PathIterator::new(start_element_pos, start_tree_peak, start_tree_height);
 
     let mut siblings = Vec::new();
     if start_element_pos == end_element_pos {
@@ -533,11 +530,7 @@ pub(crate) fn nodes_required_for_range_proof(
         // same so no need to process each independently.
         siblings.extend(left_path_iter);
     } else {
-        let right_path_iter = PathIterator::new(
-            end_element_pos,
-            end_tree_with_element.0,
-            end_tree_with_element.1,
-        );
+        let right_path_iter = PathIterator::new(end_element_pos, end_tree_peak, end_tree_height);
         // filter the right path for right siblings only
         siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
         // filter the left path for left siblings only
@@ -545,7 +538,7 @@ pub(crate) fn nodes_required_for_range_proof(
 
         // If the range spans more than one tree, then the digests must already be in the correct
         // order. Otherwise, we enforce the desired order through sorting.
-        if start_tree_with_element.0 == end_tree_with_element.0 {
+        if start_tree_peak == end_tree_peak {
             siblings.sort_by(|a, b| b.0.cmp(&a.0));
         }
     }
