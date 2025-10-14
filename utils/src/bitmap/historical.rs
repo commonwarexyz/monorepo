@@ -382,10 +382,6 @@ impl<const N: usize> Historical<N> {
     /// 2. Adjust bitmap structure to target length (extend/shrink as needed)
     /// 3. Update chunk data for Modified and Removed chunks
     /// 4. Set next_bit to match target length exactly
-    ///
-    /// Key insight: We adjust the bitmap's STRUCTURE first (ensuring all chunks exist),
-    /// then update chunk DATA. This avoids the alignment issues that occur when trying
-    /// to push chunks onto a non-aligned bitmap.
     fn apply_reverse_diff(&self, newer_state: &mut Prunable<N>, diff: &CommitDiff<N>) {
         let target_len = diff.metadata.len;
         let target_pruned = diff.metadata.pruned_chunks;
@@ -517,32 +513,6 @@ impl<const N: usize> Historical<N> {
     }
 
     /// Apply a batch's changes to the current bitmap.
-    ///
-    /// # Order of Operations
-    ///
-    /// The order is chosen for correctness and clarity:
-    ///
-    /// 1. **Pop to target length**: Remove bits that were popped in the batch
-    ///    - Must happen BEFORE appends to establish the correct base length
-    ///    - Example: bitmap has 10 bits, batch pops 3 then pushes 2
-    ///      → First shrink to 7, then grow to 9 (not directly from 10 to 9)
-    ///    - After this step: `current.len() == projected_len - appended_bits.len()`
-    ///
-    /// 2. **Apply appends**: Push all bits from `appended_bits`
-    ///    - Grows the bitmap from base length to final length
-    ///    - After this step: `current.len() == projected_len`
-    ///
-    /// 3. **Apply modifications**: Set bits recorded in `modified_bits`
-    ///    - Must happen AFTER step 1 so all offsets in `modified_bits` are valid
-    ///      (after step 1: all offsets < current.len())
-    ///    - Could happen before step 2 (modifications only affect base region, which
-    ///      is already at correct length after step 1), but doing it after is clearer
-    ///    - `modified_bits` never contains appended bit offsets (those are modified
-    ///      directly in `appended_bits` vector via `set_bit()` during the batch)
-    ///
-    /// 4. **Apply pruning**: Remove chunks from the beginning
-    ///    - Must happen LAST to avoid invalidating bit offsets in steps 2-3
-    ///    - Pruning changes which bits are accessible but doesn't change values
     fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
         // Step 1: Shrink to length before appends (handles net pops)
         let target_len_before_appends = batch.projected_len - batch.appended_bits.len() as u64;
@@ -555,6 +525,7 @@ impl<const N: usize> Historical<N> {
         for &bit in &batch.appended_bits {
             self.current.push(bit);
         }
+        assert_eq!(self.current.len(), batch.projected_len);
 
         // Step 3: Modify existing base bits (not appended bits)
         for (&bit, &value) in &batch.modified_bits {
