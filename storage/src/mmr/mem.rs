@@ -124,7 +124,7 @@ impl<H: CHasher> Mmr<H> {
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !PeakIterator::check_validity(size) {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
