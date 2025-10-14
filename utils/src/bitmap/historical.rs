@@ -633,7 +633,13 @@ impl<const N: usize> Historical<N> {
         };
 
         // Capture all chunks between the new and old endpoints.
+        // Skip chunks that were already pruned before this batch started.
         for chunk_idx in new_last_chunk..=old_last_chunk {
+            if chunk_idx < batch.base_pruned_chunks {
+                // This chunk was already pruned before the batch, skip it
+                continue;
+            }
+
             changes.entry(chunk_idx).or_insert_with(|| {
                 let old_chunk = self
                     .get_chunk(chunk_idx)
