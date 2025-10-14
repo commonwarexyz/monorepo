@@ -144,7 +144,7 @@ fn apply_op(
 fn fuzz(input: FuzzInput) {
     // Initialize Historical and ground truth storage
     let mut bitmap: BitMap<4> = BitMap::new();
-    let mut checkpoints: Vec<(u64, Prunable<4>)> = Vec::new();
+    let mut commits: Vec<(u64, Prunable<4>)> = Vec::new();
 
     // Initialize ground truth bitmap
     let mut ground_truth = Prunable::<4>::new();
@@ -175,11 +175,11 @@ fn fuzz(input: FuzzInput) {
         batch.commit(commit_number).unwrap();
 
         // Save checkpoint
-        checkpoints.push((commit_number, ground_truth.clone()));
+        commits.push((commit_number, ground_truth.clone()));
     }
 
     // Verify all commits
-    for (commit_num, expected) in &checkpoints {
+    for (commit_num, expected) in &commits {
         // Reconstruct historical state
         // This should never fail since we committed successfully and never prune commit history
         let reconstructed = bitmap
