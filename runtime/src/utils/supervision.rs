@@ -26,6 +26,7 @@ impl SupervisionTreeInner {
     }
 
     fn register_child(&mut self, child: &Arc<SupervisionTree>) {
+        // To avoid unbounded growth of children for clone-heavy loops, we reap dropped children here.
         self.children.retain(|weak| weak.strong_count() > 0);
         self.children.push(Arc::downgrade(child));
     }
