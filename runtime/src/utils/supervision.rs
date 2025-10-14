@@ -1,9 +1,8 @@
+use super::Aborter;
 use std::{
     mem,
     sync::{Arc, Mutex, Weak},
 };
-
-use super::Aborter;
 
 /// Interior state guarded by the [`SupervisionTree`] lock.
 struct SupervisionTreeInner {
