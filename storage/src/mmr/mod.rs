@@ -86,8 +86,8 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
-pub use location::{Location, MAX_LOCATION};
-pub use position::Position;
+pub use location::{Location, LocationError, MAX_LOCATION};
+pub use position::{Position, MAX_POSITION};
 pub use proof::Proof;
 use thiserror::Error;
 
@@ -137,4 +137,6 @@ pub enum Error {
     DirtyState,
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
+    #[error("invalid pinned nodes")]
+    InvalidPinnedNodes,
 }

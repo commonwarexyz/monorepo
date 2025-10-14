@@ -154,7 +154,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             pruned_to_pos: mmr_size,
             pinned_nodes,
             pool,
-        });
+        })?;
 
         let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned_chunks should never overflow");
