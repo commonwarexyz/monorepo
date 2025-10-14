@@ -257,6 +257,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// # Errors
     ///
+    /// Returns [Error::InvalidSize] if the proof size is not a valid MMR size.
     /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
     /// positions count.
@@ -269,9 +270,6 @@ impl<D: Digest> Proof<D> {
         // Get the positions of all nodes that should be pinned.
         let start_pos = Position::try_from(range.start)?;
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
-        if !self.size.is_mmr_size() {
-            return Err(Error::InvalidProof);
-        }
 
         // Get all positions required for the proof.
         let required_positions = nodes_required_for_range_proof(self.size, range)?;
@@ -1205,6 +1203,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_proving_extract_pinned_nodes_invalid_size() {
+        // Test that extract_pinned_nodes returns an error for invalid MMR size
+        let mut mmr = Mmr::new();
+        let mut hasher: Standard<Sha256> = Standard::new();
+
+        // Build MMR with 10 elements
+        for i in 0..10 {
+            let digest = test_digest(i);
+            mmr.add(&mut hasher, &digest);
+        }
+
+        // Generate a valid proof
+        let range = Location::new_unchecked(5)..Location::new_unchecked(8);
+        let mut proof = mmr.range_proof(range.clone()).unwrap();
+
+        // Verify the proof works with valid size
+        assert!(proof.extract_pinned_nodes(range.clone()).is_ok());
+
+        // Test various invalid sizes
+        const INVALID_SIZES: [u64; 5] = [2, 5, 6, 9, u64::MAX];
+        for invalid_size in INVALID_SIZES {
+            proof.size = Position::new(invalid_size);
+            let result = proof.extract_pinned_nodes(range.clone());
+            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == invalid_size));
+        }
+
+        // Test with MSB set (invalid due to leading zero requirement)
+        proof.size = Position::new(1u64 << 63);
+        let result = proof.extract_pinned_nodes(range);
+        assert!(matches!(result, Err(Error::InvalidSize(s)) if s == 1u64 << 63));
     }
 
     #[test]
