@@ -1317,16 +1317,15 @@ mod tests {
     use super::*;
     #[cfg(feature = "pacer")]
     use crate::FutureExt;
-    use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Spawner, Storage,
-    };
+    #[cfg(feature = "pacer")]
+    use crate::Spawner;
+    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
     use commonware_macros::test_traced;
-    use futures::{
-        channel::{mpsc, oneshot},
-        future::pending,
-        task::noop_waker,
-        SinkExt, StreamExt,
-    };
+    #[cfg(not(feature = "pacer"))]
+    use futures::future::pending;
+    #[cfg(feature = "pacer")]
+    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::oneshot, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1533,6 +1532,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(feature = "pacer"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]
     fn test_stall() {
@@ -1545,6 +1545,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(feature = "pacer"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]
     fn test_external_simulated() {
