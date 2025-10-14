@@ -195,6 +195,11 @@ impl<
         self.any.op_count()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.any.is_empty()
+    }
+
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
     pub fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
@@ -609,6 +614,15 @@ impl<
             root,
             &element,
         )
+    }
+
+    /// Get the operation that currently defines the span whose range contains `key`, or None if the
+    /// DB is empty.
+    pub async fn get_span(
+        &self,
+        key: &K,
+    ) -> Result<Option<(Location, OrderedKeyData<K, V>)>, Error> {
+        self.any.get_span(key).await
     }
 
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
