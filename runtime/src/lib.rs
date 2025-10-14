@@ -325,7 +325,7 @@ pub trait Pacer: Clock + Clone + Send + Sync + 'static {
     /// doesn't require anything in the current thread to complete (or else it will deadlock).
     fn pace<'a, F, T>(
         &'a self,
-        _range: Range<Duration>,
+        range: Range<Duration>,
         future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where
