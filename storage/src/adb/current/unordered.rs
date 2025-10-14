@@ -306,7 +306,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc);
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -333,14 +333,13 @@ impl<
 
     /// Return the root of the db.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing root"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
         let ops = &self.any.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, ops, height);
@@ -378,20 +377,16 @@ impl<
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
 
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
@@ -511,18 +506,18 @@ impl<
     /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
     /// not currently assigned any value.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
         let op = self.any.get_key_loc(&key).await?;
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
@@ -644,7 +639,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(*target_prune_loc);
+        self.status.prune_to_bit(*target_prune_loc)?;
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),

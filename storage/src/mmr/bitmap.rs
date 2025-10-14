@@ -227,15 +227,15 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     ///
     /// # Warning
     ///
-    /// - Panics if `bit` is greater than the bitmap length.
-    ///
-    /// - Panics if there are unprocessed updates.
-    pub fn prune_to_bit(&mut self, bit: u64) {
+    /// - Returns [Error::DirtyState] if there are unprocessed updates.
+    pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
+        if self.is_dirty() {
+            return Err(Error::DirtyState);
+        }
         let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
         if chunk < self.bitmap.pruned_chunks() {
-            return;
+            return Ok(());
         }
-        assert!(!self.is_dirty(), "cannot prune with unprocessed updates");
 
         // Prune inner bitmap
         self.bitmap.prune_to_bit(bit);
@@ -246,6 +246,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
         self.mmr.prune_to_pos(mmr_pos);
+        Ok(())
     }
 
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
@@ -350,7 +351,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        self.mmr.update_leaf_batched(hasher, &updates);
+        self.mmr.update_leaf_batched(hasher, &updates)?;
         self.dirty_chunks.clear();
         self.mmr.sync(hasher);
 
@@ -415,19 +416,21 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     /// bits in any partial chunk. The underlying MMR size can be derived from the number of
     /// bits as `leaf_num_to_pos(proof.size / Bitmap<_, N>::CHUNK_SIZE_BITS)`.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if there are unprocessed updates.
+    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
+    /// Returns [Error::DirtyState] if there are unprocessed updates.
     pub async fn proof(
         &self,
         hasher: &mut impl Hasher<H>,
         bit: u64,
     ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
-        assert!(bit < self.len(), "out of bounds");
-        assert!(
-            !self.is_dirty(),
-            "cannot compute proof with unprocessed updates"
-        );
+        if bit >= self.len() {
+            return Err(Error::BitOutOfBounds(bit, self.len()));
+        }
+        if self.is_dirty() {
+            return Err(Error::DirtyState);
+        }
 
         let chunk = *self.get_chunk_containing(bit);
         let chunk_loc = PrunableBitMap::<N>::unpruned_chunk(bit);
@@ -651,7 +654,7 @@ mod tests {
             let mut bitmap: BitMap<Sha256, SHA256_SIZE> = BitMap::new();
             assert_eq!(bitmap.len(), 0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
-            bitmap.prune_to_bit(0);
+            bitmap.prune_to_bit(0).unwrap();
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
             assert_eq!(bitmap.last_chunk().1, 0);
@@ -665,7 +668,7 @@ mod tests {
             let new_root = bitmap.root(&mut hasher).await.unwrap();
             assert_ne!(root, new_root);
             let root = new_root;
-            bitmap.prune_to_bit(1);
+            bitmap.prune_to_bit(1).unwrap();
             assert_eq!(bitmap.len(), 1);
             assert_ne!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
             assert_eq!(bitmap.last_chunk().1, 1);
@@ -695,7 +698,7 @@ mod tests {
             );
 
             // Now pruning all bits should matter.
-            bitmap.prune_to_bit(256);
+            bitmap.prune_to_bit(256).unwrap();
             assert_eq!(bitmap.len(), 256);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 1);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
@@ -704,7 +707,7 @@ mod tests {
             assert_eq!(bitmap.last_chunk().1, 0);
 
             // Pruning to an earlier point should be a no-op.
-            bitmap.prune_to_bit(10);
+            bitmap.prune_to_bit(10).unwrap();
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
         });
     }
@@ -805,7 +808,7 @@ mod tests {
             let mut hasher = StandardHasher::new();
             bitmap.sync(&mut hasher).await.unwrap();
 
-            bitmap.prune_to_bit(256);
+            bitmap.prune_to_bit(256).unwrap();
             bitmap.get_bit(255);
         });
     }
@@ -848,7 +851,7 @@ mod tests {
             assert_ne!(new_root, newer_root);
 
             // Confirm pruning everything doesn't affect the root.
-            bitmap.prune_to_bit(bitmap.len());
+            bitmap.prune_to_bit(bitmap.len()).unwrap();
             assert_eq!(bitmap.bitmap.pruned_chunks(), 3);
             assert_eq!(bitmap.len(), 256 * 3 + 1);
             assert_eq!(newer_root, bitmap.root(&mut hasher).await.unwrap());
@@ -892,7 +895,7 @@ mod tests {
 
             // Repeat the test after pruning.
             let start_bit = (SHA256_SIZE * 8 * 2) as u64;
-            bitmap.prune_to_bit(start_bit);
+            bitmap.prune_to_bit(start_bit).unwrap();
             for bit_pos in (start_bit..bitmap.len()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
                 bitmap.set_bit(bit_pos, !bit);
@@ -946,7 +949,7 @@ mod tests {
             // the largest prime that is less than the size of one 32-byte chunk in bits).
             for prune_to_bit in (0..bitmap.len()).step_by(251) {
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), root);
-                bitmap.prune_to_bit(prune_to_bit);
+                bitmap.prune_to_bit(prune_to_bit).unwrap();
                 for i in prune_to_bit..bitmap.len() {
                     let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
 
@@ -1005,9 +1008,11 @@ mod tests {
 
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
-                bitmap.prune_to_bit(
-                    (i * BitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
-                );
+                bitmap
+                    .prune_to_bit(
+                        (i * BitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
+                    )
+                    .unwrap();
                 bitmap
                     .write_pruned(context.clone(), PARTITION)
                     .await
@@ -1033,6 +1038,77 @@ mod tests {
                 bitmap.push(true);
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), root);
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_bitmap_prune_to_bit_dirty_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            bitmap.push_chunk(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test2"));
+            let mut hasher = StandardHasher::new();
+            bitmap.sync(&mut hasher).await.unwrap();
+
+            // Make the bitmap dirty by modifying an existing bit
+            bitmap.set_bit(0, !bitmap.get_bit(0));
+
+            // Pruning while dirty should return error
+            assert!(bitmap.is_dirty(), "Bitmap should be dirty after set_bit");
+            let result = bitmap.prune_to_bit(256);
+            assert!(matches!(result, Err(crate::mmr::Error::DirtyState)));
+
+            // After syncing, pruning should work
+            bitmap.sync(&mut hasher).await.unwrap();
+            assert!(bitmap.prune_to_bit(256).is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_bitmap_proof_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            bitmap.push_chunk(&test_chunk(b"test"));
+            let mut hasher = StandardHasher::new();
+            bitmap.sync(&mut hasher).await.unwrap();
+
+            // Proof for bit_offset >= bit_count should fail
+            let result = bitmap.proof(&mut hasher, 256).await;
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 256 && size == 256));
+
+            let result = bitmap.proof(&mut hasher, 1000).await;
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 1000 && size == 256));
+
+            // Valid proof should work
+            assert!(bitmap.proof(&mut hasher, 0).await.is_ok());
+            assert!(bitmap.proof(&mut hasher, 255).await.is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_bitmap_proof_dirty_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            bitmap.push_chunk(&test_chunk(b"test"));
+            let mut hasher = StandardHasher::new();
+            bitmap.sync(&mut hasher).await.unwrap();
+
+            // Make the bitmap dirty by modifying an existing bit
+            bitmap.set_bit(0, !bitmap.get_bit(0));
+
+            // Proof while dirty should return error
+            assert!(bitmap.is_dirty(), "Bitmap should be dirty after set_bit");
+            let result = bitmap.proof(&mut hasher, 0).await;
+            assert!(matches!(result, Err(crate::mmr::Error::DirtyState)));
+
+            // After syncing, proof should work
+            bitmap.sync(&mut hasher).await.unwrap();
+            assert!(bitmap.proof(&mut hasher, 0).await.is_ok());
         });
     }
 }
