@@ -233,15 +233,16 @@ impl<T> RwLock<T> {
     }
 }
 
-// Synchronization primitive that enables a thread to block until a waker delivers a signal.
+/// Synchronization primitive that enables a thread to block until a waker delivers a signal.
 pub struct Blocker {
-    // Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
+    /// Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
     state: Mutex<bool>,
-    // Condvar used to park and resume the thread when the signal flips to true.
+    /// Condvar used to park and resume the thread when the signal flips to true.
     cv: Condvar,
 }
 
 impl Blocker {
+    /// Create a new [Blocker].
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(false),
@@ -249,6 +250,7 @@ impl Blocker {
         })
     }
 
+    /// Block the current thread until a waker delivers a signal.
     pub fn wait(&self) {
         // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
         let mut signaled = self.state.lock().unwrap();
