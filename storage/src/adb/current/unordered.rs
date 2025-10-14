@@ -198,9 +198,8 @@ impl<
         BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
@@ -662,23 +661,23 @@ impl<
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
-        self.any.op_count()
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
+        self.inactivity_floor_loc()
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
-        self.any.get(key).await.map_err(Into::into)
+        self.get(key).await.map_err(Into::into)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
-        self.any.update(key, value).await.map_err(Into::into)
+        self.update(key, value).await.map_err(Into::into)
     }
 
     async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
-        self.any.delete(key).await.map(|_| ()).map_err(Into::into)
+        self.delete(key).await.map(|_| ()).map_err(Into::into)
     }
 
     async fn commit(&mut self) -> Result<(), crate::store::Error> {
