@@ -4,6 +4,11 @@ use core::{
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
+/// Maximum valid [Position] value that can exist in a valid MMR.
+///
+/// This value corresponds to the last node in an MMR with the maximum number of leaves.
+pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 63) - 2
+
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
@@ -22,11 +27,17 @@ impl Position {
         self.0
     }
 
-    /// Return `self + rhs` returning `None` on overflow.
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
-            Some(value) => Some(Self(value)),
+            Some(value) => {
+                if value <= MAX_POSITION.0 {
+                    Some(Self(value))
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     }
@@ -40,10 +51,15 @@ impl Position {
         }
     }
 
-    /// Return `self + rhs` saturating at `u64::MAX`.
+    /// Return `self + rhs` saturating at [MAX_POSITION].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
-        Self(self.0.saturating_add(rhs))
+        let result = self.0.saturating_add(rhs);
+        if result > MAX_POSITION.0 {
+            MAX_POSITION
+        } else {
+            Self(result)
+        }
     }
 
     /// Return `self - rhs` saturating at zero.
@@ -241,6 +257,7 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
+    use crate::mmr::{MAX_LOCATION, MAX_POSITION};
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -273,7 +290,19 @@ mod tests {
     fn test_checked_add() {
         let pos = Position::new(10);
         assert_eq!(pos.checked_add(5).unwrap(), 15);
+
+        // Overflow returns None
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
+
+        // Exceeding MAX_POSITION returns None
+        assert!(MAX_POSITION.checked_add(1).is_none());
+        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
+
+        // At MAX_POSITION is OK
+        assert_eq!(
+            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
+            MAX_POSITION
+        );
     }
 
     #[test]
@@ -287,7 +316,15 @@ mod tests {
     fn test_saturating_add() {
         let pos = Position::new(10);
         assert_eq!(pos.saturating_add(5), 15);
-        assert_eq!(Position::new(u64::MAX).saturating_add(1), u64::MAX);
+
+        // Saturates at MAX_POSITION, not u64::MAX
+        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
+        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
+        assert_eq!(
+            Position::new(*MAX_POSITION - 5).saturating_add(10),
+            MAX_POSITION
+        );
     }
 
     #[test]
@@ -347,5 +384,41 @@ mod tests {
         // Test sub assignment
         pos -= 3;
         assert_eq!(pos, 12u64);
+    }
+
+    #[test]
+    fn test_max_position() {
+        // The constraint is: MMR_size must have top bit clear (< 2^63)
+        // For N leaves: MMR_size = 2*N - popcount(N)
+        // Worst case (maximum size) is when N is a power of 2: MMR_size = 2*N - 1
+
+        // Maximum N where 2*N - 1 < 2^63:
+        //   2*N - 1 < 2^63
+        //   2*N < 2^63 + 1
+        //   N <= 2^62
+        let max_leaves = 1u64 << 62;
+
+        // For N = 2^62 leaves:
+        // MMR_size = 2 * 2^62 - 1 = 2^63 - 1
+        let mmr_size_at_max = 2 * max_leaves - 1;
+        assert_eq!(mmr_size_at_max, (1u64 << 63) - 1);
+        assert_eq!(mmr_size_at_max.leading_zeros(), 1); // Top bit clear ✓
+
+        // Last position (0-indexed) = MMR_size - 1 = 2^63 - 2
+        let expected_max_pos = mmr_size_at_max - 1;
+        assert_eq!(MAX_POSITION, expected_max_pos);
+        assert_eq!(MAX_POSITION, (1u64 << 63) - 2);
+
+        // Verify the constraint: a position at MAX_POSITION + 1 would require
+        // an MMR_size >= 2^63, which violates the "top bit clear" requirement
+        let hypothetical_mmr_size = MAX_POSITION + 2; // Would need this many nodes
+        assert_eq!(hypothetical_mmr_size, 1u64 << 63);
+        assert_eq!(hypothetical_mmr_size.leading_zeros(), 0); // Top bit NOT clear ✗
+
+        // Verify relationship with MAX_LOCATION
+        // Converting MAX_LOCATION to position should give a value < MAX_POSITION
+        let max_loc = Location::new_unchecked(MAX_LOCATION);
+        let last_leaf_pos = Position::try_from(max_loc).unwrap();
+        assert!(*last_leaf_pos < MAX_POSITION);
     }
 }
