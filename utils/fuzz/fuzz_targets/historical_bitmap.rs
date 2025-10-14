@@ -21,7 +21,7 @@
 //! - Operations that would violate invariants are skipped (not an error)
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_utils::bitmap::{Historical, Prunable};
+use commonware_utils::bitmap::{historical::BitMap, Prunable};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of commits in a single fuzz input
@@ -93,7 +93,7 @@ fn normalize_commits(commits: &mut [Commit]) {
 ///
 /// Returns true if the operation was applied, false if it was skipped due to bounds
 fn apply_op(
-    batch: &mut commonware_utils::bitmap::BatchGuard<4>,
+    batch: &mut commonware_utils::bitmap::historical::BatchGuard<4>,
     ground_truth: &mut Prunable<4>,
     op: &BatchOp,
     current_len: &mut u64,
@@ -171,7 +171,7 @@ fn fuzz(mut input: FuzzInput) {
     normalize_commits(&mut input.commits);
 
     // Initialize Historical and ground truth storage
-    let mut historical: Historical<4> = Historical::new();
+    let mut bitmap: BitMap<4> = BitMap::new();
     let mut checkpoints: Vec<(u64, Prunable<4>)> = Vec::new();
 
     // Initialize ground truth bitmap
@@ -186,7 +186,7 @@ fn fuzz(mut input: FuzzInput) {
         let mut current_pruned = ground_truth.pruned_chunks();
 
         // Start batch
-        let mut batch = historical.start_batch();
+        let mut batch = bitmap.start_batch();
 
         // Apply operations
         for op in &commit.operations {
@@ -210,7 +210,7 @@ fn fuzz(mut input: FuzzInput) {
     for (commit_num, expected) in &checkpoints {
         // Reconstruct historical state
         // This should never fail since we committed successfully and never prune commit history
-        let reconstructed = historical
+        let reconstructed = bitmap
             .get_at_commit(*commit_num)
             .expect("commit must exist in history");
 

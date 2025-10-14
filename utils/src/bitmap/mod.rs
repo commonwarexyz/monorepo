@@ -19,8 +19,7 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
-mod historical;
-pub use historical::{BatchGuard, Error, Historical};
+pub mod historical;
 
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
