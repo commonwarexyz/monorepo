@@ -93,6 +93,52 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
     }
 }
 
+/// Data about a key in an ordered database or an ordered database operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderedKeyData<K: Array + Ord, V: CodecFixed> {
+    /// The key that exists in the database or in the database operation.
+    pub key: K,
+    /// The value of `key` in the database or operation.
+    pub value: V,
+    /// The next-key of `key` in the database or operation.
+    pub next_key: K,
+}
+
+/// An operation applied to an authenticated database with a fixed size value that supports
+/// exclusion proofs over ordered keys.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum FixedOrdered<K: Array + Ord, V: CodecFixed> {
+    /// Indicates the key no longer has a value.
+    Delete(K),
+
+    /// Indicates the key now has the wrapped value and the wrapped next-key.
+    ///
+    /// The next-key is the next active key that lexicographically follows it in the key space. If
+    /// the key is the lexicographically-last active key, then next-key is the
+    /// lexicographically-first of all active keys (in a DB with only one key, this means its
+    /// next-key is itself)
+    Update(OrderedKeyData<K, V>),
+
+    /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
+    /// operations has been raised to the wrapped value.
+    CommitFloor(Location),
+}
+
+impl<K: Array + Ord, V: CodecFixed> FixedOrdered<K, V> {
+    // For a compile-time assertion that operation's array size is large enough to handle the commit
+    // operation, which requires 9 bytes.
+    const _MIN_OPERATION_LEN: usize = 9;
+
+    /// Asserts that the size of `Self` is greater than the minimum operation size.
+    #[inline(always)]
+    const fn assert_valid_size() {
+        assert!(
+            Self::SIZE >= Self::_MIN_OPERATION_LEN,
+            "array size too small for commit op"
+        );
+    }
+}
+
 /// An operation applied to an authenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Variable<K: Array, V: Codec> {
@@ -164,6 +210,10 @@ impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
 }
 
+impl<K: Array + Ord, V: CodecFixed> FixedSize for FixedOrdered<K, V> {
+    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE + K::SIZE;
+}
+
 impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Fixed<K, V> {
     type Key = K;
     type Value = V;
@@ -215,6 +265,57 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Fixed<K, V> {
     }
 }
 
+impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> FixedOperation for FixedOrdered<K, V> {
+    type Key = K;
+    type Value = V;
+
+    fn commit_floor(&self) -> Option<Location> {
+        match self {
+            FixedOrdered::CommitFloor(loc) => Some(*loc),
+            _ => None,
+        }
+    }
+
+    fn key(&self) -> Option<&Self::Key> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            FixedOrdered::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            FixedOrdered::Delete(key) => Some(key),
+            FixedOrdered::Update(data) => Some(&data.key),
+            FixedOrdered::CommitFloor(_) => None,
+        }
+    }
+
+    fn value(&self) -> Option<&Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            FixedOrdered::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            FixedOrdered::Delete(_) => None,
+            FixedOrdered::Update(data) => Some(&data.value),
+            FixedOrdered::CommitFloor(_) => None,
+        }
+    }
+
+    fn into_value(self) -> Option<Self::Value> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            FixedOrdered::<K, V>::assert_valid_size();
+        }
+
+        match self {
+            FixedOrdered::Delete(_) => None,
+            FixedOrdered::Update(data) => Some(data.value),
+            FixedOrdered::CommitFloor(_) => None,
+        }
+    }
+}
+
 impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
@@ -253,6 +354,31 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
                 v.write(buf);
             }
             Fixed::CommitFloor(floor_loc) => {
+                COMMIT_FLOOR_CONTEXT.write(buf);
+                buf.put_slice(&floor_loc.to_be_bytes());
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
+            }
+        }
+    }
+}
+
+impl<K: Array + Ord, V: CodecFixed> Write for FixedOrdered<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match &self {
+            FixedOrdered::Delete(k) => {
+                DELETE_CONTEXT.write(buf);
+                k.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - 1 - K::SIZE);
+            }
+            FixedOrdered::Update(data) => {
+                UPDATE_CONTEXT.write(buf);
+                data.key.write(buf);
+                data.value.write(buf);
+                data.next_key.write(buf);
+            }
+            FixedOrdered::CommitFloor(floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
                 buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
@@ -355,6 +481,59 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
     }
 }
 
+impl<K: Array + Ord, V: CodecFixed> Read for FixedOrdered<K, V> {
+    type Cfg = <V as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE)?;
+
+        match u8::read(buf)? {
+            UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                let next_key = K::read(buf)?;
+                Ok(Self::Update(OrderedKeyData {
+                    key,
+                    value,
+                    next_key,
+                }))
+            }
+            DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                // Check that the value is all zeroes
+                for _ in 0..(Self::SIZE - 1 - K::SIZE) {
+                    if u8::read(buf)? != 0 {
+                        return Err(CodecError::Invalid(
+                            "storage::adb::operation::FixedOrdered",
+                            "delete value non-zero",
+                        ));
+                    }
+                }
+                Ok(Self::Delete(key))
+            }
+            COMMIT_FLOOR_CONTEXT => {
+                let floor_loc = u64::read(buf)?;
+                let floor_loc = Location::new(floor_loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::adb::operation::Variable",
+                        "commit floor location overflow",
+                    )
+                })?;
+                for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
+                    if u8::read(buf)? != 0 {
+                        return Err(CodecError::Invalid(
+                            "storage::adb::operation::FixedOrdered",
+                            "commit value non-zero",
+                        ));
+                    }
+                }
+                Ok(Self::CommitFloor(floor_loc))
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
 impl<K: Array, V: Codec> Read for Variable<K, V> {
     type Cfg = <V as Read>::Cfg;
 
@@ -413,6 +592,24 @@ impl<K: Array, V: CodecFixed> Display for Fixed<K, V> {
     }
 }
 
+impl<K: Array + Ord, V: CodecFixed> Display for FixedOrdered<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixedOrdered::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            FixedOrdered::Update(data) => {
+                write!(
+                    f,
+                    "[key:{} next_key:{} value:{}]",
+                    data.key,
+                    data.next_key,
+                    hex(&data.value.encode())
+                )
+            }
+            FixedOrdered::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
+        }
+    }
+}
+
 impl<K: Array, V: Codec> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -463,7 +660,7 @@ mod tests {
     use commonware_utils::sequence::U64;
 
     #[test]
-    fn test_to_key() {
+    fn test_operation_to_key() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -475,10 +672,23 @@ mod tests {
 
         let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.key());
+
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
+        assert_eq!(&key, update_op.key().unwrap());
+
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        assert_eq!(&key, delete_op.key().unwrap());
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.key());
     }
 
     #[test]
-    fn test_to_value() {
+    fn test_operation_to_value() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -490,10 +700,51 @@ mod tests {
 
         let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.value());
+
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
+        assert_eq!(&value, update_op.value().unwrap());
+
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.value());
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.value());
     }
 
     #[test]
-    fn test_operation_array_basic() {
+    fn test_operation_into_value() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let update_op = Fixed::Update(key.clone(), value.clone());
+        assert_eq!(value, update_op.into_value().unwrap());
+
+        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_value());
+
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.into_value());
+
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
+        assert_eq!(value, update_op.into_value().unwrap());
+
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_value());
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        assert_eq!(None, commit_op.into_value());
+    }
+
+    #[test]
+    fn test_operation_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
@@ -542,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_array_display() {
+    fn test_operation_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
         let update_op = Fixed::Update(key.clone(), value.clone());
@@ -554,10 +805,23 @@ mod tests {
         let key2 = U64::new(42);
         let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
+
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let key2 = U64::new(999);
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key2.clone(),
+        });
+        assert_eq!(
+            format!("{update_op}"),
+            format!("[key:{key} next_key:{key2} value:{}]", hex(&value.encode()))
+        );
     }
 
     #[test]
-    fn test_operation_array_codec() {
+    fn test_operation_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
         let update_op = Fixed::Update(key, value);
@@ -567,10 +831,25 @@ mod tests {
 
         let decoded = Fixed::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
+
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let key2 = U64::new(999);
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key,
+            value,
+            next_key: key2,
+        });
+
+        let encoded = update_op.encode();
+        assert_eq!(encoded.len(), FixedOrdered::<U64, U64>::SIZE);
+
+        let decoded = FixedOrdered::<U64, U64>::decode(encoded).unwrap();
+        assert_eq!(update_op, decoded);
     }
 
     #[test]
-    fn test_keyless_append() {
+    fn test_operation_keyless_append() {
         let append_op = Keyless::Append(U64::new(12345));
 
         let encoded = append_op.encode();
@@ -585,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keyless_commit() {
+    fn test_operation_keyless_commit() {
         let metadata = Some(U64::new(12345));
         let commit_op = Keyless::<U64>::Commit(metadata.clone());
 
@@ -600,12 +879,67 @@ mod tests {
     }
 
     #[test]
-    fn test_keyless_invalid_context() {
+    fn test_operation_keyless_invalid_context() {
         let invalid = vec![0xFF; 1];
         let decoded = Keyless::<U64>::decode(invalid.as_ref());
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
+    }
+
+    #[test]
+    fn test_operation_ordered_basic() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let update_op = FixedOrdered::Update(OrderedKeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
+        });
+        assert_eq!(&key, update_op.key().unwrap());
+        assert_eq!(&value, update_op.value().unwrap());
+
+        let from = FixedOrdered::<U64, U64>::decode(update_op.encode()).unwrap();
+        assert_eq!(&key, from.key().unwrap());
+        assert_eq!(&value, from.value().unwrap());
+        assert_eq!(update_op, from);
+
+        let key2 = U64::new(42);
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key2.clone());
+        let from = FixedOrdered::<U64, U64>::decode(delete_op.encode()).unwrap();
+        assert_eq!(&key2, from.key().unwrap());
+        assert_eq!(None, from.value());
+        assert_eq!(delete_op, from);
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        let from = FixedOrdered::<U64, U64>::decode(commit_op.encode()).unwrap();
+        assert_eq!(None, from.value());
+        assert!(
+            matches!(from, FixedOrdered::CommitFloor(loc) if loc == Location::new_unchecked(42))
+        );
+        assert_eq!(commit_op, from);
+
+        // test non-zero byte detection in delete operation
+        let mut invalid = delete_op.encode();
+        invalid[U64::SIZE + 4] = 0xFF;
+        let decoded = FixedOrdered::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
+
+        // test invalid context byte detection
+        let mut invalid = delete_op.encode();
+        invalid[0] = 0xFF;
+        let decoded = FixedOrdered::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(
+            decoded.unwrap_err(),
+            CodecError::InvalidEnum(0xFF)
+        ));
+
+        // test invalid length detection
+        let mut invalid = delete_op.encode().to_vec();
+        invalid.pop();
+        let decoded = FixedOrdered::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 }

@@ -1,4 +1,8 @@
-//! An Any database implementation with an unordered key space and fixed-size values.
+//! An _ordered_ variant of a Any authenticated database with fixed-size values which additionally
+//! maintains the lexicographic-next active key of each active key. For example, if the active key
+//! set is `{bar, baz, foo}`, then the next-key value for `bar` is `baz`, the next-key value for
+//! `baz` is `foo`, and because we define the next-key of the very last key as the first key, the
+//! next-key value for `foo` is `bar`.
 
 use crate::{
     adb::{
@@ -7,11 +11,13 @@ use crate::{
         },
         Error,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     store::{
-        operation::{Fixed as Operation, FixedOperation as OperationTrait},
+        operation::{
+            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
+        },
         Db,
     },
     translator::Translator,
@@ -20,27 +26,38 @@ use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, try_join, StreamExt as _, TryFutureExt as _};
+use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
 use tracing::info;
 
+/// The return type of the `Any::update_loc` method.
+enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
+    /// The key already exists in the snapshot. The wrapped value is its next-key.
+    Exists(K),
+
+    /// The key did not already exist in the snapshot. The wrapped key data is for the the first
+    /// preceding key that does exist in the snapshot.
+    NotExists(KeyData<K, V>),
+}
+
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
-/// value ever associated with a key.
+/// value ever associated with a key, and access to the lexicographically-next active key of a given
+/// active key.
 pub struct Any<
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Array + Ord,
     V: CodecFixed<Cfg = ()>,
     H: CHasher,
     T: Translator,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
-    /// # Invariant
+    /// # Invariants
     ///
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -50,31 +67,31 @@ pub struct Any<
     /// - An operation's location is always equal to the number of the MMR leaf storing the digest
     ///   of the operation.
     /// - The log is never pruned beyond the inactivity floor.
-    pub(crate) log: Journal<E, Operation<K, V>>,
+    log: Journal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
-    /// # Invariant
+    /// # Invariants
     ///
     /// Only references operations of type [Operation::Update].
-    pub(crate) snapshot: Index<T, Location>,
+    snapshot: Index<T, Location>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: Location,
+    inactivity_floor_loc: Location,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
-    pub(crate) steps: u64,
+    steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(crate) hasher: Standard<H>,
+    hasher: Standard<H>,
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Array + Ord,
         V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
@@ -107,7 +124,7 @@ impl<
     /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
     /// status updates. The first argument of the callback is the activity status of the operation,
     /// and the second argument is the location of the operation it inactivates (if any).
-    pub(crate) async fn build_snapshot_from_log<F>(
+    async fn build_snapshot_from_log<F>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, Location>,
@@ -122,57 +139,65 @@ impl<
         pin_mut!(stream);
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
-            match result {
-                Err(e) => {
-                    return Err(Error::Journal(e));
+            let (i, op) = result?;
+            let loc = Location::new_unchecked(i);
+            match op {
+                Operation::Delete(key) => {
+                    let old_loc =
+                        Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
+                    callback(false, old_loc);
                 }
-                Ok((i, op)) => {
-                    let loc = Location::new_unchecked(i);
-                    match op {
-                        Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, loc).await?;
-                            callback(false, result);
-                        }
-                        Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, loc).await?;
-                            callback(true, result);
-                        }
-                        Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-                    }
+                Operation::Update(data) => {
+                    let old_loc =
+                        Any::<E, K, V, H, T>::replay_update(snapshot, log, &data.key, loc).await?;
+                    callback(true, old_loc);
                 }
+                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
             }
         }
 
         Ok(())
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present.
-    async fn update_loc(
-        snapshot: &mut Index<T, Location>,
+    /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
+    async fn last_key_in_iter(
         log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then update its location.
-        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(new_loc > loc);
-            cursor.update(new_loc);
-            return Ok(Some(loc));
+        iter: impl Iterator<Item = &Location>,
+    ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        let mut last_key: Option<(Location, KeyData<K, V>)> = None;
+        for &loc in iter {
+            let data = Self::get_update_op(log, loc).await?;
+            if let Some(ref other_key) = last_key {
+                if data.key > other_key.1.key {
+                    last_key = Some((loc, data));
+                }
+            } else {
+                last_key = Some((loc, data));
+            }
         }
 
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_loc);
+        Ok(last_key)
+    }
 
-        Ok(None)
+    /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+    /// its location to `new_loc`.
+    async fn update_known_loc(
+        &mut self,
+        key: &K,
+        old_loc: Location,
+        new_loc: Location,
+    ) -> Result<(), Error> {
+        let mut cursor = self
+            .snapshot
+            .get_mut(key)
+            .expect("key should be known to exist");
+        assert!(
+            cursor.find(|&loc| *loc == old_loc),
+            "prev_key with given old_loc should have been found"
+        );
+        cursor.update(new_loc);
+
+        Ok(())
     }
 
     /// Find and return the location of the update operation for `key`, if it exists. The cursor is
@@ -183,13 +208,162 @@ impl<
         key: &K,
     ) -> Result<Option<Location>, Error> {
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
-            if k == *key {
+            let data = Self::get_update_op(log, loc).await?;
+            if data.key == *key {
                 return Ok(Some(loc));
             }
         }
 
         Ok(None)
+    }
+
+    /// Update the location of `key` to `next_loc` in the snapshot and return its old location, or
+    /// insert it if the key isn't already present. For use by log-replay.
+    async fn replay_update(
+        snapshot: &mut Index<T, Location>,
+        log: &Journal<E, Operation<K, V>>,
+        key: &K,
+        next_loc: Location,
+    ) -> Result<Option<Location>, Error> {
+        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+        // cursor to look for the key.
+        let Some(mut cursor) = snapshot.get_mut_or_insert(key, next_loc) else {
+            return Ok(None);
+        };
+
+        // Find the matching key among all conflicts, then update its location.
+        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
+            assert!(next_loc > loc);
+            cursor.update(next_loc);
+            return Ok(Some(loc));
+        }
+
+        // The key wasn't in the snapshot, so add it to the cursor.
+        cursor.insert(next_loc);
+
+        Ok(None)
+    }
+
+    /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
+    /// the previous key does not share the same translated key, returning an UpdateLocResult
+    /// indicating the specific outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the snapshot is empty.
+    async fn update_non_colliding_prev_key_loc(
+        &mut self,
+        key: &K,
+        next_loc: Location,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<UpdateLocResult<K, V>, Error> {
+        assert!(!self.is_empty(), "snapshot should not be empty");
+        let iter = self.snapshot.prev_translated_key(key);
+        if let Some((loc, prev_key)) = Self::last_key_in_iter(&self.log, iter).await? {
+            callback(Some(loc));
+            self.update_known_loc(&prev_key.key, loc, next_loc).await?;
+            return Ok(UpdateLocResult::NotExists(prev_key));
+        }
+
+        // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
+        let iter = self.snapshot.last_translated_key();
+        let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+        let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
+
+        callback(Some(loc));
+        Self::update_known_loc(self, &last_key.key, loc, next_loc).await?;
+
+        Ok(UpdateLocResult::NotExists(last_key))
+    }
+
+    /// Update the location of `key` to `next_loc` in the snapshot, and update the location of
+    /// previous key to `next_loc + 1` if its next key will need to be updated to `key`. Returns an
+    /// UpdateLocResult indicating the specific outcome.
+    async fn update_loc(
+        &mut self,
+        key: &K,
+        next_loc: Location,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<UpdateLocResult<K, V>, Error> {
+        let keys = self.snapshot.keys();
+        let mut best_prev_key: Option<(Location, KeyData<K, V>)> = None;
+        {
+            // If the translated key is not in the snapshot, insert the new location and return the
+            // previous key info.
+            let Some(mut cursor) = self.snapshot.get_mut_or_insert(key, next_loc) else {
+                callback(None);
+                return self
+                    .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                    .await;
+            };
+
+            // Iterate over conflicts in the snapshot entry to try and find the key, or its
+            // predecessor if it doesn't exist.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == *key {
+                    // Found the key in the snapshot.  Update its location and return its next-key.
+                    assert!(next_loc > loc);
+                    cursor.update(next_loc);
+                    callback(Some(loc));
+                    return Ok(UpdateLocResult::Exists(data.next_key));
+                }
+                if data.key > *key {
+                    continue;
+                }
+                if let Some((_, ref key_data)) = best_prev_key {
+                    if data.key > key_data.key {
+                        best_prev_key = Some((loc, data));
+                    }
+                } else {
+                    best_prev_key = Some((loc, data));
+                }
+            }
+
+            if keys != 1 || best_prev_key.is_some() {
+                // For the special case handled below around the snapshot having only one translated
+                // key, avoid inserting the key into the snapshot here otherwise we'll confuse the
+                // subsequent search for the best_prev_key.
+                cursor.insert(next_loc);
+                callback(None);
+            }
+        }
+
+        if keys == 1 && best_prev_key.is_none() {
+            // In this special case, our key precedes all keys in the snapshot, thus we need to
+            // "cycle around" to the very last key. But this key must share the same translated
+            // key since there's only one.
+            let iter = self.snapshot.get(key);
+            best_prev_key = Self::last_key_in_iter(&self.log, iter).await?;
+            assert!(
+                best_prev_key.is_some(),
+                "best_prev_key should have been found"
+            );
+            self.snapshot.insert(key, next_loc);
+            callback(None);
+        }
+
+        let Some((loc, prev_key_data)) = best_prev_key else {
+            // The previous key was not found, meaning it does not share the same translated key.
+            // This should be the common case when collisions are rare.
+            return self
+                .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                .await;
+        };
+
+        // The previous key was found within the same snapshot entry as `key`.
+        let mut cursor = self
+            .snapshot
+            .get_mut(&prev_key_data.key)
+            .expect("prev_key already known to exist");
+        assert!(
+            cursor.find(|&l| *l == loc),
+            "prev_key should have been found"
+        );
+        cursor.update(next_loc + 1);
+        callback(Some(loc));
+
+        Ok(UpdateLocResult::NotExists(prev_key_data))
     }
 
     /// Get the update operation from `log` corresponding to a known location.
@@ -202,49 +376,89 @@ impl<
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
-    ) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(*loc).await? else {
+    ) -> Result<KeyData<K, V>, Error> {
+        let Operation::Update(data) = log.read(*loc).await? else {
             unreachable!("location does not reference update operation. loc={loc}");
         };
 
-        Ok((k, v))
+        Ok(data)
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
+        Ok(self.get_key_loc(key).await?.map(|(v, _, _)| v))
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-
-        assert!(loc < self.op_count());
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        Ok(self.log.read(*loc).await?.into_value())
+    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
+    pub async fn get_all(&self, key: &K) -> Result<Option<(V, K)>, Error> {
+        Ok(self
+            .get_key_loc(key)
+            .await?
+            .map(|(v, next_key, _)| (v, next_key)))
     }
 
-    /// Get the value & location of the active operation for `key` in the db, or None if it has no
-    /// value.
-    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
+    /// Find the span produced by the provided `iter` that contains `key`, if any.
+    async fn find_span(
+        log: &Journal<E, Operation<K, V>>,
+        iter: impl Iterator<Item = &Location>,
+        key: &K,
+    ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        for &loc in iter {
+            // Iterate over conflicts in the snapshot entry to find the span.
+            let data = Self::get_update_op(log, loc).await?;
+            if data.key >= data.next_key {
+                // cyclic span case
+                if *key >= data.key || *key < data.next_key {
+                    return Ok(Some((loc, data)));
+                }
+            } else {
+                // normal span case
+                if *key >= data.key && *key < data.next_key {
+                    return Ok(Some((loc, data)));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the operation that defines the span whose range contains `key`, or None if the DB is
+    /// empty.
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+
+        // If the translated key is in the snapshot, get a cursor to look for the key.
+        let iter = self.snapshot.get(key);
+        let span = Self::find_span(&self.log, iter, key).await?;
+        if let Some(span) = span {
+            return Ok(Some(span));
+        }
+
+        let iter = self.snapshot.prev_translated_key(key);
+        let span = Self::find_span(&self.log, iter, key).await?;
+        if let Some(span) = span {
+            return Ok(Some(span));
+        }
+
+        // If we get here, then `key` must precede the first key in the snapshot, in which case we
+        // have to cycle around to the very last key.
+        let iter = self.snapshot.last_translated_key();
+        let span = Self::find_span(&self.log, iter, key)
+            .await?
+            .expect("a span that includes any given key should always exist if db is non-empty");
+
+        Ok(Some(span))
+    }
+
+    /// Get the value, next-key, and location of the active operation for `key` in the db, or None
+    /// if it has no value.
+    async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, loc).await?;
-            if k == *key {
-                return Ok(Some((v, loc)));
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if data.key == *key {
+                return Ok(Some((data.value, data.next_key, loc)));
             }
         }
 
@@ -257,76 +471,199 @@ impl<
         self.mmr.leaves()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
+    /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
+    /// operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_return_loc(key, value).await?;
+        self.update_with_callback(key, value, |_| {}).await?;
 
         Ok(())
     }
 
-    /// Updates `key` to have value `value`, returning the old location of the key if it was
-    /// previously assigned some value, and None otherwise.
-    pub(crate) async fn update_return_loc(
+    /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
+    /// operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. For each operation added to the log by this method, the callback is
+    /// invoked with the old location of the affected key (if any).
+    async fn update_with_callback(
         &mut self,
         key: K,
         value: V,
-    ) -> Result<Option<Location>, Error> {
-        let new_loc = self.op_count();
-        let res =
-            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
-
-        let op = Operation::Update(key, value);
-        self.apply_op(op).await?;
-        if res.is_some() {
-            self.steps += 1;
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<(), Error> {
+        let next_loc = self.op_count();
+        if self.is_empty() {
+            // We're inserting the very first key. For this special case, the next-key value is the
+            // same as the key.
+            self.snapshot.insert(&key, next_loc);
+            let op = Operation::Update(KeyData {
+                key: key.clone(),
+                value,
+                next_key: key,
+            });
+            callback(None);
+            self.apply_op(op).await?;
+            return Ok(());
         }
+        let res = self.update_loc(&key, next_loc, callback).await?;
+        let op = match res {
+            UpdateLocResult::Exists(next_key) => Operation::Update(KeyData {
+                key,
+                value,
+                next_key,
+            }),
+            UpdateLocResult::NotExists(prev_data) => {
+                self.apply_op(Operation::Update(KeyData {
+                    key: key.clone(),
+                    value,
+                    next_key: prev_data.next_key,
+                }))
+                .await?;
+                // For a key that was not previously active, we need to update the next_key value of
+                // the previous key.
+                Operation::Update(KeyData {
+                    key: prev_data.key,
+                    value: prev_data.value,
+                    next_key: key,
+                })
+            }
+        };
 
-        Ok(res)
+        self.apply_op(op).await?;
+        // For either a new key or an update of existing key, we inactivate exactly one previous
+        // operation. A new key inactivates a previous span, and an update of existing key
+        // inactivates a previous value.
+        self.steps += 1;
+
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns the location of the deleted value for the key (if any).
-    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let loc = self.op_count();
-        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
-        if r.is_some() {
-            self.apply_op(Operation::Delete(key)).await?;
-            self.steps += 1;
-        };
+    /// successful `commit`.
+    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
+        self.delete_with_callback(key, |_, _| {}).await
+    }
 
-        Ok(r)
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. For each operation added to the log by this method, the callback is
+    /// invoked with the old location of the affected key (if any).
+    async fn delete_with_callback(
+        &mut self,
+        key: K,
+        mut callback: impl FnMut(bool, Option<Location>),
+    ) -> Result<(), Error> {
+        let mut prev_key = None;
+        let mut next_key = None;
+        {
+            // If the translated key is in the snapshot, get a cursor to look for the key.
+            let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+                // no-op
+                return Ok(());
+            };
+
+            // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
+            // potentially find the previous key.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == key {
+                    // The key is in the snapshot, so delete it.
+                    cursor.delete();
+                    next_key = Some(data.next_key);
+                    callback(false, Some(loc));
+                    continue;
+                }
+                if data.key > key {
+                    continue;
+                }
+                let Some((_, ref current_prev_key, _)) = prev_key else {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                    continue;
+                };
+                if data.key > *current_prev_key {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                }
+            }
+        }
+
+        let Some(next_key) = next_key else {
+            // no-op
+            return Ok(());
+        };
+        self.apply_op(Operation::Delete(key.clone())).await?;
+        self.steps += 1;
+
+        if self.is_empty() {
+            // This was the last key in the DB so there is no span to update.
+            return Ok(());
+        }
+
+        // Find & update the affected span.
+        if prev_key.is_none() {
+            let iter = self.snapshot.prev_translated_key(&key);
+            let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
+        }
+        if prev_key.is_none() {
+            // Unusual case where we deleted the very first key in the DB, so the very last key in
+            // the DB defines the span in need of update.
+            let iter = self.snapshot.last_translated_key();
+            let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
+        }
+
+        let prev_key = prev_key.expect("prev_key should have been found");
+
+        let loc = self.op_count();
+        callback(true, Some(prev_key.0));
+        self.update_known_loc(&prev_key.1, prev_key.0, loc).await?;
+
+        self.apply_op(Operation::Update(KeyData {
+            key: prev_key.1,
+            value: prev_key.2,
+            next_key,
+        }))
+        .await?;
+        self.steps += 1;
+
+        Ok(())
     }
 
     /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it.
-    async fn delete_key(
+    /// associated with it. For use by log-replay. Because replay begins from the inactivity floor,
+    /// it's possible that certain keys referenced by subsequent delete operations might not have
+    /// been previously added to the snapshot, so we do not treat not-found as a consistency error.
+    async fn replay_delete(
         snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
+        // Get a cursor to look for the key if it exists in the snapshot.
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return Ok(None);
         };
 
-        // Find the matching key among all conflicts, then delete it.
-        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(loc < delete_loc);
-            cursor.delete();
-            return Ok(Some(loc));
-        }
+        // Find the matching key among all conflicts if it exists, then delete it.
+        let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? else {
+            return Ok(None);
+        };
 
-        // The key isn't in the conflicting keys, so this is a no-op.
-        Ok(None)
+        assert!(loc < delete_loc);
+        cursor.delete();
+
+        Ok(Some(loc))
     }
 
     /// Return the root of the db.
@@ -340,7 +677,7 @@ impl<
 
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
     /// until the next successful `commit`.
-    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
@@ -361,11 +698,9 @@ impl<
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
     ///
-    /// # Errors
+    /// # Warning
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: Location,
@@ -402,7 +737,7 @@ impl<
         // previous commit becoming inactive.
         let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
-            if self.snapshot.keys() == 0 {
+            if self.is_empty() {
                 self.inactivity_floor_loc = self.op_count();
                 info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
@@ -440,7 +775,7 @@ impl<
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
-    pub(crate) async fn move_op_if_active(
+    async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
         old_loc: Location,
@@ -590,7 +925,7 @@ impl<
     }
 
     async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
-        self.delete(key).await.map(|_| ()).map_err(Into::into)
+        self.delete(key).await.map_err(Into::into)
     }
 
     async fn commit(&mut self) -> Result<(), crate::store::Error> {
@@ -614,18 +949,14 @@ impl<
     }
 }
 
-// pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
-pub(super) mod test {
+mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        index::{Index as IndexTrait, Unordered as Index},
-        mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
-        store::operation::Fixed as Operation,
-        translator::TwoCap,
+        mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
+        translator::{OneCap, TwoCap},
     };
-    use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -633,21 +964,15 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::NZU64;
-    use rand::{
-        rngs::{OsRng, StdRng},
-        RngCore, SeedableRng,
-    };
-    use std::collections::{HashMap, HashSet};
-    use tracing::warn;
-
-    const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    use commonware_utils::{sequence::FixedBytes, NZU64};
+    use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
+    use std::collections::{BTreeMap, HashMap};
 
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
+    const PAGE_SIZE: usize = 103;
+    const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) fn any_db_config(suffix: &str) -> Config<TwoCap> {
+    fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -663,7 +988,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -672,23 +997,27 @@ pub(super) mod test {
             .unwrap()
     }
 
-    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
+    fn create_test_config(seed: u64) -> Config<TwoCap> {
+        create_generic_test_config::<TwoCap>(seed, TwoCap)
+    }
+
+    fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(13), // intentionally small and janky size
+            mmr_items_per_blob: NZU64!(12), // intentionally small and janky size
             mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: NZU64!(11), // intentionally small and janky size
+            log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
-            translator: TwoCap,
+            translator: t,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
+    async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         AnyTest::init(context, config).await.unwrap()
@@ -696,17 +1025,22 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
-            let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
                 ops.push(Operation::Delete(prev_key));
             } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value));
+                ops.push(Operation::Update(KeyData {
+                    key,
+                    value,
+                    next_key,
+                }));
                 prev_key = key;
             }
         }
@@ -714,11 +1048,11 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value) => {
-                    db.update(key, value).await.unwrap();
+                Operation::Update(data) => {
+                    db.update(data.key, data.value).await.unwrap();
                 }
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
@@ -730,38 +1064,29 @@ pub(super) mod test {
         }
     }
 
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_empty() {
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            let empty_root = db.root(&mut hasher);
-            assert_eq!(empty_root, MemMmr::default().root(&mut hasher));
+            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
+            let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), empty_root);
-
-            let empty_proof = Proof::default();
-            assert!(verify_proof(
-                &mut hasher,
-                &empty_proof,
-                Location::new_unchecked(0),
-                &[] as &[Operation<Digest, Digest>],
-                &empty_root
-            ));
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit().await.unwrap();
-            assert_eq!(db.op_count(), 1); // commit op added
+            assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -770,37 +1095,91 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Empty proof should no longer verify.
-            assert!(!verify_proof(
-                &mut hasher,
-                &empty_proof,
-                Location::new_unchecked(0),
-                &[] as &[Operation<Digest, Digest>],
-                &root
-            ));
-
-            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
-            // non-empty db.
-            db.update(d1, d2).await.unwrap();
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
                 db.commit().await.unwrap();
-                // Distance should equal 3 after the second commit, with inactivity_floor
-                // referencing the previous commit operation.
-                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
+                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
-
-            // Confirm the inactivity floor is raised to tip when the db becomes empty.
-            db.delete(d1).await.unwrap();
-            db.commit().await.unwrap();
-            assert_eq!(db.snapshot.keys(), 0);
-            assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();
         });
     }
 
     #[test_traced("WARN")]
-    fn test_any_fixed_db_build_basic() {
+    // Test the edge case that arises where we're inserting the second key and it precedes the first
+    // key, but shares the same translated key.
+    fn test_ordered_any_fixed_db_translated_key_collision_edge_case() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let seed = context.next_u64();
+            let config = create_generic_test_config::<OneCap>(seed, OneCap);
+            let mut db =
+                Any::<Context, FixedBytes<2>, i32, Sha256, OneCap>::init(context.clone(), config)
+                    .await
+                    .unwrap();
+            let key1 = FixedBytes::<2>::new([1u8, 1u8]);
+            let key2 = FixedBytes::<2>::new([1u8, 3u8]);
+            // Create some keys that will not be added to the snapshot.
+            let early_key = FixedBytes::<2>::new([0u8, 2u8]);
+            let late_key = FixedBytes::<2>::new([3u8, 0u8]);
+            let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
+
+            db.update(key1.clone(), 1).await.unwrap();
+            db.update(key2.clone(), 2).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
+
+            db.delete(key1.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key2.clone());
+
+            db.delete(key2.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().is_none());
+            assert!(db.get_span(&key2).await.unwrap().is_none());
+
+            db.commit().await.unwrap();
+            assert!(db.is_empty());
+
+            // Update the keys in opposite order from earlier.
+            db.update(key2.clone(), 2).await.unwrap();
+            db.update(key1.clone(), 1).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
+
+            // Delete the keys in opposite order from earlier.
+            db.delete(key2.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key1.clone());
+            assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
+
+            db.delete(key1.clone()).await.unwrap();
+            assert!(db.get_span(&key1).await.unwrap().is_none());
+            assert!(db.get_span(&key2).await.unwrap().is_none());
+            db.commit().await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_build_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
@@ -808,81 +1187,85 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
-            let d1 = Sha256::fill(1u8);
-            let d2 = Sha256::fill(2u8);
+            let key1 = Sha256::fill(1u8);
+            let key2 = Sha256::fill(2u8);
+            let val1 = Sha256::fill(3u8);
+            let val2 = Sha256::fill(4u8);
 
-            assert!(db.get(&d1).await.unwrap().is_none());
-            assert!(db.get(&d2).await.unwrap().is_none());
+            assert!(db.get(&key1).await.unwrap().is_none());
+            assert!(db.get(&key2).await.unwrap().is_none());
 
-            db.update(d1, d2).await.unwrap();
-            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
-            assert!(db.get(&d2).await.unwrap().is_none());
+            db.update(key1, val1).await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val1, key1));
+            assert!(db.get_all(&key2).await.unwrap().is_none());
 
-            db.update(d2, d1).await.unwrap();
-            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
-            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
+            db.update(key2, val2).await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val1, key2));
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val2, key1));
 
-            db.delete(d1).await.unwrap(); // inactivates op 0
-            assert!(db.get(&d1).await.unwrap().is_none());
-            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
+            db.delete(key1).await.unwrap();
+            assert!(db.get_all(&key1).await.unwrap().is_none());
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val2, key2));
 
-            db.update(d1, d1).await.unwrap();
-            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
+            let new_val = Sha256::fill(5u8);
+            db.update(key1, new_val).await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (new_val, key2));
 
-            db.update(d2, d2).await.unwrap(); // inactivates op  1
-            assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
+            db.update(key2, new_val).await.unwrap();
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (new_val, key1));
 
-            assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
+            assert_eq!(db.log.size().await.unwrap(), 8); // 2 new keys (4), 2 updates (2), 1 deletion (2)
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
+            assert_eq!(db.inactivity_floor_loc, 0);
             db.sync().await.unwrap();
 
-            // take one floor raising step, which should move the first active op (at location 3) to
-            // tip, leaving the floor at the next location (4).
+            // take one floor raising step, which should move the first active op (at location 5) to
+            // tip, leaving the floor at the next location (6).
             db.raise_floor().await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
-            assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
+            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(6));
+            assert_eq!(db.log.size().await.unwrap(), 9);
             db.sync().await.unwrap();
 
-            // Delete all keys.
-            db.delete(d1).await.unwrap();
-            db.delete(d2).await.unwrap();
-            assert!(db.get(&d1).await.unwrap().is_none());
-            assert!(db.get(&d2).await.unwrap().is_none());
-            assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
-
+            // Delete all keys and commit the changes.
+            db.delete(key1).await.unwrap();
+            db.delete(key2).await.unwrap();
+            assert!(db.get(&key1).await.unwrap().is_none());
+            assert!(db.get(&key2).await.unwrap().is_none());
+            assert_eq!(db.log.size().await.unwrap(), 12);
             db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
             // Since this db no longer has any active keys, the inactivity floor should have been
             // set to tip.
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
-            let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            db.delete(d1).await.unwrap();
-            assert_eq!(db.log.size().await.unwrap(), 9); // one more commit op added.
+            db.delete(key1).await.unwrap();
+            assert_eq!(db.log.size().await.unwrap(), 13);
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
-            let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
-            assert!(db.delete(d3).await.unwrap().is_none());
-            assert_eq!(db.log.size().await.unwrap(), 9);
+            let key3 = Sha256::fill(5u8);
+            assert!(db.delete(key3).await.is_ok());
+            assert_eq!(db.log.size().await.unwrap(), 13);
             db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
-            assert_eq!(db.log.size().await.unwrap(), 9);
-            let root = db.root(&mut hasher);
+            assert_eq!(db.log.size().await.unwrap(), 13);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.log.size().await.unwrap(), 9);
+            assert_eq!(db.log.size().await.unwrap(), 13);
             assert_eq!(db.root(&mut hasher), root);
 
             // Re-activate the keys by updating them.
-            db.update(d1, d1).await.unwrap();
-            db.update(d2, d2).await.unwrap();
-            db.delete(d1).await.unwrap();
-            db.update(d2, d1).await.unwrap();
-            db.update(d1, d2).await.unwrap();
+            db.update(key1, val1).await.unwrap();
+            db.update(key2, val2).await.unwrap();
+            db.delete(key1).await.unwrap();
+            db.update(key2, val1).await.unwrap();
+            db.update(key1, val2).await.unwrap();
+            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val2, key2));
+            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val1, key1));
             assert_eq!(db.snapshot.keys(), 2);
 
             // Confirm close/reopen gets us back to the same state.
@@ -910,7 +1293,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    fn test_any_fixed_db_build_and_authenticate() {
+    fn test_ordered_any_fixed_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         // Build a db with 1000 keys, some of which we update and some of which we delete, and
         // confirm that the end state of the db matches that of an identically updated hashmap.
@@ -948,17 +1331,17 @@ pub(super) mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.op_count(), 1477);
-            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(db.log.size().await.unwrap(), 1477);
+            assert_eq!(db.op_count(), 2619);
+            assert_eq!(db.inactivity_floor_loc, 0);
+            assert_eq!(db.log.size().await.unwrap(), 2619);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             db.commit().await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 1956);
-            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(837));
+            assert_eq!(db.op_count(), 4240);
+            assert_eq!(db.inactivity_floor_loc, 3382);
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -966,8 +1349,8 @@ pub(super) mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
-            assert_eq!(db.op_count(), 1956);
-            assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(837));
+            assert_eq!(db.op_count(), 4240);
+            assert_eq!(db.inactivity_floor_loc, 3382);
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -995,8 +1378,8 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for loc in *start_loc..*end_loc {
-                let loc = Location::new_unchecked(loc);
+            for i in start_loc.as_u64()..end_loc.as_u64() {
+                let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, loc, &log, &root));
             }
@@ -1008,7 +1391,7 @@ pub(super) mod test {
     /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
     /// empty DB on re-open.
     #[test_traced("WARN")]
-    fn test_any_fixed_non_empty_db_recovery() {
+    fn test_ordered_any_fixed_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1087,7 +1470,7 @@ pub(super) mod test {
     /// Test that various types of unclean shutdown while updating an empty DB recover to the empty
     /// DB on re-open.
     #[test_traced("WARN")]
-    fn test_any_fixed_empty_db_recovery() {
+    fn test_ordered_any_fixed_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize an empty db.
@@ -1152,7 +1535,7 @@ pub(super) mod test {
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
     // in the snapshot.
     #[test_traced("WARN")]
-    fn test_any_fixed_db_log_replay() {
+    fn test_ordered_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1180,7 +1563,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    fn test_any_fixed_db_multiple_commits_delete_gets_replayed() {
+    fn test_ordered_any_fixed_db_multiple_commits_delete_gets_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1217,126 +1600,8 @@ pub(super) mod test {
         });
     }
 
-    /// This test builds a random database, and makes sure that its state can be replayed by
-    /// `build_snapshot_from_log` with a bitmap to correctly capture the active operations.
-    #[test_traced("WARN")]
-    fn test_any_fixed_db_build_snapshot_with_bitmap() {
-        // Number of elements to initially insert into the db.
-        const ELEMENTS: u64 = 1000;
-
-        // Use a non-deterministic rng seed to ensure each run is different.
-        let rng_seed = OsRng.next_u64();
-        // Log the seed with high visibility to make failures reproducible.
-        warn!("rng_seed={}", rng_seed);
-        let mut rng = StdRng::seed_from_u64(rng_seed);
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
-
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-                db.update(k, v).await.unwrap();
-            }
-
-            // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
-            // frequency.
-            for _ in 0u64..ELEMENTS * 10 {
-                let rand_key = Sha256::hash(&(rng.next_u64() % ELEMENTS).to_be_bytes());
-                if rng.next_u32() % 7 == 0 {
-                    db.delete(rand_key).await.unwrap();
-                    continue;
-                }
-                let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-                db.update(rand_key, v).await.unwrap();
-                if rng.next_u32() % 20 == 0 {
-                    // Commit every ~20 updates.
-                    db.commit().await.unwrap();
-                }
-            }
-            db.commit().await.unwrap();
-
-            let root = db.root(&mut hasher);
-            let inactivity_floor_loc = db.inactivity_floor_loc;
-
-            // Close the db, then replay its operations with a bitmap.
-            db.close().await.unwrap();
-            // Initialize the bitmap based on the current db's inactivity floor.
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
-            for _ in 0..*inactivity_floor_loc {
-                bitmap.push(false);
-            }
-            bitmap.sync(&mut hasher).await.unwrap();
-
-            // Initialize the db's mmr/log.
-            let cfg = any_db_config("partition");
-            let (inactivity_floor_loc, mmr, log) =
-                init_mmr_and_log(context.clone(), cfg, &mut hasher)
-                    .await
-                    .unwrap();
-
-            // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
-            let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
-            AnyTest::build_snapshot_from_log(
-                inactivity_floor_loc,
-                &log,
-                &mut snapshot,
-                |append, loc| {
-                    bitmap.push(append);
-                    if let Some(loc) = loc {
-                        bitmap.set_bit(*loc, false);
-                    }
-                },
-            )
-            .await
-            .unwrap();
-
-            // Check the recovered state is correct.
-            let db = AnyTest {
-                mmr,
-                log,
-                snapshot,
-                inactivity_floor_loc,
-                steps: 0,
-                hasher: Standard::<Sha256>::new(),
-            };
-            assert_eq!(db.root(&mut hasher), root);
-
-            // Check the bitmap state matches that of the snapshot.
-            let items = db.log.size().await.unwrap();
-            assert_eq!(bitmap.len(), items);
-            let mut active_positions = HashSet::new();
-            // This loop checks that the expected true bits are true in the bitmap.
-            for pos in *db.inactivity_floor_loc..items {
-                let item = db.log.read(pos).await.unwrap();
-                let Some(item_key) = item.key() else {
-                    // `item` is a commit
-                    continue;
-                };
-                let iter = db.snapshot.get(item_key);
-                for loc in iter {
-                    if *loc == pos {
-                        // Found an active op.
-                        active_positions.insert(pos);
-                        assert!(bitmap.get_bit(pos));
-                        break;
-                    }
-                }
-            }
-            // This loop checks that the expected false bits are false in the bitmap.
-            for pos in *db.inactivity_floor_loc..items - 1 {
-                assert_eq!(bitmap.get_bit(pos), active_positions.contains(&pos));
-            }
-            assert!(bitmap.get_bit(items - 1)); // last commit should always be active
-
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test]
-    fn test_any_fixed_db_historical_proof_basic() {
+    fn test_ordered_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1359,7 +1624,6 @@ pub(super) mod test {
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert_eq!(historical_ops, ops[5..15]);
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
@@ -1399,7 +1663,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_fixed_db_historical_proof_edge_cases() {
+    fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1449,7 +1713,6 @@ pub(super) mod test {
                 .await
                 .unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
-            assert_eq!(limited_ops, ops[5..10]);
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db
@@ -1465,7 +1728,6 @@ pub(super) mod test {
                 Position::try_from(Location::new_unchecked(3)).unwrap()
             );
             assert_eq!(min_ops.len(), 3);
-            assert_eq!(min_ops, ops[0..3]);
 
             single_db.destroy().await.unwrap();
             db.destroy().await.unwrap();
@@ -1473,7 +1735,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_fixed_db_historical_proof_different_historical_sizes() {
+    fn test_ordered_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1482,43 +1744,36 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let mut hasher = Standard::<Sha256>::new();
+            let root = db.root(&mut hasher);
 
-            // Test historical proof generation for several historical states.
             let start_loc = Location::new_unchecked(20);
             let max_ops = NZU64!(10);
-            for end_loc in 31..50 {
-                let end_loc = Location::new_unchecked(end_loc);
+            let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+
+            // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
+            let historical_size = db.op_count();
+
+            for _ in 1..10 {
+                let more_ops = create_test_ops(100);
+                apply_ops(&mut db, more_ops).await;
+                db.commit().await.unwrap();
+
                 let (historical_proof, historical_ops) = db
-                    .historical_proof(end_loc, start_loc, max_ops)
+                    .historical_proof(historical_size, start_loc, max_ops)
                     .await
                     .unwrap();
-
-                assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
-
-                // Create  reference database at the given historical size
-                let mut ref_db = create_test_db(context.clone()).await;
-                apply_ops(&mut ref_db, ops[0..*end_loc as usize].to_vec()).await;
-                // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-                ref_db.sync().await.unwrap();
-
-                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
-                assert_eq!(ref_proof.size, historical_proof.size);
-                assert_eq!(ref_ops, historical_ops);
-                assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
-                assert_eq!(ref_ops, ops[*start_loc as usize..*end_loc as usize]);
+                assert_eq!(proof.size, historical_proof.size);
+                assert_eq!(ops, historical_ops);
+                assert_eq!(proof.digests, historical_proof.digests);
 
                 // Verify proof against reference root
-                let ref_root = ref_db.root(&mut hasher);
                 assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
                     &historical_ops,
-                    &ref_root
-                ),);
-
-                ref_db.destroy().await.unwrap();
+                    &root
+                ));
             }
 
             db.destroy().await.unwrap();
@@ -1526,7 +1781,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_fixed_db_historical_proof_invalid() {
+    fn test_ordered_any_fixed_db_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1572,9 +1827,14 @@ pub(super) mod test {
             }
 
             // Changing the ops should cause verification to fail
+            let changed_op = Operation::Update(KeyData {
+                key: Sha256::hash(b"key1"),
+                value: Sha256::hash(b"value1"),
+                next_key: Sha256::hash(b"key2"),
+            });
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
+                ops[0] = changed_op.clone();
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(
                     &mut hasher,
@@ -1586,10 +1846,7 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(
-                    Sha256::hash(b"key1"),
-                    Sha256::hash(b"value1"),
-                ));
+                ops.push(changed_op);
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(
                     &mut hasher,
@@ -1626,7 +1883,7 @@ pub(super) mod test {
             // Changing the proof size should cause verification to fail
             {
                 let mut proof = proof.clone();
-                proof.size = Position::new(100);
+                proof.size = Position::from(100u64);
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(
                     &mut hasher,
@@ -1637,6 +1894,87 @@ pub(super) mod test {
                 ));
             }
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            async fn insert_random<T: Translator>(
+                db: &mut Any<Context, Digest, i32, Sha256, T>,
+                rng: &mut StdRng,
+            ) {
+                let mut keys = BTreeMap::new();
+
+                // Insert 1000 random keys into both the db and an ordered map.
+                for i in 0..1000 {
+                    let key = Digest::random(rng);
+                    keys.insert(key, i);
+                    db.update(key, i).await.unwrap();
+                }
+
+                db.commit().await.unwrap();
+
+                // Make sure the db and ordered map agree on contents & key order.
+                let mut iter = keys.iter();
+                let first_key = iter.next().unwrap().0;
+                let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
+                for (key, value) in iter {
+                    let (v, next) = db.get_all(key).await.unwrap().unwrap();
+                    assert_eq!(*value, v);
+                    assert_eq!(*key, next_key);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
+                    next_key = next;
+                }
+
+                // Delete some random keys and check order agreement again.
+                for _ in 0..500 {
+                    let key = keys.keys().choose(rng).cloned().unwrap();
+                    keys.remove(&key);
+                    db.delete(key).await.unwrap();
+                }
+
+                let mut iter = keys.iter();
+                let first_key = iter.next().unwrap().0;
+                let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
+                for (key, value) in iter {
+                    let (v, next) = db.get_all(key).await.unwrap().unwrap();
+                    assert_eq!(*value, v);
+                    assert_eq!(*key, next_key);
+                    assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
+                    next_key = next;
+                }
+
+                // Delete the rest of the keys and make sure we get back to empty.
+                for _ in 0..500 {
+                    let key = keys.keys().choose(rng).cloned().unwrap();
+                    keys.remove(&key);
+                    db.delete(key).await.unwrap();
+                }
+                assert_eq!(keys.len(), 0);
+                assert!(db.is_empty());
+                assert_eq!(db.get_span(&Digest::random(rng)).await.unwrap(), None);
+            }
+
+            let mut rng = StdRng::seed_from_u64(context.next_u64());
+            let seed = context.next_u64();
+
+            // Use a OneCap to ensure many collisions.
+            let config = create_generic_test_config::<OneCap>(seed, OneCap);
+            let mut db = Any::<Context, Digest, i32, Sha256, OneCap>::init(context.clone(), config)
+                .await
+                .unwrap();
+            insert_random(&mut db, &mut rng).await;
+            db.destroy().await.unwrap();
+
+            // Repeat test with TwoCap to test low/no collisions.
+            let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
+            let mut db = Any::<Context, Digest, i32, Sha256, TwoCap>::init(context.clone(), config)
+                .await
+                .unwrap();
+            insert_random(&mut db, &mut rng).await;
             db.destroy().await.unwrap();
         });
     }
