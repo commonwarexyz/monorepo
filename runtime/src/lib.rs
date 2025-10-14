@@ -575,7 +575,7 @@ mod tests {
                 "supervised task should not run after parent aborts"
             );
 
-            let detached_handle = clone.spawn({
+            let bad_handle = clone.spawn({
                 let run_count = run_count.clone();
                 move |_| {
                     let run_count = run_count.clone();
@@ -585,13 +585,13 @@ mod tests {
                 }
             });
             assert!(
-                matches!(detached_handle.await, Err(Error::Closed)),
-                "expected detached spawn from aborted context to close immediately"
+                matches!(bad_handle.await, Err(Error::Closed)),
+                "expected spawn from aborted context to close immediately"
             );
             assert_eq!(
                 run_count.load(Ordering::Relaxed),
                 0,
-                "detached task should not run after parent aborts"
+                "task should not run after parent aborts"
             );
         });
     }
