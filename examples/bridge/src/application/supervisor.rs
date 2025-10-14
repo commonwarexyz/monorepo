@@ -55,8 +55,8 @@ impl<P: PublicKey> Su for Supervisor<P> {
         unimplemented!("only defined in supertrait")
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        Some(&self.participants)
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
+        Some(self.participants.as_ref())
     }
 
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
