@@ -1299,11 +1299,9 @@ dependencies = [
 name = "commonware-macros"
 version = "0.0.62"
 dependencies = [
+ "commonware-proc-macros",
  "futures",
  "futures-timer",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1332,6 +1330,15 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-proc-macros"
+version = "0.0.62"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2873,6 +2880,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37ee39891760e7d94734f6f63fedc29a2e4a152f836120753a72503f09fcf904"
 dependencies = [
  "hashbrown",
+]
+
+[[package]]
+name = "macros-test"
+version = "0.0.62"
+dependencies = [
+ "commonware-macros",
+ "futures",
+ "futures-timer",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -8,7 +8,9 @@ members = [
     "cryptography",
     "deployer",
     "macros",
+    "macros-test",
     "p2p",
+    "proc-macros",
     "resolver",
     "runtime",
     "storage",
@@ -50,7 +52,9 @@ commonware-consensus = { version = "0.0.62", path = "consensus" }
 commonware-cryptography = { version = "0.0.62", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.62", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.62", path = "macros" }
+commonware-macros-test = { version = "0.0.62", path = "macros-test" }
 commonware-p2p = { version = "0.0.62", path = "p2p" }
+commonware-proc-macros = { version = "0.0.62", path = "proc-macros" }
 commonware-resolver = { version = "0.0.62", path = "resolver" }
 commonware-runtime = { version = "0.0.62", path = "runtime" }
 commonware-storage = { version = "0.0.62", path = "storage", default-features = false }

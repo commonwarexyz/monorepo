@@ -1,0 +1,24 @@
+[package]
+name = "macros-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+commonware-macros = { workspace = true }
+
+# All of these are aliased because they are also dependencies of the proc
+# macros. This is to ensure that the proc macros work without needing their
+# dependencies in scope at the call site.
+#
+# NOTE: workspace = true packages do not work because they do not take their
+# alias.
+test-tracing = { package = "tracing", version = "0.1.41" }
+test-tracing-subscriber = { package = "tracing-subscriber", version = "0.3.19" }
+test-futures = { package = "futures", version = "0.3.31" }
+
+futures-timer = "3.0.3"
+

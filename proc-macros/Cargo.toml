@@ -1,0 +1,20 @@
+[package]
+name = "commonware-proc-macros"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Augment the development of primitives with procedural macros."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
+documentation = "https://docs.rs/commonware-macros"
+
+[lib]
+bench = false
+proc-macro = true
+
+[dependencies]
+syn = { version = "1.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
