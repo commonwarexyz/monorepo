@@ -13,8 +13,6 @@ struct FuzzInput {
     pruned_to_pos: u64,
     nodes: Vec<[u8; 32]>,
     pinned_nodes: Vec<[u8; 32]>,
-    call_leaves: bool,
-    call_range_proof: bool,
 }
 
 fn fuzz(input: FuzzInput) {
@@ -37,24 +35,18 @@ fn fuzz(input: FuzzInput) {
         pool: None,
     };
 
-    let mmr = Mmr::init(config);
+    let Ok(mmr) = Mmr::init(config) else {
+        return;
+    };
 
     if input.pruned_to_pos == u64::MAX || input.pruned_to_pos == u64::MAX - 1 {
         return;
     }
 
-    if input.call_leaves {
-        let _ = mmr.leaves();
-    }
-
-    if input.call_range_proof {
-        let leaves = mmr.leaves();
-        let leaves_u64: u64 = leaves.into();
-        if leaves_u64 > 0 {
-            // Location::new(0) returns Some(Location(0)) since 0 is always valid
-            if let Some(start_loc) = Location::new(0) {
-                let _ = mmr.range_proof(start_loc..leaves);
-            }
+    let leaves = mmr.leaves();
+    if leaves > 0 {
+        if let Some(start_loc) = Location::new(0) {
+            let _ = mmr.range_proof(start_loc..leaves);
         }
     }
 }
