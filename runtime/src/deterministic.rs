@@ -53,9 +53,9 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 #[cfg(feature = "pacer")]
 use rand::Rng;
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
 #[cfg(feature = "pacer")]
 use std::ops::Range;
@@ -172,19 +172,6 @@ pub struct Config {
     /// loop. This is useful to prevent starvation if some task never yields.
     cycle: Duration,
 
-    /// Observe the actual passage of time rather than simulating it.
-    ///
-    /// When testing an application that coordinates with some external process, it can appear to
-    /// the runtime that progress has stalled (i.e. no pending tasks can make progress because it is
-    /// waiting on an event unknown to the runtime). When enabled, `realtime` disables time simulation
-    /// and runtime stall detection to provide external processes with time to perform useful work (without
-    /// permitting the managed tasks to run far ahead).
-    ///
-    /// To maintain determinism in this case, the runtime still advances time by [Config::cycle] after
-    /// each iteration of the event loop (rather than just observing the current time). This means that time
-    /// could drift from elapsed time as a function of how long it takes to process tasks in a given iteration.
-    realtime: bool,
-
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
@@ -198,7 +185,6 @@ impl Config {
         Self {
             seed: 42,
             cycle: Duration::from_millis(1),
-            realtime: false,
             timeout: None,
             catch_panics: false,
         }
@@ -213,11 +199,6 @@ impl Config {
     /// See [Config]
     pub fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
-        self
-    }
-    /// See [Config]
-    pub fn with_realtime(mut self, realtime: bool) -> Self {
-        self.realtime = realtime;
         self
     }
     /// See [Config]
@@ -239,10 +220,6 @@ impl Config {
     /// See [Config]
     pub fn cycle(&self) -> Duration {
         self.cycle
-    }
-    /// See [Config]
-    pub fn realtime(&self) -> bool {
-        self.realtime
     }
     /// See [Config]
     pub fn timeout(&self) -> Option<Duration> {
@@ -276,7 +253,6 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     cycle: Duration,
-    realtime: bool,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -291,11 +267,11 @@ pub struct Executor {
 impl Executor {
     /// Advance simulated time by [Config::cycle].
     ///
-    /// If we are operating in [Config::realtime], we will sleep for [Config::cycle].
+    /// When built with the `pacer` feature, block the current thread for [Config::cycle] to let
+    /// external processes make progress before resuming execution.
     fn advance_time(&self) -> SystemTime {
-        if self.realtime {
-            std::thread::sleep(self.cycle);
-        }
+        #[cfg(feature = "pacer")]
+        std::thread::sleep(self.cycle);
 
         let mut time = self.time.lock().unwrap();
         *time = time
@@ -308,10 +284,10 @@ impl Executor {
 
     /// When idle, jump directly to the next actionable time.
     ///
-    /// If we are operating in [Config::realtime], we will never skip ahead (to ensure
-    /// we poll all pending tasks every [Config::cycle]).
+    /// When built with the `pacer` feature, never skip ahead (to ensure we poll all pending tasks
+    /// every [Config::cycle]).
     fn skip_idle_time(&self, current: SystemTime) -> SystemTime {
-        if self.realtime || self.tasks.ready() != 0 {
+        if cfg!(feature = "pacer") || self.tasks.ready() != 0 {
             return current;
         }
 
@@ -351,10 +327,9 @@ impl Executor {
 
     /// Ensure the runtime is making progress.
     ///
-    /// If we are operating in [Config::realtime], we will always try to keep making
-    /// progress after the passage of time by polling all pending tasks.
+    /// When built with the `pacer` feature, always poll pending tasks after the passage of time.
     fn assert_liveness(&self) {
-        if self.realtime || self.tasks.ready() != 0 {
+        if cfg!(feature = "pacer") || self.tasks.ready() != 0 {
             return;
         }
 
@@ -367,7 +342,6 @@ impl Executor {
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
 pub struct Checkpoint {
     cycle: Duration,
-    realtime: bool,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
@@ -587,7 +561,6 @@ impl Runner {
         // Construct a checkpoint that can be used to restart the runtime
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
-            realtime: executor.realtime,
             deadline: executor.deadline,
             auditor: executor.auditor,
             rng: executor.rng,
@@ -805,7 +778,6 @@ impl Context {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
-            realtime: cfg.realtime,
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
@@ -859,7 +831,6 @@ impl Context {
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
-            realtime: checkpoint.realtime,
             deadline: checkpoint.deadline,
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
@@ -1593,11 +1564,11 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "pacer")]
     #[test]
     fn test_external_realtime() {
         // Initialize runtime
-        let cfg = Config::default().with_realtime(true);
-        let executor = deterministic::Runner::new(cfg);
+        let executor = deterministic::Runner::default();
 
         // Create a thread that waits for 1 second
         let (tx, rx) = oneshot::channel();
@@ -1616,8 +1587,7 @@ mod tests {
     #[test]
     fn test_external_realtime_variable() {
         // Initialize runtime
-        let cfg = Config::default().with_realtime(true);
-        let executor = deterministic::Runner::new(cfg);
+        let executor = deterministic::Runner::default();
 
         // Start runtime
         executor.start(|context| async move {
@@ -1683,10 +1653,11 @@ mod tests {
         });
     }
 
+    #[cfg(not(feature = "pacer"))]
     #[test]
     fn test_simulated_skip() {
         // Initialize runtime
-        let executor = deterministic::Runner::new(Config::default());
+        let executor = deterministic::Runner::default();
 
         // Start runtime
         executor.start(|context| async move {
@@ -1705,11 +1676,11 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "pacer")]
     #[test]
     fn test_realtime_no_skip() {
         // Initialize runtime
-        let cfg = Config::default().with_realtime(true);
-        let executor = deterministic::Runner::new(cfg);
+        let executor = deterministic::Runner::default();
 
         // Start runtime
         executor.start(|context| async move {
