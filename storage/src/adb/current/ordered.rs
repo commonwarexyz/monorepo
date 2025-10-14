@@ -1408,6 +1408,11 @@ pub mod test {
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
 
+            // We shouldn't be able to generate an exclusion proof for a key already in the db.
+            let result = db.exclusion_proof(hasher.inner(), &k).await;
+            assert!(matches!(result, Err(Error::KeyExists)));
+
+            // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
             let (proof, info) = db
@@ -1443,13 +1448,26 @@ pub mod test {
                 hasher.inner(),
                 &proof,
                 &k,
-                info,
+                info.clone(),
+                &root,
+            ));
+            // Exclusion proof should fail if we blow away the next_key setting in proof info.
+            let mut corrupt_info = info.clone();
+            if let ExclusionProofInfo::KeyValue(ref mut kv_info) = corrupt_info {
+                kv_info.next_key = None;
+            }
+            assert!(!CurrentTest::verify_exclusion_proof(
+                hasher.inner(),
+                &proof,
+                &k,
+                corrupt_info,
                 &root,
             ));
 
             // Add a second key and test exclusion proving over the two-key database case.
             let k2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
+
             db.update(k2, v2).await.unwrap();
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
@@ -1458,31 +1476,44 @@ pub mod test {
             // on our use of OneCap translator.
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
+            let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
             let (proof, info) = db
                 .exclusion_proof(hasher.inner(), &greater_key)
                 .await
                 .unwrap();
+            // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
+            // key, but fail on middle_key.
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &greater_key,
-                info,
+                info.clone(),
                 &root,
             ));
-
-            let (proof, info) = db
-                .exclusion_proof(hasher.inner(), &lesser_key)
-                .await
-                .unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
                 &lesser_key,
-                info,
+                info.clone(),
+                &root,
+            ));
+            assert!(!CurrentTest::verify_exclusion_proof(
+                hasher.inner(),
+                &proof,
+                &middle_key,
+                info.clone(),
                 &root,
             ));
 
-            let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
+            // Due to the cycle, lesser & greater keys should produce the same proof.
+            let (new_proof, new_info) = db
+                .exclusion_proof(hasher.inner(), &lesser_key)
+                .await
+                .unwrap();
+            assert_eq!(proof, new_proof);
+            assert_eq!(info, new_info);
+
+            // Test the inner span.
             let (proof, info) = db
                 .exclusion_proof(hasher.inner(), &middle_key)
                 .await
@@ -1524,6 +1555,7 @@ pub mod test {
             // again.
             db.delete(k).await.unwrap();
             db.delete(k2).await.unwrap();
+            db.sync().await.unwrap();
             db.commit().await.unwrap();
             let root = db.root(&mut hasher).await.unwrap();
             // This root should be different than the empty root from earlier since the DB now has a
