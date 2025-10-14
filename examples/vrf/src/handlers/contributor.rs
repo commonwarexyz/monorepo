@@ -77,7 +77,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
     ) -> (u64, Option<Output<MinSig>>) {
         // Configure me
         let me = self.crypto.public_key();
-        let me_idx = self.contributors.binary_search(&me).unwrap() as u32;
+        let me_idx = self.contributors.position(&me).unwrap() as u32;
 
         // Wait for start message from arbiter
         let (public, round) = loop {

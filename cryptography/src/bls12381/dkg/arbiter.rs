@@ -120,9 +120,9 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Find the index of the dealer
-        let idx = match self.dealers.binary_search(&dealer) {
-            Ok(idx) => idx,
-            Err(_) => return Err(Error::DealerInvalid),
+        let idx = match self.dealers.position(&dealer) {
+            Some(idx) => idx,
+            None => return Err(Error::DealerInvalid),
         } as u32;
 
         // Check if commitment already exists
@@ -206,7 +206,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     pub fn finalize(mut self) -> (Result<Output<V>, Error>, HashSet<P>) {
         // Drop commitments from disqualified dealers
         for disqualified in self.disqualified.iter() {
-            let idx = self.dealers.binary_search(disqualified).unwrap() as u32;
+            let idx = self.dealers.position(disqualified).unwrap() as u32;
             self.commitments.remove(&idx);
         }
 

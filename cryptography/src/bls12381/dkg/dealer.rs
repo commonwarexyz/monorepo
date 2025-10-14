@@ -60,9 +60,9 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     /// Track acknowledgement from a player.
     pub fn ack(&mut self, player: P) -> Result<(), Error> {
         // Ensure player is valid
-        let idx = match self.players.binary_search(&player) {
-            Ok(player) => player,
-            Err(_) => return Err(Error::PlayerInvalid),
+        let idx = match self.players.position(&player) {
+            Some(player) => player,
+            None => return Err(Error::PlayerInvalid),
         };
 
         // Store ack

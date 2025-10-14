@@ -52,10 +52,7 @@ impl<P: PublicKey> Su for Supervisor<P> {
     }
 
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.participants
-            .binary_search(candidate)
-            .ok()
-            .map(|i| i as u32)
+        self.participants.position(candidate).map(|i| i as u32)
     }
 }
 

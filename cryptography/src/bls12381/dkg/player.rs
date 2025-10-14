@@ -52,9 +52,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         recipients: Set<P>,
         concurrency: usize,
     ) -> Self {
-        let me_idx = recipients
-            .binary_search(&me)
-            .expect("player not in recipients") as u32;
+        let me_idx = recipients.position(&me).expect("player not in recipients") as u32;
         Self {
             me: me_idx,
             dealer_threshold: quorum(dealers.len() as u32),
@@ -76,9 +74,9 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let dealer_idx = match self.dealers.binary_search(&dealer) {
-            Ok(contributor) => contributor,
-            Err(_) => return Err(Error::DealerInvalid),
+        let dealer_idx = match self.dealers.position(&dealer) {
+            Some(contributor) => contributor,
+            None => return Err(Error::DealerInvalid),
         } as u32;
 
         // Check that share is valid

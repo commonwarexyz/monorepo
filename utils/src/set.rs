@@ -4,7 +4,10 @@
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use core::{fmt, ops::Deref};
+use core::{
+    fmt,
+    ops::{Index, Range},
+};
 
 /// A wrapper around a [`Vec<T>`] that guarantees the contained items are sorted and deduplicated
 /// upon construction.
@@ -22,6 +25,34 @@ impl<T> Set<T> {
         items.sort_by_key(&f);
         items.dedup_by_key(|i| f(i));
         Self(items)
+    }
+
+    /// Returns the size of the [Set].
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns true if the [Set] is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns an item by index, if it exists.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.0.get(index)
+    }
+
+    /// Returns the position of a given item in the [Set], if it exists.
+    pub fn position(&self, item: &T) -> Option<usize>
+    where
+        T: Ord,
+    {
+        self.0.binary_search(item).ok()
+    }
+
+    /// Returns an iterator over the items in the set.
+    pub fn iter(&self) -> core::slice::Iter<'_, T> {
+        self.into_iter()
     }
 }
 
@@ -75,11 +106,25 @@ impl<'a, T> IntoIterator for &'a Set<T> {
     }
 }
 
-impl<T> Deref for Set<T> {
-    type Target = [T];
+impl<T> Index<usize> for Set<T> {
+    type Output = T;
 
-    fn deref(&self) -> &Self::Target {
-        self.0.as_slice()
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl<T> Index<Range<usize>> for Set<T> {
+    type Output = [T];
+
+    fn index(&self, index: Range<usize>) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl<T> AsRef<[T]> for Set<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
     }
 }
 
