@@ -85,10 +85,7 @@ impl Position {
         }
         let start = u64::MAX >> leading_zeros;
         let mut two_h = 1 << start.trailing_ones();
-        let mut node_pos = match start.checked_sub(1) {
-            Some(pos) => pos,
-            None => return false, // start should be greater than 0 since we check size != 0 above
-        };
+        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
         while two_h > 1 {
             if node_pos < self.0 {
                 if two_h == 2 {
