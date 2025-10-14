@@ -15,7 +15,7 @@ pub(crate) struct SupervisionTree {
     // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
     // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
     // pointers that cannot be upgraded during abort cascades.
-    _parent: Option<Arc<SupervisionTree>>,
+    parent: Option<Arc<SupervisionTree>>,
     index: Mutex<Option<usize>>,
     children: Mutex<Vec<Weak<SupervisionTree>>>,
     task: Mutex<Option<Aborter>>,
@@ -26,7 +26,7 @@ impl SupervisionTree {
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            _parent: None,
+            parent: None,
             index: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
@@ -39,7 +39,7 @@ impl SupervisionTree {
         let aborted = parent.aborted.load(Ordering::Acquire);
 
         let child = Arc::new(Self {
-            _parent: Some(parent.clone()),
+            parent: Some(parent.clone()),
             index: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             task: Mutex::new(None),
@@ -122,7 +122,7 @@ impl SupervisionTree {
 
 impl Drop for SupervisionTree {
     fn drop(&mut self) {
-        let Some(parent) = self._parent.as_ref() else {
+        let Some(parent) = self.parent.as_ref() else {
             return;
         };
 
