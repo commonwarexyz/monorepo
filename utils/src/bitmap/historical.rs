@@ -111,7 +111,7 @@ struct CommitMetadata {
 
 /// Type of change to a chunk.
 #[derive(Clone, Debug)]
-enum ChunkChange<const N: usize> {
+enum ChunkDiff<const N: usize> {
     /// Chunk was modified (contains old value before the change).
     Modified([u8; N]),
     /// Chunk was removed from the right side (contains old value before removal).
@@ -128,7 +128,7 @@ struct CommitDiff<const N: usize> {
     /// Metadata about the state before this commit.
     metadata: CommitMetadata,
     /// Chunk-level changes.
-    changes: BTreeMap<usize, ChunkChange<N>>,
+    changes: BTreeMap<usize, ChunkDiff<N>>,
 }
 
 /// An active batch that tracks mutations as a diff layer.
@@ -398,7 +398,7 @@ impl<const N: usize> Historical<N> {
         );
         let mut chunks_to_unprune = Vec::with_capacity(newer_pruned - target_pruned);
         for chunk_index in (target_pruned..newer_pruned).rev() {
-            let Some(ChunkChange::Pruned(chunk)) = diff.changes.get(&chunk_index) else {
+            let Some(ChunkDiff::Pruned(chunk)) = diff.changes.get(&chunk_index) else {
                 panic!("chunk {chunk_index} should be Pruned in diff");
             };
             chunks_to_unprune.push(*chunk);
@@ -419,18 +419,18 @@ impl<const N: usize> Historical<N> {
             .filter(|(chunk_index, _)| **chunk_index >= newer_pruned)
         {
             match change {
-                ChunkChange::Modified(old_data) | ChunkChange::Removed(old_data) => {
+                ChunkDiff::Modified(old_data) | ChunkDiff::Removed(old_data) => {
                     // Both cases: chunk exists in target, just update its data
                     newer_state.set_chunk_by_index(chunk_index, old_data);
                 }
-                ChunkChange::Added => {
+                ChunkDiff::Added => {
                     // Chunk didn't exist in target - already handled by pop_to_length.
                     // We can break here because there are no more modifications to apply.
                     // Added can only occur after all Modified. If we encounter Added, we know
                     // there are no Removed. (diff.changes can't have both Added and Removed.)
                     break;
                 }
-                ChunkChange::Pruned(_) => {
+                ChunkDiff::Pruned(_) => {
                     panic!("pruned chunk found at unexpected index {chunk_index}")
                 }
             }
@@ -680,7 +680,7 @@ impl<const N: usize> Historical<N> {
     fn capture_modified_chunks(
         &self,
         batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+        changes: &mut BTreeMap<usize, ChunkDiff<N>>,
     ) {
         for &bit in batch.modified_bits.keys() {
             let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
@@ -691,7 +691,7 @@ impl<const N: usize> Historical<N> {
                 let old_chunk = self
                     .get_chunk_if_exists(chunk_idx)
                     .expect("chunk must exist for modified bit");
-                ChunkChange::Modified(old_chunk)
+                ChunkDiff::Modified(old_chunk)
             });
         }
     }
@@ -704,7 +704,7 @@ impl<const N: usize> Historical<N> {
     fn capture_appended_chunks(
         &self,
         batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+        changes: &mut BTreeMap<usize, ChunkDiff<N>>,
     ) {
         if batch.appended_bits.is_empty() {
             return;
@@ -722,10 +722,10 @@ impl<const N: usize> Historical<N> {
             changes.entry(chunk_idx).or_insert_with(|| {
                 if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
                     // Chunk existed before: store its old data
-                    ChunkChange::Modified(old_chunk)
+                    ChunkDiff::Modified(old_chunk)
                 } else {
                     // Chunk is brand new: mark as Added
-                    ChunkChange::Added
+                    ChunkDiff::Added
                 }
             });
         }
@@ -736,11 +736,7 @@ impl<const N: usize> Historical<N> {
     /// When bits are popped (projected_len < base_len), we need to capture the original
     /// data of chunks that will be truncated or fully removed. This allows reconstruction
     /// to restore the bits that were popped.
-    fn capture_popped_chunks(
-        &self,
-        batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkChange<N>>,
-    ) {
+    fn capture_popped_chunks(&self, batch: &Batch<N>, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
         if batch.projected_len >= batch.base_len || batch.base_len == 0 {
             return; // No net pops
         }
@@ -765,10 +761,10 @@ impl<const N: usize> Historical<N> {
 
                 if batch.projected_len > chunk_start_bit {
                     // Chunk spans the new length boundary → partially kept (Modified)
-                    ChunkChange::Modified(old_chunk)
+                    ChunkDiff::Modified(old_chunk)
                 } else {
                     // Chunk is completely beyond the new length → fully removed (Removed)
-                    ChunkChange::Removed(old_chunk)
+                    ChunkDiff::Removed(old_chunk)
                 }
             });
         }
@@ -778,13 +774,9 @@ impl<const N: usize> Historical<N> {
     ///
     /// The batch's `prune_to_bit` method already captured the old chunk data,
     /// so we simply copy it into the reverse diff.
-    fn capture_pruned_chunks(
-        &self,
-        batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkChange<N>>,
-    ) {
+    fn capture_pruned_chunks(&self, batch: &Batch<N>, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
         for (&chunk_idx, &chunk_data) in &batch.chunks_to_prune {
-            changes.insert(chunk_idx, ChunkChange::Pruned(chunk_data));
+            changes.insert(chunk_idx, ChunkDiff::Pruned(chunk_data));
         }
     }
 
@@ -2012,7 +2004,7 @@ mod tests {
     /// 2. We prune that data in a later commit
     /// 3. We try to reconstruct the earlier state (which needs the now-pruned data)
     ///
-    /// The diff system should have captured the pruned chunk data as `ChunkChange::Pruned`,
+    /// The diff system should have captured the pruned chunk data as `ChunkDiff::Pruned`,
     /// allowing reconstruction even though that chunk no longer exists in current state.
     #[test]
     fn test_reconstruct_less_pruned_from_more_pruned() {
