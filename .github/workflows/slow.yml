@@ -30,6 +30,7 @@ jobs:
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/pacer"
           - "--no-default-features"
           - ""
         exclude:
@@ -42,6 +43,11 @@ jobs:
             flags: "--features commonware-runtime/iouring-network"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring-network"
+          # Only run pacer feature on Ubuntu
+          - os: windows-latest
+            flags: "--features commonware-runtime/pacer"
+          - os: macos-latest
+            flags: "--features commonware-runtime/pacer"
           # Only run --no-default-features on Ubuntu
           - os: windows-latest
             flags: "--no-default-features"
