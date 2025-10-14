@@ -302,7 +302,7 @@ impl<const N: usize> Prunable<N> {
     pub(super) fn unprune_chunks(&mut self, chunks: &[[u8; N]]) {
         assert!(
             chunks.len() <= self.pruned_chunks,
-            "cannot unpruned {} chunks (only {} pruned)",
+            "cannot unprune {} chunks (only {} pruned)",
             chunks.len(),
             self.pruned_chunks
         );
