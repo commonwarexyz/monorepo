@@ -329,7 +329,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Return a stream of all items in the journal starting from `start_pos`.
     ///
     /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
+    /// position in the journal.
     ///
     /// # Errors
     ///
@@ -340,8 +340,6 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + '_, Error> {
-        use futures::StreamExt;
-
         if start_pos > self.size {
             return Err(Error::ItemOutOfRange(start_pos));
         }
