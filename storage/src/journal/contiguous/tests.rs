@@ -28,6 +28,8 @@ where
     test_replay_at_exact_size(&factory).await;
     test_multiple_prunes(&factory).await;
     test_prune_beyond_size(&factory).await;
+    test_persistence_basic(&factory).await;
+    test_persistence_after_prune(&factory).await;
 }
 
 /// Test that an empty journal has size 0.
@@ -366,4 +368,115 @@ where
 
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
+}
+
+/// Test basic persistence: append items, close, re-open, verify state.
+async fn test_persistence_basic<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let test_name = "persistence_basic".to_string();
+
+    // Create journal and append items
+    {
+        let mut journal = factory(test_name.clone()).await.unwrap();
+
+        for i in 0..15u64 {
+            let pos = journal.append(i * 10).await.unwrap();
+            assert_eq!(pos, i);
+        }
+
+        let size = journal.size().await.unwrap();
+        assert_eq!(size, 15);
+
+        journal.close().await.unwrap();
+    }
+
+    // Re-open and verify state persists
+    {
+        let journal = factory(test_name.clone()).await.unwrap();
+
+        let size = journal.size().await.unwrap();
+        assert_eq!(size, 15);
+
+        // Replay and verify all items
+        {
+            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            futures::pin_mut!(stream);
+
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                items.push(result.unwrap());
+            }
+
+            assert_eq!(items.len(), 15);
+            for (i, (pos, value)) in items.iter().enumerate() {
+                assert_eq!(*pos, i as u64);
+                assert_eq!(*value, (i as u64) * 10);
+            }
+        }
+
+        journal.destroy().await.unwrap();
+    }
+}
+
+/// Test persistence after pruning: append, prune, close, re-open, verify pruned state.
+async fn test_persistence_after_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let test_name = "persistence_after_prune".to_string();
+
+    // Create journal, append items, and prune
+    {
+        let mut journal = factory(test_name.clone()).await.unwrap();
+
+        for i in 0..25u64 {
+            journal.append(i * 100).await.unwrap();
+        }
+
+        // Prune first 10 items
+        let pruned = journal.prune(10).await.unwrap();
+        assert!(pruned);
+
+        let size = journal.size().await.unwrap();
+        assert_eq!(size, 25);
+
+        journal.close().await.unwrap();
+    }
+
+    // Re-open and verify pruned state persists
+    {
+        let mut journal = factory(test_name.clone()).await.unwrap();
+
+        // Size should still be 25
+        let size = journal.size().await.unwrap();
+        assert_eq!(size, 25);
+
+        // Replay from position 10 (first non-pruned position)
+        {
+            let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+            futures::pin_mut!(stream);
+
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                items.push(result.unwrap());
+            }
+
+            assert_eq!(items.len(), 15);
+            for (i, (pos, value)) in items.iter().enumerate() {
+                let expected_pos = (i + 10) as u64;
+                assert_eq!(*pos, expected_pos);
+                assert_eq!(*value, expected_pos * 100);
+            }
+        }
+
+        // Append more items after re-opening
+        let pos = journal.append(999).await.unwrap();
+        assert_eq!(pos, 25);
+
+        journal.destroy().await.unwrap();
+    }
 }

@@ -39,6 +39,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
     async fn close(self) -> Result<(), Error> {
         fixed::Journal::close(self).await
     }
+
+    async fn destroy(self) -> Result<(), Error> {
+        fixed::Journal::destroy(self).await
+    }
 }
 
 // Implement ContiguousRead for fixed::Journal

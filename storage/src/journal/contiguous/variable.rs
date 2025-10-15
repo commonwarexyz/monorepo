@@ -461,6 +461,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
     async fn close(self) -> Result<(), Error> {
         Variable::close(self).await
     }
+
+    async fn destroy(self) -> Result<(), Error> {
+        Variable::destroy(self).await
+    }
 }
 
 #[cfg(test)]
