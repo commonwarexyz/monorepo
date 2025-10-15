@@ -26,8 +26,6 @@ jobs:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
-            flags: "--features commonware-runtime/pacer"
-          - os: ubuntu-latest
             flags: ""
           - os: windows-latest
             flags: ""
