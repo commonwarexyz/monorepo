@@ -53,19 +53,6 @@ impl<V: Variant, P: PublicKey> Supervisor<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> p2p::Coordinator for Supervisor<V, P> {
-    type PublicKey = P;
-
-    fn peers(&self) -> &[Self::PublicKey] {
-        self.participants.as_ref()
-    }
-
-    fn peer_set_id(&self) -> u64 {
-        // In this example, we only have one static peer set.
-        0
-    }
-}
-
 impl<V: Variant, P: PublicKey> commonware_consensus::Supervisor for Supervisor<V, P> {
     type Index = View;
     type PublicKey = P;
@@ -104,5 +91,29 @@ impl<V: Variant, P: PublicKey> ThresholdSupervisor for Supervisor<V, P> {
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {
         self.share.as_ref()
+    }
+}
+
+#[derive(Clone)]
+pub struct Coordinator<P> {
+    pub participants: Vec<P>,
+}
+
+impl<P> Coordinator<P> {
+    pub fn new(participants: Vec<P>) -> Self {
+        Self { participants }
+    }
+}
+
+impl<P: PublicKey> p2p::Coordinator for Coordinator<P> {
+    type PublicKey = P;
+
+    fn peers(&self) -> &[Self::PublicKey] {
+        self.participants.as_ref()
+    }
+
+    fn peer_set_id(&self) -> u64 {
+        // In this example, we only have one static peer set.
+        0
     }
 }

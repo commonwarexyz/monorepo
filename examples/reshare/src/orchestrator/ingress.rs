@@ -3,39 +3,38 @@
 use commonware_consensus::{types::Epoch, Reporter};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
-    Hasher, PublicKey,
+    PublicKey,
 };
+use commonware_utils::set::Set;
 use futures::{channel::mpsc, SinkExt};
 
 /// A notification of an epoch transition.
-pub struct EpochTransition<V: Variant, H: Hasher, P: PublicKey> {
+pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The epoch to transition to.
     pub epoch: Epoch,
-    /// The seed for the new epoch.
-    pub seed: H::Digest,
     /// The new public polynomial for the epoch.
     pub poly: Public<V>,
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
     /// The new participants for the epoch.
-    pub participants: Vec<P>,
+    pub participants: Set<P>,
 }
 
 /// Inbound communication channel for epoch transitions.
 #[derive(Debug, Clone)]
-pub struct Mailbox<V: Variant, H: Hasher, P: PublicKey> {
-    sender: mpsc::Sender<EpochTransition<V, H, P>>,
+pub struct Mailbox<V: Variant, P: PublicKey> {
+    sender: mpsc::Sender<EpochTransition<V, P>>,
 }
 
-impl<V: Variant, H: Hasher, P: PublicKey> Mailbox<V, H, P> {
+impl<V: Variant, P: PublicKey> Mailbox<V, P> {
     /// Create a new [Mailbox].
-    pub fn new(sender: mpsc::Sender<EpochTransition<V, H, P>>) -> Self {
+    pub fn new(sender: mpsc::Sender<EpochTransition<V, P>>) -> Self {
         Self { sender }
     }
 }
 
-impl<V: Variant, H: Hasher, P: PublicKey> Reporter for Mailbox<V, H, P> {
-    type Activity = EpochTransition<V, H, P>;
+impl<V: Variant, P: PublicKey> Reporter for Mailbox<V, P> {
+    type Activity = EpochTransition<V, P>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

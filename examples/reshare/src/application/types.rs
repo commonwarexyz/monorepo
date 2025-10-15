@@ -22,8 +22,8 @@ where
     /// The current height.
     pub height: u64,
 
-    /// An optional outcome of a resharing operation.
-    pub reshare_outcome: Option<DealOutcome<C, V>>,
+    /// An optional outcome of a dealing operation.
+    pub deal_outcome: Option<DealOutcome<C, V>>,
 }
 
 impl<H, C, V> Block<H, C, V>
@@ -41,7 +41,7 @@ where
         Self {
             parent,
             height,
-            reshare_outcome,
+            deal_outcome: reshare_outcome,
         }
     }
 }
@@ -55,7 +55,7 @@ where
     fn write(&self, buf: &mut impl BufMut) {
         self.parent.write(buf);
         self.height.write(buf);
-        self.reshare_outcome.write(buf);
+        self.deal_outcome.write(buf);
     }
 }
 
@@ -66,7 +66,7 @@ where
     V: Variant,
 {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size() + self.height.encode_size() + self.reshare_outcome.encode_size()
+        self.parent.encode_size() + self.height.encode_size() + self.deal_outcome.encode_size()
     }
 }
 
@@ -76,13 +76,14 @@ where
     C: Signer,
     V: Variant,
 {
+    // The consensus quorum
     type Cfg = usize;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             parent: H::Digest::read(buf)?,
             height: u64::read(buf)?,
-            reshare_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
+            deal_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
         })
     }
 }

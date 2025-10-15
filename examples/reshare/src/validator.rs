@@ -1,7 +1,7 @@
 //! Validator node service entrypoint.
 
 use crate::{
-    application::Supervisor,
+    application::Coordinator,
     engine,
     setup::{ParticipantConfig, PeerConfig},
 };
@@ -91,11 +91,10 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let dkg_channel = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
     // Create a static resolver for backfill
-    let supervisor =
-        Supervisor::<MinSig, _>::new(polynomial.clone(), peer_config.all_peers(), None);
+    let coordinator = Coordinator::new(peer_config.all_peers());
     let resolver_cfg = p2p_resolver::Config {
         public_key: config.p2p_key.public_key(),
-        coordinator: supervisor.clone(),
+        coordinator: coordinator.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
             public_key: config.p2p_key.public_key(),
@@ -147,10 +146,7 @@ mod test {
     use crate::{application::Block, utils::BLOCKS_PER_EPOCH};
     use commonware_consensus::marshal::ingress::handler;
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops,
-            primitives::{poly::Public, variant::MinSig},
-        },
+        bls12381::{dkg::ops, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
@@ -174,7 +170,6 @@ mod test {
     async fn register_validators(
         context: &deterministic::Context,
         oracle: &mut Oracle<PublicKey>,
-        polynomial: &Public<MinSig>,
         validators: &[PublicKey],
     ) -> HashMap<
         PublicKey,
@@ -206,11 +201,10 @@ mod test {
             let (dkg_sender, dkg_receiver) = oracle.register(validator.clone(), 5).await.unwrap();
 
             // Create a static resolver for backfill
-            let supervisor =
-                Supervisor::<MinSig, _>::new(polynomial.clone(), validators.to_vec(), None);
+            let coordinator = Coordinator::new(validators.to_vec());
             let resolver_cfg = p2p_resolver::Config {
                 public_key: validator.clone(),
-                coordinator: supervisor.clone(),
+                coordinator: coordinator.clone(),
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     public_key: validator.clone(),
@@ -306,8 +300,7 @@ mod test {
             }
             validators.sort();
             signers.sort_by_key(|s| s.public_key());
-            let mut registrations =
-                register_validators(&context, &mut oracle, &polynomial, &validators).await;
+            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators
             link_validators(&mut oracle, &validators, link, None).await;
@@ -462,8 +455,7 @@ mod test {
             }
             validators.sort();
             signers.sort_by_key(|s| s.public_key());
-            let mut registrations =
-                register_validators(&context, &mut oracle, &polynomial, &validators).await;
+            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators (except 0)
             let link = Link {
@@ -677,7 +669,7 @@ mod test {
                 validators.sort();
                 signers.sort_by_key(|s| s.public_key());
                 let mut registrations =
-                    register_validators(&context, &mut oracle, &polynomial, &validators).await;
+                    register_validators(&context, &mut oracle, &validators).await;
 
                 // Link all validators
                 let link = Link {
@@ -767,7 +759,7 @@ mod test {
 
                 // Exit at random points until finished
                 let wait =
-                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(1_000));
+                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(1_000));
 
                 // Wait for one to finish
                 select! {

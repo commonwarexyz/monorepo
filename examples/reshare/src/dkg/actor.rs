@@ -11,7 +11,7 @@ use commonware_cryptography::{
         dkg::{player::Output, types::Ack},
         primitives::{group::Share, poly::Public, variant::Variant},
     },
-    Digestible, Hasher, Signer,
+    Hasher, Signer,
 };
 use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{
@@ -22,9 +22,18 @@ use commonware_storage::{
     store::{self, Store},
     translator::TwoCap,
 };
-use commonware_utils::{quorum, sequence::FixedBytes, NZUsize};
+use commonware_utils::{
+    quorum,
+    sequence::{FixedBytes, U64},
+    set::Set,
+    NZUsize,
+};
 use futures::{channel::mpsc, StreamExt};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{
+    rngs::StdRng,
+    seq::{IteratorRandom, SliceRandom},
+    SeedableRng,
+};
 use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, num::NonZero};
 use tracing::info;
@@ -53,7 +62,7 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     num_participants_per_epoch: usize,
-    store: Store<ContextCell<E>, FixedBytes<8>, RoundInfo<V, C>, TwoCap>,
+    store: Store<ContextCell<E>, U64, RoundInfo<V, C>, TwoCap>,
     metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
 }
 
@@ -69,7 +78,7 @@ where
         let context = ContextCell::new(context);
 
         // Initialize a store for round information, to recover in case of restarts.
-        let store = Store::<_, FixedBytes<8>, RoundInfo<V, C>, _>::init(
+        let store = Store::<_, U64, RoundInfo<V, C>, _>::init(
             context.with_label("store"),
             store::Config {
                 log_journal_partition: format!("{}_dkg_store", config.partition_prefix),
@@ -120,7 +129,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        orchestrator: impl Reporter<Activity = EpochTransition<V, H, C::PublicKey>>,
+        orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -146,7 +155,7 @@ where
         initial_share: Option<Share>,
         mut active_participants: Vec<C::PublicKey>,
         mut inactive_participants: Vec<C::PublicKey>,
-        mut orchestrator: impl Reporter<Activity = EpochTransition<V, H, C::PublicKey>>,
+        mut orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -158,14 +167,11 @@ where
         mux.start();
 
         // Collect all contributors (active + inactive.)
-        let mut all_participants = active_participants
+        let all_participants = active_participants
             .iter()
             .chain(inactive_participants.iter())
             .cloned()
-            .collect::<Vec<_>>();
-
-        // Sort participants to ensure everyone agrees on ordering.
-        all_participants.sort();
+            .collect::<Set<_>>();
 
         // Fetch the initial epoch from metadata, defaulting to 0 if not present.
         let initial_epoch = self.metadata.get(&METADATA_KEY).cloned().unwrap_or(0);
@@ -198,26 +204,23 @@ where
             if initial_epoch == 1 {
                 active_participants = inactive_participants.clone();
                 inactive_participants = all_participants
-                    .choose_multiple(&mut rng, self.num_participants_per_epoch)
+                    .iter()
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .choose_multiple(&mut rng, self.num_participants_per_epoch);
             }
         } else {
             // If we're starting from a later epoch, we need to pseudorandomly select both the dealers
             // and players for the current epoch, based on the epoch number as a seed.
             let mut last_epoch_rng = StdRng::seed_from_u64(initial_epoch - 1);
             active_participants = all_participants
-                .choose_multiple(&mut last_epoch_rng, self.num_participants_per_epoch)
+                .iter()
                 .cloned()
-                .collect::<Vec<_>>();
+                .choose_multiple(&mut last_epoch_rng, self.num_participants_per_epoch);
             inactive_participants = all_participants
-                .choose_multiple(&mut rng, self.num_participants_per_epoch)
+                .iter()
                 .cloned()
-                .collect::<Vec<_>>();
+                .choose_multiple(&mut rng, self.num_participants_per_epoch);
         }
-
-        active_participants.sort();
-        inactive_participants.sort();
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -226,8 +229,8 @@ where
             initial_public,
             initial_share,
             &mut self.signer,
-            active_participants,
-            inactive_participants,
+            Set::from_iter(active_participants),
+            Set::from_iter(inactive_participants),
             &mut dkg_mux,
             &mut self.store,
         )
@@ -272,15 +275,15 @@ where
 
                         // Pseudorandomly select some random players to receive shares for the next epoch.
                         let mut rng = StdRng::seed_from_u64(next_epoch);
-                        let mut next_players = all_participants
-                            .choose_multiple(&mut rng, self.num_participants_per_epoch)
+                        let next_players = all_participants
+                            .iter()
                             .cloned()
-                            .collect::<Vec<_>>();
-                        next_players.sort();
+                            .choose_multiple(&mut rng, self.num_participants_per_epoch)
+                            .into_iter()
+                            .collect::<Set<_>>();
 
-                        let transition: EpochTransition<V, H, C::PublicKey> = EpochTransition {
+                        let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                             epoch: next_epoch,
-                            seed: block.digest(),
                             poly: public.clone(),
                             share: share.clone(),
                             participants: next_participants.clone(),
@@ -338,7 +341,7 @@ where
 
 #[allow(clippy::type_complexity)]
 pub(crate) struct RoundInfo<V: Variant, C: Signer> {
-    pub deal: Option<(Public<V>, Vec<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
+    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
     pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
     pub local_outcome: Option<DealOutcome<C, V>>,
     pub outcomes: Vec<DealOutcome<C, V>>,
@@ -381,7 +384,7 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            deal: Option::<(Public<V>, Vec<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
+            deal: Option::<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
                 buf,
                 &(
                     *cfg,

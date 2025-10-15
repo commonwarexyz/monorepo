@@ -10,4 +10,4 @@ mod ingress;
 pub use ingress::{Mailbox, Message};
 
 mod supervisor;
-pub use supervisor::Supervisor;
+pub use supervisor::{Coordinator, Supervisor};

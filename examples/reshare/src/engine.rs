@@ -83,7 +83,7 @@ where
     marshal: marshal::Actor<Block<H, C, V>, E, V>,
     marshal_mailbox: marshal::Mailbox<V, Block<H, C, V>>,
     orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C, V>>,
-    orchestrator_mailbox: orchestrator::Mailbox<V, H, C::PublicKey>,
+    orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 

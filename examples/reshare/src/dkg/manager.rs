@@ -23,7 +23,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{store::Store, translator::TwoCap};
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::U64, set::Set};
 use futures::FutureExt;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, ops::Deref};
@@ -61,7 +61,7 @@ where
     previous: RoundResult<V>,
 
     /// The players in the round.
-    players: Vec<C::PublicKey>,
+    players: Set<C::PublicKey>,
 
     /// The outbound communication channel for peers.
     sender: SubSender<S>,
@@ -79,7 +79,7 @@ where
     arbiter: Arbiter<C::PublicKey, V>,
 
     /// The [Store] used for persisting round state.
-    store: &'ctx mut Store<E, FixedBytes<8>, RoundInfo<V, C>, TwoCap>,
+    store: &'ctx mut Store<E, U64, RoundInfo<V, C>, TwoCap>,
 }
 
 /// Metadata associated with a [Dealer].
@@ -89,7 +89,7 @@ struct DealerMetadata<C: Signer, V: Variant> {
     /// The [Dealer]'s commitment.
     commitment: Public<V>,
     /// The [Dealer]'s shares for all players.
-    shares: Vec<group::Share>,
+    shares: Set<group::Share>,
     /// Signed acknowledgements from contributors.
     acks: BTreeMap<u32, Ack<C::Signature>>,
     /// The constructed dealing for inclusion in a block, if any.
@@ -125,36 +125,31 @@ where
         public: Public<V>,
         share: Option<group::Share>,
         signer: &'ctx mut C,
-        dealers: Vec<C::PublicKey>,
-        players: Vec<C::PublicKey>,
+        dealers: Set<C::PublicKey>,
+        players: Set<C::PublicKey>,
         mux: &'ctx mut MuxHandle<S, R>,
-        store: &'ctx mut Store<E, FixedBytes<8>, RoundInfo<V, C>, TwoCap>,
+        store: &'ctx mut Store<E, U64, RoundInfo<V, C>, TwoCap>,
     ) -> Self {
-        let mut player =
-            players
-                .iter()
-                .position(|p| p == &signer.public_key())
-                .map(|signer_index| {
-                    let player = Player::new(
-                        signer.public_key(),
-                        Some(public.clone()),
-                        dealers.to_vec(),
-                        players.to_vec(),
-                        CONCURRENCY,
-                    );
+        let mut player = players.position(&signer.public_key()).map(|signer_index| {
+            let player = Player::new(
+                signer.public_key(),
+                Some(public.clone()),
+                dealers.clone(),
+                players.clone(),
+                CONCURRENCY,
+            );
 
-                    (signer_index as u32, player)
-                });
+            (signer_index as u32, player)
+        });
         let mut arbiter = Arbiter::new(
             Some(public.clone()),
-            dealers.to_vec(),
-            players.to_vec(),
+            dealers.clone(),
+            players.clone(),
             CONCURRENCY,
         );
 
         // If the node crashed in the middle of dealing, recover the dealer state from storage.
-        let dealer_meta = if let Some(meta) = store.get(&epoch.to_le_bytes().into()).await.unwrap()
-        {
+        let dealer_meta = if let Some(meta) = store.get(&epoch.into()).await.unwrap() {
             for outcome in meta.outcomes {
                 let ack_indices = outcome
                     .acks
@@ -178,7 +173,7 @@ where
             }
 
             if let Some((commitment, shares, acks)) = meta.deal {
-                let (mut dealer, _, _) = Dealer::new(context, share.clone(), players.to_vec());
+                let (mut dealer, _, _) = Dealer::new(context, share.clone(), players.clone());
                 for ack in acks.values() {
                     dealer
                         .ack(players.get(ack.player as usize).cloned().unwrap())
@@ -197,7 +192,7 @@ where
         } else {
             share.as_ref().map(|share| {
                 let (dealer, commitment, shares) =
-                    Dealer::new(context, Some(share.clone()), players.to_vec());
+                    Dealer::new(context, Some(share.clone()), players.clone());
                 DealerMetadata {
                     dealer,
                     commitment,
@@ -275,7 +270,7 @@ where
 
                     // Persist the acknowledgement to storage.
                     self.store
-                        .upsert(self.epoch.to_le_bytes().into(), |meta| {
+                        .upsert(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(signer_index, ack);
                             } else {
@@ -388,7 +383,7 @@ where
 
                     // Persist the acknowledgement to storage.
                     self.store
-                        .upsert(self.epoch.to_le_bytes().into(), |meta| {
+                        .upsert(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(ack.player, ack);
                             } else {
@@ -418,7 +413,7 @@ where
 
                     // Persist the share to storage.
                     self.store
-                        .upsert(self.epoch.to_le_bytes().into(), |meta| {
+                        .upsert(self.epoch.into(), |meta| {
                             meta.received_shares
                                 .push((peer.clone(), commitment.clone(), share));
                         })
@@ -455,7 +450,7 @@ where
     /// Processes a [Block] that may contain a [DealOutcome], tracking it with the [Arbiter] if
     /// all acknowledgement signatures are valid.
     pub async fn process_block(&mut self, round: u64, block: Block<impl Hasher, C, V>) {
-        let Some(outcome) = block.reshare_outcome else {
+        let Some(outcome) = block.deal_outcome else {
             debug!(height = block.height, "saw block with no deal outcome");
             return;
         };
@@ -516,7 +511,7 @@ where
 
         // Persist deal outcome to storage.
         self.store
-            .upsert(self.epoch.to_le_bytes().into(), |meta| {
+            .upsert(self.epoch.into(), |meta| {
                 if let Some(pos) = meta
                     .outcomes
                     .iter()
@@ -543,7 +538,7 @@ where
     }
 
     /// Finalize the DKG/reshare round, returning the [Output].
-    pub async fn finalize(self, round: u64) -> (Vec<C::PublicKey>, RoundResult<V>) {
+    pub async fn finalize(self, round: u64) -> (Set<C::PublicKey>, RoundResult<V>) {
         let (result, disqualified) = self.arbiter.finalize();
         let result = match result {
             Ok(output) => output,
@@ -624,7 +619,7 @@ where
         ));
 
         self.store
-            .upsert(self.epoch.to_le_bytes().into(), |meta| {
+            .upsert(self.epoch.into(), |meta| {
                 meta.local_outcome = local_outcome.clone();
             })
             .await

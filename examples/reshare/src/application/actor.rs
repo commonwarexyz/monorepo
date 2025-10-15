@@ -80,8 +80,9 @@ where
                     // Case: Non-genesis.
                     let height = get_last_height(epoch - 1);
                     let Some(block) = marshal.get_block(height).await else {
-                        // No block exists, put the response in the responders map for later.
-                        continue;
+                        // A new consensus engine will never be started without having the genesis block
+                        // of the new epoch (the last block of the previous epoch) already stored.
+                        unreachable!("missing block at height {}", height);
                     };
                     let _ = response.send(block.commitment());
                 }
@@ -230,6 +231,6 @@ where
             }
         }
 
-        info!("mailbox closed, exiting.");
+        info!("mailbox closed, exiting");
     }
 }

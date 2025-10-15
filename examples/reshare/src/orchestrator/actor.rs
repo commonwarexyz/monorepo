@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{genesis_block, Block, Supervisor},
+    application::{Block, Supervisor},
     orchestrator::{ingress::EpochTransition, Mailbox},
 };
 use commonware_consensus::{
@@ -12,7 +12,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
-    Committable, Hasher, Signer,
+    Hasher, Signer,
 };
 use commonware_p2p::{
     utils::mux::{MuxHandle, Muxer},
@@ -22,7 +22,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU32};
+use commonware_utils::{sequence::FixedBytes, set::Set, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
@@ -63,7 +63,7 @@ where
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<EpochTransition<V, H, C::PublicKey>>,
+    mailbox: mpsc::Receiver<EpochTransition<V, C::PublicKey>>,
     signer: C,
     application: A,
 
@@ -73,6 +73,7 @@ where
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
+    pool_ref: PoolRef,
 
     epoch: Epoch,
     engine: Option<Handle<()>>,
@@ -87,8 +88,9 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
-    pub fn new(context: E, config: Config<B, V, C, H, A>) -> (Self, Mailbox<V, H, C::PublicKey>) {
+    pub fn new(context: E, config: Config<B, V, C, H, A>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
         (
             Self {
@@ -101,6 +103,7 @@ where
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
+                pool_ref,
                 epoch: 0,
                 engine: None,
             },
@@ -185,23 +188,19 @@ where
             self.context.with_label("metadata"),
             metadata::Config {
                 partition: format!("{}-metadata", self.partition_prefix),
-                codec_config: ((), ()),
+                codec_config: (),
             },
         )
         .await
         .expect("failed to initialize orchestrator metadata");
 
         // Enter the initial epoch
-        let (initial_epoch, initial_seed) = metadata
-            .get(&METADATA_KEY)
-            .cloned()
-            .unwrap_or((0, genesis_block::<H, C, V>().commitment()));
+        let initial_epoch = metadata.get(&METADATA_KEY).cloned().unwrap_or(0);
         self.enter_epoch(
             initial_epoch,
-            initial_seed,
             initial_poly,
             initial_share,
-            initial_participants,
+            Set::from_iter(initial_participants),
             &mut metadata,
             &mut pending_mux,
             &mut recovered_mux,
@@ -218,7 +217,6 @@ where
             // Enter the new epoch.
             self.enter_epoch(
                 transition.epoch,
-                transition.seed,
                 transition.poly,
                 transition.share,
                 transition.participants,
@@ -235,11 +233,10 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        seed: H::Digest,
         polynomial: Public<V>,
         share: Option<group::Share>,
-        participants: Vec<C::PublicKey>,
-        metadata: &mut Metadata<ContextCell<E>, FixedBytes<1>, (Epoch, H::Digest)>,
+        participants: Set<C::PublicKey>,
+        metadata: &mut Metadata<ContextCell<E>, FixedBytes<1>, Epoch>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -253,7 +250,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         >,
     ) {
-        let _ = metadata.put_sync(METADATA_KEY, (epoch, seed)).await;
+        let _ = metadata.put_sync(METADATA_KEY, epoch).await;
         self.epoch = epoch;
 
         // Stop the previous consensus engine, if there is one.
@@ -261,7 +258,7 @@ where
             engine.abort();
         }
 
-        let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants, share);
+        let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants.into(), share);
         let engine = threshold_simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             threshold_simplex::Config {
@@ -286,7 +283,7 @@ where
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+                buffer_pool: self.pool_ref.clone(),
             },
         );
 
