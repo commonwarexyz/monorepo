@@ -331,16 +331,9 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Returns the number of commits removed.
     pub fn prune_commits_before(&mut self, commit_number: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self
-            .commits
-            .range(..commit_number)
-            .map(|(k, _)| *k)
-            .collect();
-        let count = keys_to_remove.len();
-        for key in keys_to_remove {
-            self.commits.remove(&key);
-        }
-        count
+        let count = self.commits.len();
+        self.commits.retain(|k, _| *k >= commit_number);
+        count - self.commits.len()
     }
 
     /// Clear all historical commits.
@@ -402,7 +395,7 @@ impl<const N: usize> BitMap<N> {
         for &bit in batch.modified_bits.keys() {
             let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
             changes.entry(chunk_idx).or_insert_with(|| {
-                // modified_bits only contains bits from the base region that existed
+                // `modified_bits` only contains bits from the base region that existed
                 // at batch creation. Since current hasn't changed yet (we're still
                 // building the diff), the chunk MUST exist.
                 let old_chunk = self

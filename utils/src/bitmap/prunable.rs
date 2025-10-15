@@ -298,7 +298,7 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.set_chunk_by_index(bitmap_chunk_idx, chunk_data);
     }
 
-    /// Unpruned chunks by prepending them back to the front of the bitmap.
+    /// Unprune chunks by prepending them back to the front of the bitmap.
     ///
     /// The caller must provide chunks in **reverse** order: to restore chunks with
     /// indices [0, 1, 2], pass them as [2, 1, 0]. This is necessary because each chunk
