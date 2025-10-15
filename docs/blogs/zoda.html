@@ -94,7 +94,7 @@ Meier</a></div>
         naively, - how to increase efficiency with coding, - and,
         finally, how to get quicker guarantees about the data with <a
         href="https://eprint.iacr.org/2025/034">ZODA</a>.</p>
-        <p>In the future post could cover lower-level details of our
+        <p>In a future post we could cover lower-level details of our
         implementation, like the field we use for Reed-Solomon coding,
         and the optimizations needed for fast fourier transforms, but
         this one will stick to an overview.</p>
@@ -120,7 +120,7 @@ Meier</a></div>
         well. Imagine, after our naive protocol, that a follower
         crashes, losing their data. This is no big problem: the data is
         present among the other followers, and our lost node can
-        communicate with them to recover it. In fact, ever other node
+        communicate with them to recover it. In fact, every other node
         has all of the data, so you have more information than required
         on the network. If one node had one half of the data, and some
         other node the other half, you would still be able to recover
@@ -132,7 +132,7 @@ Meier</a></div>
         possible.</p>
         <p>In this case, the leader’s transmission cost is now just
         <span class="math inline">m \cdot \frac{D}{m}</span> = D$, quite
-        the improvement. If the participants wnat to recover the whole
+        the improvement. If the participants want to recover the whole
         data, each of them will need to send their shard to the others,
         at a cost of <span class="math inline">(m - 1) \cdot
         \frac{D}{m}</span> bytes. The total amount of data sent by the
@@ -181,21 +181,21 @@ Meier</a></div>
         <p>These details are not essential: what matters is that we take
         <span class="math inline">n</span> symbols, encode them into
         <span class="math inline">m</span>, such that any <span
-        class="math inline">n</span> of the encode symbols are good
+        class="math inline">n</span> of the encoded symbols are good
         enough to recover the originals.</p>
         <h3 id="dissemination-with-coding">Dissemination with
         Coding</h3>
         <p>This naturally suggests a scheme in which followers receive
         encoded symbols, allowing recovery with partial information. To
-        flesh this out further, we want to accomodate data which may not
-        consist of precisely <span class="math inline">n</span> symbols.
-        Instead, we assume a matrix of <span class="math inline">n
-        \times c</span> symbols (which may be padded). This matrix can
-        be encoded columnwise, producing a result of size <span
-        class="math inline">m \times c</span>. Each shard can be a row
-        of this matrix. Given <span class="math inline">n</span> shards,
-        the original matrix can be recovered, proceeding columnwise once
-        more.</p>
+        flesh this out further, we want to accommodate data which may
+        not consist of precisely <span class="math inline">n</span>
+        symbols. Instead, we assume a matrix of <span
+        class="math inline">n \times c</span> symbols (which may be
+        padded). This matrix can be encoded columnwise, producing a
+        result of size <span class="math inline">m \times c</span>. Each
+        shard can be a row of this matrix. Given <span
+        class="math inline">n</span> shards, the original matrix can be
+        recovered, proceeding columnwise once more.</p>
         <p>The cost of this scheme is now: - <span class="math inline">m
         \cdot \frac{D}{n}</span> for the leader, - <span
         class="math inline">(m - 1) \cdot \frac{D}{n}</span> for each
@@ -222,8 +222,8 @@ Meier</a></div>
         cognitively, to the point where implementations often don’t
         contain procedures for decoding with errors at all.</p>
         <p>To avoid the need to correct errors, we can use a trick:
-        instead of decoding we bad shards, we could detect that they’ve
-        been corrupted, and treat them as missing instead.</p>
+        instead of decoding with bad shards, we could detect that
+        they’ve been corrupted, and treat them as missing instead.</p>
         <p>If the followers received a hash of each shard, then they
         could tell whether some data is actually the shard it claims to
         be, by hashing it. This comes at a penalty of transmitting <span
@@ -242,7 +242,7 @@ Meier</a></div>
         attesting uniquely to the encoded data. This could be used for
         consensus, like the hash of the data itself often is.</p>
         <h3 id="bad-leaders">Bad Leaders</h3>
-        <p>So far, ourleader encodes the data into shards, distributes
+        <p>So far, our leader encodes the data into shards, distributes
         them, and given a large enough subset of them, we can recover
         the data. We also know that malicious follower cannot tamper
         with the data, because they must prove that their shard is what
@@ -283,7 +283,7 @@ Meier</a></div>
         that our shard results from an encoding of it.</p>
         <h3 id="some-details-and-intuition">Some Details and
         Intuition</h3>
-        <p>The inner workingg of the protocol are not necessary to
+        <p>The inner workings of the protocol are not necessary to
         understand its utility nor application, but are simple enough to
         be understood at a high level of operation.</p>
         <p>We continue in modelling our data, <span
@@ -299,7 +299,7 @@ Meier</a></div>
         according to the <em>Fiat-Shamir</em> paradigm.</p>
         <p>Whereas in the plain coding scheme, we received one
         particular row of <span class="math inline">Y</span>, here we
-        receive <span class="math inline">S</span> rows, samplesd at
+        receive <span class="math inline">S</span> rows, sampled at
         random. (We may modify <span class="math inline">m</span> and
         <span class="math inline">n</span> to accomodate this fact). We
         also receive proofs of inclusion for each row.</p>
@@ -351,7 +351,7 @@ Meier</a></div>
         checks, since the cheater will not know where they need to fake
         the outcome.</p>
         <h3 id="completing-the-protocol">Completing the Protocol</h3>
-        <p>To complete th sketch of the protocol let’s look at how we
+        <p>To complete the sketch of the protocol let’s look at how we
         handle the shards, collectively. Rather than have each follower
         sample <span class="math inline">S</span> rows at random, we
         instead shuffle the rows, and partition it into chunks of size
