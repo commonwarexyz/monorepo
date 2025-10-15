@@ -69,7 +69,6 @@ impl SupervisionTreeInner {
         self.aborted = true;
         let was_active = self.is_active();
         let task = self.task.take();
-        self.active_children = 0;
         let children = mem::take(&mut self.children);
         Some((task, children, was_active))
     }
@@ -187,7 +186,7 @@ impl SupervisionTree {
                     "active child tracking underflow"
                 );
                 parent_inner.active_children -= 1;
-                was_active && !parent_inner.is_active()
+                !parent_inner.aborted && was_active && !parent_inner.is_active()
             };
             if propagate {
                 current = parent;
@@ -236,5 +235,45 @@ impl SupervisionTree {
                 child.abort_descendants();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::MetricHandle;
+    use futures::{
+        executor::block_on,
+        future::{pending, AbortHandle, Abortable, Aborted},
+    };
+    use prometheus_client::metrics::gauge::Gauge;
+
+    fn pending_aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
+        let (handle, registration) = AbortHandle::new_pair();
+        let gauge = Gauge::default();
+        let metric = MetricHandle::new(gauge);
+        let aborter = Aborter::new(handle, metric);
+        (aborter, Abortable::new(pending::<()>(), registration))
+    }
+
+    #[test]
+    fn abort_cascades_to_children() {
+        let root = SupervisionTree::root();
+        let (parent, aborted) = SupervisionTree::spawn_child(&root);
+        assert!(!aborted, "parent node unexpectedly aborted");
+
+        let (parent_aborter, parent_future) = pending_aborter();
+        parent.register_task(parent_aborter);
+
+        let (child, aborted) = SupervisionTree::spawn_child(&parent);
+        assert!(!aborted, "child node unexpectedly aborted");
+
+        let (child_aborter, child_future) = pending_aborter();
+        child.register_task(child_aborter);
+
+        parent.abort_descendants();
+
+        assert!(matches!(block_on(parent_future), Err(Aborted)));
+        assert!(matches!(block_on(child_future), Err(Aborted)));
     }
 }
