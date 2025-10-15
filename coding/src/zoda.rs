@@ -181,11 +181,12 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
-fn required_samples_impl(n: usize, k: usize, skew: usize) -> usize {
-    let n = BigRational::from_usize(n);
-    let k = BigRational::from_usize(k);
+fn required_samples_impl(n: usize, m: usize, skew: usize) -> usize {
+    assert!(m >= n);
+    let k = BigRational::from_usize(m - n);
+    let m = BigRational::from_usize(m);
     let skew = BigRational::from_usize(skew);
-    let fraction = (&k + &skew) / (BigRational::from_usize(2) * (&n + &k));
+    let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
     let log_term = (BigRational::from_usize(1) - fraction).log2_ceil(7);
     let required = BigRational::from_usize(128) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
@@ -198,10 +199,10 @@ fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
 
 /// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
 ///
-/// The actual number of required samples for a given n * samples and k * samples
+/// The actual number of required samples for a given n * samples and m * samples
 /// will be less.
-fn required_samples_upper_bound(n: usize, k: usize) -> usize {
-    required_samples_impl(n, k, 0)
+fn required_samples_upper_bound(n: usize, m: usize) -> usize {
+    required_samples_impl(n, m, 0)
 }
 
 fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
