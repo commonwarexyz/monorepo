@@ -1,157 +1,57 @@
-//! A contiguous journal interface for position-based append-only logging.
-//!
-//! This module provides a unified `Contiguous` trait for journals that support sequential
-//! append operations with monotonically increasing positions. It includes:
-//!
-//! - [Contiguous]: Core trait for append/replay/prune operations
-//! - [ContiguousRead]: Extension trait adding random read support
-//! - [Variable]: Wrapper for `variable::Journal` that implements [Contiguous]
+//! Contiguous wrapper for variable-length journals.
 
-use super::{fixed, variable, Error};
-use crate::metadata;
+use super::Contiguous;
+use crate::{journal::variable, journal::Error, metadata};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, CodecFixed, FixedSize, Read as CodecRead, Write as CodecWrite};
+use commonware_codec::{Codec, FixedSize, Read, Write};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::{sequence::U64, NZUsize};
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+
+/// The metadata key used to store journal metadata.
+/// We use key 0 as there is only one metadata entry per journal.
 const METADATA_KEY: U64 = U64::new(0);
 
-/// Core trait for contiguous journals supporting sequential append operations.
+/// Calculate the section number for a given position.
 ///
-/// A contiguous journal maintains a monotonically increasing position counter where each
-/// appended item receives a unique position starting from 0.
-pub trait Contiguous {
-    /// The type of items stored in the journal.
-    type Item;
-
-    /// Append a new item to the journal, returning its position.
-    ///
-    /// Positions are monotonically increasing starting from 0. The position of each item
-    /// is stable across pruning (i.e., if item X has position 5, it will always have
-    /// position 5 even if earlier items are pruned).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails or if the item cannot
-    /// be encoded.
-    fn append(
-        &mut self,
-        item: Self::Item,
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
-
-    /// Return the total number of items that have been appended to the journal.
-    ///
-    /// This count is NOT affected by pruning. The next appended item will receive this
-    /// position as its value.
-    fn size(&self) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
-
-    /// Prune items at positions strictly less than `min_position`.
-    ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
-    ///
-    /// # Note on Section Alignment
-    ///
-    /// Some items with positions less than `min_position` may be retained.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    fn prune(
-        &mut self,
-        min_position: u64,
-    ) -> impl std::future::Future<Output = Result<bool, Error>> + Send;
-
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
-    > + Send;
-
-    /// Sync all pending writes to storage.
-    ///
-    /// This ensures all previously appended items are durably persisted.
-    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Close the journal, syncing all pending writes and releasing resources.
-    ///
-    /// After calling close, the journal cannot be used again.
-    fn close(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-}
-
-/// Extension trait for contiguous journals that support random reads by position.
+/// # Arguments
 ///
-/// This trait can only be efficiently implemented for fixed-length items where the position
-/// directly maps to a storage offset. Variable-length journals cannot implement this without
-/// an auxiliary index mapping positions to offsets.
-pub trait ContiguousRead: Contiguous {
-    /// Read the item at the given position.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    /// - Returns other errors if storage or decoding fails.
-    fn read(
-        &self,
-        position: u64,
-    ) -> impl std::future::Future<Output = Result<Self::Item, Error>> + Send;
-}
+/// * `position` - The absolute position in the journal (must be >= `oldest_retained_pos`)
+/// * `oldest_retained_pos` - The position of the first item after pruning (section-aligned)
+/// * `items_per_section` - The number of items stored in each section
+///
+/// # Returns
+///
+/// The section number where the item at `position` should be stored.
+///
+/// # Examples
+///
+/// ```ignore
+/// // With 10 items per section and no pruning:
+/// assert_eq!(position_to_section(0, 0, 10), 0);   // position 0 -> section 0
+/// assert_eq!(position_to_section(9, 0, 10), 0);   // position 9 -> section 0
+/// assert_eq!(position_to_section(10, 0, 10), 1);  // position 10 -> section 1
+/// assert_eq!(position_to_section(25, 0, 10), 2);  // position 25 -> section 2
+///
+/// // After pruning sections 0-1 (oldest_retained_pos = 20):
+/// assert_eq!(position_to_section(20, 20, 10), 2); // position 20 -> section 2
+/// assert_eq!(position_to_section(25, 20, 10), 2); // position 25 -> section 2
+/// assert_eq!(position_to_section(30, 20, 10), 3); // position 30 -> section 3
+/// ```
+const fn position_to_section(
+    position: u64,
+    oldest_retained_pos: u64,
+    items_per_section: u64,
+) -> u64 {
+    // Calculate position relative to the oldest retained position
+    let relative_position = position - oldest_retained_pos;
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
-    for fixed::Journal<E, A>
-{
-    type Item = A;
-
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        fixed::Journal::append(self, item).await
-    }
-
-    async fn size(&self) -> Result<u64, Error> {
-        fixed::Journal::size(self).await
-    }
-
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        fixed::Journal::prune(self, min_position).await
-    }
-
-    async fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        fixed::Journal::replay(self, buffer, start_pos).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        fixed::Journal::sync(self).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        fixed::Journal::close(self).await
-    }
-}
-
-// Implement ContiguousRead for fixed::Journal
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> ContiguousRead
-    for fixed::Journal<E, A>
-{
-    async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        fixed::Journal::read(self, position).await
-    }
+    // Determine the section: base section number (from oldest_retained_pos)
+    // plus the section offset (from relative_position)
+    (relative_position / items_per_section) + (oldest_retained_pos / items_per_section)
 }
 
 /// Configuration for a contiguous variable-length journal.
@@ -181,6 +81,47 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
+/// Metadata for a contiguous variable journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Metadata {
+    /// The number of items per section. Must match the configuration.
+    pub items_per_section: u64,
+
+    /// The next position to be assigned on append (total items appended).
+    pub size: u64,
+
+    /// The position of the first item that remains after pruning.
+    pub oldest_retained_pos: u64,
+}
+
+impl Write for Metadata {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_u64(self.items_per_section);
+        buf.put_u64(self.size);
+        buf.put_u64(self.oldest_retained_pos);
+    }
+}
+
+impl FixedSize for Metadata {
+    const SIZE: usize = 24; // 3 * u64
+}
+
+impl Read for Metadata {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        if buf.remaining() < Self::SIZE {
+            return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
+        }
+
+        Ok(Self {
+            items_per_section: buf.get_u64(),
+            size: buf.get_u64(),
+            oldest_retained_pos: buf.get_u64(),
+        })
+    }
+}
+
 /// A contiguous wrapper around `variable::Journal` that provides position-based append.
 ///
 /// This wrapper manages section assignment automatically, allowing callers to append items
@@ -191,7 +132,7 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     journal: variable::Journal<E, V>,
 
     /// Metadata about this journal.
-    metadata: metadata::Metadata<E, U64, JournalMetadata>,
+    metadata: metadata::Metadata<E, U64, Metadata>,
 
     /// The number of items per section.
     ///
@@ -218,47 +159,6 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-/// Metadata for a contiguous variable journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct JournalMetadata {
-    /// The number of items per section. Must match the configuration.
-    items_per_section: u64,
-
-    /// The next position to be assigned on append (total items appended).
-    size: u64,
-
-    /// The position of the first item that remains after pruning.
-    oldest_retained_pos: u64,
-}
-
-impl CodecWrite for JournalMetadata {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.items_per_section);
-        buf.put_u64(self.size);
-        buf.put_u64(self.oldest_retained_pos);
-    }
-}
-
-impl FixedSize for JournalMetadata {
-    const SIZE: usize = 24; // 3 * u64
-}
-
-impl CodecRead for JournalMetadata {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
-        }
-
-        Ok(Self {
-            items_per_section: buf.get_u64(),
-            size: buf.get_u64(),
-            oldest_retained_pos: buf.get_u64(),
-        })
-    }
-}
-
 impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
@@ -273,8 +173,6 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Returns an error if the underlying journal initialization fails or if any storage
     /// operations fail.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        use futures::StreamExt;
-
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable journal
@@ -291,7 +189,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         .await?;
 
         // Initialize metadata store
-        let mut metadata: metadata::Metadata<E, U64, JournalMetadata> = metadata::Metadata::init(
+        let mut metadata: metadata::Metadata<E, U64, Metadata> = metadata::Metadata::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -328,7 +226,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
                 // Store the computed metadata
                 metadata.put(
                     METADATA_KEY,
-                    JournalMetadata {
+                    Metadata {
                         items_per_section,
                         size,
                         oldest_retained_pos,
@@ -349,18 +247,17 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         })
     }
 
-    /// Save metadata to storage.
-    async fn save_metadata(&mut self) -> Result<(), Error> {
-        self.metadata.put(
-            METADATA_KEY,
-            JournalMetadata {
-                items_per_section: self.items_per_section,
-                size: self.size,
-                oldest_retained_pos: self.oldest_retained_pos,
-            },
-        );
-        self.metadata.sync().await?;
-        Ok(())
+    /// Return the section number where the next append will write.
+    ///
+    /// This is a convenience method that calculates the section for the current
+    /// journal size, accounting for pruning. It's equivalent to calling
+    /// `position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)`.
+    ///
+    /// # Returns
+    ///
+    /// The section number where the next appended item will be stored.
+    const fn current_section(&self) -> u64 {
+        position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)
     }
 
     /// Append a new item to the journal, returning its position.
@@ -375,9 +272,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// be encoded.
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         // Calculate which section this position belongs to
-        let relative_position = self.size - self.oldest_retained_pos;
-        let section = (relative_position / self.items_per_section)
-            + (self.oldest_retained_pos / self.items_per_section);
+        let section = self.current_section();
 
         // Append to the underlying journal
         self.journal.append(section, item).await?;
@@ -420,7 +315,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         if pruned {
             self.oldest_retained_pos = min_section * self.items_per_section;
             // Save updated metadata
-            self.save_metadata().await?;
+            self.sync_metadata().await?;
         }
         Ok(pruned)
     }
@@ -487,7 +382,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         }
 
         // Save metadata
-        self.save_metadata().await?;
+        self.sync_metadata().await?;
 
         Ok(())
     }
@@ -495,7 +390,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Close the journal, syncing all pending writes and saving metadata.
     pub async fn close(mut self) -> Result<(), Error> {
         // Save metadata before closing
-        self.save_metadata().await?;
+        self.sync_metadata().await?;
 
         // Close metadata and journal
         self.metadata.close().await?;
@@ -512,6 +407,20 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
         // Destroy the underlying journal
         self.journal.destroy().await
+    }
+
+    /// Sync metadata to storage.
+    async fn sync_metadata(&mut self) -> Result<(), Error> {
+        self.metadata.put(
+            METADATA_KEY,
+            Metadata {
+                items_per_section: self.items_per_section,
+                size: self.size,
+                oldest_retained_pos: self.oldest_retained_pos,
+            },
+        );
+        self.metadata.sync().await?;
+        Ok(())
     }
 }
 
@@ -551,128 +460,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner};
+    use crate::journal::contiguous::Contiguous;
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
-
-    #[test]
-    fn test_fixed_journal_implements_contiguous() {
-        // Test that we can use a fixed journal through the Contiguous trait
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal: fixed::Journal<_, u64> = fixed::Journal::init(
-                context,
-                fixed::Config {
-                    partition: "test".to_string(),
-                    items_per_blob: NZU64!(10),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Use through trait methods
-            let pos1 = Contiguous::append(&mut journal, 42u64).await.unwrap();
-            let pos2 = Contiguous::append(&mut journal, 100u64).await.unwrap();
-            assert_eq!(pos1, 0);
-            assert_eq!(pos2, 1);
-
-            let size = Contiguous::size(&journal).await.unwrap();
-            assert_eq!(size, 2);
-
-            // Use ContiguousRead trait
-            let item = ContiguousRead::read(&journal, 0).await.unwrap();
-            assert_eq!(item, 42u64);
-
-            journal.close().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_fixed_journal_replay_through_trait() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal: fixed::Journal<_, u64> = fixed::Journal::init(
-                context,
-                fixed::Config {
-                    partition: "test".to_string(),
-                    items_per_blob: NZU64!(10),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append some items
-            for i in 0..5u64 {
-                Contiguous::append(&mut journal, i * 10).await.unwrap();
-            }
-
-            // Replay through trait
-            use futures::StreamExt;
-            {
-                let stream = Contiguous::replay(&journal, 0, NZUsize!(1024))
-                    .await
-                    .unwrap();
-                futures::pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    items.push(result.unwrap());
-                }
-
-                assert_eq!(items.len(), 5);
-                for (i, (pos, value)) in items.iter().enumerate() {
-                    assert_eq!(*pos, i as u64);
-                    assert_eq!(*value, (i as u64) * 10);
-                }
-            }
-
-            journal.close().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_fixed_journal_prune_through_trait() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal: fixed::Journal<_, u64> = fixed::Journal::init(
-                context,
-                fixed::Config {
-                    partition: "test".to_string(),
-                    items_per_blob: NZU64!(10),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append items
-            for i in 0..20u64 {
-                Contiguous::append(&mut journal, i).await.unwrap();
-            }
-
-            // Prune first 10 items
-            let pruned = Contiguous::prune(&mut journal, 10).await.unwrap();
-            assert!(pruned);
-
-            // Size should still be 20
-            let size = Contiguous::size(&journal).await.unwrap();
-            assert_eq!(size, 20);
-
-            // Reading pruned item should fail
-            let result = ContiguousRead::read(&journal, 5).await;
-            assert!(result.is_err());
-
-            // Reading non-pruned item should work
-            let item = ContiguousRead::read(&journal, 15).await.unwrap();
-            assert_eq!(item, 15);
-
-            journal.close().await.unwrap();
-        });
-    }
+    use test_case::test_case;
 
     #[test]
     fn test_variable_empty_journal() {
@@ -1072,5 +863,164 @@ mod tests {
                 journal.close().await.unwrap();
             }
         });
+    }
+
+    #[test]
+    fn test_current_section_no_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = Variable::<_, u64>::init(
+                context,
+                Config {
+                    partition: "test_current_section".to_string(),
+                    metadata_partition: "test_current_section_meta".to_string(),
+                    items_per_section: NZU64!(10),
+                    compression: None,
+                    codec_config: (),
+                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                    write_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Initially, should be in section 0
+            assert_eq!(journal.current_section(), 0);
+
+            // After appending 5 items, still in section 0
+            for _ in 0..5 {
+                journal.append(42u64).await.unwrap();
+            }
+            assert_eq!(journal.current_section(), 0);
+
+            // After appending 5 more items (total 10), should be in section 1
+            for _ in 0..5 {
+                journal.append(42u64).await.unwrap();
+            }
+            assert_eq!(journal.current_section(), 1);
+
+            // After appending 15 more items (total 25), should be in section 2
+            for _ in 0..15 {
+                journal.append(42u64).await.unwrap();
+            }
+            assert_eq!(journal.current_section(), 2);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_current_section_after_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = Variable::<_, u64>::init(
+                context,
+                Config {
+                    partition: "test_current_section_prune".to_string(),
+                    metadata_partition: "test_current_section_prune_meta".to_string(),
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                    write_buffer: NZUsize!(1024),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Append 12 items (sections 0, 1, 2)
+            for _ in 0..12 {
+                journal.append(42u64).await.unwrap();
+            }
+
+            // Current section should be 2 (positions 10-14 are in section 2)
+            assert_eq!(journal.current_section(), 2);
+
+            // Prune up to position 7 (removes section 0, keeps sections 1+)
+            journal.prune(7).await.unwrap();
+
+            // Should still be in section 2
+            assert_eq!(journal.current_section(), 2);
+
+            // Append a few more items
+            for _ in 0..3 {
+                journal.append(42u64).await.unwrap();
+            }
+
+            // Should now be in section 3 (15 items total)
+            assert_eq!(journal.current_section(), 3);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    // No pruning cases
+    #[test_case(0, 0, 10, 0; "first section start")]
+    #[test_case(5, 0, 10, 0; "first section middle")]
+    #[test_case(9, 0, 10, 0; "first section end")]
+    #[test_case(10, 0, 10, 1; "second section start")]
+    #[test_case(15, 0, 10, 1; "second section middle")]
+    #[test_case(19, 0, 10, 1; "second section end")]
+    #[test_case(20, 0, 10, 2; "third section start")]
+    #[test_case(25, 0, 10, 2; "third section middle")]
+    #[test_case(29, 0, 10, 2; "third section end")]
+    // After pruning one section
+    #[test_case(10, 10, 10, 1; "after prune one: section 1 start")]
+    #[test_case(15, 10, 10, 1; "after prune one: section 1 middle")]
+    #[test_case(19, 10, 10, 1; "after prune one: section 1 end")]
+    #[test_case(20, 10, 10, 2; "after prune one: section 2 start")]
+    #[test_case(25, 10, 10, 2; "after prune one: section 2 middle")]
+    #[test_case(29, 10, 10, 2; "after prune one: section 2 end")]
+    // After pruning two sections
+    #[test_case(20, 20, 10, 2; "after prune two: section 2 start")]
+    #[test_case(25, 20, 10, 2; "after prune two: section 2 middle")]
+    #[test_case(29, 20, 10, 2; "after prune two: section 2 end")]
+    #[test_case(30, 20, 10, 3; "after prune two: section 3 start")]
+    #[test_case(35, 20, 10, 3; "after prune two: section 3 middle")]
+    #[test_case(39, 20, 10, 3; "after prune two: section 3 end")]
+    // Section boundaries
+    #[test_case(0, 0, 10, 0; "boundary: position 0")]
+    #[test_case(10, 0, 10, 1; "boundary: position 10")]
+    #[test_case(20, 0, 10, 2; "boundary: position 20")]
+    #[test_case(30, 0, 10, 3; "boundary: position 30")]
+    #[test_case(10, 10, 10, 1; "boundary after prune: base 10")]
+    #[test_case(20, 10, 10, 2; "boundary after prune: position 20")]
+    #[test_case(30, 10, 10, 3; "boundary after prune: position 30")]
+    #[test_case(20, 20, 10, 2; "boundary after prune: base 20")]
+    #[test_case(30, 20, 10, 3; "boundary after prune: position 30 base 20")]
+    #[test_case(40, 20, 10, 4; "boundary after prune: position 40")]
+    // Edge case: 1 item per section
+    #[test_case(0, 0, 1, 0; "1 item: position 0")]
+    #[test_case(1, 0, 1, 1; "1 item: position 1")]
+    #[test_case(2, 0, 1, 2; "1 item: position 2")]
+    #[test_case(10, 0, 1, 10; "1 item: position 10")]
+    #[test_case(5, 5, 1, 5; "1 item after prune: position 5")]
+    #[test_case(6, 5, 1, 6; "1 item after prune: position 6")]
+    #[test_case(10, 5, 1, 10; "1 item after prune: position 10")]
+    // Position equals oldest_retained_pos
+    #[test_case(0, 0, 10, 0; "position equals base: 0")]
+    #[test_case(10, 10, 10, 1; "position equals base: 10")]
+    #[test_case(20, 20, 10, 2; "position equals base: 20")]
+    #[test_case(100, 100, 10, 10; "position equals base: 100")]
+    fn test_position_to_section_mapping(
+        position: u64,
+        oldest_retained_pos: u64,
+        items_per_section: u64,
+        expected_section: u64,
+    ) {
+        assert_eq!(
+            position_to_section(position, oldest_retained_pos, items_per_section),
+            expected_section
+        );
+    }
+
+    #[test]
+    fn test_const_evaluation() {
+        // Verify the function can be used in const contexts
+        const SECTION: u64 = position_to_section(25, 0, 10);
+        assert_eq!(SECTION, 2);
+
+        const SECTION_AFTER_PRUNE: u64 = position_to_section(25, 20, 10);
+        assert_eq!(SECTION_AFTER_PRUNE, 2);
     }
 }
