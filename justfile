@@ -42,11 +42,7 @@ test *args='':
 
 # Test the Rust documentation
 test-docs *args='':
-  if [ -z "{{args}}" ]; then
-    cargo test --doc --all --locked
-  else
-    cargo test --doc --locked {{args}}
-  fi
+  if [ -z "{{args}}" ]; then cargo test --doc --all --locked; else cargo test --doc --locked {{args}}; fi
 
 # Lint the Rust documentation
 check-docs *args='':
