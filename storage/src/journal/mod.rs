@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+pub mod contiguous;
 pub mod fixed;
 pub mod variable;
 
