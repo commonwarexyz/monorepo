@@ -198,10 +198,12 @@ impl SupervisionTree {
 
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(self: &Arc<Self>, aborter: Aborter) {
-        match {
+        let result = {
             let mut inner = self.inner.lock().unwrap();
             inner.set_task(aborter)
-        } {
+        };
+
+        match result {
             Ok(activated) => {
                 if activated {
                     Self::on_activation(self);
