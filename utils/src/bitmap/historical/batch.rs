@@ -125,7 +125,7 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             .active_batch
             .as_ref()
             .map(|b| b.projected_len)
-            .unwrap_or(0)
+            .expect("active batch must exist since we have this guard")
     }
 
     /// Returns true if the bitmap would be empty after committing this batch.
