@@ -103,6 +103,10 @@ impl SupervisionTree {
                     // Keep the newly spawned task attached to its parent.
                     return true;
                 }
+                if Self::has_descendant_task(&child) {
+                    // This branch already supervises running work; keep it attached to the parent.
+                    return true;
+                }
 
                 {
                     let mut child_inner = child.inner.lock().unwrap();
@@ -119,6 +123,24 @@ impl SupervisionTree {
 
         let mut to_inner = to.inner.lock().unwrap();
         to_inner.children.extend(adopted);
+    }
+
+    fn has_descendant_task(node: &Arc<Self>) -> bool {
+        let children = {
+            let inner = node.inner.lock().unwrap();
+            if inner.task.is_some() {
+                return true;
+            }
+            inner.children.clone()
+        };
+        for weak in children {
+            if let Some(child) = weak.upgrade() {
+                if Self::has_descendant_task(&child) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Records a supervised task so it can be aborted alongside the current context.
