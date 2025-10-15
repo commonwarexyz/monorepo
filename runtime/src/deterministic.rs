@@ -4,19 +4,19 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
-//! # Pacer
+//! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to
-//! the runtime that progress has stalled because no pending tasks can make progress (i.e. progress
-//! depends on an event unknown to the runtime). To support testing these applications, the runtime
-//! can be built with the `external` feature enabled to execute tasks (often annotated with `pace()`) at
-//! "realtime" rather than "simulated time".
+//! the runtime that progress has stalled because no pending tasks can make progress and/or
+//! that futures resolve at variable latency (which in turn triggers non-deterministic execution).
 //!
-//! "Realtime" here means the runtime sleeps for [Config::cycle] after each iteration of the event loop
-//! (rather than just incrementing the current time). This means that time could drift from elapsed time
-//! as a function of how long it takes to process tasks in a given iteration.
+//! To support such applications, the runtime can be built with the `external` feature to both
+//! sleep for each [Config::cycle] (opting to wait if all futures are pending) and to constrain
+//! the duration of any future to some reproducible latency (with `pace()`).
 //!
-//! **Applications built entirely with runtime should never need to enable this feature.**
+//! **Applications that do not interact with external processes (or are able to mock them) should never
+//! need to enable this feature. It is commonly used when tests consensus with external execution environments
+//! that use their own runtime (but are deterministic over some set of inputs).**
 //!
 //! # Example
 //!
