@@ -1,35 +1,58 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
         any::fixed::{ordered::Any, Config},
         verify_proof,
     },
-    mmr::{Location, StandardHasher as Standard},
+    mmr::{Location, Position, Proof, StandardHasher as Standard},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU64,
+};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
 
+const MAX_OPS: usize = 25;
+
 #[derive(Arbitrary, Debug, Clone)]
 enum AdbOperation {
-    Update { key: RawKey, value: RawValue },
-    Delete { key: RawKey },
+    Update {
+        key: RawKey,
+        value: RawValue,
+    },
+    Delete {
+        key: RawKey,
+    },
     Commit,
     OpCount,
     Root,
-    Proof { start_loc: u64, max_ops: u64 },
-    Get { key: RawKey },
-    GetSpan { key: RawKey },
+    Proof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
+    ArbitraryProof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+        proof_size: u64,
+        digests: Vec<[u8; 32]>,
+    },
+    Get {
+        key: RawKey,
+    },
+    GetSpan {
+        key: RawKey,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -67,7 +90,7 @@ fn fuzz(data: FuzzInput) {
         let mut uncommitted_ops = 0;
         let mut last_known_op_count = Location::new(0).unwrap();
 
-        for op in &data.operations {
+        for op in data.operations.iter().take(MAX_OPS) {
             match op {
                 AdbOperation::Update { key, value } => {
                     let k = Key::new(*key);
@@ -128,7 +151,7 @@ fn fuzz(data: FuzzInput) {
                     let actual_op_count = adb.op_count();
 
                     // Only generate proof if ADB has operations and valid parameters
-                    if actual_op_count > 0 && *max_ops > 0 {
+                    if actual_op_count > 0 {
                         // Ensure all operations are committed before generating proof
                         if uncommitted_ops > 0 {
                             adb.commit().await.expect("commit should not fail");
@@ -140,10 +163,9 @@ fn fuzz(data: FuzzInput) {
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
-                        let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
-                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
+                            .proof(adjusted_start, *max_ops)
                             .await
                             .expect("proof should not fail");
 
@@ -155,8 +177,42 @@ fn fuzz(data: FuzzInput) {
                                 &log,
                                 &current_root
                             ),
-                            "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
+                            "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                         );
+                    }
+                }
+
+                AdbOperation::ArbitraryProof { start_loc, max_ops , proof_size, digests} => {
+                    let actual_op_count = adb.op_count();
+
+                    let proof = Proof {
+                        size: Position::new(*proof_size),
+                        digests: digests.iter().map(|d| Digest::from(*d)).collect(),
+                    };
+
+                    // Only generate proof if ADB has operations and valid parameters
+                    if actual_op_count > 0 {
+                        if uncommitted_ops > 0 {
+                            adb.commit().await.expect("commit should not fail");
+                            last_known_op_count = adb.op_count();
+                            uncommitted_ops = 0;
+                        }
+
+                        let current_root = adb.root(&mut hasher);
+                        let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
+
+                        if let Ok(res) = adb
+                            .proof(adjusted_start, *max_ops)
+                            .await {
+                                let _ = verify_proof(
+                                    &mut hasher,
+                                    &proof,
+                                    adjusted_start,
+                                    &res.1,
+                                    &current_root
+                                );
+
+                        }
                     }
                 }
 
