@@ -201,9 +201,9 @@ impl<const N: usize> BitMap<N> {
             let excess = state.len() - target_len;
             let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
 
-            // If current chunk is empty and we need to remove at least a full chunk, pop entire chunk
+            // If at chunk boundary and we need to remove at least a full chunk, pop entire chunk
             if next_bit == 0 && excess >= Prunable::<N>::CHUNK_SIZE_BITS {
-                state.pop(); // This removes the empty chunk
+                state.pop_chunk();
             } else {
                 // Otherwise pop individual bits
                 state.pop();

@@ -195,6 +195,15 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push_chunk(chunk);
     }
 
+    /// Remove and return the last complete chunk from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bitmap has fewer than `CHUNK_SIZE_BITS` bits or if not chunk-aligned.
+    pub fn pop_chunk(&mut self) -> [u8; N] {
+        self.bitmap.pop_chunk()
+    }
+
     /* Pruning */
 
     /// Prune all complete chunks before the chunk containing the given bit.
@@ -813,6 +822,87 @@ mod tests {
         }
 
         assert!(prunable.is_empty());
+    }
+
+    #[test]
+    fn test_pop_chunk() {
+        let mut prunable: Prunable<4> = Prunable::new();
+        const CHUNK_SIZE: u64 = Prunable::<4>::CHUNK_SIZE_BITS;
+
+        // Test 1: Pop a single chunk and verify it returns the correct data
+        let chunk1 = [0xAA, 0xBB, 0xCC, 0xDD];
+        prunable.push_chunk(&chunk1);
+        assert_eq!(prunable.len(), CHUNK_SIZE);
+        let popped = prunable.pop_chunk();
+        assert_eq!(popped, chunk1);
+        assert_eq!(prunable.len(), 0);
+        assert!(prunable.is_empty());
+
+        // Test 2: Pop multiple chunks in reverse order
+        let chunk2 = [0x11, 0x22, 0x33, 0x44];
+        let chunk3 = [0x55, 0x66, 0x77, 0x88];
+        let chunk4 = [0x99, 0xAA, 0xBB, 0xCC];
+
+        prunable.push_chunk(&chunk2);
+        prunable.push_chunk(&chunk3);
+        prunable.push_chunk(&chunk4);
+        assert_eq!(prunable.len(), CHUNK_SIZE * 3);
+
+        assert_eq!(prunable.pop_chunk(), chunk4);
+        assert_eq!(prunable.len(), CHUNK_SIZE * 2);
+
+        assert_eq!(prunable.pop_chunk(), chunk3);
+        assert_eq!(prunable.len(), CHUNK_SIZE);
+
+        assert_eq!(prunable.pop_chunk(), chunk2);
+        assert_eq!(prunable.len(), 0);
+
+        // Test 3: Verify data integrity when popping chunks
+        prunable = Prunable::new();
+        let first_chunk = [0xAA, 0xBB, 0xCC, 0xDD];
+        let second_chunk = [0x11, 0x22, 0x33, 0x44];
+        prunable.push_chunk(&first_chunk);
+        prunable.push_chunk(&second_chunk);
+
+        // Pop the second chunk, verify it and that first chunk is intact
+        assert_eq!(prunable.pop_chunk(), second_chunk);
+        assert_eq!(prunable.len(), CHUNK_SIZE);
+
+        for i in 0..CHUNK_SIZE {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = i % 8;
+            let expected = (first_chunk[byte_idx] >> bit_idx) & 1 == 1;
+            assert_eq!(prunable.get_bit(i), expected);
+        }
+
+        assert_eq!(prunable.pop_chunk(), first_chunk);
+        assert_eq!(prunable.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot pop chunk when not chunk aligned")]
+    fn test_pop_chunk_not_aligned() {
+        let mut prunable: Prunable<4> = Prunable::new();
+
+        // Push a full chunk plus one bit
+        prunable.push_chunk(&[0xFF; 4]);
+        prunable.push(true);
+
+        // Should panic because not chunk-aligned
+        prunable.pop_chunk();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot pop chunk: bitmap has fewer than CHUNK_SIZE_BITS bits")]
+    fn test_pop_chunk_insufficient_bits() {
+        let mut prunable: Prunable<4> = Prunable::new();
+
+        // Push only a few bits (less than a full chunk)
+        prunable.push(true);
+        prunable.push(false);
+
+        // Should panic because we don't have a full chunk to pop
+        prunable.pop_chunk();
     }
 
     #[test]
