@@ -53,6 +53,8 @@ still be able to recover it, by combining their halves.
 We could extend the logic further still: each of the $m$ participants could hold
 $\frac{1}{m}$ of the data.
 All together, the participants hold it all, distributed as thinly as possible.
+(They do still need to communicate to recover the data, of course, but it is
+recoverable).
 
 In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m}$ = D$,
 quite the improvement.
@@ -77,13 +79,13 @@ One follower being able to block transmission is not acceptable.
 
 From here, we reach to using a _coding scheme_.
 This scheme takes in a message of $n$ _symbols_---we shall revisit the term,
-but think of it like a byte, or some other small piece of data---and produce
+but think of it like a small, consistently sized piece of data, e.g. a byte---and produce
 $m \geq n$ symbols.
 A useful coding scheme has the property that given any $n$ of these $m$ symbols,
 we can recover the original message.
 
 As an example, a _Reed-Solomon_ code consists of treating the data as a list of
-$n$ field elements (serving as the aforementioned symbols) which define
+$n$ field elements (essentially, elements of some set where addition, multiplication, and division make sense) which define
 the polynomial:
 
 $$
@@ -166,7 +168,7 @@ This could be used for consensus, like the hash of the data itself often is.
 
 So far, our leader encodes the data into shards, distributes them, and given a
 large enough subset of them, we can recover the data.
-We also know that malicious follower cannot tamper with the data, because they must prove
+We also know that a malicious follower cannot tamper with the data, because they must prove
 that their shard is what the leader committed to.
 
 But, what if the leader is malicious? What if instead of encoding data into shards, they simply made the
