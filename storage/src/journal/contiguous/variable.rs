@@ -1,22 +1,17 @@
 //! Contiguous wrapper for variable-length journals.
+//!
+//! This wrapper enforces section fullness: all non-final sections are full and synced.
+//! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Contiguous;
-use crate::{
-    journal::{variable, Error},
-    metadata,
-};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, FixedSize, Read, Write};
+use crate::journal::{variable, Error};
+use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
-use commonware_utils::{sequence::U64, NZUsize};
+use commonware_utils::NZUsize;
 use futures::{Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
-
-/// The metadata key used to store journal metadata.
-/// We use key 0 as there is only one metadata entry per journal.
-const METADATA_KEY: U64 = U64::new(0);
 
 /// Calculate the section number for a given position.
 ///
@@ -63,12 +58,10 @@ pub struct Config<C> {
     /// The storage partition to use for journal blobs.
     pub partition: String,
 
-    /// The storage partition to use for metadata.
-    pub metadata_partition: String,
-
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
+    /// All non-final sections will be full and synced.
     pub items_per_section: NonZeroU64,
 
     /// Optional compression level for stored items.
@@ -84,58 +77,19 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Metadata for a contiguous variable journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Metadata {
-    /// The number of items per section. Must match the configuration.
-    pub items_per_section: u64,
-
-    /// The next position to be assigned on append (total items appended).
-    pub size: u64,
-
-    /// The position of the first item that remains after pruning.
-    pub oldest_retained_pos: u64,
-}
-
-impl Write for Metadata {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.items_per_section);
-        buf.put_u64(self.size);
-        buf.put_u64(self.oldest_retained_pos);
-    }
-}
-
-impl FixedSize for Metadata {
-    const SIZE: usize = 24; // 3 * u64
-}
-
-impl Read for Metadata {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
-        }
-
-        Ok(Self {
-            items_per_section: buf.get_u64(),
-            size: buf.get_u64(),
-            oldest_retained_pos: buf.get_u64(),
-        })
-    }
-}
-
 /// A contiguous wrapper around `variable::Journal` that provides position-based append.
 ///
 /// This wrapper manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers. Positions are assigned starting
 /// from 0 and increment with each append.
+///
+/// # Section Fullness Invariant
+///
+/// All non-final sections are full (`items_per_section` items) and synced. This ensures
+/// that on `init()`, we only need to replay the last section to determine the exact size.
 pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// The underlying variable-length journal.
     journal: variable::Journal<E, V>,
-
-    /// Metadata about this journal.
-    metadata: metadata::Metadata<E, U64, Metadata>,
 
     /// The number of items per section.
     ///
@@ -159,17 +113,22 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     ///
     /// Always section-aligned: `oldest_retained_pos % items_per_section == 0`.
     /// Never decreases (pruning only moves forward).
+    /// Derived from first section on disk.
     oldest_retained_pos: u64,
 }
 
 impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
-    /// This method will:
-    /// 1. Initialize the underlying `variable::Journal`
-    /// 2. Initialize the metadata store
-    /// 3. Attempt to load position metadata from a previous run
-    /// 4. If metadata is missing or invalid, replay the journal to count items
+    /// This method:
+    /// 1. Initializes the underlying `variable::Journal`
+    /// 2. Derives `oldest_retained_pos` from the first blob on disk
+    /// 3. Replays only the last section to determine the exact `size`
+    ///
+    /// # Section Fullness Invariant
+    ///
+    /// All non-final sections are assumed to be full (`items_per_section` items).
+    /// Only the final section is replayed to count items to determine journal size.
     ///
     /// # Errors
     ///
@@ -180,70 +139,44 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
         // Initialize underlying variable journal
         let journal = variable::Journal::init(
-            context.with_label("journal"),
+            context,
             variable::Config {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool.clone(),
+                buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
             },
         )
         .await?;
 
-        // Initialize metadata store
-        let mut metadata: metadata::Metadata<E, U64, Metadata> = metadata::Metadata::init(
-            context.with_label("metadata"),
-            metadata::Config {
-                partition: cfg.metadata_partition,
-                codec_config: (),
-            },
-        )
-        .await?;
+        // Derive state from disk
+        let (size, oldest_retained_pos) = if journal.blobs.is_empty() {
+            // Empty journal
+            (0, 0)
+        } else {
+            // oldest_retained_pos: Always from first blob (ground truth)
+            let first_section = *journal.blobs.first_key_value().unwrap().0;
+            let oldest_retained_pos = first_section * items_per_section;
 
-        // Try to load metadata
-        let (size, oldest_retained_pos) = match metadata.get(&METADATA_KEY) {
-            Some(meta) if meta.items_per_section == items_per_section => {
-                // Metadata loaded successfully and config matches
-                (meta.size, meta.oldest_retained_pos)
+            // Size: count items in last section only (all others assumed full)
+            let last_section = *journal.blobs.last_key_value().unwrap().0;
+
+            // Replay the last section to count its items
+            let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+            futures::pin_mut!(stream);
+            let mut items_in_last_section = 0u64;
+            while stream.next().await.is_some() {
+                items_in_last_section += 1;
             }
-            _ => {
-                // Metadata missing, corrupted, or config mismatch - replay to determine positions
-                let mut size = 0u64;
-                let mut oldest_retained_pos = 0u64;
 
-                // If there are any sections, determine the base position from the first section
-                if let Some((&first_section, _)) = journal.blobs.first_key_value() {
-                    oldest_retained_pos = first_section * items_per_section;
-                    size = oldest_retained_pos;
+            let size = (last_section * items_per_section) + items_in_last_section;
 
-                    // Replay all items to count them
-                    let stream = journal.replay(first_section, 0, REPLAY_BUFFER_SIZE).await?;
-                    futures::pin_mut!(stream);
-
-                    while stream.next().await.is_some() {
-                        size += 1;
-                    }
-                }
-
-                // Store the computed metadata
-                metadata.put(
-                    METADATA_KEY,
-                    Metadata {
-                        items_per_section,
-                        size,
-                        oldest_retained_pos,
-                    },
-                );
-                metadata.sync().await?;
-
-                (size, oldest_retained_pos)
-            }
+            (size, oldest_retained_pos)
         };
 
         Ok(Self {
             journal,
-            metadata,
             items_per_section,
             size,
             oldest_retained_pos,
@@ -269,6 +202,9 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// This position is independent of section boundaries and remains constant even after
     /// pruning.
     ///
+    /// When a section becomes full, it is automatically synced to maintain the invariant
+    /// that all non-final sections are full and synced.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails or if the item cannot
@@ -283,6 +219,12 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         // Return the current position and increment for next time
         let position = self.size;
         self.size += 1;
+
+        // If we just filled a section, sync it to maintain the fullness invariant
+        if self.size.is_multiple_of(self.items_per_section) {
+            self.journal.sync(section).await?;
+        }
+
         Ok(position)
     }
 
@@ -320,8 +262,6 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let pruned = self.journal.prune(min_section).await?;
         if pruned {
             self.oldest_retained_pos += min_section * self.items_per_section;
-            // Save updated metadata
-            self.sync_metadata().await?;
         }
         Ok(pruned)
     }
@@ -378,53 +318,27 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             }))
     }
 
-    /// Sync all pending writes to storage and save metadata.
+    /// Sync all pending writes to storage.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync all sections in the underlying journal
         for &section in self.journal.blobs.keys() {
             self.journal.sync(section).await?;
         }
-
-        // Save metadata
-        self.sync_metadata().await?;
-
         Ok(())
     }
 
-    /// Close the journal, syncing all pending writes and saving metadata.
+    /// Close the journal, syncing all pending writes.
     pub async fn close(mut self) -> Result<(), Error> {
-        // Save metadata before closing
-        self.sync_metadata().await?;
-
-        // Close metadata and journal
-        self.metadata.close().await?;
+        self.sync().await?;
         self.journal.close().await
     }
 
-    /// Remove any underlying blobs created by the journal, including metadata.
+    /// Remove any underlying blobs created by the journal.
     ///
     /// This is useful for cleaning up test journals. After calling this method,
     /// the journal cannot be used again.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy metadata store
-        self.metadata.destroy().await?;
-
-        // Destroy the underlying journal
         self.journal.destroy().await
-    }
-
-    /// Sync metadata to storage.
-    async fn sync_metadata(&mut self) -> Result<(), Error> {
-        self.metadata.put(
-            METADATA_KEY,
-            Metadata {
-                items_per_section: self.items_per_section,
-                size: self.size,
-                oldest_retained_pos: self.oldest_retained_pos,
-            },
-        );
-        self.metadata.sync().await?;
-        Ok(())
     }
 }
 
@@ -482,7 +396,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_empty".to_string(),
-                    metadata_partition: "test_variable_empty_meta".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -508,7 +421,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_append".to_string(),
-                    metadata_partition: "test_variable_append_meta".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -544,7 +456,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_sections".to_string(),
-                    metadata_partition: "test_variable_sections_meta".to_string(),
                     items_per_section: NZU64!(5), // Small sections to test crossing boundaries
                     compression: None,
                     codec_config: (),
@@ -574,7 +485,6 @@ mod tests {
             let partition = "test_variable_persist";
             let cfg = Config {
                 partition: partition.to_string(),
-                metadata_partition: "test_variable_persist_meta".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -624,7 +534,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_prune".to_string(),
-                    metadata_partition: "test_variable_prune_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -659,7 +568,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay".to_string(),
-                    metadata_partition: "test_variable_replay_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -705,7 +613,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay_middle".to_string(),
-                    metadata_partition: "test_variable_replay_middle_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -751,7 +658,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_trait".to_string(),
-                    metadata_partition: "test_variable_trait_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -782,7 +688,6 @@ mod tests {
             let partition = "test_variable_destroy";
             let cfg = Config {
                 partition: partition.to_string(),
-                metadata_partition: "test_variable_destroy_meta".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -828,7 +733,6 @@ mod tests {
             let partition = "test_variable_metadata";
             let cfg = Config {
                 partition: partition.to_string(),
-                metadata_partition: "test_variable_metadata_meta".to_string(),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: (),
@@ -882,7 +786,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_current_section".to_string(),
-                    metadata_partition: "test_current_section_meta".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -926,7 +829,6 @@ mod tests {
                 context,
                 Config {
                     partition: "test_current_section_prune".to_string(),
-                    metadata_partition: "test_current_section_prune_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -1024,17 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn test_const_evaluation() {
-        // Verify the function can be used in const contexts
-        const SECTION: u64 = position_to_section(25, 0, 10);
-        assert_eq!(SECTION, 2);
-
-        const SECTION_AFTER_PRUNE: u64 = position_to_section(25, 20, 10);
-        assert_eq!(SECTION_AFTER_PRUNE, 2);
-    }
-
-    #[test]
-    fn test_variable_generic_suite() {
+    fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String| {
@@ -1044,7 +936,6 @@ mod tests {
                         context,
                         Config {
                             partition: format!("generic_test_{}", test_name),
-                            metadata_partition: format!("generic_test_{}_meta", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),

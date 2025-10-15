@@ -63,7 +63,7 @@ mod tests {
     use futures::FutureExt as _;
 
     #[test]
-    fn test_fixed_generic_suite() {
+    fn test_fixed_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String| {
