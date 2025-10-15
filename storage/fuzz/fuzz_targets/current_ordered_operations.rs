@@ -50,6 +50,9 @@ enum CurrentOperation {
     GetSpan {
         key: RawKey,
     },
+    ExclusionProof {
+        key: RawKey,
+    },
 }
 
 const MAX_OPERATIONS: usize = 100;
@@ -296,6 +299,37 @@ fn fuzz(data: FuzzInput) {
                         }
                         Err(e) => {
                             panic!("Unexpected error during key value proof generation: {e:?}");
+                        }
+                    }
+                }
+
+                CurrentOperation::ExclusionProof { key } => {
+                    let k = Key::new(*key);
+
+                    if uncommitted_ops > 0 {
+                        db.commit().await.expect("Commit before exclusion proof should not fail");
+                        last_committed_op_count = db.op_count();
+                        uncommitted_ops = 0;
+                    }
+
+                    let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
+
+                    match db.exclusion_proof(hasher.inner(), &k).await {
+                        Ok((proof, info)) => {
+                            let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
+                                hasher.inner(),
+                                &proof,
+                                &k,
+                                info.clone(),
+                                &current_root,
+                            );
+                            assert!(verification_result, "Key value proof verification failed for key {key:?}");
+                        }
+                        Err(commonware_storage::adb::Error::KeyExists) => {
+                            assert!(expected_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
+                        }
+                        Err(e) => {
+                            panic!("Unexpected error during exclusion proof generation: {e:?}");
                         }
                     }
                 }
