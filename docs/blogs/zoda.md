@@ -18,7 +18,7 @@ As an outline, we'll cover:
 - how to increase efficiency with coding,
 - and, finally, how to get quicker guarantees about the data with [ZODA](https://eprint.iacr.org/2025/034).
 
-In the future post could cover lower-level details of our implementation, like
+In a future post we could cover lower-level details of our implementation, like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
 
@@ -45,7 +45,7 @@ We want the followers to participate in sending the data as well.
 Imagine, after our naive protocol, that a follower crashes, losing their data.
 This is no big problem: the data is present among the other followers, and our lost
 node can communicate with them to recover it.
-In fact, ever other node has all of the data, so you have more information
+In fact, every other node has all of the data, so you have more information
 than required on the network.
 If one node had one half of the data, and some other node the other half, you would
 still be able to recover it, by combining their halves.
@@ -56,7 +56,7 @@ All together, the participants hold it all, distributed as thinly as possible.
 
 In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m}$ = D$,
 quite the improvement.
-If the participants wnat to recover the whole data, each of them will need to
+If the participants want to recover the whole data, each of them will need to
 send their shard to the others, at a cost of $(m - 1) \cdot \frac{D}{m}$ bytes.
 The total amount of data sent by the leader, and then the followers, is
 $D + m \cdot \frac{(m - 1) D}{m} = m \cdot D$.
@@ -101,14 +101,14 @@ With some algebra, any $n$ of these evaluations can be interpolated back into
 the original polynomial $d(X)$, whose coefficients spell out our message.
 
 These details are not essential: what matters is that we take $n$ symbols,
-encode them into $m$, such that any $n$ of the encode symbols are good enough
+encode them into $m$, such that any $n$ of the encoded symbols are good enough
 to recover the originals.
 
 ### Dissemination with Coding
 
 This naturally suggests a scheme in which followers receive encoded symbols,
 allowing recovery with partial information.
-To flesh this out further, we want to accomodate data which may not consist
+To flesh this out further, we want to accommodate data which may not consist
 of precisely $n$ symbols.
 Instead, we assume a matrix of $n \times c$ symbols (which may be padded).
 This matrix can be encoded columnwise, producing a result of size $m \times c$.
@@ -145,7 +145,7 @@ mathematically, and cognitively, to the point where implementations often
 don't contain procedures for decoding with errors at all.
 
 To avoid the need to correct errors, we can use a trick:
-instead of decoding we bad shards, we could detect that they've been corrupted,
+instead of decoding with bad shards, we could detect that they've been corrupted,
 and treat them as missing instead.
 
 If the followers received a hash of each shard, then they could tell
@@ -164,7 +164,7 @@ This could be used for consensus, like the hash of the data itself often is.
 
 ### Bad Leaders
 
-So far, ourleader encodes the data into shards, distributes them, and given a
+So far, our leader encodes the data into shards, distributes them, and given a
 large enough subset of them, we can recover the data.
 We also know that malicious follower cannot tamper with the data, because they must prove
 that their shard is what the leader committed to.
@@ -208,7 +208,7 @@ recovering it, but in providing assurance that our shard results from an encodin
 
 ### Some Details and Intuition
 
-The inner workingg of the protocol are not necessary to understand its utility nor
+The inner workings of the protocol are not necessary to understand its utility nor
 application, but are simple enough to be understood at a high level of operation.
 
 We continue in modelling our data, $X$, as a matrix of dimension $n \times c$,
@@ -219,7 +219,7 @@ The rows of $Y$ are committed to, and this commitment can serve as a source
 of randomness in what follows, according to the _Fiat-Shamir_ paradigm.
 
 Whereas in the plain coding scheme, we received one particular row of $Y$,
-here we receive $S$ rows, samplesd at random.
+here we receive $S$ rows, sampled at random.
 (We may modify $m$ and $n$ to accomodate this fact).
 We also receive proofs of inclusion for each row.
 
@@ -268,7 +268,7 @@ since the cheater will not know where they need to fake the outcome.
 
 ### Completing the Protocol
 
-To complete th sketch of the protocol let's look at how we handle
+To complete the sketch of the protocol let's look at how we handle
 the shards, collectively.
 Rather than have each follower sample $S$ rows at random, we instead shuffle the rows,
 and partition it into chunks of size $S$.
