@@ -82,23 +82,23 @@
         <p>An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee as well as refreshing secret key material amongst active participants. Validator committees are rarely static in practice, and networks need to adapt without touching the brakes.</p>
         <p>Validator committee reconfiguration normally entails injecting out-of-band key material generated and maintained by the new validators. <code>examples/reshare</code> shows a different path: drive a continuous BLS12-381 reshare entirely through the replicated log and require validators to rotate key material every epoch.</p>
         <img src ="../imgs/reshare.png" alt="Reshare Flow" />
-        <p>The example combines <code>consensus::threshold_simplex</code>, <code>cryptography::bls12381::dkg</code>, and <code>p2p::authenticated</code> into a single demonstration that you can run end to end. Because every interaction in the reshare lands in the log, each participant gains an auditable transcript of who proposed what, which shares were acknowledged, and how the next committee was formed.</p>
+        <p>The example combines <code>consensus::threshold_simplex</code>, <code>cryptography::bls12381::dkg</code>, and <code>p2p::authenticated</code> into a single demonstration that you can run end to end. Because every interaction in the reshare is in the log, each participant has a transcript of who proposed what, which shares were acknowledged, and how the next committee was formed.</p>
 
         <h2>A refresher on <code>consensus::threshold_simplex</code> and <code>examples/vrf</code></h2>
-        <p>The <code>consensus::threshold_simplex</code> module utilizes BLS12-381 threshold signatures to enable a group of validators to collectively sign consensus messages. Each active validator has a share of the private key, and a predefined threshold of these shares is required to produce a valid signature for a given message.</p>
-        <p><a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>examples/vrf</code></a> showcases a continuous key reshare process to generate randomness, but with a key caveat - participants trust a central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>" to track commitments, acknowledgements, and reveals.</p>
+        <p>The <code>consensus::threshold_simplex</code> module utilizes BLS12-381 threshold signatures so that a group of validators can sign consensus messages. Each active validator has a share of the signing key. A threshold of these shares is required to sign a message.</p>
+        <p><a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>examples/vrf</code></a> showcases a continuous key reshare process to generate randomness, but with one flaw: participants trust a central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>" to track commitments, acknowledgements, and reveals.</p>
 
         <h2>Epoching</h2>
-        <p>Recently, <a href="https://x.com/B_Chou">Brendan Chou</a> added support for height-based epoching in <code>consensus::threshold_simplex</code>. This feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the perfect platform to perform progressive BLS key reshare as a means of facilitating committee reconfiguration.</p>
+        <p>Recently, <a href="https://x.com/B_Chou">Brendan Chou</a> added support for height-based epoching in <code>consensus::threshold_simplex</code>. This feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the perfect platform to perform progressive BLS key reshare to reconfigure the committee.</p>
         <p>This approach was derived from <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden and Ertem Nusret Tas.</p>
 
         <h2>Piggybacking on Consensus</h2>
-        <p>To facilitate safe reconfiguration of the validator committee in a <code>consensus::threshold_simplex</code> engine, <code>cryptography::bls12381::dkg</code> can be employed to securely generate new shares for the next committee.</p>
-        <p>Each epoch begins with a threshold of validators acting as dealers and players for the next BLS polynomial. Dealers encrypt fresh shares to the upcoming committee (players), players acknowledge receipt, and anyone who misbehaves is deterministically flagged by participants. Those transcripts are bundled into a compact reshare outcome and proposed alongside normal blocks.</p>
-        <p>Consensus handles the rest. Once the reshare outcomes are included within finalized blocks, every replica learns the same public polynomial, optional local share (if part of the current committee), and participant list for the next epoch.</p>
+        <p>To safely reconfigure the validator committee in a <code>consensus::threshold_simplex</code> engine, we use <code>cryptography::bls12381::dkg</code> to securely generate new shares for the next committee.</p>
+        <p>Each epoch begins with a threshold of validators acting as dealers and players for the next BLS shares. Dealers encrypt fresh shares to the upcoming committee (players), players acknowledge these shares, and anyone who misbehaves is flagged by participants. Those transcripts are bundled into a compact result and proposed alongside normal blocks.</p>
+        <p>Consensus handles the rest. Once the reshare outcomes are included within finalized blocks, every replica learns the same commitment to the shares, optional local share (if part of the current committee), and participant list for the next epoch.</p>
         <img src="../imgs/reshare_actors.png" alt="Actor Interactions" />
         <p>
-            Driving resharing through the replicated log buys:
+            Driving resharing through the replicated log provides:
             <ol>
                 <li><b>accountability</b>: cryptographic receipts for every dealer's outcome are included in the replicated log.</li>
                 <li><b>availability</b>: the network keeps producing blocks while it prepares the next quorum, so reconfiguration/reshare does not compete with liveness.</li>
@@ -107,7 +107,7 @@
         </p>
 
         <h2>Trying It Locally</h2>
-        <p>You can run the example locally by generating participant configurations and launching the validators with the command emitted by the setup step. Within a few minutes the logs will show share distributions, resumed consensus rounds, and epoch transitions as the network continually rotates the committee with refreshed shares.</p>
+        <p>You can run the example by generating participant configurations and launching the validators with the command emitted by the setup step. Within a few minutes the logs will show share distributions, resumed consensus rounds, and epoch transitions as the network continually rotates the committee with refreshed shares.</p>
         <pre><code>
 $ git clone git@github.com:commonwarexyz/monorepo.git && cd monorepo
 $ cargo run --bin commonware-reshare setup
@@ -115,7 +115,7 @@ $ cargo run --bin commonware-reshare setup
         </code></pre>
 
         <h2>What Comes Next</h2>
-        <p>We expect builders to swap in their own selection rules, plug the reshare transcript into application state, and experiment with rotating keys on cadences that were impractical before. If you take the example in a new direction, or uncover interesting corner cases, let us know. Validator networks should be able to evolve in real time, and this example is an invitation to make that the default.</p>
+        <p>We expect builders to use their own selection rules, plug the reshare transcript into application state, and experiment with rotating keys on cadences that were impractical before. If you take the example in a new direction, or uncover interesting corner cases, let us know. Validator networks should be able to evolve in real time, and this example is an invitation to make that the default.</p>
     </div>
 
     <div id="footer-placeholder"></div>
