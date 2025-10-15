@@ -94,7 +94,7 @@ impl<C: PublicKey, D: Digest> Su for Supervisor<C, D> {
         Some(leader)
     }
 
-    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {

@@ -67,10 +67,7 @@ fn bench_insert(c: &mut Criterion) {
     }
 }
 
-fn run_benchmark<I: Index<Value = u64>>(
-    index: &mut I,
-    kvs: &Vec<(<Sha256 as Hasher>::Digest, u64)>,
-) {
+fn run_benchmark<I: Index<Value = u64>>(index: &mut I, kvs: &[(<Sha256 as Hasher>::Digest, u64)]) {
     for (k, v) in kvs {
         index.insert(k, *v);
     }

@@ -47,7 +47,7 @@ impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
         unimplemented!()
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
         Some(&self.validators)
     }
 
