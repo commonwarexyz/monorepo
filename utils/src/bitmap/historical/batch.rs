@@ -67,6 +67,50 @@ pub(super) struct Batch<const N: usize> {
     pub(super) chunks_to_prune: BTreeMap<usize, [u8; N]>,
 }
 
+/// Guard for an active batch on a historical bitmap.
+///
+/// Provides mutable access to an active batch, allowing operations that modify the bitmap
+/// through a diff layer. Changes are not applied to the underlying bitmap until
+/// [commit](Self::commit) is called.
+///
+/// # Lifecycle
+///
+/// The guard **must** be either:
+/// - **Committed**: Call [commit(commit_number)](Self::commit) to apply changes
+///   and store a historical snapshot.
+/// - **Dropped**: Drop without committing to discard all changes.
+///
+/// # Examples
+///
+/// ```
+/// # use commonware_utils::bitmap::historical::BitMap;
+/// let mut bitmap: BitMap<4> = BitMap::new();
+///
+/// // Create a batch guard and make changes
+/// let mut batch = bitmap.start_batch();
+/// batch.push(true);
+/// batch.push(false);
+/// batch.commit(1).unwrap();
+///
+/// // Bitmap is now modified
+/// assert_eq!(bitmap.len(), 2);
+/// ```
+///
+/// ## Discarding Changes
+///
+/// ```
+/// # use commonware_utils::bitmap::historical::BitMap;
+/// let mut bitmap: BitMap<4> = BitMap::new();
+///
+/// {
+///     let mut batch = bitmap.start_batch();
+///     batch.push(true);
+///     // batch dropped here without commit
+/// }
+///
+/// // Bitmap is unchanged
+/// assert_eq!(bitmap.len(), 0);
+/// ```
 #[must_use = "batches must be committed or explicitly dropped"]
 pub struct BatchGuard<'a, const N: usize> {
     pub(super) bitmap: &'a mut BitMap<N>,

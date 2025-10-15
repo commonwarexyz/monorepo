@@ -259,7 +259,7 @@ impl<const N: usize> BitMap<N> {
                     // Chunk didn't exist in target - already handled by pop_to_length.
                     // We can break here because there are no more modifications to apply.
                     // Added can only occur after all Modified. If we encounter Added, we know
-                    // there are no Removed. (diff.changes can't have both Added and Removed.)
+                    // there are no Removed. (diff.chunk_diffs can't have both Added and Removed.)
                     break;
                 }
                 ChunkDiff::Pruned(_) => {
