@@ -529,7 +529,7 @@ impl<
             let Some(validators) = self.validators.participants(self.epoch) else {
                 return Err(Error::UnknownValidators(self.epoch));
             };
-            let mut recipients = validators.clone();
+            let mut recipients = validators.to_vec();
             if self
                 .validators
                 .is_participant(self.epoch, &tip.chunk.sequencer)
@@ -803,7 +803,7 @@ impl<
         // Send the node to all validators
         node_sender
             .send(
-                Recipients::Some(validators.clone()),
+                Recipients::Some(validators.to_vec()),
                 node,
                 self.priority_proposals,
             )

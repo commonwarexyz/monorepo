@@ -120,7 +120,7 @@ fn fuzz(input: FuzzInput) {
                     if bit_count > 0 && !bitmap.is_dirty() {
                         let safe_offset = (bit_offset % (bit_count + 1)).min(bit_count);
                         if safe_offset >= pruned_bits {
-                            bitmap.prune_to_bit(safe_offset);
+                            bitmap.prune_to_bit(safe_offset).unwrap();
                             // Update pruned_bits to match what was actually pruned
                             pruned_bits = bitmap.pruned_bits();
 

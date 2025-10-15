@@ -25,7 +25,7 @@ impl PeakIterator {
     /// # Panics
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
-    /// check_validity first.
+    /// [Position::is_mmr_size] first.
     pub fn new(size: Position) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
@@ -61,47 +61,6 @@ impl PeakIterator {
         last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
     }
 
-    /// Return if an MMR of the given `size` has a valid structure.
-    ///
-    /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
-    /// MMR of the given size have strictly decreasing height, which is a necessary condition for
-    /// MMR validity.
-    pub fn check_validity(size: Position) -> bool {
-        if size == 0 {
-            return true;
-        }
-        let leading_zeros = size.leading_zeros();
-        if leading_zeros == 0 {
-            // size overflow
-            return false;
-        }
-        let start = u64::MAX >> leading_zeros;
-        let mut two_h = 1 << start.trailing_ones();
-        let mut node_pos = start
-            .checked_sub(1)
-            .expect("start should be greater than 0 since we check size !=0 above");
-        while two_h > 1 {
-            if node_pos < size {
-                if two_h == 2 {
-                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
-                    // invalid.
-                    return node_pos == size - 1;
-                }
-                // move to the right sibling
-                node_pos += two_h - 1;
-                if node_pos < size {
-                    // If the right sibling is in the MMR, then it is invalid.
-                    return false;
-                }
-                continue;
-            }
-            // descend to the left child
-            two_h >>= 1;
-            node_pos -= two_h;
-        }
-        true
-    }
-
     // Returns the largest valid MMR size that is no greater than the given size.
     //
     // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
@@ -115,7 +74,7 @@ impl PeakIterator {
         // below, since we no longer have a log(n) bound on the number of iterations.
         assert_ne!(size.leading_zeros(), 0, "overflow");
 
-        while !PeakIterator::check_validity(size) {
+        while !size.is_mmr_size() {
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             size -= 1;
         }
@@ -297,43 +256,6 @@ mod tests {
             }
             last_leaf_pos = *leaf_pos;
         }
-    }
-
-    #[test]
-    fn test_check_validity() {
-        // Build an MMR one node at a time and check that the validity check is correct for all
-        // sizes up to the current size.
-        let mut mmr = Mmr::new();
-        let mut size_to_check = Position::new(0);
-        let mut hasher = Standard::<Sha256>::new();
-        let digest = [1u8; 32];
-        for _i in 0..10000 {
-            while size_to_check != mmr.size() {
-                assert!(
-                    !PeakIterator::check_validity(size_to_check),
-                    "size_to_check: {} {}",
-                    size_to_check,
-                    mmr.size()
-                );
-                size_to_check += 1;
-            }
-            assert!(PeakIterator::check_validity(size_to_check));
-            mmr.add(&mut hasher, &digest);
-            size_to_check += 1;
-        }
-
-        // Test overflow boundaries.
-        assert!(!PeakIterator::check_validity(Position::new(u64::MAX)));
-        assert!(PeakIterator::check_validity(Position::new(u64::MAX >> 1)));
-        assert!(!PeakIterator::check_validity(Position::new(
-            (u64::MAX >> 1) + 1
-        )));
-
-        let largest_valid_size = Position::new(u64::MAX >> 1);
-        assert_eq!(
-            PeakIterator::to_nearest_size(largest_valid_size),
-            largest_valid_size
-        );
     }
 
     #[test]
