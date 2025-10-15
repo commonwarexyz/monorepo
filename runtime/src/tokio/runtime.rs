@@ -4,6 +4,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
@@ -16,7 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, Aborter, Panicker},
-    Clock, Error, Handle, Model, Pacer, SinkOf, StreamOf, METRICS_PREFIX,
+    Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -26,11 +28,12 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
+#[cfg(feature = "external")]
+use std::ops::Range;
 use std::{
     env,
     future::Future,
     net::SocketAddr,
-    ops::Range,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -560,6 +563,7 @@ impl Clock for Context {
     }
 }
 
+#[cfg(feature = "external")]
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,

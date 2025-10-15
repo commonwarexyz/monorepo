@@ -91,16 +91,50 @@ jobs:
     - name: Run doc tests
       run: just test-docs ${{ matrix.flags }}
 
+  Tests-Subset:
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\")"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+          - os: windows-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+          - os: macos-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.104
+    - name: Run subset tests
+      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+    - name: Run subset doc tests
+      run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
+
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: Tests
+    needs: [Tests, Tests-Subset]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
             echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          if [ "${{ needs.Tests-Subset.result }}" != "success" ]; then
+            echo "Tests-Subset failed or were cancelled"
             exit 1
           fi
           echo "All tests passed successfully!"

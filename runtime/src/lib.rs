@@ -25,11 +25,12 @@
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
+#[cfg(feature = "external")]
+use std::ops::Range;
 use std::{
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
-    ops::Range,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -307,53 +308,55 @@ pub trait Clock: Clone + Send + Sync + 'static {
     }
 }
 
-/// Interface that runtimes can implement to constrain the latency a future
-/// takes to execute (allowing a runtime to "pace" the execution of a future
-/// driven by an external process).
-pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-    /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
-    /// the future is not yet ready at the desired time of completion, the runtime will block until
-    /// the future is ready.
-    ///
-    /// In [crate::deterministic], this is used to ensure interactions with external systems can
-    /// be interacted with deterministically. In [crate::tokio], this is a passthrough (allows
-    /// multiple runtimes to be tested with no code changes).
-    ///
-    /// # Warning
-    ///
-    /// Because `pace` will block if the future is not ready, it is important that the future's completion
-    /// doesn't require anything in the current thread to complete (or else it will deadlock).
-    fn pace<'a, F, T>(
-        &'a self,
-        range: Range<Duration>,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'a
-    where
-        F: Future<Output = T> + Send + 'a,
-        T: Send + 'a;
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "external")] {
+        /// Interface that runtimes can implement to constrain the execution latency of a future.
+        pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+            /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
+            /// the future is not yet ready at the desired time of completion, the runtime will block until
+            /// the future is ready.
+            ///
+            /// In [crate::deterministic], this is used to ensure interactions with external systems can
+            /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
+            /// multiple runtimes to be tested with no code changes).
+            ///
+            /// # Warning
+            ///
+            /// Because `pace` blocks if the future is not ready, it is important that the future's completion
+            /// doesn't require anything in the current thread to complete (or else it will deadlock).
+            fn pace<'a, F, T>(
+                &'a self,
+                range: Range<Duration>,
+                future: F,
+            ) -> impl Future<Output = T> + Send + 'a
+            where
+                F: Future<Output = T> + Send + 'a,
+                T: Send + 'a;
+        }
 
-/// Extension trait that makes it more ergonomic to use [Pacer].
-///
-/// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
-/// runtime should delay completion relative to the clock.
-pub trait FutureExt: Future + Send + Sized {
-    /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
-    fn pace<'a, E>(
-        self,
-        pacer: &'a E,
-        range: Range<Duration>,
-    ) -> impl Future<Output = Self::Output> + Send + 'a
-    where
-        E: Pacer + 'a,
-        Self: Send + 'a,
-        Self::Output: Send + 'a,
-    {
-        pacer.pace(range, self)
+        /// Extension trait that makes it more ergonomic to use [Pacer].
+        ///
+        /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
+        /// runtime should delay completion relative to the clock.
+        pub trait FutureExt: Future + Send + Sized {
+            /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
+            fn pace<'a, E>(
+                self,
+                pacer: &'a E,
+                range: Range<Duration>,
+            ) -> impl Future<Output = Self::Output> + Send + 'a
+            where
+                E: Pacer + 'a,
+                Self: Send + 'a,
+                Self::Output: Send + 'a,
+            {
+                pacer.pace(range, self)
+            }
+        }
+
+        impl<F> FutureExt for F where F: Future + Send {}
     }
 }
-
-impl<F> FutureExt for F where F: Future + Send {}
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
 pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
