@@ -1,0 +1,369 @@
+//! Generic test suite for Contiguous trait implementations.
+
+use super::{Contiguous, Error};
+use commonware_utils::NZUsize;
+use futures::{future::BoxFuture, StreamExt};
+
+/// Run the full suite of generic tests on a Contiguous implementation.
+///
+/// The factory function receives a test identifier string that should be used
+/// to create unique partitions for each test to avoid conflicts.
+pub(super) async fn run_contiguous_tests<F, J>(factory: F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    test_empty_journal(&factory).await;
+    test_append_and_size(&factory).await;
+    test_sequential_appends(&factory).await;
+    test_replay_from_start(&factory).await;
+    test_replay_from_middle(&factory).await;
+    test_prune_retains_size(&factory).await;
+    test_through_trait(&factory).await;
+    test_replay_after_prune(&factory).await;
+    test_prune_then_append(&factory).await;
+    test_position_stability(&factory).await;
+    test_sync_behavior(&factory).await;
+    test_replay_on_empty(&factory).await;
+    test_replay_at_exact_size(&factory).await;
+    test_multiple_prunes(&factory).await;
+    test_prune_beyond_size(&factory).await;
+}
+
+/// Test that an empty journal has size 0.
+async fn test_empty_journal<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let journal = factory("empty".to_string()).await.unwrap();
+    assert_eq!(journal.size().await.unwrap(), 0);
+}
+
+/// Test that append returns sequential positions and size increments.
+async fn test_append_and_size<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("append_and_size".to_string()).await.unwrap();
+
+    let pos1 = journal.append(100).await.unwrap();
+    let pos2 = journal.append(200).await.unwrap();
+    let pos3 = journal.append(300).await.unwrap();
+
+    assert_eq!(pos1, 0);
+    assert_eq!(pos2, 1);
+    assert_eq!(pos3, 2);
+    assert_eq!(journal.size().await.unwrap(), 3);
+}
+
+/// Test appending many items across section boundaries.
+async fn test_sequential_appends<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("sequential_appends".to_string()).await.unwrap();
+
+    for i in 0..25u64 {
+        let pos = journal.append(i * 10).await.unwrap();
+        assert_eq!(pos, i);
+    }
+
+    assert_eq!(journal.size().await.unwrap(), 25);
+}
+
+/// Test replay from the start of the journal.
+async fn test_replay_from_start<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("replay_from_start".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i * 10).await.unwrap();
+    }
+
+    let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 10);
+    for (i, (pos, value)) in items.iter().enumerate() {
+        assert_eq!(*pos, i as u64);
+        assert_eq!(*value, (i as u64) * 10);
+    }
+}
+
+/// Test replay from the middle of the journal.
+async fn test_replay_from_middle<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("replay_from_middle".to_string()).await.unwrap();
+
+    for i in 0..15u64 {
+        journal.append(i * 10).await.unwrap();
+    }
+
+    let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 8);
+    for (i, (pos, value)) in items.iter().enumerate() {
+        assert_eq!(*pos, (i + 7) as u64);
+        assert_eq!(*value, ((i + 7) as u64) * 10);
+    }
+}
+
+/// Test that size is unchanged after pruning.
+async fn test_prune_retains_size<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("prune_retains_size".to_string()).await.unwrap();
+
+    for i in 0..20u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    let size_before = journal.size().await.unwrap();
+    journal.prune(10).await.unwrap();
+    let size_after = journal.size().await.unwrap();
+
+    assert_eq!(size_before, size_after);
+    assert_eq!(size_after, 20);
+}
+
+/// Test using journal through Contiguous trait methods.
+async fn test_through_trait<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("through_trait".to_string()).await.unwrap();
+
+    let pos1 = Contiguous::append(&mut journal, 42).await.unwrap();
+    let pos2 = Contiguous::append(&mut journal, 100).await.unwrap();
+
+    assert_eq!(pos1, 0);
+    assert_eq!(pos2, 1);
+
+    let size = Contiguous::size(&journal).await.unwrap();
+    assert_eq!(size, 2);
+}
+
+/// Test replay after pruning items.
+async fn test_replay_after_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("replay_after_prune".to_string()).await.unwrap();
+
+    for i in 0..20u64 {
+        journal.append(i * 10).await.unwrap();
+    }
+
+    journal.prune(10).await.unwrap();
+
+    // Replay from a position that may or may not be pruned (section-aligned)
+    // We replay from position 10 which should be safe
+    let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 10);
+    for (i, (pos, value)) in items.iter().enumerate() {
+        assert_eq!(*pos, (i + 10) as u64);
+        assert_eq!(*value, ((i + 10) as u64) * 10);
+    }
+}
+
+/// Test pruning all items then appending new ones.
+async fn test_prune_then_append<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("prune_then_append".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    journal.prune(10).await.unwrap();
+
+    // Append new items after pruning all
+    let pos = journal.append(999).await.unwrap();
+    assert_eq!(pos, 10);
+
+    let size = journal.size().await.unwrap();
+    assert_eq!(size, 11);
+}
+
+/// Test that positions remain stable after pruning and further appends.
+async fn test_position_stability<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("position_stability".to_string()).await.unwrap();
+
+    // Append initial items
+    for i in 0..20u64 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Prune first 10
+    journal.prune(10).await.unwrap();
+
+    // Append more items
+    for i in 20..25u64 {
+        let pos = journal.append(i * 100).await.unwrap();
+        assert_eq!(pos, i);
+    }
+
+    // Replay from position 10 and verify positions
+    let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 15);
+    for (i, (pos, value)) in items.iter().enumerate() {
+        let expected_pos = (i + 10) as u64;
+        assert_eq!(*pos, expected_pos);
+        assert_eq!(*value, expected_pos * 100);
+    }
+}
+
+/// Test sync behavior.
+async fn test_sync_behavior<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("sync_behavior".to_string()).await.unwrap();
+
+    for i in 0..5u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    journal.sync().await.unwrap();
+
+    // Verify operations work after sync
+    let pos = journal.append(100).await.unwrap();
+    assert_eq!(pos, 5);
+
+    let size = journal.size().await.unwrap();
+    assert_eq!(size, 6);
+}
+
+/// Test replay on an empty journal.
+async fn test_replay_on_empty<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let journal = factory("replay_on_empty".to_string()).await.unwrap();
+
+    let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 0);
+}
+
+/// Test replay at exact size position.
+async fn test_replay_at_exact_size<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("replay_at_exact_size".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    let size = journal.size().await.unwrap();
+    let stream = journal.replay(size, NZUsize!(1024)).await.unwrap();
+    futures::pin_mut!(stream);
+
+    let mut items = Vec::new();
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 0);
+}
+
+/// Test multiple prunes with same min_position for idempotency.
+async fn test_multiple_prunes<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("multiple_prunes".to_string()).await.unwrap();
+
+    for i in 0..20u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    let pruned1 = journal.prune(10).await.unwrap();
+    let pruned2 = journal.prune(10).await.unwrap();
+
+    assert!(pruned1);
+    assert!(!pruned2); // Second prune should return false (nothing to prune)
+
+    let size = journal.size().await.unwrap();
+    assert_eq!(size, 20);
+}
+
+/// Test pruning beyond the current size.
+async fn test_prune_beyond_size<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("prune_beyond_size".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    // Prune with min_position > size should be safe
+    journal.prune(100).await.unwrap();
+
+    // Verify journal still works
+    let size = journal.size().await.unwrap();
+    assert_eq!(size, 10);
+
+    let pos = journal.append(999).await.unwrap();
+    assert_eq!(pos, 10);
+}

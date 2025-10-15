@@ -14,6 +14,9 @@ use std::num::NonZeroUsize;
 mod fixed;
 pub mod variable;
 
+#[cfg(test)]
+pub(super) mod tests;
+
 // Re-export public types
 pub use variable::{Config, Variable};
 

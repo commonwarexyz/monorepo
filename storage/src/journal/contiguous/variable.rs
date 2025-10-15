@@ -1,7 +1,10 @@
 //! Contiguous wrapper for variable-length journals.
 
 use super::Contiguous;
-use crate::{journal::variable, journal::Error, metadata};
+use crate::{
+    journal::{variable, Error},
+    metadata,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
@@ -308,12 +311,15 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             return Ok(false);
         }
 
-        let relative_pos = min_position - self.oldest_retained_pos;
+        // Cap min_position to size to maintain the invariant oldest_retained_pos <= size
+        let capped_min_position = min_position.min(self.size);
+
+        let relative_pos = capped_min_position - self.oldest_retained_pos;
         let min_section = relative_pos / self.items_per_section;
 
         let pruned = self.journal.prune(min_section).await?;
         if pruned {
-            self.oldest_retained_pos = min_section * self.items_per_section;
+            self.oldest_retained_pos += min_section * self.items_per_section;
             // Save updated metadata
             self.sync_metadata().await?;
         }
@@ -460,9 +466,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::Contiguous;
+    use crate::journal::contiguous::{tests::run_contiguous_tests, Contiguous};
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
+    use futures::FutureExt as _;
     use test_case::test_case;
 
     #[test]
@@ -1022,5 +1029,32 @@ mod tests {
 
         const SECTION_AFTER_PRUNE: u64 = position_to_section(25, 20, 10);
         assert_eq!(SECTION_AFTER_PRUNE, 2);
+    }
+
+    #[test]
+    fn test_variable_generic_suite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            run_contiguous_tests(move |test_name: String| {
+                let context = context.clone();
+                async move {
+                    Variable::<_, u64>::init(
+                        context,
+                        Config {
+                            partition: format!("generic_test_{}", test_name),
+                            metadata_partition: format!("generic_test_{}_meta", test_name),
+                            items_per_section: NZU64!(10),
+                            compression: None,
+                            codec_config: (),
+                            buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                            write_buffer: NZUsize!(1024),
+                        },
+                    )
+                    .await
+                }
+                .boxed()
+            })
+            .await;
+        });
     }
 }
