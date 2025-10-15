@@ -30,6 +30,8 @@ pub(super) struct CommitDiff<const N: usize> {
 }
 
 /// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
+///
+/// Commit numbers must be strictly monotonically increasing and < u64::MAX.
 pub struct BitMap<const N: usize> {
     /// The current/HEAD state - the one and only full bitmap.
     pub(super) current: Prunable<N>,
@@ -114,6 +116,8 @@ impl<const N: usize> BitMap<N> {
     /// Returns [Error::NonMonotonicCommit] if the commit number is not
     /// greater than the previous commit.
     ///
+    /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
+    ///
     /// # Panics
     ///
     /// Panics if a batch is already active.
@@ -128,7 +132,8 @@ impl<const N: usize> BitMap<N> {
 
     /// Get the bitmap state as it existed at a specific commit.
     ///
-    /// Returns `None` if the commit does not exist.
+    /// Returns `None` if the commit does not exist or if `commit_number` is `u64::MAX`
+    /// (which is reserved and cannot be used as a commit number).
     ///
     /// This reconstructs the historical state by applying reverse diffs backward from
     /// the current state. Each commit's reverse diff describes the state before that
@@ -161,8 +166,8 @@ impl<const N: usize> BitMap<N> {
     /// assert!(!bitmap.get_bit(0));
     /// ```
     pub fn get_at_commit(&self, commit_number: u64) -> Option<Prunable<N>> {
-        // Check if the commit exists
-        if !self.commits.contains_key(&commit_number) {
+        // Check if the commit exists and is valid
+        if commit_number == u64::MAX || !self.commits.contains_key(&commit_number) {
             return None;
         }
 
@@ -171,6 +176,7 @@ impl<const N: usize> BitMap<N> {
 
         // Apply reverse diffs from newest down to target (exclusive)
         // Each reverse diff at commit N describes the state before commit N
+        // Addition can't overflow because commit_number < u64::MAX
         for (_commit, diff) in self.commits.range(commit_number + 1..).rev() {
             self.apply_reverse_diff(&mut state, diff);
         }
@@ -332,7 +338,7 @@ impl<const N: usize> BitMap<N> {
     /// Returns the number of commits removed.
     pub fn prune_commits_before(&mut self, commit_number: u64) -> usize {
         let count = self.commits.len();
-        self.commits.retain(|k, _| *k >= commit_number);
+        self.commits = self.commits.split_off(&commit_number);
         count - self.commits.len()
     }
 

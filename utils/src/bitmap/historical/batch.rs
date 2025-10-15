@@ -124,8 +124,8 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         self.bitmap
             .active_batch
             .as_ref()
-            .map(|b| b.projected_len)
             .expect("active batch must exist since we have this guard")
+            .projected_len
     }
 
     /// Returns true if the bitmap would be empty after committing this batch.
@@ -140,8 +140,8 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         self.bitmap
             .active_batch
             .as_ref()
-            .map(|b| b.projected_pruned_chunks)
-            .unwrap_or(0)
+            .expect("active batch must exist since we have this guard")
+            .projected_pruned_chunks
     }
 
     /// Get a bit value with read-through semantics.
@@ -468,7 +468,14 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     ///
     /// Returns [Error::NonMonotonicCommit] if the commit number is not
     /// greater than the previous commit.
+    ///
+    /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
     pub fn commit(mut self, commit_number: u64) -> Result<(), Error> {
+        // Validate commit number is not reserved
+        if commit_number == u64::MAX {
+            return Err(Error::ReservedCommitNumber);
+        }
+
         // Validate commit number is monotonically increasing
         if let Some(&max_commit) = self.bitmap.commits.keys().next_back() {
             if commit_number <= max_commit {

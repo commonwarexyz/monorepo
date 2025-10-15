@@ -1030,3 +1030,30 @@ fn test_pop_into_pruned_region_panics() {
         batch.pop();
     }
 }
+
+#[test]
+fn test_commit_u64_max_is_reserved() {
+    let mut bitmap: BitMap<4> = BitMap::new();
+
+    // Verify that u64::MAX cannot be used as a commit number
+    let result = bitmap.with_batch(u64::MAX, |b| {
+        b.push(true);
+    });
+
+    assert!(matches!(result, Err(Error::ReservedCommitNumber)));
+    assert_eq!(bitmap.len(), 0); // Batch was rejected
+
+    // Verify that u64::MAX - 1 can be used
+    let result = bitmap.with_batch(u64::MAX - 1, |b| {
+        b.push(true);
+    });
+
+    assert!(result.is_ok());
+    assert_eq!(bitmap.len(), 1);
+
+    // Verify get_at_commit returns None for u64::MAX
+    assert!(bitmap.get_at_commit(u64::MAX).is_none());
+
+    // But works for u64::MAX - 1
+    assert!(bitmap.get_at_commit(u64::MAX - 1).is_some());
+}
