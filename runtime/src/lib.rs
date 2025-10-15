@@ -310,24 +310,19 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "external")] {
-        /// Interface that runtimes can implement to constrain the latency a future
-        /// takes to execute (allowing a runtime to "pace" the execution of a future
-        /// driven by an external process).
-        ///
-        /// **Applications built on top of `commonware-runtime` (with no external processes) should never need
-        /// to use this trait.**
+        /// Interface that runtimes can implement to constrain the execution latency of a future.
         pub trait Pacer: Clock + Clone + Send + Sync + 'static {
             /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
             /// the future is not yet ready at the desired time of completion, the runtime will block until
             /// the future is ready.
             ///
             /// In [crate::deterministic], this is used to ensure interactions with external systems can
-            /// be interacted with deterministically. In [crate::tokio], this is a passthrough (allows
+            /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
             /// multiple runtimes to be tested with no code changes).
             ///
             /// # Warning
             ///
-            /// Because `pace` will block if the future is not ready, it is important that the future's completion
+            /// Because `pace` blocks if the future is not ready, it is important that the future's completion
             /// doesn't require anything in the current thread to complete (or else it will deadlock).
             fn pace<'a, F, T>(
                 &'a self,
