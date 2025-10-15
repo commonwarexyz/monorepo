@@ -15,8 +15,8 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::quorum;
-use std::collections::{btree_map::Entry, BTreeMap, HashMap};
+use commonware_utils::{quorum, set::Set};
+use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -38,7 +38,7 @@ pub struct Player<P: PublicKey, V: Variant> {
     previous: Option<poly::Public<V>>,
     concurrency: usize,
 
-    dealers: HashMap<P, u32>,
+    dealers: Set<P>,
 
     dealings: BTreeMap<u32, (poly::Public<V>, Share)>,
 }
@@ -48,26 +48,13 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
     pub fn new(
         me: P,
         previous: Option<poly::Public<V>>,
-        mut dealers: Vec<P>,
-        mut recipients: Vec<P>,
+        dealers: Set<P>,
+        recipients: Set<P>,
         concurrency: usize,
     ) -> Self {
-        dealers.sort();
-        let dealers = dealers
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<P, _>>();
-        recipients.sort();
-        let mut me_idx = None;
-        for (idx, recipient) in recipients.iter().enumerate() {
-            if recipient == &me {
-                me_idx = Some(idx);
-                break;
-            }
-        }
+        let me_idx = recipients.position(&me).expect("player not in recipients") as u32;
         Self {
-            me: me_idx.expect("player not in recipients") as u32,
+            me: me_idx,
             dealer_threshold: quorum(dealers.len() as u32),
             player_threshold: quorum(recipients.len() as u32),
             previous,
@@ -87,10 +74,10 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let dealer_idx = match self.dealers.get(&dealer) {
-            Some(contributor) => *contributor,
+        let dealer_idx = match self.dealers.position(&dealer) {
+            Some(contributor) => contributor,
             None => return Err(Error::DealerInvalid),
-        };
+        } as u32;
 
         // Check that share is valid
         if share.index != self.me {

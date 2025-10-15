@@ -8,28 +8,25 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, set::Set};
 use rand_core::CryptoRngCore;
-use std::{
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-};
+use std::{collections::HashSet, marker::PhantomData};
 
 /// Dealer output of a DKG/Resharing procedure.
 #[derive(Clone)]
 pub struct Output {
     /// List of active players.
-    pub active: Vec<u32>,
+    pub active: Set<u32>,
 
     /// List of inactive players (that we need to send
     /// a reveal for).
-    pub inactive: Vec<u32>,
+    pub inactive: Set<u32>,
 }
 
 /// Track acknowledgements from players.
 pub struct Dealer<P: PublicKey, V: Variant> {
     threshold: u32,
-    players: HashMap<P, u32>,
+    players: Set<P>,
 
     acks: HashSet<u32>,
 
@@ -41,16 +38,8 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     pub fn new<R: CryptoRngCore>(
         rng: &mut R,
         share: Option<Share>,
-        mut players: Vec<P>,
-    ) -> (Self, poly::Public<V>, Vec<Share>) {
-        // Order players
-        players.sort();
-        let players_ordered = players
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
-
+        players: Set<P>,
+    ) -> (Self, poly::Public<V>, Set<Share>) {
         // Generate shares and commitment
         let players_len = players.len() as u32;
         let threshold = quorum(players_len);
@@ -58,26 +47,26 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
         (
             Self {
                 threshold,
-                players: players_ordered,
+                players,
                 acks: HashSet::new(),
 
                 _phantom: PhantomData,
             },
             commitment,
-            shares,
+            shares.into_iter().collect(),
         )
     }
 
     /// Track acknowledgement from a player.
     pub fn ack(&mut self, player: P) -> Result<(), Error> {
         // Ensure player is valid
-        let idx = match self.players.get(&player) {
-            Some(player) => *player,
+        let idx = match self.players.position(&player) {
+            Some(player) => player,
             None => return Err(Error::PlayerInvalid),
         };
 
         // Store ack
-        match self.acks.insert(idx) {
+        match self.acks.insert(idx as u32) {
             true => Ok(()),
             false => Err(Error::DuplicateAck),
         }
@@ -93,15 +82,16 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
         // Return the list of players and players that weren't active
         let mut active = Vec::new();
         let mut inactive = Vec::new();
-        for (_, player) in self.players.into_iter() {
+        for player in 0..self.players.len() as u32 {
             if self.acks.contains(&player) {
                 active.push(player);
             } else {
                 inactive.push(player);
             }
         }
-        active.sort();
-        inactive.sort();
-        Some(Output { active, inactive })
+        Some(Output {
+            active: Set::from_iter(active),
+            inactive: Set::from_iter(inactive),
+        })
     }
 }

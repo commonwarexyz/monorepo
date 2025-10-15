@@ -11,28 +11,21 @@ use commonware_cryptography::{
     },
     PublicKey,
 };
-use commonware_utils::modulo;
-use std::collections::HashMap;
+use commonware_utils::{modulo, set::Set};
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
 pub struct Supervisor<P: PublicKey> {
     identity: <MinSig as Variant>::Public,
     polynomial: Vec<<MinSig as Variant>::Public>,
-    participants: Vec<P>,
-    participants_map: HashMap<P, u32>,
+    participants: Set<P>,
 
     share: group::Share,
 }
 
 impl<P: PublicKey> Supervisor<P> {
-    pub fn new(polynomial: Public<MinSig>, mut participants: Vec<P>, share: group::Share) -> Self {
+    pub fn new(polynomial: Public<MinSig>, participants: Vec<P>, share: group::Share) -> Self {
         // Setup participants
-        participants.sort();
-        let mut participants_map = HashMap::new();
-        for (index, validator) in participants.iter().enumerate() {
-            participants_map.insert(validator.clone(), index as u32);
-        }
         let identity = *poly::public::<MinSig>(&polynomial);
         let polynomial = evaluate_all::<MinSig>(&polynomial, participants.len() as u32);
 
@@ -40,8 +33,7 @@ impl<P: PublicKey> Supervisor<P> {
         Self {
             identity,
             polynomial,
-            participants,
-            participants_map,
+            participants: Set::from_iter(participants),
             share,
         }
     }
@@ -55,12 +47,12 @@ impl<P: PublicKey> Su for Supervisor<P> {
         unimplemented!("only defined in supertrait")
     }
 
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        Some(&self.participants)
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
+        Some(self.participants.as_ref())
     }
 
     fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.participants_map.get(candidate).cloned()
+        self.participants.position(candidate).map(|i| i as u32)
     }
 }
 
