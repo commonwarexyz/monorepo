@@ -22,7 +22,7 @@ pub enum Error {
 pub struct U64([u8; u64::SIZE]);
 
 impl U64 {
-    pub fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value.to_be_bytes())
     }
 }

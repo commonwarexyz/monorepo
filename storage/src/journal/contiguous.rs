@@ -8,16 +8,16 @@
 //! - [Variable]: Wrapper for `variable::Journal` that implements [Contiguous]
 
 use super::{fixed, variable, Error};
+use crate::metadata;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    Codec, CodecFixed, Encode, FixedSize, Read as CodecRead, Write as CodecWrite,
-};
-use commonware_runtime::{buffer::PoolRef, Blob, Metrics, Storage};
-use commonware_utils::NZUsize;
+use commonware_codec::{Codec, CodecFixed, FixedSize, Read as CodecRead, Write as CodecWrite};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_utils::{sequence::U64, NZUsize};
 use futures::Stream;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+const METADATA_KEY: U64 = U64::new(0);
 
 /// Core trait for contiguous journals supporting sequential append operations.
 ///
@@ -160,6 +160,9 @@ pub struct Config<C> {
     /// The storage partition to use for journal blobs.
     pub partition: String,
 
+    /// The storage partition to use for metadata.
+    pub metadata_partition: String,
+
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
@@ -183,12 +186,12 @@ pub struct Config<C> {
 /// This wrapper manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers. Positions are assigned starting
 /// from 0 and increment with each append.
-pub struct Variable<E: Storage + Metrics, V: Codec> {
-    /// The storage partition containing all journal sections.
-    partition: String,
-
+pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// The underlying variable-length journal.
     journal: variable::Journal<E, V>,
+
+    /// Metadata about this journal.
+    metadata: metadata::Metadata<E, U64, JournalMetadata>,
 
     /// The number of items per section.
     ///
@@ -202,7 +205,8 @@ pub struct Variable<E: Storage + Metrics, V: Codec> {
     ///
     /// # Invariant
     ///
-    /// Always >= `oldest_retained_pos`. Increments by 1 on each successful append.
+    /// Always >= `oldest_retained_pos`. Equal when journal is empty or fully pruned.
+    /// Increments by 1 on each successful append.
     size: u64,
 
     /// The position of the first item that remains after pruning.
@@ -216,7 +220,7 @@ pub struct Variable<E: Storage + Metrics, V: Codec> {
 
 /// Metadata for a contiguous variable journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Metadata {
+struct JournalMetadata {
     /// The number of items per section. Must match the configuration.
     items_per_section: u64,
 
@@ -227,7 +231,7 @@ struct Metadata {
     oldest_retained_pos: u64,
 }
 
-impl CodecWrite for Metadata {
+impl CodecWrite for JournalMetadata {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.items_per_section);
         buf.put_u64(self.size);
@@ -235,15 +239,15 @@ impl CodecWrite for Metadata {
     }
 }
 
-impl FixedSize for Metadata {
+impl FixedSize for JournalMetadata {
     const SIZE: usize = 24; // 3 * u64
 }
 
-impl CodecRead for Metadata {
+impl CodecRead for JournalMetadata {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Metadata::SIZE {
+        if buf.remaining() < Self::SIZE {
             return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
         }
 
@@ -255,16 +259,14 @@ impl CodecRead for Metadata {
     }
 }
 
-// Use u64::MAX as the metadata blob identifier (won't conflict with section numbers)
-const METADATA_BLOB_ID: u64 = u64::MAX;
-
-impl<E: Storage + Metrics, V: Codec> Variable<E, V> {
+impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// This method will:
     /// 1. Initialize the underlying `variable::Journal`
-    /// 2. Attempt to load position metadata from a previous run
-    /// 3. If metadata is missing or invalid, replay the journal to count items
+    /// 2. Initialize the metadata store
+    /// 3. Attempt to load position metadata from a previous run
+    /// 4. If metadata is missing or invalid, replay the journal to count items
     ///
     /// # Errors
     ///
@@ -273,121 +275,91 @@ impl<E: Storage + Metrics, V: Codec> Variable<E, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         use futures::StreamExt;
 
-        // Store items_per_section and partition before moving cfg
         let items_per_section = cfg.items_per_section.get();
-        let partition = cfg.partition.clone();
 
         // Initialize underlying variable journal
         let journal = variable::Journal::init(
-            context,
+            context.with_label("journal"),
             variable::Config {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool,
+                buffer_pool: cfg.buffer_pool.clone(),
                 write_buffer: cfg.write_buffer,
             },
         )
         .await?;
 
-        // Try to load metadata first (using journal's context which has access to the partition)
-        let (size, oldest_retained_pos) =
-            match Self::load_metadata(&journal.context, &partition, items_per_section).await {
-                Ok((sz, oldest)) => {
-                    // Metadata loaded successfully
-                    (sz, oldest)
-                }
-                Err(_) => {
-                    // Metadata missing or invalid, replay to determine positions
-                    let mut size = 0u64;
-                    let mut oldest_retained_pos = 0u64;
+        // Initialize metadata store
+        let mut metadata: metadata::Metadata<E, U64, JournalMetadata> = metadata::Metadata::init(
+            context.with_label("metadata"),
+            metadata::Config {
+                partition: cfg.metadata_partition,
+                codec_config: (),
+            },
+        )
+        .await?;
 
-                    // If there are any sections, determine the base position from the first section
-                    if let Some((&first_section, _)) = journal.blobs.first_key_value() {
-                        oldest_retained_pos = first_section * items_per_section;
-                        size = oldest_retained_pos;
+        // Try to load metadata
+        let (size, oldest_retained_pos) = match metadata.get(&METADATA_KEY) {
+            Some(meta) if meta.items_per_section == items_per_section => {
+                // Metadata loaded successfully and config matches
+                (meta.size, meta.oldest_retained_pos)
+            }
+            _ => {
+                // Metadata missing, corrupted, or config mismatch - replay to determine positions
+                let mut size = 0u64;
+                let mut oldest_retained_pos = 0u64;
 
-                        // Replay all items to count them
-                        let stream = journal.replay(first_section, 0, REPLAY_BUFFER_SIZE).await?;
-                        futures::pin_mut!(stream);
+                // If there are any sections, determine the base position from the first section
+                if let Some((&first_section, _)) = journal.blobs.first_key_value() {
+                    oldest_retained_pos = first_section * items_per_section;
+                    size = oldest_retained_pos;
 
-                        while stream.next().await.is_some() {
-                            size += 1;
-                        }
+                    // Replay all items to count them
+                    let stream = journal.replay(first_section, 0, REPLAY_BUFFER_SIZE).await?;
+                    futures::pin_mut!(stream);
+
+                    while stream.next().await.is_some() {
+                        size += 1;
                     }
-
-                    (size, oldest_retained_pos)
                 }
-            };
+
+                // Store the computed metadata
+                metadata.put(
+                    METADATA_KEY,
+                    JournalMetadata {
+                        items_per_section,
+                        size,
+                        oldest_retained_pos,
+                    },
+                );
+                metadata.sync().await?;
+
+                (size, oldest_retained_pos)
+            }
+        };
 
         Ok(Self {
-            partition,
             journal,
+            metadata,
             items_per_section,
             size,
             oldest_retained_pos,
         })
     }
 
-    /// Load metadata from storage.
-    ///
-    /// Returns (size, oldest_retained_pos) on success.
-    /// Returns error if metadata doesn't exist, is invalid, or items_per_section doesn't match.
-    async fn load_metadata(
-        context: &E,
-        partition: &str,
-        expected_items_per_section: u64,
-    ) -> Result<(u64, u64), Error> {
-        use commonware_codec::ReadExt;
-
-        // Try to open the metadata blob
-        let (blob, size) = context
-            .open(partition, &METADATA_BLOB_ID.to_be_bytes())
-            .await?;
-
-        if size == 0 {
-            return Err(Error::MissingBlob(0));
-        }
-
-        if size != Metadata::SIZE as u64 {
-            return Err(Error::UnexpectedSize(Metadata::SIZE as u32, size as u32));
-        }
-
-        // Read and decode metadata
-        let buf = blob.read_at(vec![0u8; Metadata::SIZE], 0).await?;
-        let metadata = Metadata::read(&mut buf.as_ref())?;
-
-        // Validate items_per_section matches
-        if metadata.items_per_section != expected_items_per_section {
-            return Err(Error::UnexpectedSize(
-                expected_items_per_section as u32,
-                metadata.items_per_section as u32,
-            ));
-        }
-
-        Ok((metadata.size, metadata.oldest_retained_pos))
-    }
-
     /// Save metadata to storage.
-    async fn save_metadata(&self) -> Result<(), Error> {
-        let metadata = Metadata {
-            items_per_section: self.items_per_section,
-            size: self.size,
-            oldest_retained_pos: self.oldest_retained_pos,
-        };
-
-        let encoded = metadata.encode().to_vec();
-        let (blob, _) = self
-            .journal
-            .context
-            .open(&self.partition, &METADATA_BLOB_ID.to_be_bytes())
-            .await?;
-
-        // Overwrite metadata by resizing to 0 then writing
-        blob.resize(0).await?;
-        blob.write_at(encoded, 0).await?;
-        blob.sync().await?;
-
+    async fn save_metadata(&mut self) -> Result<(), Error> {
+        self.metadata.put(
+            METADATA_KEY,
+            JournalMetadata {
+                items_per_section: self.items_per_section,
+                size: self.size,
+                oldest_retained_pos: self.oldest_retained_pos,
+            },
+        );
+        self.metadata.sync().await?;
         Ok(())
     }
 
@@ -521,11 +493,12 @@ impl<E: Storage + Metrics, V: Codec> Variable<E, V> {
     }
 
     /// Close the journal, syncing all pending writes and saving metadata.
-    pub async fn close(self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(), Error> {
         // Save metadata before closing
         self.save_metadata().await?;
 
-        // Close the underlying journal
+        // Close metadata and journal
+        self.metadata.close().await?;
         self.journal.close().await
     }
 
@@ -534,20 +507,16 @@ impl<E: Storage + Metrics, V: Codec> Variable<E, V> {
     /// This is useful for cleaning up test journals. After calling this method,
     /// the journal cannot be used again.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Remove metadata blob
-        let _ = self
-            .journal
-            .context
-            .remove(&self.partition, Some(&METADATA_BLOB_ID.to_be_bytes()))
-            .await;
+        // Destroy metadata store
+        self.metadata.destroy().await?;
 
-        // Destroy the underlying journal (removes all section blobs and partition)
+        // Destroy the underlying journal
         self.journal.destroy().await
     }
 }
 
 // Implement Contiguous trait for Variable
-impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V> {
+impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variable<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
@@ -713,6 +682,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_empty".to_string(),
+                    metadata_partition: "test_variable_empty_meta".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -738,6 +708,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_append".to_string(),
+                    metadata_partition: "test_variable_append_meta".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -773,6 +744,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_sections".to_string(),
+                    metadata_partition: "test_variable_sections_meta".to_string(),
                     items_per_section: NZU64!(5), // Small sections to test crossing boundaries
                     compression: None,
                     codec_config: (),
@@ -802,6 +774,7 @@ mod tests {
             let partition = "test_variable_persist";
             let cfg = Config {
                 partition: partition.to_string(),
+                metadata_partition: "test_variable_persist_meta".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -851,6 +824,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_prune".to_string(),
+                    metadata_partition: "test_variable_prune_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -885,6 +859,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay".to_string(),
+                    metadata_partition: "test_variable_replay_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -930,6 +905,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay_middle".to_string(),
+                    metadata_partition: "test_variable_replay_middle_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -975,6 +951,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_trait".to_string(),
+                    metadata_partition: "test_variable_trait_meta".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -1005,6 +982,7 @@ mod tests {
             let partition = "test_variable_destroy";
             let cfg = Config {
                 partition: partition.to_string(),
+                metadata_partition: "test_variable_destroy_meta".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1050,6 +1028,7 @@ mod tests {
             let partition = "test_variable_metadata";
             let cfg = Config {
                 partition: partition.to_string(),
+                metadata_partition: "test_variable_metadata_meta".to_string(),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: (),

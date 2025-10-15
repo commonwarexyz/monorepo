@@ -65,4 +65,6 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
 }
