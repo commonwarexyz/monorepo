@@ -1,3 +1,5 @@
+use tracing::info;
+
 use super::Aborter;
 use std::{
     mem,
@@ -86,6 +88,41 @@ impl SupervisionTree {
         (child, parent_inner.aborted)
     }
 
+    /// Transfers all non-dropped children from `from` to `to`, updating their parent pointers.
+    pub(crate) fn adopt_children(from: &Arc<Self>, to: &Arc<Self>) {
+        let mut adopted = Vec::new();
+        {
+            let mut from_inner = from.inner.lock().unwrap();
+            if from_inner.children.is_empty() {
+                return;
+            }
+
+            from_inner.children.retain(|weak| {
+                let Some(child) = weak.upgrade() else {
+                    return false;
+                };
+                if Arc::ptr_eq(&child, to) {
+                    // Keep the newly spawned task attached to its parent.
+                    return true;
+                }
+
+                {
+                    let mut child_inner = child.inner.lock().unwrap();
+                    child_inner._parent = Some(Arc::clone(to));
+                }
+                adopted.push(Arc::downgrade(&child));
+                false
+            });
+        }
+
+        if adopted.is_empty() {
+            return;
+        }
+
+        let mut to_inner = to.inner.lock().unwrap();
+        to_inner.children.extend(adopted);
+    }
+
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(&self, aborter: Aborter) {
         let aborter = {
@@ -105,8 +142,14 @@ impl SupervisionTree {
             inner.capture()
         };
         let Some((task, children)) = result else {
+            info!("no descendants to abort");
             return;
         };
+        info!(
+            aborter = task.is_some(),
+            children = children.len(),
+            "aborting descendants"
+        );
 
         if let Some(aborter) = task {
             aborter.abort();

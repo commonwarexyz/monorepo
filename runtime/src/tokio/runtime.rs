@@ -420,12 +420,14 @@ impl crate::Spawner for Context {
         let (_, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration.
+        let parent = Arc::clone(&self.tree);
         let past = self.execution;
         self.execution = Execution::default();
-        let (tree, aborted) = SupervisionTree::child(&self.tree);
+        let (tree, aborted) = SupervisionTree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
+        SupervisionTree::adopt_children(&parent, &tree);
         self.tree = Arc::clone(&tree);
 
         // Spawn the task
