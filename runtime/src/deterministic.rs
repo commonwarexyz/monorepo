@@ -9,7 +9,7 @@
 //! When testing an application that interacts with some external process, it can appear to
 //! the runtime that progress has stalled because no pending tasks can make progress (i.e. progress
 //! depends on an event unknown to the runtime). To support testing these applications, the runtime
-//! can be built with the `pacer` feature enabled to execute tasks (often annotated with `pace()`) at
+//! can be built with the `external` feature enabled to execute tasks (often annotated with `pace()`) at
 //! "realtime" rather than "simulated time".
 //!
 //! "Realtime" here means the runtime sleeps for [Config::cycle] after each iteration of the event loop
@@ -36,7 +36,7 @@
 //! });
 //! ```
 
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
     network::{
@@ -67,11 +67,11 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use rand::Rng;
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use std::ops::Range;
 use std::{
     collections::{BTreeMap, BinaryHeap},
@@ -281,10 +281,10 @@ pub struct Executor {
 impl Executor {
     /// Advance simulated time by [Config::cycle].
     ///
-    /// When built with the `pacer` feature, sleep for [Config::cycle] to let
+    /// When built with the `external` feature, sleep for [Config::cycle] to let
     /// external processes make progress.
     fn advance_time(&self) -> SystemTime {
-        #[cfg(feature = "pacer")]
+        #[cfg(feature = "external")]
         std::thread::sleep(self.cycle);
 
         let mut time = self.time.lock().unwrap();
@@ -298,10 +298,10 @@ impl Executor {
 
     /// When idle, jump directly to the next actionable time.
     ///
-    /// When built with the `pacer` feature, never skip ahead (to ensure we poll all pending tasks
+    /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
     /// every [Config::cycle]).
     fn skip_idle_time(&self, current: SystemTime) -> SystemTime {
-        if cfg!(feature = "pacer") || self.tasks.ready() != 0 {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 {
             return current;
         }
 
@@ -341,9 +341,9 @@ impl Executor {
 
     /// Ensure the runtime is making progress.
     ///
-    /// When built with the `pacer` feature, always poll pending tasks after the passage of time.
+    /// When built with the `external` feature, always poll pending tasks after the passage of time.
     fn assert_liveness(&self) {
-        if cfg!(feature = "pacer") || self.tasks.ready() != 0 {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 {
             return;
         }
 
@@ -1203,7 +1203,7 @@ where
     }
 }
 
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,
@@ -1329,15 +1329,15 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     use crate::FutureExt;
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     use crate::Spawner;
     use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
     use commonware_macros::test_traced;
-    #[cfg(not(feature = "pacer"))]
+    #[cfg(not(feature = "external"))]
     use futures::future::pending;
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use futures::{channel::oneshot, task::noop_waker};
 
@@ -1546,7 +1546,7 @@ mod tests {
         });
     }
 
-    #[cfg(not(feature = "pacer"))]
+    #[cfg(not(feature = "external"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]
     fn test_stall() {
@@ -1559,7 +1559,7 @@ mod tests {
         });
     }
 
-    #[cfg(not(feature = "pacer"))]
+    #[cfg(not(feature = "external"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]
     fn test_external_simulated() {
@@ -1579,7 +1579,7 @@ mod tests {
         });
     }
 
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     #[test]
     fn test_external_realtime() {
         // Initialize runtime
@@ -1598,7 +1598,7 @@ mod tests {
         });
     }
 
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     #[test]
     fn test_external_realtime_variable() {
         // Initialize runtime
@@ -1668,7 +1668,7 @@ mod tests {
         });
     }
 
-    #[cfg(not(feature = "pacer"))]
+    #[cfg(not(feature = "external"))]
     #[test]
     fn test_simulated_skip() {
         // Initialize runtime
@@ -1691,7 +1691,7 @@ mod tests {
         });
     }
 
-    #[cfg(feature = "pacer")]
+    #[cfg(feature = "external")]
     #[test]
     fn test_realtime_no_skip() {
         // Initialize runtime

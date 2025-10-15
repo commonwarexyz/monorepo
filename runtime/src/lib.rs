@@ -25,7 +25,7 @@
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use std::ops::Range;
 use std::{
     future::Future,
@@ -309,7 +309,7 @@ pub trait Clock: Clone + Send + Sync + 'static {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "pacer")] {
+    if #[cfg(feature = "external")] {
         /// Interface that runtimes can implement to constrain the latency a future
         /// takes to execute (allowing a runtime to "pace" the execution of a future
         /// driven by an external process).

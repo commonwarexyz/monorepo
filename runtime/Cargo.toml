@@ -34,7 +34,7 @@ sysinfo = { workspace = true }
 
 [features]
 default = []
-pacer = []
+external = []
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 

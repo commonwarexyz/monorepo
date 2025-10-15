@@ -4,7 +4,7 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use crate::Pacer;
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -28,7 +28,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 use std::ops::Range;
 use std::{
     env,
@@ -563,7 +563,7 @@ impl Clock for Context {
     }
 }
 
-#[cfg(feature = "pacer")]
+#[cfg(feature = "external")]
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,
