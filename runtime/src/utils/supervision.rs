@@ -1,5 +1,3 @@
-use tracing::info;
-
 use super::Aborter;
 use std::{
     mem,
@@ -142,14 +140,8 @@ impl SupervisionTree {
             inner.capture()
         };
         let Some((task, children)) = result else {
-            info!("no descendants to abort");
             return;
         };
-        info!(
-            aborter = task.is_some(),
-            children = children.len(),
-            "aborting descendants"
-        );
 
         if let Some(aborter) = task {
             aborter.abort();
