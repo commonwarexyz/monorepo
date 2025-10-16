@@ -67,12 +67,8 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-#[cfg(feature = "external")]
-use rand::Rng;
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
@@ -1205,35 +1201,19 @@ where
 
 #[cfg(feature = "external")]
 impl Pacer for Context {
-    fn pace<'a, F, T>(
-        &'a self,
-        range: Range<Duration>,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'a
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        // Compute delay
-        let executor = self.executor();
-        let Range { start, end } = range;
-        let delay = if start < end {
-            let mut rng = executor.rng.lock().unwrap();
-            rng.gen_range(start..end)
-        } else if start == end {
-            start
-        } else {
-            panic!("invalid delay range");
-        };
-
         // Compute target time
-        let target = executor
+        let target = self
+            .executor()
             .time
             .lock()
             .unwrap()
-            .checked_add(delay)
+            .checked_add(latency)
             .expect("overflow when setting wake time");
-        drop(executor);
 
         Waiter {
             executor: self.executor.clone(),
@@ -1630,10 +1610,7 @@ mod tests {
             let first = context.clone().spawn({
                 let mut results_tx = results_tx.clone();
                 move |context| async move {
-                    first_rx
-                        .pace(&context, Duration::ZERO..Duration::ZERO)
-                        .await
-                        .unwrap();
+                    first_rx.pace(&context, Duration::ZERO).await.unwrap();
                     let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
                     assert!(elapsed_real > first_wait);
                     let elapsed_sim = context.current().duration_since(start_sim).unwrap();
@@ -1644,10 +1621,7 @@ mod tests {
 
             // Wait for a delay sampled after the external send occurs
             let second = context.clone().spawn(move |context| async move {
-                second_rx
-                    .pace(&context, first_wait..(first_wait * 2))
-                    .await
-                    .unwrap();
+                second_rx.pace(&context, first_wait).await.unwrap();
                 let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
                 assert!(elapsed_real >= first_wait);
                 let elapsed_sim = context.current().duration_since(start_sim).unwrap();

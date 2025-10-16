@@ -25,8 +25,6 @@
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     future::Future,
     io::Error as IoError,
@@ -326,7 +324,7 @@ cfg_if::cfg_if! {
             /// doesn't require anything in the current thread to complete (or else it will deadlock).
             fn pace<'a, F, T>(
                 &'a self,
-                range: Range<Duration>,
+                latency: Duration,
                 future: F,
             ) -> impl Future<Output = T> + Send + 'a
             where
@@ -343,14 +341,14 @@ cfg_if::cfg_if! {
             fn pace<'a, E>(
                 self,
                 pacer: &'a E,
-                range: Range<Duration>,
+                latency: Duration,
             ) -> impl Future<Output = Self::Output> + Send + 'a
             where
                 E: Pacer + 'a,
                 Self: Send + 'a,
                 Self::Output: Send + 'a,
             {
-                pacer.pace(range, self)
+                pacer.pace(latency, self)
             }
         }
 
