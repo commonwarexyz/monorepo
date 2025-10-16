@@ -189,7 +189,7 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
     ) -> Result<(u64, u64), Error> {
         // === Step 1: Scan data journal to determine expected state ===
 
-        let (expected_size, expected_oldest_pos) = if data.blobs.is_empty() {
+        let (expected_locations_size, expected_locations_oldest_pos) = if data.blobs.is_empty() {
             // No data blobs → journal is empty or fully pruned
             // Size comes from locations journal.
             (locations.size().await?, locations.size().await?)
@@ -218,38 +218,51 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
         // === Step 2: Check current locations state ===
 
         let locations_size = locations.size().await?;
-        let locations_oldest = locations.oldest_retained_pos().await?;
 
         // === Step 3: Fix size mismatch ===
 
-        if locations_size > expected_size {
+        if locations_size > expected_locations_size {
             // Locations ahead of data → should never happen (violates write ordering)
             return Err(Error::Corruption(format!(
-                "locations ahead of data: locations_size={locations_size} > data_size={expected_size}"
+                "locations ahead of data: locations_size={locations_size} > data_size={expected_locations_size}"
             )));
         }
 
-        if locations_size < expected_size {
+        if locations_size < expected_locations_size {
             // Locations behind data → rebuild missing entries
-            Self::rebuild_locations(data, locations, expected_size).await?;
+            Self::rebuild_locations(data, locations, expected_locations_size).await?;
         }
 
         // === Step 4: Fix pruning mismatch ===
 
-        match locations_oldest {
-            Some(loc_oldest) if loc_oldest > expected_oldest_pos => {
+        match locations.oldest_retained_pos().await? {
+            Some(oldest_retained_pos) if oldest_retained_pos > expected_locations_oldest_pos => {
                 // Locations pruned ahead of data → should never happen (violates write ordering)
                 return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations_oldest={loc_oldest} > data_oldest={expected_oldest_pos}"
+                    "locations pruned ahead of data: locations_oldest={oldest_retained_pos} > data_oldest={expected_locations_oldest_pos}"
                 )));
             }
-            Some(loc_oldest) if loc_oldest < expected_oldest_pos => {
+            Some(oldest_retained_pos) if oldest_retained_pos < expected_locations_oldest_pos => {
                 // Locations behind on pruning → prune to catch up
-                locations.prune(expected_oldest_pos).await?;
+                locations.prune(expected_locations_oldest_pos).await?;
             }
-            None if expected_oldest_pos < expected_size => {
-                // Locations says "fully pruned" but data has items → prune to match
-                locations.prune(expected_oldest_pos).await?;
+            None if expected_locations_oldest_pos < expected_locations_size => {
+                // The locations journal returned `None` from oldest_retained_pos(), which means
+                // it's fully pruned (all items have been pruned, so oldest_retained_pos == size).
+                //
+                // However, the data journal still has un-pruned items from position
+                // expected_locations_oldest_pos onwards.
+                //
+                // Example:
+                //   - Size: 100 (both journals agree we have 100 total items)
+                //   - Data oldest: 20 (data has items 20-99)
+                //   - Locations oldest: 100 (locations has pruned everything)
+                //
+                // This violates our invariant: data is always pruned BEFORE locations.
+                // If the data journal has items 20-99, the locations journal should too.
+                return Err(Error::Corruption(format!(
+                    "locations pruned ahead of data: locations fully pruned (oldest_retained_pos={expected_locations_size}) but data_oldest={expected_locations_oldest_pos}"
+                )));
             }
             _ => {
                 // Pruning is consistent
@@ -259,9 +272,9 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
         // === Step 5: Verify and return ===
 
         locations.sync().await?;
-        assert_eq!(locations.size().await?, expected_size);
+        assert_eq!(locations.size().await?, expected_locations_size);
 
-        Ok((expected_size, expected_oldest_pos))
+        Ok((expected_locations_size, expected_locations_oldest_pos))
     }
 
     /// Rebuild missing location entries by replaying the data journal.
