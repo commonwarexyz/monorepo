@@ -11,7 +11,6 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use futures::{Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::warn;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -122,21 +121,40 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// A contiguous wrapper around `variable::Journal` that provides position-based append.
+/// A contiguous wrapper around [variable::Journal] that implements an append-only log.
 ///
 /// This wrapper manages section assignment automatically, allowing callers to append items
-/// sequentially without manually tracking section numbers. Positions are assigned starting
-/// from 0 and increment with each append.
+/// sequentially without manually tracking section numbers.
 ///
-/// # Section Fullness Invariant
+/// # Invariants
+///
+/// ## 1. Section Fullness
 ///
 /// All non-final sections are full (`items_per_section` items) and synced. This ensures
 /// that on `init()`, we only need to replay the last section to determine the exact size.
+///
+/// ## 2. Data Journal is Source of Truth
+///
+/// The data journal is always written before the locations index. This means:
+/// - `locations.size()` must NEVER exceed the number of items in the data journal
+/// - On crash recovery, locations may be behind data (expected), but never ahead
+/// - If locations are ahead, this indicates a critical bug and will return `Error::Corruption`
+///
+/// ## 3. Crash Recovery
+///
+/// Because of the write ordering (data first, then locations) and section fullness,
+/// crash recovery divergence is bounded by `items_per_section`. Any divergence exceeding
+/// this indicates corruption and will return an error.
 pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// The underlying variable-length journal.
     journal: variable::Journal<E, V>,
 
     /// Index mapping positions to (section, offset) pairs for O(1) reads.
+    ///
+    /// # Invariant
+    ///
+    /// `locations.size()` must always equal the number of items in the data journal.
+    /// During crash recovery, locations may temporarily be behind, but NEVER ahead.
     locations: fixed::Journal<E, Location>,
 
     /// The number of items per section.
@@ -152,7 +170,6 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// # Invariant
     ///
     /// Always >= `oldest_retained_pos`. Equal when journal is empty or fully pruned.
-    /// Increments by 1 on each successful append.
     size: u64,
 
     /// The position of the first item that remains after pruning.
@@ -168,26 +185,10 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
 impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
-    /// This method:
-    /// 1. Initializes the underlying `variable::Journal` and locations index
-    /// 2. Derives `oldest_retained_pos` from the first blob on disk
-    /// 3. Replays only the last section to verify/rebuild locations index
-    ///
-    /// # Section Fullness Invariant
-    ///
-    /// All non-final sections are assumed to be full (`items_per_section` items).
-    /// Only the final section is replayed to ensure consistency.
-    ///
     /// # Crash Recovery
     ///
     /// The data journal is the source of truth. If the locations index is inconsistent
-    /// (ahead, behind, or missing), this method will automatically rebuild it from the
-    /// last section.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying journal initialization fails or if any storage
-    /// operations fail.
+    /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_section = cfg.items_per_section.get();
 
@@ -216,93 +217,93 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         )
         .await?;
 
-        // CRASH RECOVERY: Data journal is the source of truth
-        // Always synchronize locations to match data
-        let (size, oldest_retained_pos) = if journal.blobs.is_empty() {
+        // Synchronize locations to match data
+        if journal.blobs.is_empty() {
             // Empty data journal - locations should also be empty
             let locations_size = locations.size().await?;
             if locations_size > 0 {
-                // Fix corruption: Rewind locations to match empty data
-                warn!(
-                    locations_size,
-                    "locations ahead of empty data journal, rewinding to 0"
-                );
-                locations.rewind(0).await?;
-                locations.sync().await?;
+                return Err(Error::Corruption(format!(
+                    "locations ahead of empty data journal: locations_size={locations_size}"
+                )));
             }
-            (0, 0)
-        } else {
-            let first_section = *journal.blobs.first_key_value().unwrap().0;
-            let oldest_retained_pos = first_section * items_per_section;
-            let last_section = *journal.blobs.last_key_value().unwrap().0;
+            return Ok(Self {
+                journal,
+                locations,
+                items_per_section,
+                size: 0,
+                oldest_retained_pos: 0,
+            });
+        }
 
-            // Count items in last section
+        let first_section = *journal.blobs.first_key_value().unwrap().0;
+        let oldest_retained_pos = first_section * items_per_section;
+        let last_section = *journal.blobs.last_key_value().unwrap().0;
+
+        // Count items in last section
+        let items_in_last_section = {
             let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
-
             let mut items_in_last_section = 0u64;
             while stream.next().await.is_some() {
                 items_in_last_section += 1;
             }
-
-            // Calculate expected size based on actual data on disk
-            let expected_size = (last_section * items_per_section) + items_in_last_section;
-            let last_section_start_pos = last_section * items_per_section;
-
-            // Check locations journal state
-            let locations_size = locations.size().await?;
-
-            // Fix any inconsistency between the locations journal and the data journal
-            if locations_size != expected_size {
-                warn!(
-                    locations_size,
-                    expected_size,
-                    last_section,
-                    items_in_last_section,
-                    "locations journal inconsistent with data, rebuilding"
-                );
-
-                if locations_size < expected_size {
-                    // Locations behind: append only the missing locations
-                    // Calculate offset within the last section where we need to start
-                    let start_offset = (locations_size - last_section_start_pos) as u32;
-
-                    // Replay from where locations left off
-                    let stream = journal
-                        .replay(last_section, start_offset, REPLAY_BUFFER_SIZE)
-                        .await?;
-                    futures::pin_mut!(stream);
-
-                    while let Some(result) = stream.next().await {
-                        let (section, offset, _size, _item) = result?;
-                        locations.append(Location { section, offset }).await?;
-                    }
-                } else {
-                    // Locations ahead: rewind and rebuild entire last section
-                    locations.rewind(last_section_start_pos).await?;
-
-                    // Replay from offset 0 and stream locations directly
-                    let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-                    futures::pin_mut!(stream);
-
-                    while let Some(result) = stream.next().await {
-                        let (section, offset, _size, _item) = result?;
-                        locations.append(Location { section, offset }).await?;
-                    }
-                }
-
-                // Sync the rebuilt/extended locations
-                locations.sync().await?;
-            }
-
-            (expected_size, oldest_retained_pos)
+            items_in_last_section
         };
 
+        // Calculate expected size based on actual data on disk
+        let expected_size = (last_section * items_per_section) + items_in_last_section;
+        let last_section_start_pos = last_section * items_per_section;
+
+        // Check locations journal state
+        let locations_size = locations.size().await?;
+
+        // Fix any inconsistency between the locations journal and the data journal
+        if locations_size > expected_size {
+            // We violated the invariant that locations is never ahead of data
+            return Err(Error::Corruption(format!(
+                "locations ahead of data journal: locations_size={locations_size} > expected_size={expected_size}"
+            )));
+        }
+        if locations_size < expected_size {
+            let size_diff = expected_size - locations_size;
+            if size_diff > items_per_section {
+                // This should never happen because `append` writes both data and locations when
+                // a section becomes full.
+                return Err(Error::Corruption(format!(
+                    "locations divergence {size_diff} exceeds items_per_section {items_per_section}",
+                )));
+            }
+
+            // Replay last section and append items we're missing
+            let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+            futures::pin_mut!(stream);
+
+            let Some(items_already_indexed) = locations_size.checked_sub(last_section_start_pos)
+            else {
+                // This should never happen because `append` writes both data and locations when
+                // a section becomes full.
+                return Err(Error::Corruption(format!(
+                    "locations size {locations_size} < last section start position {last_section_start_pos}"
+                )));
+            };
+
+            let mut index = 0u64;
+            while let Some(result) = stream.next().await {
+                let (section, offset, _size, _item) = result?;
+
+                // Only append locations we don't have yet
+                if index >= items_already_indexed {
+                    locations.append(Location { section, offset }).await?;
+                }
+                index += 1;
+            }
+        }
+        locations.sync().await?;
         Ok(Self {
             journal,
             locations,
             items_per_section,
-            size,
+            size: expected_size,
             oldest_retained_pos,
         })
     }

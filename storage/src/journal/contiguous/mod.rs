@@ -48,12 +48,9 @@ pub trait Contiguous {
     fn size(&self) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.
+    /// Some items with positions less than `min_position` may be retained.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
-    ///
-    /// # Note on Section Alignment
-    ///
-    /// Some items with positions less than `min_position` may be retained.
     ///
     /// # Errors
     ///
@@ -86,7 +83,6 @@ pub trait Contiguous {
     ///
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    /// - Returns other errors if storage or decoding fails.
     fn read(
         &self,
         position: u64,
@@ -98,8 +94,6 @@ pub trait Contiguous {
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Close the journal, syncing all pending writes and releasing resources.
-    ///
-    /// After calling close, the journal cannot be used again.
     fn close(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Destroy the journal, removing all associated storage.
@@ -107,9 +101,5 @@ pub trait Contiguous {
     /// This method consumes the journal and deletes all persisted data including blobs,
     /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
     /// permanently removing a journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operations fail.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }
