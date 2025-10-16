@@ -1,6 +1,11 @@
-//! This module exposes the domain-separation helpers plus concrete
-//! [`SigningScheme`] implementations: one backed by BLS12-381 threshold
-//! signatures and one backed by Ed25519 quorum signatures.
+//! Signing-scheme abstraction and implementations used by `threshold_simplex`.
+//!
+//! The [`SigningScheme`] trait defines the cryptographic surface consumed by the core consensus
+//! engine: how votes are signed and verified, how quorum certificates are assembled/checked, and
+//! whether additional randomness is exposed for leader rotation. Two concrete schemes are provided:
+//!
+//! * [`bls12381_threshold`] – aggregated threshold signatures that also expose per-view randomness.
+//! * [`ed25519`] – quorum signatures collected into a vector.
 
 pub mod bls12381_threshold;
 pub mod ed25519;
@@ -19,9 +24,11 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// available, derives a randomness seed for leader rotation. Implementations may override
 /// the provided defaults to take advantage of scheme-specific batching strategies.
 pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
+    /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
+    /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
-
+    /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + EncodeFixed + Send;
 
     /// Converts the scheme into a pure verifier.
@@ -43,7 +50,8 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         vote: &Vote<Self>,
     ) -> bool;
 
-    /// Batch-verifies votes and separates valid messages from the indices that failed verification.
+    /// Batch-verifies votes and separates valid messages from the voter indices that failed
+    /// verification.
     ///
     /// Callers must not include duplicate votes from the same signer.
     fn verify_votes<R, D, I>(
