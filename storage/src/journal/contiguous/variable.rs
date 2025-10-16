@@ -190,6 +190,14 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// The data journal is the source of truth. If the locations index is inconsistent
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        // Validate that partitions are different to prevent blob name collisions
+        if cfg.partition == cfg.locations_partition {
+            return Err(Error::Corruption(format!(
+                "partition and locations_partition must be different: both are '{}'",
+                cfg.partition
+            )));
+        }
+
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable data journal
@@ -361,8 +369,9 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         // Append to data journal, get offset
         let (offset, _size) = self.data.append(section, item).await?;
 
-        // Append location to locations journal
-        self.locations.append(Location { section, offset }).await?;
+        // Append location to locations journal and verify it stays in sync
+        let locations_pos = self.locations.append(Location { section, offset }).await?;
+        assert_eq!(locations_pos, self.size);
 
         // Return the current position and increment for next time
         let position = self.size;
@@ -654,6 +663,34 @@ mod tests {
             position_to_section(position, oldest_retained_pos, items_per_section),
             expected_section
         );
+    }
+
+    /// Test that init rejects when partition and locations_partition are the same.
+    ///
+    /// This prevents blob name collisions between data and locations journals.
+    #[test]
+    fn test_variable_reject_same_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "same_partition".to_string(),
+                locations_partition: "same_partition".to_string(), // Same as partition!
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let result = Variable::<_, u64>::init(context, cfg).await;
+            match result {
+                Err(e) => {
+                    let err_msg = format!("{e}");
+                    assert!(err_msg.contains("partition and locations_partition must be different"));
+                }
+                Ok(_) => panic!("Should reject identical partitions"),
+            }
+        });
     }
 
     #[test]
