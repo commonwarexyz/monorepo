@@ -15,7 +15,7 @@
 //! the duration of any future to some reproducible latency (with `pace()`).
 //!
 //! **Applications that do not interact with external processes (or are able to mock them) should never
-//! need to enable this feature. It is commonly used when tests consensus with external execution environments
+//! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
 //! # Example
