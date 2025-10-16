@@ -200,7 +200,6 @@ impl<P: PublicKey> From<Vec<P>> for Participants<P> {
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
-/// The verifier retains a clone of the active [`SigningScheme`] so it can batch-verify votes on demand.
 pub struct BatchVerifier<S: SigningScheme, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     signing: S,
@@ -936,6 +935,8 @@ impl<S: SigningScheme, D: Digest> Notarize<S, D> {
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
+    ///
+    /// This ensures that the notarize signature is valid for the claimed proposal.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
@@ -994,12 +995,15 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
 }
 
 /// Aggregated notarization certificate recovered from notarize votes.
+/// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
 /// leader rotation), it can be accessed via [`SigningScheme::seed`].
 #[derive(Clone, Debug, Eq)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
+    /// The proposal that has been notarized.
     pub proposal: Proposal<D>,
+    /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
 }
 
@@ -1047,6 +1051,8 @@ impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
 
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
+    ///
+    /// This ensures that the certificate is valid for the claimed proposal.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
@@ -1102,10 +1108,13 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
-/// Validator vote for nullifying the current round.
+/// Validator vote for nullifying the current round, i.e. skip the current round.
+/// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug, Eq)]
 pub struct Nullify<S: SigningScheme> {
+    /// The round to be nullified (skipped).
     pub round: Round,
+    /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
@@ -1131,6 +1140,8 @@ impl<S: SigningScheme> Nullify<S> {
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
+    ///
+    /// This ensures that the nullify signature is valid for the given round.
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote::<D>(
             namespace,
@@ -1186,10 +1197,13 @@ impl<S: SigningScheme> Viewable for Nullify<S> {
     }
 }
 
-/// Aggregated nullification certificate for a round.
+/// Aggregated nullification certificate recovered from nullify votes.
+/// When a view is nullified, the consensus moves to the next view without finalizing a block.
 #[derive(Clone, Debug, Eq)]
 pub struct Nullification<S: SigningScheme> {
+    /// The round in which this nullification is made.
     pub round: Round,
+    /// The recovered certificate for the nullification.
     pub certificate: S::Certificate,
 }
 
@@ -1239,6 +1253,8 @@ impl<S: SigningScheme> Write for Nullification<S> {
 
 impl<S: SigningScheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
+    ///
+    /// This ensures that the certificate is valid for the claimed round.
     pub fn verify<R: Rng + CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
@@ -1287,10 +1303,14 @@ impl<S: SigningScheme> Viewable for Nullification<S> {
     }
 }
 
-/// Validator vote finalizing a proposal after notarization.
+/// Validator vote to finalize a proposal.
+/// This happens after a proposal has been notarized, confirming it as the canonical block
+/// for this round.
 #[derive(Clone, Debug, Eq)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
+    /// Proposal being finalized.
     pub proposal: Proposal<D>,
+    /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
@@ -1328,6 +1348,8 @@ impl<S: SigningScheme, D: Digest> Finalize<S, D> {
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
+    ///
+    /// This ensures that the finalize signature is valid for the claimed proposal.
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
@@ -1385,10 +1407,16 @@ impl<S: SigningScheme, D: Digest> Viewable for Finalize<S, D> {
     }
 }
 
-/// Aggregated finalization certificate.
+/// Aggregated finalization certificate recovered from finalize votes.
+/// When a proposal is finalized, it becomes the canonical block for its view.
+///
+/// Some signing schemes embed an additional randomness seed in the certificate (used for
+/// leader rotation), it can be accessed via [`SigningScheme::seed`].
 #[derive(Clone, Debug, Eq)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
+    /// The proposal that has been finalized.
     pub proposal: Proposal<D>,
+    /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
 }
 
@@ -1454,6 +1482,8 @@ impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
+    ///
+    /// This ensures that the certificate is valid for the claimed proposal.
     pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
@@ -2010,7 +2040,9 @@ impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, Eq)]
 pub struct ConflictingNotarize<S: SigningScheme, D: Digest> {
+    /// The first conflicting notarize
     notarize_1: Notarize<S, D>,
+    /// The second conflicting notarize
     notarize_2: Notarize<S, D>,
 }
 
@@ -2105,7 +2137,9 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, Eq)]
 pub struct ConflictingFinalize<S: SigningScheme, D: Digest> {
+    /// The second conflicting finalize
     finalize_1: Finalize<S, D>,
+    /// The second conflicting finalize
     finalize_2: Finalize<S, D>,
 }
 
@@ -2201,7 +2235,9 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 /// finalize a proposal, not both).
 #[derive(Clone, Debug, Eq)]
 pub struct NullifyFinalize<S: SigningScheme, D: Digest> {
+    /// The conflicting nullify
     nullify: Nullify<S>,
+    /// The conflicting finalize
     finalize: Finalize<S, D>,
 }
 
