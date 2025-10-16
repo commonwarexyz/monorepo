@@ -332,7 +332,7 @@ impl<H: Hasher> Read for Shard<H> {
             rows: Read::read_cfg(buf, &(topology.data_cols * topology.data_rows))?,
             checksum: Arc::new(Read::read_cfg(
                 buf,
-                &(topology.data_cols * topology.data_rows),
+                &(topology.data_rows * topology.column_samples),
             )?),
         })
     }
@@ -366,11 +366,11 @@ impl<H: Hasher> Write for ReShard<H> {
 }
 
 impl<H: Hasher> Read for ReShard<H> {
-    type Cfg = usize;
+    type Cfg = crate::Cfg;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_data_bytes: &Self::Cfg,
+        &(max_data_bytes, _): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_data_els = max_data_bytes.div_ceil(F::SIZE);
         Ok(Self {

@@ -69,6 +69,8 @@ impl Read for Config {
     }
 }
 
+pub type Cfg = (usize, Config);
+
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.
 ///
 /// # Example
@@ -114,13 +116,13 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Clone + Eq + Codec + Send + Sync + 'static;
+    type Shard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Clone + Eq + Codec + Send + Sync + 'static;
+    type ReShard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
     /// Data which can assist in checking shards.
     type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
@@ -200,8 +202,11 @@ pub trait ValidatingScheme: Scheme {}
 mod test {
     use super::*;
     use crate::reed_solomon::ReedSolomon;
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use std::cmp::Reverse;
+
+    const MAX_DATA_BYTES: usize = 1 << 31;
 
     fn general_test<S: Scheme>(
         name: &str,
@@ -230,6 +235,7 @@ mod test {
             minimum_shards: min_shards,
             extra_shards: total_shards - min_shards,
         };
+        let read_cfg = (MAX_DATA_BYTES, config);
         let (commitment, shards) = S::encode(&config, data).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
@@ -237,6 +243,7 @@ mod test {
                 .into_iter()
                 .enumerate()
                 .filter_map(|(i, shard)| {
+                    let shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
                     let i = i as u16;
                     let pos_of_i = indices.iter().position(|&x| x == i)?;
                     let (x0, x1, x2) = S::reshard(&config, &commitment, i, shard).unwrap();
@@ -251,6 +258,7 @@ mod test {
             let mut others = other_packets
                 .into_iter()
                 .map(|(_, i, _, _, reshard)| {
+                    let reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
                     S::check(&config, &commitment, &checking_data, i, reshard).unwrap()
                 })
                 .collect::<Vec<_>>();
