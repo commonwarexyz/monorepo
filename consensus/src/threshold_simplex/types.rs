@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{quorum_from_slice, set::Set};
+use commonware_utils::{max_faults, quorum_from_slice, set::Set};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
 
@@ -138,6 +138,8 @@ pub struct Participants<P: PublicKey> {
     keys: Set<P>,
     /// Quorum (2f+1) computed from the participant set.
     quorum: u32,
+    /// Maximum number of faults (f) tolerated by the participant set.
+    max_faults: u32,
 }
 
 impl<P: PublicKey> Participants<P> {
@@ -145,8 +147,13 @@ impl<P: PublicKey> Participants<P> {
     pub fn new(keys: Vec<P>) -> Self {
         let keys: Set<_> = keys.into_iter().collect();
         let quorum = quorum_from_slice(keys.as_ref());
+        let max_faults = max_faults(keys.len() as u32);
 
-        Self { keys, quorum }
+        Self {
+            keys,
+            quorum,
+            max_faults,
+        }
     }
 
     /// Returns the participant key at the given signer index.
@@ -162,6 +169,11 @@ impl<P: PublicKey> Participants<P> {
     /// Returns the cached quorum value for this participant set.
     pub fn quorum(&self) -> u32 {
         self.quorum
+    }
+
+    /// Returns the cached maximum number of faults tolerated by this participant set.
+    pub fn max_faults(&self) -> u32 {
+        self.max_faults
     }
 }
 

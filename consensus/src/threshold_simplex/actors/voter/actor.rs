@@ -355,8 +355,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let at_least_one_honest = (self.participants.quorum() - 1) / 2 + 1;
-        if self.notarizes.len() < at_least_one_honest as usize {
+        if self.notarizes.len() <= self.participants.max_faults() as usize {
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
