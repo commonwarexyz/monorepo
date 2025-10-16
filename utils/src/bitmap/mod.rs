@@ -19,6 +19,8 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
+pub mod historical;
+
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
@@ -250,6 +252,28 @@ impl<const N: usize> BitMap<N> {
         bit
     }
 
+    /// Remove and return the last complete chunk from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bitmap has fewer than `CHUNK_SIZE_BITS` bits or if not chunk-aligned.
+    pub(super) fn pop_chunk(&mut self) -> [u8; N] {
+        assert!(
+            self.len() >= Self::CHUNK_SIZE_BITS,
+            "cannot pop chunk: bitmap has fewer than CHUNK_SIZE_BITS bits"
+        );
+        assert_eq!(self.next_bit, 0, "cannot pop chunk when not chunk aligned");
+
+        // Remove the empty chunk at the end
+        self.chunks.pop_back();
+        // Remove and return the last data chunk
+        let chunk = self.chunks.pop_back().expect("chunk must exist");
+        // Add a new empty chunk to maintain invariant
+        self.chunks.push_back(Self::EMPTY_CHUNK);
+        // next_bit stays 0
+        chunk
+    }
+
     /// Flips the given bit.
     ///
     /// # Panics
@@ -337,7 +361,7 @@ impl<const N: usize> BitMap<N> {
     /// # Warning
     ///
     /// Panics if self.next_bit is not chunk aligned.
-    pub(super) fn push_chunk(&mut self, chunk: &[u8; N]) {
+    pub fn push_chunk(&mut self, chunk: &[u8; N]) {
         assert_eq!(self.next_bit, 0, "cannot add chunk when not chunk aligned");
         self.last_chunk_mut().copy_from_slice(chunk.as_ref());
         self.prepare_next_chunk();
@@ -412,6 +436,29 @@ impl<const N: usize> BitMap<N> {
             self.chunks.push_back(Self::EMPTY_CHUNK);
             self.next_bit = 0;
         }
+    }
+
+    /// Prepend a chunk to the beginning of the bitmap.
+    pub(super) fn prepend_chunk(&mut self, chunk: &[u8; N]) {
+        self.chunks.push_front(*chunk);
+    }
+
+    /// Overwrite a chunk's data at the given index.
+    ///
+    /// Replaces the entire chunk data, including any bits beyond `len()` in the last chunk.
+    /// The caller is responsible for ensuring `chunk_data` has the correct bit pattern
+    /// (e.g., zeros beyond the valid length if this is a partial last chunk).
+    ///
+    /// # Panics
+    ///
+    /// Panics if chunk_index is out of bounds.
+    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
+        assert!(
+            chunk_index < self.chunks.len(),
+            "chunk index {chunk_index} out of bounds (chunks_len: {})",
+            self.chunks.len()
+        );
+        self.chunks[chunk_index].copy_from_slice(chunk_data);
     }
 
     /* Counting */
@@ -1015,6 +1062,86 @@ mod tests {
         }
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_pop_chunk() {
+        let mut bv: BitMap<3> = BitMap::new();
+        const CHUNK_SIZE: u64 = BitMap::<3>::CHUNK_SIZE_BITS;
+
+        // Test 1: Pop a single chunk and verify it returns the correct data
+        let chunk1 = [0xAA, 0xBB, 0xCC];
+        bv.push_chunk(&chunk1);
+        assert_eq!(bv.len(), CHUNK_SIZE);
+        let popped = bv.pop_chunk();
+        assert_eq!(popped, chunk1);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+
+        // Test 2: Pop multiple chunks in reverse order
+        let chunk2 = [0x11, 0x22, 0x33];
+        let chunk3 = [0x44, 0x55, 0x66];
+        let chunk4 = [0x77, 0x88, 0x99];
+
+        bv.push_chunk(&chunk2);
+        bv.push_chunk(&chunk3);
+        bv.push_chunk(&chunk4);
+        assert_eq!(bv.len(), CHUNK_SIZE * 3);
+
+        assert_eq!(bv.pop_chunk(), chunk4);
+        assert_eq!(bv.len(), CHUNK_SIZE * 2);
+
+        assert_eq!(bv.pop_chunk(), chunk3);
+        assert_eq!(bv.len(), CHUNK_SIZE);
+
+        assert_eq!(bv.pop_chunk(), chunk2);
+        assert_eq!(bv.len(), 0);
+
+        // Test 3: Verify data integrity when popping chunks
+        let first_chunk = [0xAA, 0xBB, 0xCC];
+        let second_chunk = [0x11, 0x22, 0x33];
+        bv.push_chunk(&first_chunk);
+        bv.push_chunk(&second_chunk);
+
+        // Pop the second chunk, verify it and that first chunk is intact
+        assert_eq!(bv.pop_chunk(), second_chunk);
+        assert_eq!(bv.len(), CHUNK_SIZE);
+
+        for i in 0..CHUNK_SIZE {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = i % 8;
+            let expected = (first_chunk[byte_idx] >> bit_idx) & 1 == 1;
+            assert_eq!(bv.get(i), expected);
+        }
+
+        assert_eq!(bv.pop_chunk(), first_chunk);
+        assert_eq!(bv.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot pop chunk when not chunk aligned")]
+    fn test_pop_chunk_not_aligned() {
+        let mut bv: BitMap<3> = BitMap::new();
+
+        // Push a full chunk plus one bit
+        bv.push_chunk(&[0xFF; 3]);
+        bv.push(true);
+
+        // Should panic because not chunk-aligned
+        bv.pop_chunk();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot pop chunk: bitmap has fewer than CHUNK_SIZE_BITS bits")]
+    fn test_pop_chunk_insufficient_bits() {
+        let mut bv: BitMap<3> = BitMap::new();
+
+        // Push only a few bits (less than a full chunk)
+        bv.push(true);
+        bv.push(false);
+
+        // Should panic because we don't have a full chunk to pop
+        bv.pop_chunk();
     }
 
     #[test]
