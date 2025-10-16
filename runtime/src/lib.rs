@@ -310,9 +310,9 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "external")] {
         /// Interface that runtimes can implement to constrain the execution latency of a future.
         pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-            /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
-            /// the future is not yet ready at the desired time of completion, the runtime will block until
-            /// the future is ready.
+            /// Defer completion of a future until a specified `latency` has elapsed. If the future is
+            /// not yet ready at the desired time of completion, the runtime will block until the future
+            /// is ready.
             ///
             /// In [crate::deterministic], this is used to ensure interactions with external systems can
             /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
