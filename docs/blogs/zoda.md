@@ -30,6 +30,8 @@ The simplest approach is to have the leader send the data to every follower.
 The leader's transmission cost is $m \cdot D$ bytes, and the followers' cost
 is $0$ bytes, since they send nothing.
 
+![](/blogs/zoda/img-000.png)
+
 Networked protocols are often bottlenecked by sending data, since moving
 bits around the planet, a country, or a building is hopelessly slow compared
 to moving it within an integrated circuit.
@@ -55,6 +57,8 @@ $\frac{1}{m}$ of the data.
 All together, the participants hold it all, distributed as thinly as possible.
 (They do still need to communicate to recover the data, of course, but it is
 recoverable).
+
+![](/blogs/zoda/img-001.png)
 
 In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m} = D$,
 quite the improvement.
@@ -118,6 +122,8 @@ Each shard can be a row of this matrix.
 Given $n$ shards, the original matrix can be recovered, proceeding columnwise
 once more.
 
+![](/blogs/zoda/img-002.png)
+
 The cost of this scheme is now:
 - $m \cdot \frac{D}{n}$ for the leader,
 - $(m - 1) \cdot \frac{D}{n}$ for each follower,
@@ -159,6 +165,8 @@ Each shard would then come with an opening, demonstrating that the $i$th hash
 in the vector is that of the shard.
 A binary Merkle Tree is an example of such a scheme (but others might work better,
 e.g. playing with arity, or using a Polynomial Commitment Scheme).
+
+![](/blogs/zoda/img-003.png)
 
 As a side-effect, our scheme now produces a fingerprint, attesting uniquely to
 the encoded data.

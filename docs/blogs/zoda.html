@@ -108,6 +108,7 @@ Meier</a></div>
         D\)</span> bytes, and the followers’ cost is <span
         class="math inline">\(0\)</span> bytes, since they send
         nothing.</p>
+        <p><img src="/blogs/zoda/img-000.png" /></p>
         <p>Networked protocols are often bottlenecked by sending data,
         since moving bits around the planet, a country, or a building is
         hopelessly slow compared to moving it within an integrated
@@ -132,6 +133,7 @@ Meier</a></div>
         together, the participants hold it all, distributed as thinly as
         possible. (They do still need to communicate to recover the
         data, of course, but it is recoverable).</p>
+        <p><img src="/blogs/zoda/img-001.png" /></p>
         <p>In this case, the leader’s transmission cost is now just
         <span class="math inline">\(m \cdot \frac{D}{m} = D\)</span>,
         quite the improvement. If the participants want to recover the
@@ -200,6 +202,7 @@ Meier</a></div>
         Each shard can be a row of this matrix. Given <span
         class="math inline">\(n\)</span> shards, the original matrix can
         be recovered, proceeding columnwise once more.</p>
+        <p><img src="/blogs/zoda/img-002.png" /></p>
         <p>The cost of this scheme is now: - <span
         class="math inline">\(m \cdot \frac{D}{n}\)</span> for the
         leader, - <span class="math inline">\((m - 1) \cdot
@@ -244,6 +247,7 @@ Meier</a></div>
         that of the shard. A binary Merkle Tree is an example of such a
         scheme (but others might work better, e.g. playing with arity,
         or using a Polynomial Commitment Scheme).</p>
+        <p><img src="/blogs/zoda/img-003.png" /></p>
         <p>As a side-effect, our scheme now produces a fingerprint,
         attesting uniquely to the encoded data. This could be used for
         consensus, like the hash of the data itself often is.</p>
