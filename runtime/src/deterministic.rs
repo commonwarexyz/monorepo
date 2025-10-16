@@ -61,7 +61,7 @@ use futures::{
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use pin_project_lite::pin_project;
+use pin_project::pin_project;
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -1119,18 +1119,17 @@ impl Clock for Context {
     }
 }
 
-pin_project! {
-    /// A future that resolves when a given target time is reached.
-    ///
-    /// If the future is not ready at the target time, the future is blocked until the target time is reached.
-    struct Waiter<F: Future> {
-        executor: Weak<Executor>,
-        target: SystemTime,
-        future: Option<Pin<Box<F>>>,
-        ready: Option<F::Output>,
-        started: bool,
-        registered: bool,
-    }
+/// A future that resolves when a given target time is reached.
+///
+/// If the future is not ready at the target time, the future is blocked until the target time is reached.
+#[pin_project]
+struct Waiter<F: Future> {
+    executor: Weak<Executor>,
+    target: SystemTime,
+    future: Option<Pin<Box<F>>>,
+    ready: Option<F::Output>,
+    started: bool,
+    registered: bool,
 }
 
 impl<F> Future for Waiter<F>
