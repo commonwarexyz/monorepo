@@ -136,8 +136,8 @@ impl<S: SigningScheme> VoteVerification<S> {
 ///
 /// A `SigningScheme` produces validator votes, validates them (individually or in
 /// batches), assembles quorum certificates, checks recovered certificates and, when
-/// available, derives randomness for leader rotation. Implementations may override the
-/// provided defaults to take advantage of scheme-specific batching strategies.
+/// available, derives a randomness seed for leader rotation. Implementations may override
+/// the provided defaults to take advantage of scheme-specific batching strategies.
 pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
     type Signature: Clone
         + Debug
@@ -161,7 +161,7 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         + Write
         + Read<Cfg = Self::CertificateCfg>;
 
-    type Randomness: Clone + EncodeSize + Write + Send;
+    type Seed: Clone + EncodeSize + Write + Send;
 
     type CertificateCfg: Clone + Send + Sync;
 
@@ -259,8 +259,8 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
-    /// Extracts randomness derived from the certificate, if provided by the scheme.
-    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
+    /// Extracts randomness seed derived from the certificate, if provided by the scheme.
+    fn seed(&self, certificate: &Self::Certificate) -> Option<Self::Seed>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> Self::CertificateCfg;
@@ -1138,8 +1138,8 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
 
 /// Aggregated notarization certificate recovered from notarize votes.
 ///
-/// Some signing schemes embed additional randomness in the certificate (used for
-/// leader rotation), it can be accessed via [`SigningScheme::randomness`].
+/// Some signing schemes embed an additional randomness seed in the certificate (used for
+/// leader rotation), it can be accessed via [`SigningScheme::seed`].
 #[derive(Clone, Debug, Eq)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,

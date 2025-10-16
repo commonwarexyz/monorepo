@@ -178,7 +178,7 @@ impl<V: Variant> EncodeSize for Signature<V> {
 impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
-    type Randomness = V::Signature;
+    type Seed = V::Signature;
 
     type CertificateCfg = ();
 
@@ -771,7 +771,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         .is_ok()
     }
 
-    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness> {
+    fn seed(&self, certificate: &Self::Certificate) -> Option<Self::Seed> {
         Some(certificate.seed_signature)
     }
 
@@ -1306,8 +1306,8 @@ mod tests {
             .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
-        let randomness = schemes[0].randomness(&certificate);
-        assert_eq!(randomness, Some(certificate.seed_signature));
+        let seed = schemes[0].seed(&certificate);
+        assert_eq!(seed, Some(certificate.seed_signature));
     }
 
     #[test]

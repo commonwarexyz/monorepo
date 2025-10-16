@@ -155,7 +155,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
     }
 
-    pub fn set_leader(&mut self, seed: Option<S::Randomness>) {
+    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_index) =
             select_leader::<S, _>(&self.participants, self.round.view(), seed);
         self.leader = Some((leader.clone(), leader_index));
@@ -969,7 +969,7 @@ impl<
         Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Randomness>) {
+    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1103,7 +1103,7 @@ impl<
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
-        let seed = self.signing.randomness(&notarization.certificate);
+        let seed = self.signing.seed(&notarization.certificate);
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1160,7 +1160,7 @@ impl<
 
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
-        let seed = self.signing.randomness(&nullification.certificate);
+        let seed = self.signing.seed(&nullification.certificate);
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1242,7 +1242,7 @@ impl<
 
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
-        let seed = self.signing.randomness(&finalization.certificate);
+        let seed = self.signing.seed(&finalization.certificate);
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()

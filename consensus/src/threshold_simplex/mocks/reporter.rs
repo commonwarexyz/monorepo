@@ -43,7 +43,7 @@ pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: SigningScheme, D: Diges
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Option<S::Randomness>>>>,
+    pub seeds: Arc<Mutex<HashMap<View, Option<S::Seed>>>>,
     pub notarizes: Arc<Mutex<Participation<P, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
@@ -85,10 +85,10 @@ where
         }
     }
 
-    fn record_leader(&self, view: View, randomness: Option<S::Randomness>) {
+    fn record_leader(&self, view: View, seed: Option<S::Seed>) {
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(view).or_insert_with(|| {
-            select_leader::<S, _>(&self.participants, view, randomness)
+            select_leader::<S, _>(&self.participants, view, seed)
                 .0
                 .clone()
         });
@@ -100,7 +100,6 @@ where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
-    S::Randomness: Clone,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -154,8 +153,8 @@ where
                 self.seeds
                     .lock()
                     .unwrap()
-                    .insert(view, self.signing.randomness(&notarization.certificate));
-                self.record_leader(view + 1, self.signing.randomness(&notarization.certificate));
+                    .insert(view, self.signing.seed(&notarization.certificate));
+                self.record_leader(view + 1, self.signing.seed(&notarization.certificate));
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify::<D>(&self.signing, &self.namespace) {
@@ -198,11 +197,8 @@ where
                 self.seeds
                     .lock()
                     .unwrap()
-                    .insert(view, self.signing.randomness(&nullification.certificate));
-                self.record_leader(
-                    view + 1,
-                    self.signing.randomness(&nullification.certificate),
-                );
+                    .insert(view, self.signing.seed(&nullification.certificate));
+                self.record_leader(view + 1, self.signing.seed(&nullification.certificate));
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&self.signing, &self.namespace) {
@@ -247,8 +243,8 @@ where
                 self.seeds
                     .lock()
                     .unwrap()
-                    .insert(view, self.signing.randomness(&finalization.certificate));
-                self.record_leader(view + 1, self.signing.randomness(&finalization.certificate));
+                    .insert(view, self.signing.seed(&finalization.certificate));
+                self.record_leader(view + 1, self.signing.seed(&finalization.certificate));
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();
@@ -323,7 +319,6 @@ where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
-    S::Randomness: Clone + Encode,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

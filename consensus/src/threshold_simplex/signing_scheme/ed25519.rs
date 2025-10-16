@@ -122,7 +122,7 @@ impl Read for Certificate {
 impl SigningScheme for Scheme {
     type Signature = Ed25519Signature;
     type Certificate = Certificate;
-    type Randomness = ();
+    type Seed = ();
 
     type CertificateCfg = usize;
 
@@ -361,7 +361,7 @@ impl SigningScheme for Scheme {
         batch.verify(rng)
     }
 
-    fn randomness(&self, _: &Self::Certificate) -> Option<Self::Randomness> {
+    fn seed(&self, _: &Self::Certificate) -> Option<Self::Seed> {
         None
     }
 

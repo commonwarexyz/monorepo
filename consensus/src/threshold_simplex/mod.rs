@@ -11,7 +11,7 @@
 //!   certificate can be verified with just the static public key of the consensus instance) for each view with
 //!   zero message overhead (natively integrated).
 //! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
-//!   same interface but without succinct certificate aggregation or randomness.
+//!   same interface but without succinct certificate aggregation or randomness seed.
 //!
 //! # Features
 //!
@@ -213,22 +213,18 @@ pub(crate) fn interesting(
     true
 }
 
-/// Selects the leader for a given view using scheme-provided randomness when available.
+/// Selects the leader for a given view using scheme-provided randomness seed when available.
 ///
-/// If the active [`SigningScheme`] exposes randomness (e.g. BLS threshold certificates),
-/// the randomness is encoded and reduced modulo the number of participants. Otherwise we
-/// fall back to simple round-robin using the view number.
-pub fn select_leader<S, P>(
-    participants: &[P],
-    view: View,
-    randomness: Option<S::Randomness>,
-) -> (&P, u32)
+/// If the active [`SigningScheme`] exposes a seed (e.g. BLS threshold certificates), the
+/// seed is encoded and reduced modulo the number of participants. Otherwise we fall back
+/// to simple round-robin using the view number.
+pub fn select_leader<S, P>(participants: &[P], view: View, seed: Option<S::Seed>) -> (&P, u32)
 where
     S: SigningScheme,
 {
     use commonware_codec::Encode;
 
-    let idx = if let Some(seed) = randomness {
+    let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
         (view as usize) % participants.len()
