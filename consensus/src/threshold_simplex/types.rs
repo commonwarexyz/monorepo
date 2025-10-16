@@ -146,10 +146,7 @@ impl<P: PublicKey> Participants<P> {
         let keys: Set<_> = keys.into_iter().collect();
         let quorum = quorum_from_slice(keys.as_ref());
 
-        Self {
-            keys: keys.into(),
-            quorum,
-        }
+        Self { keys, quorum }
     }
 
     /// Returns the participant key at the given signer index.
