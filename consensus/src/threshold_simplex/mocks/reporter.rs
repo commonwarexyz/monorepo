@@ -150,11 +150,11 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, notarization.clone());
-                self.seeds
-                    .lock()
-                    .unwrap()
-                    .insert(view, self.signing.seed(&notarization.certificate));
-                self.record_leader(view + 1, self.signing.seed(&notarization.certificate));
+                let seed = self
+                    .signing
+                    .seed(notarization.round(), &notarization.certificate);
+                self.seeds.lock().unwrap().insert(view, seed.clone());
+                self.record_leader(view + 1, seed);
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify::<D>(&self.signing, &self.namespace) {
@@ -194,11 +194,11 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, nullification.clone());
-                self.seeds
-                    .lock()
-                    .unwrap()
-                    .insert(view, self.signing.seed(&nullification.certificate));
-                self.record_leader(view + 1, self.signing.seed(&nullification.certificate));
+                let seed = self
+                    .signing
+                    .seed(nullification.round, &nullification.certificate);
+                self.seeds.lock().unwrap().insert(view, seed.clone());
+                self.record_leader(view + 1, seed);
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&self.signing, &self.namespace) {
@@ -240,11 +240,11 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
-                self.seeds
-                    .lock()
-                    .unwrap()
-                    .insert(view, self.signing.seed(&finalization.certificate));
-                self.record_leader(view + 1, self.signing.seed(&finalization.certificate));
+                let seed = self
+                    .signing
+                    .seed(finalization.round(), &finalization.certificate);
+                self.seeds.lock().unwrap().insert(view, seed.clone());
+                self.record_leader(view + 1, seed);
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();

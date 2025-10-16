@@ -13,10 +13,11 @@ use crate::{
         },
         types::{Vote, VoteContext, VoteVerification},
     },
-    Viewable,
+    types::{Epoch, Round, View},
+    Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -25,7 +26,7 @@ use commonware_cryptography::{
             ops::{
                 aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
                 partial_verify_multiple_public_keys_precomputed, threshold_signature_recover,
-                threshold_signature_recover_pair,
+                threshold_signature_recover_pair, verify_message,
             },
             poly::{self, PartialSignature, Public},
             variant::Variant,
@@ -174,10 +175,85 @@ impl<V: Variant> FixedSize for Signature<V> {
     const SIZE: usize = V::Signature::SIZE * 2;
 }
 
+/// Seed represents a threshold signature over the current view.
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct Seed<V: Variant> {
+    /// The round for which this seed is generated
+    pub round: Round,
+    /// The threshold signature on the seed.
+    pub signature: V::Signature,
+}
+
+impl<V: Variant> Seed<V> {
+    /// Creates a new seed with the given view and signature.
+    pub fn new(round: Round, signature: V::Signature) -> Self {
+        Seed { round, signature }
+    }
+
+    /// Verifies the threshold signature on this [Seed].
+    pub fn verify(&self, signing: &Scheme<V>, namespace: &[u8]) -> bool {
+        let seed_namespace = seed_namespace(namespace);
+        let message = self.round.encode();
+
+        verify_message::<V>(
+            signing.identity(),
+            Some(&seed_namespace),
+            &message,
+            &self.signature,
+        )
+        .is_ok()
+    }
+
+    /// Returns the round associated with this seed.
+    pub fn round(&self) -> Round {
+        self.round
+    }
+}
+
+impl<V: Variant> Epochable for Seed<V> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
+    }
+}
+
+impl<V: Variant> Viewable for Seed<V> {
+    type View = View;
+
+    fn view(&self) -> View {
+        self.round.view()
+    }
+}
+
+impl<V: Variant> Write for Seed<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.round.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Seed<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let round = Round::read(reader)?;
+        let signature = V::Signature::read(reader)?;
+
+        Ok(Self { round, signature })
+    }
+}
+
+impl<V: Variant> EncodeSize for Seed<V> {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.signature.encode_size()
+    }
+}
+
 impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
-    type Seed = V::Signature;
+    type Seed = Seed<V>;
 
     fn into_verifier(self) -> Self {
         match self {
@@ -768,8 +844,8 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         .is_ok()
     }
 
-    fn seed(&self, certificate: &Self::Certificate) -> Option<Self::Seed> {
-        Some(certificate.seed_signature)
+    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
+        Some(Seed::new(round, certificate.seed_signature))
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
@@ -1140,6 +1216,87 @@ mod tests {
         certificate_codec_roundtrip::<MinSig>();
     }
 
+    fn seed_codec_roundtrip<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 1, 0);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes, None)
+            .expect("assemble certificate");
+
+        let seed = schemes[0]
+            .seed(proposal.round, &certificate)
+            .expect("extract seed");
+
+        let encoded = seed.encode();
+        let decoded = Seed::<V>::decode_cfg(encoded, &()).expect("decode seed");
+        assert_eq!(decoded, seed);
+    }
+
+    #[test]
+    fn test_seed_codec_roundtrip() {
+        seed_codec_roundtrip::<MinPk>();
+        seed_codec_roundtrip::<MinSig>();
+    }
+
+    fn seed_verify<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let quorum = quorum(schemes.len() as u32) as usize;
+        let proposal = sample_proposal(0, 1, 0);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme.sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes, None)
+            .expect("assemble certificate");
+
+        let seed = schemes[0]
+            .seed(proposal.round, &certificate)
+            .expect("extract seed");
+
+        assert!(seed.verify(&schemes[0], NAMESPACE));
+
+        let invalid_seed = schemes[0]
+            .seed(
+                Round::new(proposal.epoch(), proposal.view() + 1),
+                &certificate,
+            )
+            .expect("extract seed");
+
+        assert!(!invalid_seed.verify(&schemes[0], NAMESPACE));
+    }
+
+    #[test]
+    fn test_seed_verify() {
+        seed_verify::<MinPk>();
+        seed_verify::<MinSig>();
+    }
+
     fn scheme_clone_and_into_verifier<V: Variant>() {
         let (schemes, participants, polynomial) = setup_signers::<V>(3, 31);
         let signer = schemes[0].clone();
@@ -1303,8 +1460,8 @@ mod tests {
             .assemble_certificate(votes, None)
             .expect("assemble certificate");
 
-        let seed = schemes[0].seed(&certificate);
-        assert_eq!(seed, Some(certificate.seed_signature));
+        let seed = schemes[0].seed(proposal.round, &certificate).unwrap();
+        assert_eq!(seed.signature, certificate.seed_signature);
     }
 
     #[test]

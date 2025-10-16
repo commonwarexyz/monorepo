@@ -10,8 +10,11 @@
 pub mod bls12381_threshold;
 pub mod ed25519;
 
-use crate::threshold_simplex::types::{Vote, VoteContext, VoteVerification};
-use commonware_codec::{Codec, CodecFixed, EncodeFixed, Read};
+use crate::{
+    threshold_simplex::types::{Vote, VoteContext, VoteVerification},
+    types::Round,
+};
+use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 use rand::{CryptoRng, Rng};
@@ -29,7 +32,7 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
     /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
-    type Seed: Clone + EncodeFixed + Send;
+    type Seed: Clone + Encode + Send;
 
     /// Converts the scheme into a pure verifier.
     ///
@@ -126,8 +129,9 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
-    /// Extracts randomness seed derived from the certificate, if provided by the scheme.
-    fn seed(&self, certificate: &Self::Certificate) -> Option<Self::Seed>;
+    /// Extracts randomness seed, if provided by the scheme, derived from the certificate
+    /// for the given round.
+    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

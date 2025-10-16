@@ -3,9 +3,14 @@
 //! This module batches ordinary Ed25519 signatures from a quorum of participants
 //! and packages them as certificates that satisfy the generic consensus interface.
 
-use crate::threshold_simplex::{
-    signing_scheme::{finalize_namespace, notarize_namespace, nullify_namespace, SigningScheme},
-    types::{Participants, Vote, VoteContext, VoteVerification},
+use crate::{
+    threshold_simplex::{
+        signing_scheme::{
+            finalize_namespace, notarize_namespace, nullify_namespace, SigningScheme,
+        },
+        types::{Participants, Vote, VoteContext, VoteVerification},
+    },
+    types::Round,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadRangeExt, Write};
@@ -367,7 +372,7 @@ impl SigningScheme for Scheme {
         batch.verify(rng)
     }
 
-    fn seed(&self, _: &Self::Certificate) -> Option<Self::Seed> {
+    fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
         None
     }
 

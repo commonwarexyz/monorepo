@@ -1093,7 +1093,9 @@ impl<
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
-        let seed = self.signing.seed(&notarization.certificate);
+        let seed = self
+            .signing
+            .seed(notarization.round(), &notarization.certificate);
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1145,7 +1147,9 @@ impl<
 
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
-        let seed = self.signing.seed(&nullification.certificate);
+        let seed = self
+            .signing
+            .seed(nullification.round, &nullification.certificate);
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1217,7 +1221,9 @@ impl<
 
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
-        let seed = self.signing.seed(&finalization.certificate);
+        let seed = self
+            .signing
+            .seed(finalization.round(), &finalization.certificate);
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
