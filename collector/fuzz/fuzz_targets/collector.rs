@@ -129,7 +129,7 @@ impl FuzzHandler {
     fn new(respond: bool, mut rng: StdRng) -> Self {
         let mut response_map = HashMap::new();
         for _ in 0..rng.gen_range(0..10) {
-            let id = rng.gen();
+            let id = rng.r#gen();
             let result_len = rng.gen_range(0..100);
             let mut result = vec![0u8; result_len];
             rng.fill(&mut result[..]);
@@ -302,9 +302,9 @@ fn fuzz(input: FuzzInput) {
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
 
         for i in 2..5 {
-            let seed = rng.gen();
+            let seed = rng.r#gen();
             peers.push(PrivateKey::from_seed(seed));
-            handlers.insert(i, FuzzHandler::new(rng.gen(), StdRng::seed_from_u64(seed)));
+            handlers.insert(i, FuzzHandler::new(rng.r#gen(), StdRng::seed_from_u64(seed)));
             monitors.insert(i, FuzzMonitor::new());
         }
         assert!(!peers.is_empty(), "no peers");
@@ -396,7 +396,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
-                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
+                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.r#gen()))
                     });
                     let monitor = monitors.get(&idx).cloned().unwrap_or_else(FuzzMonitor::new);
                     let config = Config {

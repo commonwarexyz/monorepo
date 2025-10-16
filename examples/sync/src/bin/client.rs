@@ -320,7 +320,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .to_string();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-            let suffix: u64 = rand::thread_rng().gen();
+            let suffix: u64 = rand::thread_rng().r#gen();
             format!("{storage_dir}-{suffix}")
         } else {
             storage_dir

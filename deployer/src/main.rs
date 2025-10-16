@@ -96,36 +96,36 @@ async fn main() -> std::process::ExitCode {
         match ec2_matches.subcommand() {
             Some((ec2::CREATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::create(config_path).await {
+                match ec2::create(config_path).await { Err(e) => {
                     error!(error=?e, "failed to create EC2 deployment");
-                } else {
+                } _ => {
                     return std::process::ExitCode::SUCCESS;
-                }
+                }}
             }
             Some((ec2::UPDATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::update(config_path).await {
+                match ec2::update(config_path).await { Err(e) => {
                     error!(error=?e, "failed to update EC2 deployment");
-                } else {
+                } _ => {
                     return std::process::ExitCode::SUCCESS;
-                }
+                }}
             }
             Some((ec2::AUTHORIZE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 let ip = matches.get_one::<String>("ip").cloned();
-                if let Err(e) = ec2::authorize(config_path, ip).await {
+                match ec2::authorize(config_path, ip).await { Err(e) => {
                     error!(error=?e, "failed to authorize EC2 deployment");
-                } else {
+                } _ => {
                     return std::process::ExitCode::SUCCESS;
-                }
+                }}
             }
             Some((ec2::DESTROY_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::destroy(config_path).await {
+                match ec2::destroy(config_path).await { Err(e) => {
                     error!(error=?e, "failed to destroy EC2 deployment");
-                } else {
+                } _ => {
                     return std::process::ExitCode::SUCCESS;
-                }
+                }}
             }
             Some((cmd, _)) => {
                 error!(cmd, "invalid subcommand");

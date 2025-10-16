@@ -288,12 +288,12 @@ fn decode<H: Hasher>(
 
     // Decode original data
     let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for (idx, ref shard) in &provided_originals {
+    for (idx, shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
             .map_err(Error::ReedSolomon)?;
     }
-    for (idx, ref shard) in &provided_recoveries {
+    for (idx, shard) in &provided_recoveries {
         decoder
             .add_recovery_shard(*idx, shard)
             .map_err(Error::ReedSolomon)?;

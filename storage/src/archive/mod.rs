@@ -501,7 +501,7 @@ mod tests {
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.r#gen();
 
                 if keys.contains_key(&index) {
                     continue;
@@ -621,7 +621,7 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.r#gen();
 
                 archive
                     .put(index, key.clone(), data)

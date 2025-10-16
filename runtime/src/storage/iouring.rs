@@ -354,7 +354,7 @@ mod tests {
     fn create_test_storage() -> (Storage, PathBuf) {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
-            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.r#gen::<u64>()));
 
         let storage = Storage::start(
             Config {

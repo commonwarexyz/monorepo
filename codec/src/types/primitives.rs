@@ -201,7 +201,7 @@ mod tests {
 
     // Float tests
     macro_rules! impl_num_test {
-        ($type:ty, $size:expr) => {
+        ($type:ty, $size:expr_2021) => {
             paste! {
                 #[test]
                 fn [<test_ $type>]() {

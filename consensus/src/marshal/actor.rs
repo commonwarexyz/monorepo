@@ -332,13 +332,13 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             self.cache.put_notarization(round, commitment, notarization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                            match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                 // If found, persist the block
                                 self.cache_block(round, commitment, block).await;
-                            } else {
+                            } _ => {
                                 debug!(?round, "notarized block missing");
                                 resolver.fetch(Request::<B>::Notarized { round }).await;
-                            }
+                            }}
                         }
                         Message::Finalization { finalization } => {
                             // Cache finalization by round
@@ -347,16 +347,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                            match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                 // If found, persist the block
                                 let height = block.height();
                                 self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
                                 debug!(?round, height, "finalized block stored");
-                            } else {
+                            } _ => {
                                 // Otherwise, fetch the block from the network.
                                 debug!(?round, ?commitment, "finalized block missing");
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
-                            }
+                            }}
                         }
                         Message::GetBlock { identifier, response } => {
                             match identifier {
@@ -479,16 +479,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             // Iterate backwards, repairing blocks as we go.
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
-                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                                match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                     let finalization = self.cache.get_finalization_for(commitment).await;
                                     self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
-                                } else {
+                                } _ => {
                                     // Request the next missing block digest
                                     resolver.fetch(Request::<B>::Block(commitment)).await;
                                     break;
-                                }
+                                }}
                             }
 
                             // If we haven't fully repaired the gap, then also request any possible

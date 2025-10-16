@@ -641,33 +641,33 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(finalization) = self.construct_finalization(past_view, true) {
+            match self.construct_finalization(past_view, true) { Some(finalization) => {
                 let msg = Voter::Finalization(finalization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::FINALIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry finalization");
-            } else if let Some(notarization) = self.construct_notarization(past_view, true) {
+            } _ => { match self.construct_notarization(past_view, true) { Some(notarization) => {
                 let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true) {
+            } _ => { match self.construct_nullification(past_view, true) { Some(nullification) => {
                 let msg = Voter::Nullification(nullification);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
                     .inc();
                 debug!(view = past_view, "rebroadcast entry nullification");
-            } else {
+            } _ => {
                 warn!(
                     current = self.view,
                     "unable to rebroadcast entry notarization/nullification/finalization"
                 );
-            }
+            }}}}}}
         }
 
         // Construct nullify

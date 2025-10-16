@@ -234,7 +234,7 @@ impl Transcript {
     ///
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
-    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore {
+    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore + use<> {
         let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())

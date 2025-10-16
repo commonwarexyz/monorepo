@@ -558,14 +558,14 @@ impl<P: PublicKey> State<P> {
         loop {
             let buffered = match self.buffered.entry(key.clone()) {
                 Entry::Occupied(mut occ) => {
-                    if let Some(p) = occ.get_mut().remove(expected_entry) {
+                    match occ.get_mut().remove(expected_entry) { Some(p) => {
                         if occ.get().is_empty() {
                             occ.remove();
                         }
                         Some(p)
-                    } else {
+                    } _ => {
                         None
-                    }
+                    }}
                 }
                 Entry::Vacant(_) => None,
             };

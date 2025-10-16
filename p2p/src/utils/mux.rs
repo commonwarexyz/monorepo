@@ -304,7 +304,7 @@ mod tests {
         seed: u64,
     ) -> (
         Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Sender<PublicKey = Pk> + use<E>, impl Receiver<PublicKey = Pk> + use<E>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();

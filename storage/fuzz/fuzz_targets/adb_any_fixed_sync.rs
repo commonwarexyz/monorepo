@@ -134,7 +134,7 @@ async fn test_sync<
             max_outstanding_requests: 10,
         };
 
-    if let Ok(synced) = sync::sync(sync_config).await {
+    match sync::sync(sync_config).await { Ok(synced) => {
         let mut hasher = Standard::<Sha256>::new();
         let actual_root = synced.root(&mut hasher);
         assert_eq!(
@@ -143,9 +143,9 @@ async fn test_sync<
         );
 
         synced.destroy().await.is_ok()
-    } else {
+    } _ => {
         false
-    }
+    }}
 }
 
 fn fuzz(input: FuzzInput) {

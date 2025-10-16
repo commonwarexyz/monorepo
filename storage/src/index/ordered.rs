@@ -126,7 +126,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
-    pub fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a + use<'a, T, V> {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
@@ -146,7 +146,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     /// the same translated key can appear in any order, keys with the same first byte in this
     /// example would need to be ordered by the caller if a full ordering over the untranslated
     /// keyspace is desired.
-    pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a + use<'a, T, V> {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))

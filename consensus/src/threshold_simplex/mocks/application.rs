@@ -197,7 +197,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Generate the payload
-        let rand = self.context.gen::<u64>();
+        let rand = self.context.r#gen::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();

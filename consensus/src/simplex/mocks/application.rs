@@ -195,7 +195,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Generate the payload
         let parent = context.parent.1;
-        let random = self.context.gen::<u64>(); // Ensures we always have a unique payload
+        let random = self.context.r#gen::<u64>(); // Ensures we always have a unique payload
         let payload = (context.round, parent, random).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();

@@ -783,8 +783,8 @@ mod tests {
         expected_duration_ms: u64,
     ) {
         // Create two agents
-        let pk1 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
-        let pk2 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
+        let pk1 = PrivateKey::from_seed(context.r#gen::<u64>()).public_key();
+        let pk2 = PrivateKey::from_seed(context.r#gen::<u64>()).public_key();
         let (mut sender, _) = oracle.register(pk1.clone(), 0).await.unwrap();
         let (_, mut receiver) = oracle.register(pk2.clone(), 0).await.unwrap();
 

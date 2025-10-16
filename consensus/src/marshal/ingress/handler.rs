@@ -122,7 +122,7 @@ impl<B: Block> Request<B> {
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static + use<B> {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
             (Self::Block(_), _) => unreachable!("we should never retain by block"),

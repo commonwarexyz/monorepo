@@ -40,7 +40,7 @@ impl BloomFilter {
     }
 
     /// Generate `num_hashers` bit indices for a given item.
-    fn indices(&self, item: &[u8], bits: u64) -> impl Iterator<Item = u64> {
+    fn indices(&self, item: &[u8], bits: u64) -> impl Iterator<Item = u64> + use<> {
         // Extract two 128-bit hash values from the SHA256 digest of the item
         let digest = Sha256::hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];

@@ -87,14 +87,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
     let mut data = vec![0u8; rng.gen_range(1..=MAX_KEY_SIZE)];
     for (i, byte) in data.iter_mut().enumerate() {
-        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.gen::<u8>();
+        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.r#gen::<u8>();
     }
     Sha256::hash(&data)
 }
 
 fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
-    (0..actual_size).map(|_| rng.gen()).collect()
+    (0..actual_size).map(|_| rng.r#gen()).collect()
 }
 
 fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
