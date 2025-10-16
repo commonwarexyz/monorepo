@@ -292,6 +292,41 @@ $$
 
 as for our own shard.
 
+## Comparisons with KZG
+
+Another approach to verifiable dissemination is to lean into Polynomial Commitment Schemes.
+This is, in essence, how [Danksharding](https://ethereum.org/roadmap/danksharding/) works.
+
+In the case of Reed-Solomon coding, each shard is the evaluation of some polynomial $d(X)$
+at a given point.
+The problem of checking that our shard is an evaluation of a claimed polynomial
+is exactly that solved by a PCS.
+Such a scheme produces a succinct commitment to $d(X)$, such that we can also prove
+that some data is the result of evaluating $d(X)$ at a given point, which is what we need.
+
+
+The [ZODA paper](https://eprint.iacr.org/2025/034) has some comparison numbers with such a scheme,
+using KZG commitments,
+but they should be taken with a fairly large grain of salt, since they analyze things from a data availability
+stand point, where you have a large number of samplers (around 1000), with a rate (i.e. $n / m$) of $1/2$.
+For the use-case of data dissemination, you'd likely have fewer nodes (around 100, or however many validators you have),
+with a higher rate (something like $2/3$, allowing you to recover if byzantine validators omit their shards).
+Nonetheless, you can compare the claimed performance for different data sizes.
+For each scheme, the original block size, the size of each shard, and the total size of all shards is reported.
+The inefficiency---how much data is needed compared to just sending all of the data naively--is also reported.
+
+| Block size | ZODA Node | ZODA Network | Zoda Inef. | 2D KZG Row/Col Node | 2D KZG Row/Col Net. | 2D KZG Row/Col Inef. |
+|-----------|------------------------|----------------------|----------------------|--|--|--|
+| 32MiB      | 1.04 MiB                | 72 MiB                | 2.3x                 |12 MiB|271 MiB|8.5|
+| 256MiB     | 2.84 MiB                | 560 MiB               | 2.2x                 |35 MiB|2.0 GiB|8.2|
+| 1GiB       | 7.68 MiB                | 2.1 GiB               | 2.1x                 |70 MiB|8.1 GiB|8.2|
+| 32GiB      | 43.2 MiB                | 66 GiB                | 2.1x                 |394 MiB|258 GiB|8.1|
+| 1TiB       | 244 MiB                 | 2.1 TiB               | 2.1x                 |2.2 GiB|8.1 TiB|8.1|
+
+In any case, we can see a claimed improvement in the context of Data Availability,
+and we should expect this to extend to our slightly different use-case of
+data dissemination.
+
 ## Summary
 
 A leader wants to send some data to followers.

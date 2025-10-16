@@ -374,6 +374,77 @@ Meier</a></div>
         Y_S H \overset{?}{=} (G Z)_S
         \]</span></p>
         <p>as for our own shard.</p>
+        <h2 id="comparisons-with-kzg">Comparisons with KZG</h2>
+        <p>Another</p>
+        <table>
+        <colgroup>
+        <col style="width: 12%" />
+        <col style="width: 28%" />
+        <col style="width: 25%" />
+        <col style="width: 25%" />
+        <col style="width: 2%" />
+        <col style="width: 2%" />
+        <col style="width: 2%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th>Block size</th>
+        <th>ZODA Node</th>
+        <th>ZODA Network</th>
+        <th>Zoda Inef.</th>
+        <th>2D KZG Row/Col Node</th>
+        <th>2D KZG Row/Col Net.</th>
+        <th>2D KZG Row/Col Inef.</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td>32MiB</td>
+        <td>1.04 MiB</td>
+        <td>72 MiB</td>
+        <td>2.3x</td>
+        <td>12 MiB</td>
+        <td>271 MiB</td>
+        <td>8.5</td>
+        </tr>
+        <tr>
+        <td>256MiB</td>
+        <td>2.84 MiB</td>
+        <td>560 MiB</td>
+        <td>2.2x</td>
+        <td>35 MiB</td>
+        <td>2.0 GiB</td>
+        <td>8.2</td>
+        </tr>
+        <tr>
+        <td>1GiB</td>
+        <td>7.68 MiB</td>
+        <td>2.1 GiB</td>
+        <td>2.1x</td>
+        <td>70 MiB</td>
+        <td>8.1 GiB</td>
+        <td>8.2</td>
+        </tr>
+        <tr>
+        <td>32GiB</td>
+        <td>43.2 MiB</td>
+        <td>66 GiB</td>
+        <td>2.1x</td>
+        <td>394 MiB</td>
+        <td>258 GiB</td>
+        <td>8.1</td>
+        </tr>
+        <tr>
+        <td>1TiB</td>
+        <td>244 MiB</td>
+        <td>2.1 TiB</td>
+        <td>2.1x</td>
+        <td>2.2 GiB</td>
+        <td>8.1 TiB</td>
+        <td>8.1</td>
+        </tr>
+        </tbody>
+        </table>
         <h2 id="summary">Summary</h2>
         <p>A leader wants to send some data to followers.</p>
         <p>In the naive case, the leader simply sends all of the data to
