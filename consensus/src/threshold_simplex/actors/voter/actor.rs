@@ -522,6 +522,16 @@ impl<
         )
     }
 
+    fn new_round(&self, view: View) -> Round<E, C::PublicKey, S, D> {
+        Round::new(
+            &self.context,
+            self.participants.clone(),
+            self.signing.clone(),
+            self.recover_latency.clone(),
+            Rnd::new(self.epoch, view),
+        )
+    }
+
     fn is_notarized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
@@ -776,13 +786,8 @@ impl<
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Handle nullify
         if self.journal.is_some() {
@@ -982,13 +987,8 @@ impl<
         }
 
         // Setup new view
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         round.set_leader(seed);
@@ -1039,13 +1039,8 @@ impl<
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Handle notarize
         if self.journal.is_some() {
@@ -1094,13 +1089,8 @@ impl<
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
@@ -1151,13 +1141,8 @@ impl<
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         // Create round (if it doesn't exist)
         let view = nullification.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
@@ -1178,13 +1163,8 @@ impl<
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
         // Get view for finalize
         let view = finalize.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Handle finalize
         if self.journal.is_some() {
@@ -1233,13 +1213,8 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.view();
-        let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        ));
+        let round = self.new_round(view);
+        let round = self.views.entry(view).or_insert(round);
 
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
