@@ -18,9 +18,6 @@ use std::{
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Location of an item in the variable journal.
-///
-/// This struct maps a global position to a (section, offset) pair in the underlying
-/// variable journal, enabling O(1) reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Location {
     /// Section number where the item is stored
