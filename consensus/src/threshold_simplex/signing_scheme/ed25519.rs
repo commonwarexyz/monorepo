@@ -33,8 +33,8 @@ impl Scheme {
     ///
     /// * `participants` - ordered validator set used for verification.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(participants: Vec<PublicKey>, private_key: PrivateKey) -> Self {
-        let participants = Participants::from(participants);
+    pub fn new(participants: impl Into<Participants<PublicKey>>, private_key: PrivateKey) -> Self {
+        let participants = participants.into();
 
         let signer = participants
             .signer_index(&private_key.public_key())
@@ -47,7 +47,7 @@ impl Scheme {
     }
 
     /// Builds a pure verifier that can authenticate votes without signing.
-    pub fn verifier(participants: Vec<PublicKey>) -> Self {
+    pub fn verifier(participants: impl Into<Participants<PublicKey>>) -> Self {
         Self {
             participants: participants.into(),
             signer: None,
