@@ -25,11 +25,11 @@ fn bench_prove_single(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples = queries
+                        
+                        queries
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()
-                            .collect::<Vec<_>>();
-                        samples
+                            .collect::<Vec<_>>()
                     },
                     |samples| {
                         let mut hasher = Sha256::new();

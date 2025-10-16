@@ -365,11 +365,10 @@ fn fuzz(input: FuzzInput) {
                             .process(peers[origin_idx].public_key(), request.clone(), tx)
                             .await;
 
-                        if should_respond {
-                            if let Ok(response) = rx.await {
+                        if should_respond
+                            && let Ok(response) = rx.await {
                                 assert_eq!(response.id, request.id);
                             }
-                        }
                     }
                 }
 

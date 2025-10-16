@@ -307,11 +307,10 @@ impl Executor {
         let mut skip_until = None;
         {
             let sleeping = self.sleeping.lock().unwrap();
-            if let Some(next) = sleeping.peek() {
-                if next.time > current {
+            if let Some(next) = sleeping.peek()
+                && next.time > current {
                     skip_until = Some(next.time);
                 }
-            }
         }
 
         if let Some(deadline) = skip_until {
@@ -443,11 +442,10 @@ impl Runner {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
-                if let Some(deadline) = executor.deadline {
-                    if *current >= deadline {
+                if let Some(deadline) = executor.deadline
+                    && *current >= deadline {
                         panic!("runtime timeout");
                     }
-                }
             }
 
             // Drain all ready tasks
@@ -974,8 +972,8 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         let executor = self.executor();
         executor.auditor.event(b"stopped", |_| {});
-        let stopped = executor.shutdown.lock().unwrap().stopped();
-        stopped
+        
+        executor.shutdown.lock().unwrap().stopped()
     }
 }
 
@@ -1261,8 +1259,8 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        let result = executor.rng.lock().unwrap().next_u32();
-        result
+        
+        executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -1270,8 +1268,8 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        let result = executor.rng.lock().unwrap().next_u64();
-        result
+        
+        executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -1287,8 +1285,8 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        let result = executor.rng.lock().unwrap().try_fill_bytes(dest);
-        result
+        
+        executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 

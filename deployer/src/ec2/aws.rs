@@ -487,17 +487,13 @@ pub async fn wait_for_vpc_peering_connection(
             .vpc_peering_connection_ids(peer_id)
             .send()
             .await
-        {
-            if let Some(connections) = resp.vpc_peering_connections {
-                if let Some(connection) = connections.first() {
-                    if connection.status.as_ref().unwrap().code
+            && let Some(connections) = resp.vpc_peering_connections
+                && let Some(connection) = connections.first()
+                    && connection.status.as_ref().unwrap().code
                         == Some(VpcPeeringConnectionStateReasonCode::PendingAcceptance)
                     {
                         return Ok(());
                     }
-                }
-            }
-        }
         sleep(Duration::from_secs(2)).await;
     }
 }

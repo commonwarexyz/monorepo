@@ -429,13 +429,12 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
+            if self.pinned_nodes.is_none() && start_loc == self.target.range.start
+                && let Ok(nodes) =
                     crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
                 {
                     self.pinned_nodes = Some(nodes);
                 }
-            }
 
             // Store operations for later application
             self.store_operations(start_loc, operations);

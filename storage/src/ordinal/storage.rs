@@ -145,12 +145,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let mut intervals = RMap::new();
         for (section, blob) in &blobs {
             // Skip if bits are provided and the section is not in the bits
-            if let Some(bits) = &bits {
-                if !bits.contains_key(section) {
+            if let Some(bits) = &bits
+                && !bits.contains_key(section) {
                     warn!(section, "skipping section without bits");
                     continue;
                 }
-            }
 
             // Initialize read buffer
             let size = blob.size().await;
@@ -189,13 +188,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
-                    if record.is_valid() {
+                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice())
+                    && record.is_valid() {
                         items += 1;
                         intervals.insert(index);
                         continue;
-                    }
-                };
+                    };
 
                 // If record is invalid, it may either be empty or corrupted. We only care
                 // which is which if the provided bits indicate that the record must exist.

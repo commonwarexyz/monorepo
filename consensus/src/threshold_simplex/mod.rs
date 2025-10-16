@@ -301,11 +301,10 @@ mod tests {
                 }
 
                 // Restrict to certain connections
-                if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
+                if let Some(f) = restrict_to
+                    && !f(validators.len(), i1, i2) {
                         continue;
                     }
-                }
 
                 // Do any unlinking first
                 match action {
@@ -1462,8 +1461,8 @@ mod tests {
             for line in lines {
                 if line.contains("_engine_voter_skipped_views_total") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(number_str) = parts.last() {
-                        if let Ok(number) = number_str.parse::<u64>() {
+                    if let Some(number_str) = parts.last()
+                        && let Ok(number) = number_str.parse::<u64>() {
                             if number > 0 {
                                 nodes_skipping += 1;
                             }
@@ -1471,7 +1470,6 @@ mod tests {
                                 skipped_views = number;
                             }
                         }
-                    }
                 }
             }
             assert!(

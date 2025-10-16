@@ -125,14 +125,13 @@ impl<B: Blob> Blob for Write<B> {
 
         // Write cannot be merged, so flush the buffer if the range overlaps, and check if merge is
         // possible after.
-        if buffer.offset < end_offset {
-            if let Some((old_buf, old_offset)) = buffer.take() {
+        if buffer.offset < end_offset
+            && let Some((old_buf, old_offset)) = buffer.take() {
                 self.blob.write_at(old_buf, old_offset).await?;
                 if buffer.merge(buf.as_ref(), offset) {
                     return Ok(());
                 }
             }
-        }
 
         // Write could not be merged (exceeds buffer capacity or outside its range), so write
         // directly. Note that we end up writing an intersecting range twice: once when the buffer

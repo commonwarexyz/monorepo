@@ -549,14 +549,13 @@ mod tests {
                 assert_eq!(start_next, next_actual_index);
 
                 // If there's a gap, check an index within the gap
-                if let Some(next_index) = next_actual_index {
-                    if next_index > block_end_index + 1 {
+                if let Some(next_index) = next_actual_index
+                    && next_index > block_end_index + 1 {
                         let in_gap_index = block_end_index + 1;
                         let (current_end, start_next) = archive.next_gap(in_gap_index);
                         assert!(current_end.is_none());
                         assert_eq!(start_next, Some(next_index));
                     }
-                }
                 i = j + 1;
             }
 

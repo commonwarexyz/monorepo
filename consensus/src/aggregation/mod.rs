@@ -519,11 +519,9 @@ mod tests {
                                 loop {
                                     if let Some(tip_index) =
                                         reporter_mailbox.get_contiguous_tip().await
-                                    {
-                                        if tip_index >= target_index {
+                                        && tip_index >= target_index {
                                             break;
                                         }
-                                    }
                                     context.sleep(Duration::from_millis(50)).await;
                                 }
                             });

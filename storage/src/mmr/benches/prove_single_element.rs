@@ -33,12 +33,12 @@ fn bench_prove_single_element(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples = elements
+                        
+                        elements
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()
                             .map(|(loc, element)| (Location::new(loc as u64).unwrap(), element))
-                            .collect::<Vec<_>>();
-                        samples
+                            .collect::<Vec<_>>()
                     },
                     |samples| {
                         block_on(async {

@@ -241,13 +241,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let min = self.section(min);
 
         // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
+        if let Some(oldest_allowed) = self.oldest_allowed
+            && min <= oldest_allowed {
                 // We don't return an error in this case because the caller
                 // shouldn't be burdened with converting `min` to some section.
                 return Ok(());
             }
-        }
         debug!(min, "pruning archive");
 
         // Prune journal

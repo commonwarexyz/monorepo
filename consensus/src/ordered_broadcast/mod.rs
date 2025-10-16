@@ -122,11 +122,10 @@ mod tests {
                 if v2 == v1 {
                     continue;
                 }
-                if let Some(f) = restrict_to {
-                    if !f(participants.len(), i1, i2) {
+                if let Some(f) = restrict_to
+                    && !f(participants.len(), i1, i2) {
                         continue;
                     }
-                }
                 if matches!(action, Action::Update(_) | Action::Unlink) {
                     oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
                 }

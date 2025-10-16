@@ -126,11 +126,10 @@ impl crate::Network for Network {
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
-        }
 
         // Explicitly set non-blocking mode to true
         stream
@@ -179,11 +178,10 @@ impl crate::Listener for Listener {
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
-        }
 
         // Explicitly set non-blocking mode to true
         stream

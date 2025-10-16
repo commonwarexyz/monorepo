@@ -353,11 +353,10 @@ impl<P: PublicKey> State<P> {
                 continue;
             };
 
-            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
-                if ready_at <= now {
+            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival)
+                && ready_at <= now {
                     ready_pairs.push(key.clone());
                 }
-            }
         }
 
         // Launch any queued transmissions that have become ready to send at `now`

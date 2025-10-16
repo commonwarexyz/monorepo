@@ -299,12 +299,11 @@ impl<
 
         loop {
             // Request a new proposal if necessary
-            if pending.is_none() {
-                if let Some(context) = self.should_propose() {
+            if pending.is_none()
+                && let Some(context) = self.should_propose() {
                     let receiver = self.automaton.propose(context.clone()).await;
                     pending = Some((context, receiver));
                 }
-            }
 
             // Create deadline futures.
             //
@@ -837,11 +836,10 @@ impl<
 
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
-        if let Some(tip) = self.tip_manager.get(sender) {
-            if tip == *node {
+        if let Some(tip) = self.tip_manager.get(sender)
+            && tip == *node {
                 return Ok(None);
             }
-        }
 
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;

@@ -66,11 +66,10 @@ impl crate::Listener for Listener {
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
-        }
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
@@ -197,11 +196,10 @@ impl crate::Network for Network {
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
-        }
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();

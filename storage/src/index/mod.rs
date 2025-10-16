@@ -881,18 +881,17 @@ mod tests {
         let index_clone = Arc::clone(&index);
         let handle = thread::spawn(move || {
             // Limit the lifetime of the lock and the cursor so they drop before returning
-            let result = {
+            
+            {
                 let mut index = index_clone.lock().unwrap();
                 let mut updated = false;
-                if let Some(mut cursor) = index.get_mut(b"test_key2") {
-                    if cursor.find(|&value| value == 200) {
+                if let Some(mut cursor) = index.get_mut(b"test_key2")
+                    && cursor.find(|&value| value == 200) {
                         cursor.update(250);
                         updated = true;
                     }
-                }
                 updated
-            };
-            result
+            }
         });
 
         // Wait for the thread to complete

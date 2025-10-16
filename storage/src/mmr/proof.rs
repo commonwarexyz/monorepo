@@ -444,11 +444,10 @@ impl<D: Digest> Proof<D> {
         if elements_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
-        if let Some(next_sibling) = siblings_iter.next() {
-            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
+        if let Some(next_sibling) = siblings_iter.next()
+            && (proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1]) {
                 return Err(ReconstructionError::ExtraDigests);
             }
-        }
 
         Ok(peak_digests)
     }

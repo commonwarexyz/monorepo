@@ -72,11 +72,10 @@ pub async fn run(
                 Ok(e) => e,
                 Err(_) => break,
             };
-            if let CEvent::Key(key) = e {
-                if tx.send(Event::Input(key)).await.is_err() {
+            if let CEvent::Key(key) = e
+                && tx.send(Event::Input(key)).await.is_err() {
                     break;
                 }
-            }
         }
     });
 

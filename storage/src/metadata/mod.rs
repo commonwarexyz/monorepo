@@ -1026,11 +1026,10 @@ mod tests {
                 if context.gen_bool(0.1) {
                     let selected_index = context.gen_range(0..=i);
                     let mut_key = U64::new(selected_index as u64);
-                    if let Some(value) = metadata.get_mut(&mut_key) {
-                        if !value.is_empty() {
+                    if let Some(value) = metadata.get_mut(&mut_key)
+                        && !value.is_empty() {
                             value[0] = value[0].wrapping_add(1);
                         }
-                    }
                 }
             }
             metadata.sync().await.unwrap();

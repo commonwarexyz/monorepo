@@ -42,12 +42,10 @@ fn fuzz(input: FuzzInput) {
         } => {
             if let Some(duration) =
                 Duration::from_secs(seconds_since_epoch).checked_add(Duration::from_secs(0))
-            {
-                if let Some(time) = SystemTime::UNIX_EPOCH.checked_add(duration) {
+                && let Some(time) = SystemTime::UNIX_EPOCH.checked_add(duration) {
                     let epoch = time.epoch();
                     assert_eq!(epoch, duration);
                 }
-            }
         }
 
         Operation::SystemTimeEpochMillis {
@@ -55,8 +53,7 @@ fn fuzz(input: FuzzInput) {
         } => {
             if let Some(duration) =
                 Duration::from_secs(seconds_since_epoch).checked_add(Duration::from_secs(0))
-            {
-                if let Some(time) = SystemTime::UNIX_EPOCH.checked_add(duration) {
+                && let Some(time) = SystemTime::UNIX_EPOCH.checked_add(duration) {
                     let epoch_millis = time.epoch_millis();
                     if let Some(expected_millis) = seconds_since_epoch.checked_mul(1000) {
                         assert_eq!(epoch_millis, expected_millis);
@@ -64,7 +61,6 @@ fn fuzz(input: FuzzInput) {
                         assert_eq!(epoch_millis, u64::MAX);
                     }
                 }
-            }
         }
 
         Operation::SystemTimeAddJittered {
@@ -73,20 +69,17 @@ fn fuzz(input: FuzzInput) {
         } => {
             if let Some(base_duration) =
                 Duration::from_secs(seconds_since_epoch).checked_add(Duration::from_secs(0))
-            {
-                if let Some(base_time) = SystemTime::UNIX_EPOCH.checked_add(base_duration) {
+                && let Some(base_time) = SystemTime::UNIX_EPOCH.checked_add(base_duration) {
                     let jitter = Duration::from_secs(jitter_secs.min(3600));
 
-                    if let Some(max_jitter) = jitter.checked_mul(2) {
-                        if let Some(_max_time) = base_time.checked_add(max_jitter) {
+                    if let Some(max_jitter) = jitter.checked_mul(2)
+                        && let Some(_max_time) = base_time.checked_add(max_jitter) {
                             let jittered_time = base_time.add_jittered(&mut rng, jitter);
 
                             assert!(jittered_time >= base_time);
                             assert!(jittered_time <= base_time + (jitter * 2));
                         }
-                    }
                 }
-            }
         }
     }
 }

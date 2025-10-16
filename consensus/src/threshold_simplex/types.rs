@@ -223,11 +223,10 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
             Voter::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
-                if let Some(ref leader_proposal) = self.leader_proposal {
-                    if leader_proposal != &finalize.proposal {
+                if let Some(ref leader_proposal) = self.leader_proposal
+                    && leader_proposal != &finalize.proposal {
                         return;
                     }
-                }
 
                 // If we've made it this far, add the finalize
                 if verified {

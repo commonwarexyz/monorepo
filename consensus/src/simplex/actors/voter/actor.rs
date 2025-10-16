@@ -1077,11 +1077,10 @@ impl<
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&view) {
-            if round.broadcast_notarization {
+        if let Some(ref round) = self.views.get_mut(&view)
+            && round.broadcast_notarization {
                 return false;
             }
-        }
 
         // Verify notarization
         let Some(participants) = self.supervisor.participants(view) else {
@@ -1146,11 +1145,10 @@ impl<
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&nullification.view()) {
-            if round.broadcast_nullification {
+        if let Some(ref round) = self.views.get_mut(&nullification.view())
+            && round.broadcast_nullification {
                 return false;
             }
-        }
 
         // Verify nullification
         let Some(participants) = self.supervisor.participants(nullification.view()) else {
@@ -1256,11 +1254,10 @@ impl<
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&view) {
-            if round.broadcast_finalization {
+        if let Some(ref round) = self.views.get_mut(&view)
+            && round.broadcast_finalization {
                 return false;
             }
-        }
 
         // Verify finalization
         let Some(participants) = self.supervisor.participants(view) else {
@@ -1513,11 +1510,10 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
+            if let Some((leader, elapsed)) = self.since_view_start(view)
+                && leader {
                     self.notarization_latency.observe(elapsed);
                 }
-            }
 
             // Update backfiller
             backfiller.notarized(notarization.clone()).await;
@@ -1652,11 +1648,10 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false) {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
+            if let Some((leader, elapsed)) = self.since_view_start(view)
+                && leader {
                     self.finalization_latency.observe(elapsed);
                 }
-            }
 
             // Update backfiller
             backfiller.finalized(view).await;
@@ -1824,15 +1819,14 @@ impl<
         let mut pending_verify = None;
         loop {
             // Reset pending set if we have moved to a new view
-            if let Some(view) = pending_set {
-                if view != self.view {
+            if let Some(view) = pending_set
+                && view != self.view {
                     pending_set = None;
                     pending_propose_context = None;
                     pending_propose = None;
                     pending_verify_context = None;
                     pending_verify = None;
                 }
-            }
 
             // Attempt to propose a container
             if let Some((context, new_propose)) = self.propose(&mut backfiller).await {

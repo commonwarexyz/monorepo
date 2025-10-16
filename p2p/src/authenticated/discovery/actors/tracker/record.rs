@@ -183,11 +183,10 @@ impl<C: PublicKey> Record<C> {
     /// Indicate that there was a dial failure for this peer using the given `socket`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
-        if let Address::Discovered(info, fails) = &mut self.address {
-            if info.socket == socket {
+        if let Address::Discovered(info, fails) = &mut self.address
+            && info.socket == socket {
                 *fails += 1;
             }
-        }
     }
 
     /// Indicate that a dial succeeded for this peer.

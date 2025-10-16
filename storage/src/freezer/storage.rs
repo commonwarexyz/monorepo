@@ -435,11 +435,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
-            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2) {
-                if added >= table_resize_frequency {
+            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2)
+                && added >= table_resize_frequency {
                     resizable += 1;
                 }
-            }
         }
 
         Ok((modified, max_epoch, max_section, resizable))
@@ -762,8 +761,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
-        if let Some(resize_progress) = self.resize_progress {
-            if table_index < resize_progress {
+        if let Some(resize_progress) = self.resize_progress
+            && table_index < resize_progress {
                 self.unnecessary_writes.inc();
 
                 // If the previous entry crossed the threshold, so did this one
@@ -779,7 +778,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry)
                     .await?;
             }
-        }
 
         Ok(Cursor::new(self.current_section, offset))
     }

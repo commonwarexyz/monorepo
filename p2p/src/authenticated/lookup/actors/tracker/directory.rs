@@ -112,12 +112,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
-            if index <= *last {
+        if let Some((last, _)) = self.sets.last_key_value()
+            && index <= *last {
                 debug!(?index, ?last, "index must monotonically increase",);
                 return Vec::new();
             }
-        }
 
         // Create and store new peer set
         for (peer, addr) in &peers {

@@ -151,19 +151,17 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::CursorUpdate { key, new_value } => {
-                    if let Some(mut cursor) = index.get_mut(key) {
-                        if cursor.next().is_some() {
+                    if let Some(mut cursor) = index.get_mut(key)
+                        && cursor.next().is_some() {
                             cursor.update(*new_value);
                         }
-                    }
                 }
 
                 IndexOperation::CursorDelete { key } => {
-                    if let Some(mut cursor) = index.get_mut(key) {
-                        if cursor.next().is_some() {
+                    if let Some(mut cursor) = index.get_mut(key)
+                        && cursor.next().is_some() {
                             cursor.delete();
                         }
-                    }
                 }
 
                 IndexOperation::CursorInsert { key, value } => {

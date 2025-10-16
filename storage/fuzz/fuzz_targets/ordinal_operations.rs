@@ -129,12 +129,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::Sync => {
-                    if let Some(ordinal) = store.as_mut() {
-                        if ordinal.sync().await.is_ok() {
+                    if let Some(ordinal) = store.as_mut()
+                        && ordinal.sync().await.is_ok() {
                             // After sync, all expected data should be persisted
                             synced_data = expected_data.clone();
                         }
-                    }
                 }
 
                 OrdinalOperation::Prune { min } => {
