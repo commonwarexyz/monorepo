@@ -1125,12 +1125,7 @@ impl Clock for Context {
 
 cfg_if! {
     if #[cfg(feature = "external")] {
-        /// State machine wrapper that isolates the inner paced future and its cached output.
-        ///
-        /// The inner future is polled while in `Pending`. Once it returns `Poll::Ready`, the
-        /// result is stored in `Ready` and the future itself is dropped so any captured
-        /// resources are released before we honor the pacing delay. After the paced latency
-        /// has elapsed, the cached value is returned and the state transitions to `Completed`.
+        /// Wrapper that caches the output of a future.
         #[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
         enum FutureState<F: Future> {
             Pending(#[pin] F),
