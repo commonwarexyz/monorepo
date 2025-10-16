@@ -383,6 +383,7 @@ impl<
         }
 
         // Initialize metrics
+        let current_epoch = Gauge::<i64, AtomicI64>::default();
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -390,6 +391,7 @@ impl<
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
+        context.register("current_epoch", "current epoch", current_epoch.clone());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -413,6 +415,10 @@ impl<
             "finalization latency",
             finalization_latency.clone(),
         );
+
+        // Set the current epoch on initialization; A new consensus engine is formed
+        // each time the epoch transitions.
+        current_epoch.set(cfg.epoch as i64);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);

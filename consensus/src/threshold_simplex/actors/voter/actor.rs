@@ -505,6 +505,7 @@ impl<
         }
 
         // Initialize metrics
+        let current_epoch = Gauge::<i64, AtomicI64>::default();
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
@@ -513,6 +514,7 @@ impl<
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
         let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        context.register("current_epoch", "current epoch", current_epoch.clone());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -543,6 +545,10 @@ impl<
         );
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
+
+        // Set the current epoch on initialization; A new consensus engine is formed
+        // each time the epoch transitions.
+        current_epoch.set(cfg.epoch as i64);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
