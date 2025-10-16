@@ -902,4 +902,234 @@ mod tests {
             assert!(result.is_err(), "Init should fail on corrupted data");
         });
     }
+
+    /// Test recovery from crash after data journal pruned but before locations journal.
+    #[test]
+    fn test_variable_recovery_prune_crash_locations_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // === Setup: Create Variable wrapper with data ===
+            let cfg = Config {
+                partition: "recovery_prune_crash".to_string(),
+                locations_partition: "recovery_prune_crash_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 40 items across 4 sections to both journals
+            for i in 0..40u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            // Prune to position 10 normally (both data and locations journals pruned)
+            variable.prune(10).await.unwrap();
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
+
+            // === Simulate crash: Prune data journal but not locations journal ===
+            // Manually prune data journal to section 2 (position 20)
+            variable.data.prune(2).await.unwrap();
+            // Locations journal still has data from position 10-19
+
+            variable.close().await.unwrap();
+
+            // === Verify recovery ===
+            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Init should auto-repair: locations journal pruned to match data journal
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(20));
+            assert_eq!(variable.size().await.unwrap(), 40);
+
+            // Reads before position 20 should fail (pruned from both journals)
+            assert!(matches!(
+                variable.read(10).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+
+            // Reads at position 20+ should succeed
+            assert_eq!(variable.read(20).await.unwrap(), 2000);
+            assert_eq!(variable.read(39).await.unwrap(), 3900);
+
+            variable.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery detects corruption when locations journal pruned ahead of data journal.
+    ///
+    /// Simulates an impossible state (locations journal pruned more than data journal) which
+    /// should never happen due to write ordering. Verifies that init() returns corruption error.
+    #[test]
+    fn test_variable_recovery_locations_ahead_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // === Setup: Create Variable wrapper with data ===
+            let cfg = Config {
+                partition: "recovery_locations_ahead".to_string(),
+                locations_partition: "recovery_locations_ahead_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 40 items across 4 sections to both journals
+            for i in 0..40u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            // Prune locations journal ahead of data journal (impossible state)
+            variable.locations.prune(20).await.unwrap(); // Prune to position 20
+            variable.data.prune(1).await.unwrap(); // Only prune data journal to section 1 (position 10)
+
+            variable.close().await.unwrap();
+
+            // === Verify corruption detected ===
+            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
+            match result {
+                Err(e) => {
+                    let err_msg = format!("{}", e);
+                    assert!(err_msg.contains("locations pruned ahead"));
+                }
+                Ok(_) => panic!("Should detect locations journal ahead corruption"),
+            }
+        });
+    }
+
+    /// Test recovery from crash after appending to data journal but before appending to locations journal.
+    ///
+    /// Simulates a crash in the middle of append() where data journal was written but locations
+    /// journal was not. Verifies that init() rebuilds locations journal from data journal replay.
+    #[test]
+    fn test_variable_recovery_append_crash_locations_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // === Setup: Create Variable wrapper with partial data ===
+            let cfg = Config {
+                partition: "recovery_append_crash".to_string(),
+                locations_partition: "recovery_append_crash_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 15 items to both journals (fills section 0, partial section 1)
+            for i in 0..15u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            assert_eq!(variable.size().await.unwrap(), 15);
+
+            // Manually append 5 more items directly to data journal only
+            for i in 15..20u64 {
+                variable.data.append(1, i * 100).await.unwrap();
+            }
+            // Locations journal still has only 15 entries
+
+            variable.close().await.unwrap();
+
+            // === Verify recovery ===
+            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Init should rebuild locations journal from data journal replay
+            assert_eq!(variable.size().await.unwrap(), 20);
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
+
+            // All items should be readable from both journals
+            for i in 0..20u64 {
+                assert_eq!(variable.read(i).await.unwrap(), i * 100);
+            }
+
+            // Locations journal should be fully rebuilt to match data journal
+            assert_eq!(variable.locations.size().await.unwrap(), 20);
+
+            variable.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery from multiple prune operations with crash.
+    ///
+    /// Simulates multiple prune operations where data journal was pruned multiple times
+    /// but locations journal was only partially updated. Verifies correct recovery behavior.
+    #[test]
+    fn test_variable_recovery_multiple_prunes_crash() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // === Setup: Create Variable wrapper with data ===
+            let cfg = Config {
+                partition: "recovery_multiple_prunes".to_string(),
+                locations_partition: "recovery_multiple_prunes_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 50 items across 5 sections to both journals
+            for i in 0..50u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            // Prune to position 10 normally (both data and locations journals pruned)
+            variable.prune(10).await.unwrap();
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
+
+            // === Simulate crash: Multiple prunes on data journal, not on locations journal ===
+            // Manually prune data journal to section 3 (position 30)
+            variable.data.prune(3).await.unwrap();
+            // Locations journal still thinks oldest is position 10
+
+            variable.close().await.unwrap();
+
+            // === Verify recovery ===
+            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Init should auto-repair: locations journal pruned to match data journal
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(30));
+            assert_eq!(variable.size().await.unwrap(), 50);
+
+            // Reads before position 30 should fail (pruned from both journals)
+            assert!(matches!(
+                variable.read(10).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert!(matches!(
+                variable.read(20).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+
+            // Reads at position 30+ should succeed
+            assert_eq!(variable.read(30).await.unwrap(), 3000);
+            assert_eq!(variable.read(49).await.unwrap(), 4900);
+
+            variable.destroy().await.unwrap();
+        });
+    }
 }
