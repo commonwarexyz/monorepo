@@ -1130,7 +1130,8 @@ impl Clock for Context {
 struct Waiter<F: Future> {
     executor: Weak<Executor>,
     target: SystemTime,
-    future: Option<Pin<Box<F>>>,
+    #[pin]
+    future: F,
     ready: Option<F::Output>,
     started: bool,
     registered: bool,
@@ -1144,20 +1145,17 @@ where
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let mut this = self.project();
 
         // Poll once with a noop waker so the future can register interest or start work
         // without being able to wake this task before the sampled delay expires. Any ready
         // value is cached and only released after the clock reaches `self.target`.
         if !*this.started {
             *this.started = true;
-            if let Some(future) = this.future.as_mut() {
-                let waker = noop_waker();
-                let mut cx_noop = task::Context::from_waker(&waker);
-                if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
-                    *this.future = None;
-                    *this.ready = Some(value);
-                }
+            let waker = noop_waker();
+            let mut cx_noop = task::Context::from_waker(&waker);
+            if let Poll::Ready(value) = this.future.as_mut().poll(&mut cx_noop) {
+                *this.ready = Some(value);
             }
         }
 
@@ -1186,15 +1184,10 @@ where
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
-            let future = this
-                .future
-                .as_mut()
-                .expect("future already polled at scheduled time");
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-            match future.as_mut().poll(&mut cx_block) {
+            match this.future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
-                    *this.future = None;
                     break Poll::Ready(value);
                 }
                 Poll::Pending => blocker.wait(),
@@ -1222,7 +1215,7 @@ impl Pacer for Context {
         Waiter {
             executor: self.executor.clone(),
             target,
-            future: Some(Box::pin(future)),
+            future,
             ready: None,
             started: false,
             registered: false,
