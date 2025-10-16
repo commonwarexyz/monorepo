@@ -10,6 +10,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_utils::set::Set;
 use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
@@ -20,7 +21,7 @@ pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
     context: ContextCell<E>,
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
-    contributors: Vec<C>,
+    contributors: Set<C>,
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
@@ -30,9 +31,8 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
-        mut contributors: Vec<C>,
+        contributors: Set<C>,
     ) -> Self {
-        contributors.sort();
         Self {
             context: ContextCell::new(context),
             dkg_frequency,

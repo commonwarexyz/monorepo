@@ -25,6 +25,7 @@ pub mod bitmap;
 pub mod channels;
 #[cfg(feature = "std")]
 pub mod net;
+pub mod set;
 #[cfg(feature = "std")]
 pub use net::IpAddrExt;
 #[cfg(feature = "std")]

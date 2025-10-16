@@ -158,7 +158,7 @@ cfg_if::cfg_if! {
 
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
+            fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]>;
 
             // Indicate whether some candidate is a participant at the given view.
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;

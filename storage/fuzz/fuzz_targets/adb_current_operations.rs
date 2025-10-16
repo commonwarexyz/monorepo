@@ -194,7 +194,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
                                 hasher.inner(),
                                 &proof,
-                                &info,
+                                info.clone(),
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
