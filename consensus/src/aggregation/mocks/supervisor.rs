@@ -65,8 +65,8 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
         unimplemented!()
     }
 
-    fn participants(&self, epoch: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        self.validators.get(&epoch)
+    fn participants(&self, epoch: Self::Index) -> Option<&[Self::PublicKey]> {
+        self.validators.get(&epoch).map(|v| v.as_slice())
     }
 
     fn is_participant(&self, epoch: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {

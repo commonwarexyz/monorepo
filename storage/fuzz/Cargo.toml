@@ -21,8 +21,15 @@ rand = { workspace = true }
 bytes = { workspace = true }
 
 [[bin]]
-name = "adb_operations"
-path = "fuzz_targets/adb_operations.rs"
+name = "adb_unordered_operations"
+path = "fuzz_targets/adb_unordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adb_ordered_operations"
+path = "fuzz_targets/adb_ordered_operations.rs"
 test = false
 doc = false
 bench = false

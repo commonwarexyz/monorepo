@@ -69,6 +69,13 @@ use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
 
+/// A hasher for computing digests in a grafted MMR, where a peak tree is grafted onto a base MMR.
+///
+/// # Usage
+///
+/// Before calling any methods that compute leaf digests (such as `leaf_digest` or `add`), callers
+/// must first call Self::load_grafted_digests for all leaves that will be hashed. Failure to do
+/// so will result in a panic.
 pub struct Hasher<'a, H: CHasher> {
     hasher: &'a mut StandardHasher<H>,
     height: u32,
@@ -95,28 +102,38 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     /// any previously loaded digests. This method must be used to provide grafted digests for any
     /// leaf whose `leaf_digest` needs to be computed.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if any of the grafted digests are missing from the MMR.
-    pub async fn load_grafted_digests(
+    /// Returns [Error::LocationOverflow] if any leaf location is invalid.
+    /// Returns [Error::MissingGraftedDigest] if any of the grafted digests are missing from the MMR.
+    /// If an error occurs, no digests are inserted (all-or-nothing semantics).
+    pub(crate) async fn load_grafted_digests(
         &mut self,
         leaves: &[Location],
         mmr: &impl StorageTrait<H::Digest>,
     ) -> Result<(), Error> {
-        let mut futures = Vec::with_capacity(leaves.len());
-        for leaf_loc in leaves {
-            let leaf_pos = Position::try_from(*leaf_loc)?;
-            let dest_pos = self.destination_pos(leaf_pos);
-            let future = mmr.get_node(dest_pos);
-            futures.push(future);
+        // Validate all leaf locations and convert to positions upfront
+        let leaf_positions: Vec<Position> = leaves
+            .iter()
+            .map(|&loc| Position::try_from(loc))
+            .collect::<Result<_, _>>()?;
+
+        // Fetch all digests from MMR
+        let futures = leaf_positions
+            .iter()
+            .map(|&pos| mmr.get_node(self.destination_pos(pos)));
+        let digests = try_join_all(futures).await?;
+
+        // Validate all digests are present before modifying state
+        for (i, digest) in digests.iter().enumerate() {
+            if digest.is_none() {
+                return Err(Error::MissingGraftedDigest(leaves[i]));
+            }
         }
-        let join = try_join_all(futures).await?;
-        for (i, digest) in join.into_iter().enumerate() {
-            let Some(digest) = digest else {
-                panic!("missing grafted digest for leaf {}", leaves[i]);
-            };
-            let leaf_pos = Position::try_from(leaves[i])?;
-            self.grafted_digests.insert(leaf_pos, digest);
+
+        // Insert all digests (now that we know they all exist and are valid)
+        for (pos, digest) in leaf_positions.into_iter().zip(digests) {
+            self.grafted_digests.insert(pos, digest.unwrap());
         }
 
         Ok(())
@@ -211,13 +228,13 @@ pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Positio
 impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
-    /// # Warning
+    /// # Panics
     ///
-    /// Panics if the grafted_digest was not previously loaded for the leaf.
+    /// Panics if the grafted_digest was not previously loaded for the leaf via Self::load_grafted_digests.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos}");
+            panic!("missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first");
         };
 
         // We do not include position in the digest material here since the position information is
@@ -265,10 +282,15 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 }
 
 impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
+    /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grafted_digest was not previously loaded via Hasher::load_grafted_digests.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos}");
+            panic!("missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first");
         };
 
         // We do not include position in the digest material here since the position information is

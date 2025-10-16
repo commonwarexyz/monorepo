@@ -171,6 +171,20 @@ where
     }
 }
 
+#[cfg(feature = "external")]
+impl<C> crate::Pacer for Cell<C>
+where
+    C: crate::Pacer,
+{
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        self.as_ref().pace(latency, future)
+    }
+}
+
 impl<C> crate::Network for Cell<C>
 where
     C: crate::Network,

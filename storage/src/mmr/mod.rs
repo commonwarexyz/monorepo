@@ -86,8 +86,8 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
-pub use location::{Location, MAX_LOCATION};
-pub use position::Position;
+pub use location::{Location, LocationError, MAX_LOCATION};
+pub use position::{Position, MAX_POSITION};
 pub use proof::Proof;
 use thiserror::Error;
 
@@ -111,8 +111,14 @@ pub enum Error {
     RootMismatch,
     #[error("element pruned: {0}")]
     ElementPruned(Position),
+    #[error("position is not a leaf: {0}")]
+    PositionNotLeaf(Position),
+    #[error("invalid position: {0}")]
+    InvalidPosition(Position),
     #[error("missing digest: {0}")]
     MissingDigest(Position),
+    #[error("missing grafted digest for leaf: {0}")]
+    MissingGraftedDigest(Location),
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("invalid size: {0}")]
@@ -125,4 +131,10 @@ pub enum Error {
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]
     RangeOutOfBounds(Location),
+    #[error("bitmap has unprocessed updates")]
+    DirtyState,
+    #[error("bit offset {0} out of bounds (size: {1})")]
+    BitOutOfBounds(u64, u64),
+    #[error("invalid pinned nodes")]
+    InvalidPinnedNodes,
 }

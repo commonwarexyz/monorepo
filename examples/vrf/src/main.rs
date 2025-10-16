@@ -85,7 +85,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{quorum, NZU32};
+use commonware_utils::{quorum, set::Set, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -269,7 +269,7 @@ fn main() {
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
-                contributors.clone(),
+                Set::from_iter(contributors.clone()),
                 corrupt,
                 lazy,
                 forger,
@@ -300,7 +300,7 @@ fn main() {
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
-                contributors,
+                Set::from_iter(contributors),
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

@@ -1,5 +1,6 @@
 use crate::{
-    adb::{self, any},
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
+    adb::{self, any::fixed::unordered::Any},
     index::Unordered as Index,
     journal::fixed,
     mmr::{Location, Position, StandardHasher},
@@ -14,7 +15,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
 
-impl<E, K, V, H, T> adb::sync::Database for any::fixed::Any<E, K, V, H, T>
+impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -96,15 +97,10 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log(
-            range.start,
-            &log,
-            &mut snapshot,
-            |_, _| {},
-        )
-        .await?;
+        Any::<E, K, V, H, T>::build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {})
+            .await?;
 
-        let mut db = any::fixed::Any {
+        let mut db = Any {
             mmr,
             log,
             inactivity_floor_loc: range.start,
@@ -117,7 +113,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        any::fixed::Any::root(self, &mut StandardHasher::<H>::new())
+        Any::root(self, &mut StandardHasher::<H>::new())
     }
 
     async fn resize_journal(
@@ -275,7 +271,7 @@ mod tests {
     use crate::{
         adb::{
             self,
-            any::fixed::{
+            any::fixed::unordered::{
                 test::{
                     any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
                     AnyTest,
@@ -291,7 +287,7 @@ mod tests {
         },
         journal::{self, fixed},
         mmr::iterator::nodes_to_pin,
-        store::operation::Fixed,
+        store::operation::{Fixed, FixedOperation as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{

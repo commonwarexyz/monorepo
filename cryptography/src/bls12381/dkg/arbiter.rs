@@ -46,8 +46,8 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::{max_faults, quorum};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use commonware_utils::{max_faults, quorum, set::Set};
+use std::collections::{BTreeMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
 #[derive(Clone)]
@@ -69,8 +69,8 @@ pub struct Arbiter<P: PublicKey, V: Variant> {
     player_threshold: u32,
     concurrency: usize,
 
-    dealers: HashMap<P, u32>,
-    players: Vec<P>,
+    dealers: Set<P>,
+    players: Set<P>,
 
     #[allow(clippy::type_complexity)]
     commitments: BTreeMap<u32, (poly::Public<V>, Vec<u32>, Vec<Share>)>,
@@ -81,17 +81,10 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public<V>>,
-        mut dealers: Vec<P>,
-        mut players: Vec<P>,
+        dealers: Set<P>,
+        players: Set<P>,
         concurrency: usize,
     ) -> Self {
-        dealers.sort();
-        let dealers = dealers
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<P, _>>();
-        players.sort();
         Self {
             dealer_threshold: quorum(dealers.len() as u32),
             player_threshold: quorum(players.len() as u32),
@@ -127,10 +120,10 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Find the index of the dealer
-        let idx = match self.dealers.get(&dealer) {
-            Some(idx) => *idx,
+        let idx = match self.dealers.position(&dealer) {
+            Some(idx) => idx,
             None => return Err(Error::DealerInvalid),
-        };
+        } as u32;
 
         // Check if commitment already exists
         if self.commitments.contains_key(&idx) {
@@ -213,13 +206,13 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     pub fn finalize(mut self) -> (Result<Output<V>, Error>, HashSet<P>) {
         // Drop commitments from disqualified dealers
         for disqualified in self.disqualified.iter() {
-            let idx = self.dealers.get(disqualified).unwrap();
-            self.commitments.remove(idx);
+            let idx = self.dealers.position(disqualified).unwrap() as u32;
+            self.commitments.remove(&idx);
         }
 
         // Add any dealers we haven't heard from to disqualified
-        for (dealer, idx) in &self.dealers {
-            if self.commitments.contains_key(idx) {
+        for (idx, dealer) in self.dealers.iter().enumerate() {
+            if self.commitments.contains_key(&(idx as u32)) {
                 continue;
             }
             self.disqualified.insert(dealer.clone());
