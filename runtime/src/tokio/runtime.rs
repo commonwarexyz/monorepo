@@ -4,6 +4,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
@@ -556,6 +558,22 @@ impl Clock for Context {
         };
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
+    }
+}
+
+#[cfg(feature = "external")]
+impl Pacer for Context {
+    fn pace<'a, F, T>(
+        &'a self,
+        _latency: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        // Execute the future immediately
+        future
     }
 }
 
