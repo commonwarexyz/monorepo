@@ -11,7 +11,7 @@ use commonware_cryptography::{
 /// Enum representing incoming messages from validators to the indexer.
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
@@ -86,7 +86,7 @@ impl<D: Digest> EncodeSize for Inbound<D> {
 }
 
 /// Message to store a new block in the indexer's storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
@@ -148,7 +148,7 @@ impl<D: Digest> FixedSize for GetBlock<D> {
 }
 
 /// Message to store a finality certificate in the indexer's storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
     pub network: <MinSig as Variant>::Public,

@@ -8,7 +8,7 @@ use commonware_cryptography::Digest;
 /// Enum representing responses from the indexer to validators.
 ///
 /// These responses correspond to the results of the operations requested by `Inbound` messages.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Outbound<D: Digest> {
     /// Indicates the success or failure of a `Put` operation,

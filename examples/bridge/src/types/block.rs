@@ -5,7 +5,7 @@ use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::Digest;
 
 /// Enum representing the valid formats for blocks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum BlockFormat<D: Digest> {
     /// A random set of arbitrary data.
