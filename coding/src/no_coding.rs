@@ -1,4 +1,5 @@
 use crate::Config;
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Hasher;
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -26,12 +27,62 @@ impl<H> std::fmt::Debug for NoCoding<H> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct Shard(Vec<u8>);
+
+impl EncodeSize for Shard {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl Write for Shard {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf)
+    }
+}
+
+impl Read for Shard {
+    type Cfg = crate::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &(max_bytes, _): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Vec::read_cfg(buf, &(RangeCfg::new(0..=max_bytes), ())).map(Self)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReShard(());
+
+impl EncodeSize for ReShard {
+    fn encode_size(&self) -> usize {
+        0
+    }
+}
+
+impl Write for ReShard {
+    fn write(&self, _buf: &mut impl bytes::BufMut) {}
+}
+
+impl Read for ReShard {
+    type Cfg = crate::Cfg;
+
+    fn read_cfg(
+        _buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self(()))
+    }
+}
+
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
 
-    type Shard = Vec<u8>;
+    type Shard = Shard;
 
-    type ReShard = ();
+    type ReShard = ReShard;
 
     type CheckedShard = ();
 
@@ -46,7 +97,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
         let shards = (0..config.minimum_shards + config.extra_shards)
-            .map(|_| data.clone())
+            .map(|_| Shard(data.clone()))
             .collect();
         Ok((commitment, shards))
     }
@@ -57,11 +108,11 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
-        let my_commitment = H::new().update(shard.as_slice()).finalize();
+        let my_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &my_commitment != commitment {
             return Err(NoCodingError::BadData);
         }
-        Ok((shard, (), ()))
+        Ok((shard.0, (), ReShard(())))
     }
 
     fn check(

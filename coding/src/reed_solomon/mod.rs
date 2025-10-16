@@ -80,10 +80,13 @@ impl<H: Hasher> Write for Chunk<H> {
 
 impl<H: Hasher> Read for Chunk<H> {
     /// The maximum size of the shard.
-    type Cfg = usize;
+    type Cfg = crate::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
+    fn read_cfg(
+        reader: &mut impl Buf,
+        &(max_bytes, _): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let shard = Vec::<u8>::read_range(reader, ..=max_bytes)?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<H>::read(reader)?;
         Ok(Self {
