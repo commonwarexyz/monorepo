@@ -192,7 +192,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate that partitions are different to prevent blob name collisions
         if cfg.partition == cfg.locations_partition {
-            return Err(Error::Corruption(format!(
+            return Err(Error::InvalidConfiguration(format!(
                 "partition and locations_partition must be different: both are '{}'",
                 cfg.partition
             )));
