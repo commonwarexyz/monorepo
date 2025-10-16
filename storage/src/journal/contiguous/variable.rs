@@ -4,14 +4,54 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Contiguous;
-use crate::journal::{variable, Error};
-use commonware_codec::Codec;
+use crate::journal::{fixed, variable, Error};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use futures::{Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
+use tracing::warn;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+
+/// Location of an item in the variable journal.
+///
+/// This struct maps a global position to a (section, offset) pair in the underlying
+/// variable journal, enabling O(1) reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Location {
+    /// Section number where the item is stored
+    section: u64,
+
+    /// Offset within the section (u32, aligned to 16 bytes)
+    offset: u32,
+}
+
+impl CodecWrite for Location {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_u64(self.section);
+        buf.put_u32(self.offset);
+    }
+}
+
+impl FixedSize for Location {
+    const SIZE: usize = 12; // u64 + u32
+}
+
+impl CodecRead for Location {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        if buf.remaining() < Self::SIZE {
+            return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
+        }
+        Ok(Self {
+            section: buf.get_u64(),
+            offset: buf.get_u32(),
+        })
+    }
+}
 
 /// Calculate the section number for a given position.
 ///
@@ -58,6 +98,11 @@ pub struct Config<C> {
     /// The storage partition to use for journal blobs.
     pub partition: String,
 
+    /// The storage partition to use for the locations index.
+    ///
+    /// This index maps positions to (section, offset) pairs for O(1) reads.
+    pub locations_partition: String,
+
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
@@ -91,6 +136,9 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// The underlying variable-length journal.
     journal: variable::Journal<E, V>,
 
+    /// Index mapping positions to (section, offset) pairs for O(1) reads.
+    locations: fixed::Journal<E, Location>,
+
     /// The number of items per section.
     ///
     /// # Invariant
@@ -121,14 +169,20 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// This method:
-    /// 1. Initializes the underlying `variable::Journal`
+    /// 1. Initializes the underlying `variable::Journal` and locations index
     /// 2. Derives `oldest_retained_pos` from the first blob on disk
-    /// 3. Replays only the last section to determine the exact `size`
+    /// 3. Replays only the last section to verify/rebuild locations index
     ///
     /// # Section Fullness Invariant
     ///
     /// All non-final sections are assumed to be full (`items_per_section` items).
-    /// Only the final section is replayed to count items to determine journal size.
+    /// Only the final section is replayed to ensure consistency.
+    ///
+    /// # Crash Recovery
+    ///
+    /// The data journal is the source of truth. If the locations index is inconsistent
+    /// (ahead, behind, or missing), this method will automatically rebuild it from the
+    /// last section.
     ///
     /// # Errors
     ///
@@ -139,44 +193,114 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
         // Initialize underlying variable journal
         let journal = variable::Journal::init(
-            context,
+            context.clone(),
             variable::Config {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
+                buffer_pool: cfg.buffer_pool.clone(),
+                write_buffer: cfg.write_buffer,
+            },
+        )
+        .await?;
+
+        // Initialize locations journal
+        let mut locations = fixed::Journal::init(
+            context,
+            fixed::Config {
+                partition: cfg.locations_partition,
+                items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
             },
         )
         .await?;
 
-        // Derive state from disk
+        // CRASH RECOVERY: Data journal is the source of truth
+        // Always synchronize locations to match data
         let (size, oldest_retained_pos) = if journal.blobs.is_empty() {
-            // Empty journal
+            // Empty data journal - locations should also be empty
+            let locations_size = locations.size().await?;
+            if locations_size > 0 {
+                // Fix corruption: Rewind locations to match empty data
+                warn!(
+                    locations_size,
+                    "locations ahead of empty data journal, rewinding to 0"
+                );
+                locations.rewind(0).await?;
+                locations.sync().await?;
+            }
             (0, 0)
         } else {
-            // oldest_retained_pos: Always from first blob (ground truth)
             let first_section = *journal.blobs.first_key_value().unwrap().0;
             let oldest_retained_pos = first_section * items_per_section;
-
-            // Size: count items in last section only (all others assumed full)
             let last_section = *journal.blobs.last_key_value().unwrap().0;
 
-            // Replay the last section to count its items
+            // Count items in last section
             let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
+
             let mut items_in_last_section = 0u64;
             while stream.next().await.is_some() {
                 items_in_last_section += 1;
             }
 
-            let size = (last_section * items_per_section) + items_in_last_section;
+            // Calculate expected size based on actual data on disk
+            let expected_size = (last_section * items_per_section) + items_in_last_section;
+            let last_section_start_pos = last_section * items_per_section;
 
-            (size, oldest_retained_pos)
+            // Check locations journal state
+            let locations_size = locations.size().await?;
+
+            // Fix any inconsistency between the locations journal and the data journal
+            if locations_size != expected_size {
+                warn!(
+                    locations_size,
+                    expected_size,
+                    last_section,
+                    items_in_last_section,
+                    "locations journal inconsistent with data, rebuilding"
+                );
+
+                if locations_size < expected_size {
+                    // Locations behind: append only the missing locations
+                    // Calculate offset within the last section where we need to start
+                    let start_offset = (locations_size - last_section_start_pos) as u32;
+
+                    // Replay from where locations left off
+                    let stream = journal
+                        .replay(last_section, start_offset, REPLAY_BUFFER_SIZE)
+                        .await?;
+                    futures::pin_mut!(stream);
+
+                    while let Some(result) = stream.next().await {
+                        let (section, offset, _size, _item) = result?;
+                        locations.append(Location { section, offset }).await?;
+                    }
+                } else {
+                    // Locations ahead: rewind and rebuild entire last section
+                    locations.rewind(last_section_start_pos).await?;
+
+                    // Replay from offset 0 and stream locations directly
+                    let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                    futures::pin_mut!(stream);
+
+                    while let Some(result) = stream.next().await {
+                        let (section, offset, _size, _item) = result?;
+                        locations.append(Location { section, offset }).await?;
+                    }
+                }
+
+                // Sync the rebuilt/extended locations
+                locations.sync().await?;
+            }
+
+            (expected_size, oldest_retained_pos)
         };
 
         Ok(Self {
             journal,
+            locations,
             items_per_section,
             size,
             oldest_retained_pos,
@@ -202,8 +326,8 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// This position is independent of section boundaries and remains constant even after
     /// pruning.
     ///
-    /// When a section becomes full, it is automatically synced to maintain the invariant
-    /// that all non-final sections are full and synced.
+    /// When a section becomes full, both the data journal and locations index are synced
+    /// to maintain the invariant that all non-final sections are full and consistent.
     ///
     /// # Errors
     ///
@@ -213,16 +337,20 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         // Calculate which section this position belongs to
         let section = self.current_section();
 
-        // Append to the underlying journal
-        self.journal.append(section, item).await?;
+        // Append to data journal, get offset
+        let (offset, _size) = self.journal.append(section, item).await?;
+
+        // Append location to index
+        self.locations.append(Location { section, offset }).await?;
 
         // Return the current position and increment for next time
         let position = self.size;
         self.size += 1;
 
-        // If we just filled a section, sync it to maintain the fullness invariant
+        // If we just filled a section, sync both journals together
         if self.size.is_multiple_of(self.items_per_section) {
             self.journal.sync(section).await?;
+            self.locations.sync().await?;
         }
 
         Ok(position)
@@ -239,6 +367,8 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Prune items at positions strictly less than `min_position`.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
+    ///
+    /// This prunes both the data journal and the locations index to maintain consistency.
     ///
     /// # Note on Section Alignment
     ///
@@ -262,6 +392,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let pruned = self.journal.prune(min_section).await?;
         if pruned {
             self.oldest_retained_pos += min_section * self.items_per_section;
+            self.locations.prune(self.oldest_retained_pos).await?;
         }
         Ok(pruned)
     }
@@ -320,30 +451,49 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
     /// Read the item at the given position.
     ///
-    /// # Note
+    /// # Errors
     ///
-    /// This is currently unimplemented and will panic with `todo!()`.
-    /// A full implementation requires maintaining a position-to-offset index.
-    ///
-    /// # Panics
-    ///
-    /// Always panics - not yet implemented.
-    pub async fn read(&self, _position: u64) -> Result<V, Error> {
-        todo!("read() for variable journal requires position-to-offset index")
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if `position` is beyond the journal size.
+    /// - Returns other errors if storage or decoding fails.
+    pub async fn read(&self, position: u64) -> Result<V, Error> {
+        // Check bounds
+        if position >= self.size {
+            return Err(Error::ItemOutOfRange(position));
+        }
+
+        if position < self.oldest_retained_pos {
+            return Err(Error::ItemPruned(position));
+        }
+
+        // Read location from index
+        let location = self.locations.read(position).await?;
+
+        // Read item from data journal using the location
+        self.journal.get(location.section, location.offset).await
     }
 
     /// Sync all pending writes to storage.
+    ///
+    /// This syncs both the data journal and the locations index.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync all sections in the underlying journal
         for &section in self.journal.blobs.keys() {
             self.journal.sync(section).await?;
         }
+
+        // Sync locations journal
+        self.locations.sync().await?;
+
         Ok(())
     }
 
     /// Close the journal, syncing all pending writes.
+    ///
+    /// This closes both the data journal and the locations index.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
+        self.locations.close().await?;
         self.journal.close().await
     }
 
@@ -351,7 +501,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     ///
     /// This is useful for cleaning up test journals. After calling this method,
     /// the journal cannot be used again.
+    ///
+    /// This destroys both the data journal and the locations index.
     pub async fn destroy(self) -> Result<(), Error> {
+        self.locations.destroy().await?;
         self.journal.destroy().await
     }
 }
@@ -380,8 +533,8 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
         Variable::replay(self, start_pos, buffer).await
     }
 
-    async fn read(&self, _position: u64) -> Result<Self::Item, Error> {
-        todo!("read() for variable journal requires position-to-offset index")
+    async fn read(&self, position: u64) -> Result<Self::Item, Error> {
+        Variable::read(self, position).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -414,6 +567,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_empty".to_string(),
+                    locations_partition: "test_variable_empty_locations".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -439,6 +593,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_append".to_string(),
+                    locations_partition: "test_variable_append_locations".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -474,6 +629,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_sections".to_string(),
+                    locations_partition: "test_variable_sections_locations".to_string(),
                     items_per_section: NZU64!(5), // Small sections to test crossing boundaries
                     compression: None,
                     codec_config: (),
@@ -503,6 +659,7 @@ mod tests {
             let partition = "test_variable_persist";
             let cfg = Config {
                 partition: partition.to_string(),
+                locations_partition: format!("{}_locations", partition),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -552,6 +709,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_prune".to_string(),
+                    locations_partition: "test_variable_prune_locations".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -586,6 +744,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay".to_string(),
+                    locations_partition: "test_variable_replay_locations".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -631,6 +790,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_replay_middle".to_string(),
+                    locations_partition: "test_variable_replay_middle_locations".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -676,6 +836,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_variable_trait".to_string(),
+                    locations_partition: "test_variable_trait_locations".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -706,6 +867,7 @@ mod tests {
             let partition = "test_variable_destroy";
             let cfg = Config {
                 partition: partition.to_string(),
+                locations_partition: format!("{}_locations", partition),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -751,6 +913,7 @@ mod tests {
             let partition = "test_variable_metadata";
             let cfg = Config {
                 partition: partition.to_string(),
+                locations_partition: format!("{}_locations", partition),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config: (),
@@ -804,6 +967,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_current_section".to_string(),
+                    locations_partition: "test_current_section_locations".to_string(),
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
@@ -847,6 +1011,7 @@ mod tests {
                 context,
                 Config {
                     partition: "test_current_section_prune".to_string(),
+                    locations_partition: "test_current_section_prune_locations".to_string(),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
@@ -954,6 +1119,7 @@ mod tests {
                         context,
                         Config {
                             partition: format!("generic_test_{}", test_name),
+                            locations_partition: format!("generic_test_{}_locations", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),

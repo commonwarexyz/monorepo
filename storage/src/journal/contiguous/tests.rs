@@ -483,8 +483,13 @@ where
         let size = journal.size().await.unwrap();
         assert_eq!(size, 25);
 
-        // Verify reads work after pruning and persistence
-        for i in 0..25u64 {
+        // Verify pruned positions cannot be read
+        for i in 0..10u64 {
+            assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+        }
+
+        // Verify non-pruned positions can be read
+        for i in 10..25u64 {
             assert_eq!(journal.read(i).await.unwrap(), i * 100);
         }
 
@@ -530,9 +535,12 @@ where
         assert_eq!(journal.read(i).await.unwrap(), i * 100);
     }
 
+    // Verify we can still read all items
     for i in 0..1000u64 {
-        assert!(journal.read(i).await.is_err());
+        assert_eq!(journal.read(i).await.unwrap(), i * 100);
     }
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test read errors for out-of-range positions.
