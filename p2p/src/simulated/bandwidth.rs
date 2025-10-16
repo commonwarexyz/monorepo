@@ -6,7 +6,7 @@
 //! according to the returned rates and invoking the planner whenever the active set
 //! changes (for example when a message finishes or a new message arrives).
 
-use commonware_utils::{time::NANOS_PER_SEC, BigRationalExt, DurationExt};
+use commonware_utils::{BigRationalExt, DurationExt, time::NANOS_PER_SEC};
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
@@ -773,10 +773,12 @@ mod tests {
         let resources = planner.resources();
         assert_eq!(resources[0].active, 0);
         assert_eq!(planner.active(), 0);
-        assert!(planner
-            .rates()
-            .iter()
-            .filter_map(|opt| opt.as_ref())
-            .all(|ratio| ratio.is_zero()));
+        assert!(
+            planner
+                .rates()
+                .iter()
+                .filter_map(|opt| opt.as_ref())
+                .all(|ratio| ratio.is_zero())
+        );
     }
 }

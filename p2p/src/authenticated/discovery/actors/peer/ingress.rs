@@ -1,4 +1,4 @@
-use crate::authenticated::{discovery::types, Mailbox};
+use crate::authenticated::{Mailbox, discovery::types};
 use commonware_cryptography::PublicKey;
 
 /// Messages that can be sent to the peer [super::Actor].

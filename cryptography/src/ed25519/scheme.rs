@@ -9,7 +9,7 @@ cfg_if::cfg_if! {
 }
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, union_unique, Span};
+use commonware_utils::{Span, hex, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -368,7 +368,7 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, Signer as _, Verifier as _};
+    use crate::{Signer as _, Verifier as _, ed25519};
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
 

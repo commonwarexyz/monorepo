@@ -1,20 +1,19 @@
-use super::{metrics, Config, Mailbox, Message};
+use super::{Config, Mailbox, Message, metrics};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::status::{CounterExt, Status},
-    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{
-    channel::{mpsc, oneshot},
     StreamExt,
+    channel::{mpsc, oneshot},
 };
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};

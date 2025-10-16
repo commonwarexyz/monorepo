@@ -4,11 +4,11 @@
 //! [Player]: crate::bls12381::dkg::Player
 
 use crate::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
     PublicKey, Signature, Signer,
+    bls12381::primitives::{group, poly::Public, variant::Variant},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write, varint::UInt};
 use commonware_utils::quorum;
 
 /// A [Share] sent by a [Dealer] node to a [Player] node.
@@ -162,12 +162,12 @@ impl<S: Signature> Read for Ack<S> {
 mod test {
     use super::*;
     use crate::{
+        PrivateKeyExt, Signer,
         bls12381::{
             dkg::ops,
             primitives::{group, poly::Public, variant::MinSig},
         },
         ed25519::PrivateKey,
-        PrivateKeyExt, Signer,
     };
     use commonware_utils::quorum;
     use rand::SeedableRng;

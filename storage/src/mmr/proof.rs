@@ -7,9 +7,9 @@
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::nodes_to_pin;
 use crate::mmr::{
+    Error, Location, Position,
     hasher::Hasher,
     iterator::{PathIterator, PeakIterator},
-    Error, Location, Position,
 };
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
@@ -17,7 +17,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 #[cfg(feature = "std")]
@@ -444,10 +444,10 @@ impl<D: Digest> Proof<D> {
         if elements_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
-        if let Some(next_sibling) = siblings_iter.next() {
-            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
-                return Err(ReconstructionError::ExtraDigests);
-            }
+        if let Some(next_sibling) = siblings_iter.next()
+            && (proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1])
+        {
+            return Err(ReconstructionError::ExtraDigests);
         }
 
         Ok(peak_digests)
@@ -683,10 +683,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
+    use crate::mmr::{MAX_LOCATION, hasher::Standard, location::LocationRangeExt as _, mem::Mmr};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
 
     fn test_digest(v: u8) -> Digest {
@@ -1043,14 +1043,14 @@ mod tests {
             ..Location::new_unchecked(elements.len() as u64);
         let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
-                range_proof.verify_range_inclusion(
-                    &mut hasher,
-                    &elements[range.to_usize_range()],
-                    range.start,
-                    &updated_root,
-                ),
-                "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
-            );
+            range_proof.verify_range_inclusion(
+                &mut hasher,
+                &elements[range.to_usize_range()],
+                range.start,
+                &updated_root,
+            ),
+            "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
+        );
     }
 
     #[test]
@@ -1167,9 +1167,11 @@ mod tests {
                     // Extract pinned nodes
                     let extract_result = proof.extract_pinned_nodes(range.clone());
                     assert!(
-                            extract_result.is_ok(),
-                            "Failed to extract pinned nodes for {num_elements} elements, boundary={leaf}, range={}..{}", range.start, range.end
-                        );
+                        extract_result.is_ok(),
+                        "Failed to extract pinned nodes for {num_elements} elements, boundary={leaf}, range={}..{}",
+                        range.start,
+                        range.end
+                    );
 
                     let pinned_nodes = extract_result.unwrap();
                     let leaf_loc = Location::new_unchecked(leaf);
@@ -1178,10 +1180,10 @@ mod tests {
 
                     // Verify count matches expected
                     assert_eq!(
-                            pinned_nodes.len(),
-                            expected_pinned.len(),
-                            "Pinned node count mismatch for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
-                        );
+                        pinned_nodes.len(),
+                        expected_pinned.len(),
+                        "Pinned node count mismatch for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
+                    );
 
                     // Verify extracted hashes match actual node values
                     // The pinned_nodes Vec is in the same order as expected_pinned
@@ -1189,9 +1191,9 @@ mod tests {
                         let extracted_hash = pinned_nodes[i];
                         let actual_hash = mmr.get_node(expected_pos).unwrap();
                         assert_eq!(
-                                extracted_hash, actual_hash,
-                                "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
-                            );
+                            extracted_hash, actual_hash,
+                            "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
+                        );
                     }
                 }
             }

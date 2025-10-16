@@ -146,7 +146,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Spawner};
+    use crate::{Clock, Runner, Spawner, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 

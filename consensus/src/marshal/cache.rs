@@ -1,13 +1,13 @@
 use crate::{
+    Block,
     threshold_simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
-    Block,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::bls12381::primitives::variant::Variant;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, buffer::PoolRef};
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier},
+    archive::{self, Archive as _, Identifier, prunable},
     metadata::{self, Metadata},
     translator::TwoCap,
 };

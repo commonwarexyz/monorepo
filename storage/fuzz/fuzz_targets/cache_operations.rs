@@ -1,13 +1,13 @@
 #![no_main]
 
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::cache::{Cache, Config};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::collections::BTreeMap;
 
 const MAX_OPERATIONS: usize = 50;

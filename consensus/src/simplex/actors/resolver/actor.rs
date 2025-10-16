@@ -1,29 +1,29 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
+    Epochable, Supervisor, Viewable,
     simplex::{
         actors::voter,
         types::{Backfiller, Notarization, Nullification, Request, Response},
     },
     types::{Epoch, View},
-    Epochable, Supervisor, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
+    Receiver, Recipients, Sender,
     utils::{
-        codec::{wrap, WrappedSender},
+        codec::{WrappedSender, wrap},
         requester,
     },
-    Receiver, Recipients, Sender,
 };
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, future::Either, StreamExt};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use futures::{StreamExt, channel::mpsc, future::Either};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{Rng, seq::IteratorRandom};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -132,11 +132,11 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
-        C: PublicKey,
-        D: Digest,
-        S: Supervisor<Index = View, PublicKey = C>,
-    > Actor<E, C, D, S>
+    E: Clock + GClock + Rng + Metrics + Spawner,
+    C: PublicKey,
+    D: Digest,
+    S: Supervisor<Index = View, PublicKey = C>,
+> Actor<E, C, D, S>
 {
     pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Initialize requester

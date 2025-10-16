@@ -1,5 +1,6 @@
 use super::{Config, Mailbox, Message};
 use crate::{
+    Epochable, Reporter, ThresholdSupervisor, Viewable,
     threshold_simplex::{
         actors::voter,
         interesting,
@@ -10,18 +11,16 @@ use crate::{
         },
     },
     types::{Epoch, View},
-    Epochable, Reporter, ThresholdSupervisor, Viewable,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
+use commonware_p2p::{Blocker, Receiver, utils::codec::WrappedReceiver};
 use commonware_runtime::{
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::quorum;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 use tracing::{trace, warn};
@@ -33,11 +32,11 @@ struct Round<
     D: Digest,
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Index = View,
-        Polynomial = Vec<V::Public>,
-        PublicKey = C,
-        Identity = V::Public,
-    >,
+            Index = View,
+            Polynomial = Vec<V::Public>,
+            PublicKey = C,
+            Identity = V::Public,
+        >,
 > {
     view: View,
 
@@ -55,18 +54,18 @@ struct Round<
 }
 
 impl<
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
-        D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
+    V: Variant,
+    D: Digest,
+    R: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<
             Index = View,
             Polynomial = Vec<V::Public>,
             PublicKey = C,
             Identity = V::Public,
         >,
-    > Round<C, B, V, D, R, S>
+> Round<C, B, V, D, R, S>
 {
     fn new(
         blocker: B,
@@ -325,11 +324,11 @@ pub struct Actor<
     D: Digest,
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C,
-        Identity = V::Public,
-        Polynomial = Vec<V::Public>,
-    >,
+            Index = View,
+            PublicKey = C,
+            Identity = V::Public,
+            Polynomial = Vec<V::Public>,
+        >,
 > {
     context: ContextCell<E>,
     blocker: B,
@@ -353,19 +352,19 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock,
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
-        D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
+    E: Spawner + Metrics + Clock,
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
+    V: Variant,
+    D: Digest,
+    R: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<
             Index = View,
             PublicKey = C,
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-    > Actor<E, C, B, V, D, R, S>
+> Actor<E, C, B, V, D, R, S>
 {
     pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C, V, D>) {
         let added = Counter::default();

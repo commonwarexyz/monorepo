@@ -104,10 +104,10 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::GenerateProof { position } => {
-                if let Some(ref t) = tree {
-                    if let Ok(p) = t.proof(*position) {
-                        proof = Some(p);
-                    }
+                if let Some(ref t) = tree
+                    && let Ok(p) = t.proof(*position)
+                {
+                    proof = Some(p);
                 }
             }
 
@@ -115,7 +115,7 @@ fn fuzz(input: FuzzInput) {
                 leaf_value,
                 position,
             } => {
-                if let (Some(ref p), Some(ref t)) = (&proof, &tree) {
+                if let (Some(p), Some(t)) = (&proof, &tree) {
                     let mut hasher = Sha256::default();
                     let leaf_digest = Sha256::hash(&leaf_value.to_be_bytes());
                     let root = t.root();
@@ -154,10 +154,10 @@ fn fuzz(input: FuzzInput) {
 
             // Range proof operations
             BmtOperation::GenerateRangeProof { start, end } => {
-                if let Some(ref t) = tree {
-                    if let Ok(rp) = t.range_proof(*start, *end) {
-                        range_proof = Some(rp);
-                    }
+                if let Some(ref t) = tree
+                    && let Ok(rp) = t.range_proof(*start, *end)
+                {
+                    range_proof = Some(rp);
                 }
             }
 
@@ -165,7 +165,7 @@ fn fuzz(input: FuzzInput) {
                 start_position,
                 leaf_values,
             } => {
-                if let (Some(ref rp), Some(ref t)) = (&range_proof, &tree) {
+                if let (Some(rp), Some(t)) = (&range_proof, &tree) {
                     // Convert leaf values to digests
                     let mut hasher = Sha256::default();
                     let leaf_digests: Vec<_> = leaf_values
@@ -243,7 +243,7 @@ fn fuzz(input: FuzzInput) {
                 start,
                 tampered_values,
             } => {
-                if let (Some(ref rp), Some(ref t)) = (&range_proof, &tree) {
+                if let (Some(rp), Some(t)) = (&range_proof, &tree) {
                     // Generate tampered digests
                     let mut hasher = Sha256::default();
                     let tampered_digests: Vec<_> = tampered_values

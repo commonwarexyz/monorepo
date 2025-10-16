@@ -156,8 +156,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         Blob, Storage as _,
+        storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
     };
     use prometheus_client::registry::Registry;
 

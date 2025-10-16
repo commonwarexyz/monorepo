@@ -1,6 +1,6 @@
-use commonware_cryptography::{secp256r1, PrivateKeyExt as _, Signer as _, Verifier as _};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use commonware_cryptography::{PrivateKeyExt as _, Signer as _, Verifier as _, secp256r1};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{Rng, thread_rng};
 use std::hint::black_box;
 
 fn benchmark_signature_verify(c: &mut Criterion) {

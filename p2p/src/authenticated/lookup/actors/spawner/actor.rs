@@ -1,16 +1,16 @@
-use super::{ingress::Message, Config};
+use super::{Config, ingress::Message};
 use crate::authenticated::{
+    Mailbox,
     lookup::{
         actors::{peer, router, tracker},
         metrics,
     },
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
-use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell};
+use futures::{StreamExt, channel::mpsc};
+use governor::{Quota, clock::ReasonablyRealtime};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -36,11 +36,11 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        Si: Sink,
-        St: Stream,
-        C: PublicKey,
-    > Actor<E, Si, St, C>
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    Si: Sink,
+    St: Stream,
+    C: PublicKey,
+> Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();

@@ -1,6 +1,6 @@
 use crate::Resolver;
 use commonware_utils::Span;
-use futures::{channel::mpsc, SinkExt};
+use futures::{SinkExt, channel::mpsc};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 

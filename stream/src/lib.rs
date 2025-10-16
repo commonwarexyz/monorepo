@@ -66,11 +66,11 @@ use crate::utils::codec::{recv_frame, send_frame};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
-    handshake::{
-        dial_end, dial_start, listen_end, listen_start, Ack, Context, Error as HandshakeError,
-        RecvCipher, SendCipher, Syn, SynAck, CIPHERTEXT_OVERHEAD,
-    },
     Signer,
+    handshake::{
+        Ack, CIPHERTEXT_OVERHEAD, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn,
+        SynAck, dial_end, dial_start, listen_end, listen_start,
+    },
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
@@ -320,8 +320,8 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
-    use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
+    use commonware_cryptography::{PrivateKeyExt as _, Signer, ed25519::PrivateKey};
+    use commonware_runtime::{Runner as _, Spawner as _, deterministic, mocks};
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer

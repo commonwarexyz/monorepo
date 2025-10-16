@@ -81,7 +81,7 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{Element, Scalar, DST, GT},
+        group::{DST, Element, GT, Scalar},
         ops::{hash_message, hash_message_namespace},
         variant::Variant,
     },

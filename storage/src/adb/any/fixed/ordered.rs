@@ -6,19 +6,19 @@
 
 use crate::{
     adb::{
-        any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
-        },
         Error,
+        any::fixed::{
+            Config, SNAPSHOT_READ_BUFFER_SIZE, historical_proof, init_mmr_and_log, prune_db,
+        },
     },
     index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard, journaled::Mmr},
     store::{
+        Db,
         operation::{
             FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
         },
-        Db,
     },
     translator::Translator,
 };
@@ -26,7 +26,7 @@ use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use futures::{StreamExt, future::TryFutureExt, pin_mut, try_join};
 use std::num::NonZeroU64;
 use tracing::info;
 
@@ -90,12 +90,12 @@ pub struct Any<
 }
 
 impl<
-        E: Storage + Clock + Metrics,
-        K: Array + Ord,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Any<E, K, V, H, T>
+    E: Storage + Clock + Metrics,
+    K: Array + Ord,
+    V: CodecFixed<Cfg = ()>,
+    H: CHasher,
+    T: Translator,
+> Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -900,13 +900,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Db<E, K, V, T> for Any<E, K, V, H, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: CHasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -954,18 +949,18 @@ mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
+        mmr::{Position, StandardHasher as Standard, mem::Mmr as MemMmr},
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Digest as _, Hasher as CHasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        Runner as _,
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZU64};
-    use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
+    use commonware_utils::{NZU64, sequence::FixedBytes};
+    use rand::{RngCore, SeedableRng, rngs::StdRng, seq::IteratorRandom};
     use std::collections::{BTreeMap, HashMap};
 
     // Janky page & cache sizes to exercise boundary conditions.

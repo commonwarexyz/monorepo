@@ -1,6 +1,6 @@
 use crate::mmr::{
-    proof, verification, verification::ProofStore, Error, Location, Position, Proof,
-    StandardHasher as Standard,
+    Error, Location, Position, Proof, StandardHasher as Standard, proof, verification,
+    verification::ProofStore,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -156,9 +156,9 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{iterator::nodes_to_pin, location::LocationRangeExt as _, mem::Mmr};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[v])
@@ -331,14 +331,16 @@ mod tests {
 
             // Should fail with wrong root
             let wrong_root = test_digest(99);
-            assert!(verify_proof_and_extract_digests(
-                &mut hasher,
-                &proof,
-                Location::new_unchecked(1),
-                &operations[range.to_usize_range()],
-                &wrong_root,
-            )
-            .is_err());
+            assert!(
+                verify_proof_and_extract_digests(
+                    &mut hasher,
+                    &proof,
+                    Location::new_unchecked(1),
+                    &operations[range.to_usize_range()],
+                    &wrong_root,
+                )
+                .is_err()
+            );
         });
     }
 
@@ -461,14 +463,16 @@ mod tests {
 
             // Should fail with invalid root
             let wrong_root = test_digest(99);
-            assert!(create_proof_store(
-                &mut hasher,
-                &proof,
-                Location::new_unchecked(0),
-                &operations,
-                &wrong_root
-            )
-            .is_err());
+            assert!(
+                create_proof_store(
+                    &mut hasher,
+                    &proof,
+                    Location::new_unchecked(0),
+                    &operations,
+                    &wrong_root
+                )
+                .is_err()
+            );
         });
     }
 

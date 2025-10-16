@@ -111,11 +111,11 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        Runner,
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroUsize};
 
@@ -501,7 +501,7 @@ mod tests {
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.r#gen();
 
                 if keys.contains_key(&index) {
                     continue;
@@ -549,13 +549,13 @@ mod tests {
                 assert_eq!(start_next, next_actual_index);
 
                 // If there's a gap, check an index within the gap
-                if let Some(next_index) = next_actual_index {
-                    if next_index > block_end_index + 1 {
-                        let in_gap_index = block_end_index + 1;
-                        let (current_end, start_next) = archive.next_gap(in_gap_index);
-                        assert!(current_end.is_none());
-                        assert_eq!(start_next, Some(next_index));
-                    }
+                if let Some(next_index) = next_actual_index
+                    && next_index > block_end_index + 1
+                {
+                    let in_gap_index = block_end_index + 1;
+                    let (current_end, start_next) = archive.next_gap(in_gap_index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next, Some(next_index));
                 }
                 i = j + 1;
             }
@@ -621,7 +621,7 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.r#gen();
 
                 archive
                     .put(index, key.clone(), data)

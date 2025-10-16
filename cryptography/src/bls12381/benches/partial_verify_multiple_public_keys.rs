@@ -3,8 +3,8 @@ use commonware_cryptography::bls12381::{
     primitives::{self, variant::MinSig},
 };
 use commonware_utils::quorum;
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::hint::black_box;
 
 fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {

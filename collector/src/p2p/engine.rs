@@ -1,20 +1,20 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
-    p2p::{Handler, Monitor},
     Error,
+    p2p::{Handler, Monitor},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::futures::Pool;
 use futures::{
-    channel::{mpsc, oneshot},
     StreamExt,
+    channel::{mpsc, oneshot},
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};

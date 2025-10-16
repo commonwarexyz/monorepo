@@ -3,14 +3,14 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{types::View, Automaton, Relay, Reporter, ThresholdSupervisor};
+use crate::{Automaton, Relay, Reporter, ThresholdSupervisor, types::View};
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
+    bls12381::primitives::{group, variant::Variant},
 };
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -26,13 +26,13 @@ pub struct Engine<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C::PublicKey,
-        Identity = V::Public,
-        Seed = V::Signature,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
+            Index = View,
+            PublicKey = C::PublicKey,
+            Identity = V::Public,
+            Seed = V::Signature,
+            Polynomial = Vec<V::Public>,
+            Share = group::Share,
+        >,
 > {
     context: ContextCell<E>,
 
@@ -47,15 +47,15 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Signer,
-        B: Blocker<PublicKey = C::PublicKey>,
-        V: Variant,
-        D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    C: Signer,
+    B: Blocker<PublicKey = C::PublicKey>,
+    V: Variant,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
@@ -63,7 +63,7 @@ impl<
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, B, V, D, A, R, F, S>
+> Engine<E, C, B, V, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
     pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> Self {

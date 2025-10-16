@@ -3,8 +3,8 @@ use commonware_cryptography::bls12381::{
     primitives::{self, variant::MinSig},
 };
 use commonware_utils::quorum;
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 fn benchmark_threshold_signature_recover(c: &mut Criterion) {

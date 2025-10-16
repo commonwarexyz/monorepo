@@ -1,29 +1,29 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Finalization, Viewable};
+use commonware_consensus::{Viewable, threshold_simplex::types::Finalization};
 use commonware_cryptography::{
+    Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
     ed25519::{self},
     sha256::Digest as Sha256Digest,
-    Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_runtime::{Listener, Metrics, Network, Runner, Spawner, tokio};
+use commonware_stream::{Config as StreamConfig, listen};
 use commonware_utils::{from_hex, union};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

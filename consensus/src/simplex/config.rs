@@ -1,7 +1,7 @@
 use super::types::{Activity, Context};
 use crate::{
-    types::{Epoch, View},
     Automaton, Relay, Reporter, Supervisor,
+    types::{Epoch, View},
 };
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
@@ -100,13 +100,13 @@ pub struct Config<
 }
 
 impl<
-        C: Signer,
-        D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View>,
-    > Config<C, D, A, R, F, S>
+    C: Signer,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
+    S: Supervisor<Index = View>,
+> Config<C, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

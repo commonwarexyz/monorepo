@@ -287,10 +287,15 @@ mod test {
         let ipv6_test: Ipv6Addr = "2001:db8::ff00:42:8329".parse().unwrap();
         assert_eq!(
             ipv6_test.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29][..]
+            &[
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29
+            ][..]
         );
         assert_eq!(
-            Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff).encode(),
+            Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+            )
+            .encode(),
             &[0xff; 16][..]
         );
 
@@ -303,7 +308,9 @@ mod test {
             SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 8080, 0, 0);
         assert_eq!(
             sock_v6_1.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90][..]
+            &[
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90
+            ][..]
         );
 
         let sa_v4 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080));
@@ -316,7 +323,9 @@ mod test {
         ));
         assert_eq!(
             sa_v6.encode(),
-            &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
+            &[
+                0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB
+            ][..]
         );
     }
 }

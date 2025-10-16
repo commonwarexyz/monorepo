@@ -2,16 +2,16 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config},
         verify_proof,
     },
-    mmr::{self, hasher::Standard, MAX_LOCATION},
+    mmr::{self, MAX_LOCATION, hasher::Standard},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use mmr::location::Location;
 use std::{collections::HashMap, num::NonZeroU64};
@@ -272,10 +272,9 @@ fn fuzz(input: FuzzInput) {
 
                         if let Ok((proof, log)) =
                             db.historical_proof(op_count, *start_loc, *max_ops).await
+                            && let Some(root) = historical_roots.get(&op_count)
                         {
-                            if let Some(root) = historical_roots.get(&op_count) {
-                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
-                            }
+                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                         }
                     }
                 }

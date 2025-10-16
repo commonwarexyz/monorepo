@@ -4,9 +4,9 @@ use crate::{
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{Metrics, Storage};
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{StreamExt, future::try_join_all, pin_mut};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
@@ -197,12 +197,12 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let min = self.section(min);
 
         // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
+        if let Some(oldest_allowed) = self.oldest_allowed
+            && min <= oldest_allowed
+        {
+            // We don't return an error in this case because the caller
+            // shouldn't be burdened with converting `min` to some section.
+            return Ok(());
         }
         debug!(min, "pruning cache");
 

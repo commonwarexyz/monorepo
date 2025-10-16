@@ -1,11 +1,11 @@
-use crate::{types::Round, Block};
+use crate::{Block, types::Round};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{Consumer, p2p::Producer};
 use commonware_utils::Span;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use std::{
     fmt::{Debug, Display},
@@ -122,7 +122,7 @@ impl<B: Block> Request<B> {
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static + use<B> {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
             (Self::Block(_), _) => unreachable!("we should never retain by block"),
@@ -243,8 +243,8 @@ mod tests {
     use crate::marshal::mocks::block::Block as TestBlock;
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
-        sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _,
+        sha256::{Digest as Sha256Digest, Sha256},
     };
     use std::collections::BTreeSet;
 

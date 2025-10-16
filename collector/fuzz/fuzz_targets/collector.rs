@@ -7,22 +7,22 @@ use commonware_codec::{
     Write,
 };
 use commonware_collector::{
-    p2p::{Config, Engine, Mailbox},
     Handler, Monitor, Originator,
+    p2p::{Config, Engine, Mailbox},
 };
 use commonware_cryptography::{
+    Committable, Digestible, Hasher, PrivateKeyExt, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, PrivateKeyExt, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{deterministic, Clock, Runner};
+use commonware_runtime::{Clock, Runner, deterministic};
 use futures::{
-    channel::{mpsc, oneshot},
     StreamExt,
+    channel::{mpsc, oneshot},
 };
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{collections::HashMap, time::Duration};
 
 const MAX_LEN: usize = 1_000_000;
@@ -129,7 +129,7 @@ impl FuzzHandler {
     fn new(respond: bool, mut rng: StdRng) -> Self {
         let mut response_map = HashMap::new();
         for _ in 0..rng.gen_range(0..10) {
-            let id = rng.gen();
+            let id = rng.r#gen();
             let result_len = rng.gen_range(0..100);
             let mut result = vec![0u8; result_len];
             rng.fill(&mut result[..]);
@@ -302,9 +302,12 @@ fn fuzz(input: FuzzInput) {
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
 
         for i in 2..5 {
-            let seed = rng.gen();
+            let seed = rng.r#gen();
             peers.push(PrivateKey::from_seed(seed));
-            handlers.insert(i, FuzzHandler::new(rng.gen(), StdRng::seed_from_u64(seed)));
+            handlers.insert(
+                i,
+                FuzzHandler::new(rng.r#gen(), StdRng::seed_from_u64(seed)),
+            );
             monitors.insert(i, FuzzMonitor::new());
         }
         assert!(!peers.is_empty(), "no peers");
@@ -365,10 +368,8 @@ fn fuzz(input: FuzzInput) {
                             .process(peers[origin_idx].public_key(), request.clone(), tx)
                             .await;
 
-                        if should_respond {
-                            if let Ok(response) = rx.await {
-                                assert_eq!(response.id, request.id);
-                            }
+                        if should_respond && let Ok(response) = rx.await {
+                            assert_eq!(response.id, request.id);
                         }
                     }
                 }
@@ -396,7 +397,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
-                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
+                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.r#gen()))
                     });
                     let monitor = monitors.get(&idx).cloned().unwrap_or_else(FuzzMonitor::new);
                     let config = Config {

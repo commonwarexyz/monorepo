@@ -5,24 +5,24 @@
 //! instead for better performance._
 
 use crate::{
-    adb::{align_mmr_and_locations, Error},
+    adb::{Error, align_mmr_and_locations},
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
+        journaled::{Config as MmrConfig, Mmr},
     },
     store::operation::Variable as Operation,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool, buffer::PoolRef};
 use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use futures::{StreamExt, future::TryFutureExt, pin_mut, try_join};
 use std::{
     collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -253,8 +253,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
                         let expected = *loc / self.log_items_per_section;
-                        assert_eq!(section, expected,
-                                "given section {section} did not match expected section {expected} from location {loc}");
+                        assert_eq!(
+                            section, expected,
+                            "given section {section} did not match expected section {expected} from location {loc}"
+                        );
 
                         if self.log_size > mmr_leaves {
                             warn!(
@@ -480,11 +482,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::UnexpectedData(loc));
         };
 
-        if k != *key {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
+        if k != *key { Ok(None) } else { Ok(Some(v)) }
     }
 
     /// Get the number of operations that have been applied to this db, including those that are not
@@ -902,9 +900,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
+    use commonware_cryptography::{Digest as _, Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::NZU64;
     use std::collections::HashMap;
 

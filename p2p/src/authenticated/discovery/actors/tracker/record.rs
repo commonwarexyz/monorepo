@@ -183,10 +183,10 @@ impl<C: PublicKey> Record<C> {
     /// Indicate that there was a dial failure for this peer using the given `socket`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
-        if let Address::Discovered(info, fails) = &mut self.address {
-            if info.socket == socket {
-                *fails += 1;
-            }
+        if let Address::Discovered(info, fails) = &mut self.address
+            && info.socket == socket
+        {
+            *fails += 1;
         }
     }
 
@@ -300,7 +300,7 @@ impl<C: PublicKey> Record<C> {
 mod tests {
     use super::*;
     use commonware_codec::Encode;
-    use commonware_cryptography::{secp256r1, PrivateKeyExt};
+    use commonware_cryptography::{PrivateKeyExt, secp256r1};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info for testing

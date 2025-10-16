@@ -19,7 +19,7 @@
 //!   endian ambiguity.
 
 use crate::{
-    util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write, util::at_least, varint::UInt,
 };
 use bytes::{Buf, BufMut};
 

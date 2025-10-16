@@ -1,20 +1,20 @@
 use super::{
-    ingress::{Message, Messenger},
     Config,
+    ingress::{Message, Messenger},
 };
 use crate::{
+    Channel, Recipients,
     authenticated::{
+        Mailbox,
         data::Data,
         lookup::{channels::Channels, metrics},
         relay::Relay,
-        Mailbox,
     },
-    Channel, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use futures::{StreamExt, channel::mpsc};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;

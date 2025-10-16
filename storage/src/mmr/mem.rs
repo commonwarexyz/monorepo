@@ -1,11 +1,11 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
 use crate::mmr::{
-    hasher::Hasher,
-    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
-    proof,
     Error::{self, *},
     Location, Position, Proof,
+    hasher::Hasher,
+    iterator::{PathIterator, PeakIterator, nodes_needing_parents, nodes_to_pin},
+    proof,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -802,7 +802,7 @@ mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, stability::ROOTS};
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{create_pool, deterministic, tokio, Runner};
+    use commonware_runtime::{Runner, create_pool, deterministic, tokio};
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
@@ -987,7 +987,8 @@ mod tests {
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new_unchecked(8)..mmr.leaves()).is_ok(),
+                mmr.range_proof(Location::new_unchecked(8)..mmr.leaves())
+                    .is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 

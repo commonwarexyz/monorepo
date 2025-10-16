@@ -1,7 +1,7 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{Digest as _, Hasher, Sha256, sha256};
 use commonware_storage::bmt::Builder;
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -36,9 +36,11 @@ fn bench_prove_range(c: &mut Criterion) {
                     |(start, end, proof)| {
                         let mut hasher = Sha256::new();
                         let range_leaves = &elements[start..=end];
-                        assert!(proof
-                            .verify(&mut hasher, start as u32, range_leaves, &root)
-                            .is_ok());
+                        assert!(
+                            proof
+                                .verify(&mut hasher, start as u32, range_leaves, &root)
+                                .is_ok()
+                        );
                     },
                     criterion::BatchSize::SmallInput,
                 )

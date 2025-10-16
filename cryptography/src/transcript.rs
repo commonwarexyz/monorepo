@@ -6,12 +6,12 @@
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write, varint::UInt};
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
 use rand_core::{
-    impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
+    impls::{next_u32_via_fill, next_u64_via_fill},
 };
 use zeroize::ZeroizeOnDrop;
 
@@ -234,7 +234,7 @@ impl Transcript {
     ///
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
-    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore {
+    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore + use<> {
         let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())

@@ -2,20 +2,20 @@
 
 use super::{METRICS_PORT, SYSTEM_PORT};
 use crate::ec2::{
-    utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
+    utils::{DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL, exact_cidr},
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{
+    Client as Ec2Client, Error as Ec2Error,
     error::BuildError,
     primitives::Blob,
     types::{
         BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
         SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
-    Client as Ec2Client, Error as Ec2Error,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -487,16 +487,12 @@ pub async fn wait_for_vpc_peering_connection(
             .vpc_peering_connection_ids(peer_id)
             .send()
             .await
+            && let Some(connections) = resp.vpc_peering_connections
+            && let Some(connection) = connections.first()
+            && connection.status.as_ref().unwrap().code
+                == Some(VpcPeeringConnectionStateReasonCode::PendingAcceptance)
         {
-            if let Some(connections) = resp.vpc_peering_connections {
-                if let Some(connection) = connections.first() {
-                    if connection.status.as_ref().unwrap().code
-                        == Some(VpcPeeringConnectionStateReasonCode::PendingAcceptance)
-                    {
-                        return Ok(());
-                    }
-                }
-            }
+            return Ok(());
         }
         sleep(Duration::from_secs(2)).await;
     }

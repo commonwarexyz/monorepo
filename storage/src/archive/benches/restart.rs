@@ -1,11 +1,11 @@
-use super::utils::{append_random, Archive, Variant};
+use super::utils::{Archive, Variant, append_random};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::archive::Archive as _;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_restart(c: &mut Criterion) {

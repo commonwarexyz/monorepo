@@ -1,8 +1,8 @@
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
 use criterion::criterion_main;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod fixed_append;

@@ -3,19 +3,19 @@
 use arbitrary::Arbitrary;
 use bytes::{Buf, BufMut};
 use commonware_broadcast::{
-    buffered::{Config, Engine, Mailbox},
     Broadcaster,
+    buffered::{Config, Engine, Mailbox},
 };
 use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
+    Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use commonware_p2p::{Recipients, simulated::Network};
+use commonware_runtime::{Clock, Metrics, Runner, deterministic};
 use libfuzzer_sys::fuzz_target;
-use rand::{seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, seq::SliceRandom};
 use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone, Debug, Arbitrary)]

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{Runner, deterministic};
 use commonware_storage::mmr::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 

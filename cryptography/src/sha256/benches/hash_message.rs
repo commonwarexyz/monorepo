@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 
 fn benchmark_hash_message(c: &mut Criterion) {
     let mut sampler = StdRng::seed_from_u64(0);

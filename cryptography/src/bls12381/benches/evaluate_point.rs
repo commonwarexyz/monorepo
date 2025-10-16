@@ -1,7 +1,7 @@
 use commonware_cryptography::bls12381::{dkg, primitives::variant::MinSig};
 use commonware_utils::quorum;
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 
 fn benchmark_evaluate_point(c: &mut Criterion) {

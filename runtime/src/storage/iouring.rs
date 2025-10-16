@@ -21,14 +21,14 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::{
-    iouring::{self, should_retry},
     Error,
+    iouring::{self, should_retry},
 };
-use commonware_utils::{from_hex, hex, StableBuf};
+use commonware_utils::{StableBuf, from_hex, hex};
 use futures::{
+    SinkExt as _,
     channel::{mpsc, oneshot},
     executor::block_on,
-    SinkExt as _,
 };
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
@@ -354,7 +354,7 @@ mod tests {
     fn create_test_storage() -> (Storage, PathBuf) {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
-            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.r#gen::<u64>()));
 
         let storage = Storage::start(
             Config {

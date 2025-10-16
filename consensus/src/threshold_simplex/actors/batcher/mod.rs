@@ -2,8 +2,8 @@ mod actor;
 mod ingress;
 
 use crate::{
-    types::{Epoch, View},
     Reporter, ThresholdSupervisor,
+    types::{Epoch, View},
 };
 pub use actor::Actor;
 use commonware_p2p::Blocker;

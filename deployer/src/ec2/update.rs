@@ -1,8 +1,8 @@
 //! `update` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, utils::*, Config, Error, InstanceConfig, CREATED_FILE_NAME,
-    DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    CREATED_FILE_NAME, Config, DESTROYED_FILE_NAME, Error, InstanceConfig, MONITORING_NAME,
+    MONITORING_REGION, aws::*, deployer_directory, utils::*,
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
@@ -65,21 +65,18 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             .map_err(|err| err.into_service_error())?;
         for reservation in resp.reservations.unwrap_or_default() {
             for instance in reservation.instances.unwrap_or_default() {
-                if let Some(tags) = &instance.tags {
-                    if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
-                        if name_tag.value.as_deref() != Some(MONITORING_NAME) {
-                            if let Some(public_ip) = &instance.public_ip_address {
-                                binary_instances
-                                    .push((name_tag.value.clone().unwrap(), public_ip.clone()));
-                                info!(
-                                    region,
-                                    name = name_tag.value.clone().unwrap(),
-                                    ip = public_ip,
-                                    "found instance"
-                                );
-                            }
-                        }
-                    }
+                if let Some(tags) = &instance.tags
+                    && let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name"))
+                    && name_tag.value.as_deref() != Some(MONITORING_NAME)
+                    && let Some(public_ip) = &instance.public_ip_address
+                {
+                    binary_instances.push((name_tag.value.clone().unwrap(), public_ip.clone()));
+                    info!(
+                        region,
+                        name = name_tag.value.clone().unwrap(),
+                        ip = public_ip,
+                        "found instance"
+                    );
                 }
             }
         }

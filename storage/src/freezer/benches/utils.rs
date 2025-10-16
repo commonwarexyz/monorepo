@@ -2,8 +2,8 @@
 
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::freezer::{Config, Freezer};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::num::NonZeroUsize;
 
 /// Number of bytes that can be buffered before being written to disk.

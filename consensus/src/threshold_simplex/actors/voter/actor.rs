@@ -1,5 +1,6 @@
 use super::{Config, Mailbox, Message};
 use crate::{
+    Automaton, Epochable, LATENCY, Relay, Reporter, ThresholdSupervisor, Viewable,
     threshold_simplex::{
         actors::{batcher, resolver},
         interesting,
@@ -11,34 +12,34 @@ use crate::{
         },
     },
     types::{Epoch, Round as Rnd, View},
-    Automaton, Epochable, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{
+    Digest, PublicKey, Signer,
     bls12381::primitives::{
         group::{self, Element},
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
-    Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::PoolRef,
     spawn_cell,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, quorum_from_slice};
 use core::panic;
 use futures::{
+    StreamExt,
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -47,7 +48,7 @@ use rand::Rng;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
-    sync::{atomic::AtomicI64, Arc},
+    sync::{Arc, atomic::AtomicI64},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
@@ -70,12 +71,12 @@ struct Round<
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C,
-        Identity = V::Public,
-        Seed = V::Signature,
-        Share = group::Share,
-    >,
+            Index = View,
+            PublicKey = C,
+            Identity = V::Public,
+            Seed = V::Signature,
+            Share = group::Share,
+        >,
 > {
     start: SystemTime,
     supervisor: S,
@@ -126,18 +127,18 @@ struct Round<
 }
 
 impl<
-        E: Clock,
-        C: PublicKey,
-        V: Variant,
-        D: Digest,
-        S: ThresholdSupervisor<
+    E: Clock,
+    C: PublicKey,
+    V: Variant,
+    D: Digest,
+    S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C,
             Identity = V::Public,
         >,
-    > Round<E, C, V, D, S>
+> Round<E, C, V, D, S>
 {
     pub fn new(
         context: &ContextCell<E>,
@@ -431,13 +432,13 @@ pub struct Actor<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C::PublicKey,
-        Identity = V::Public,
-        Seed = V::Signature,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
+            Index = View,
+            PublicKey = C::PublicKey,
+            Identity = V::Public,
+            Seed = V::Signature,
+            Polynomial = Vec<V::Public>,
+            Share = group::Share,
+        >,
 > {
     context: ContextCell<E>,
     crypto: C,
@@ -480,15 +481,15 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Signer,
-        B: Blocker<PublicKey = C::PublicKey>,
-        V: Variant,
-        D: Digest,
-        A: Automaton<Digest = D, Context = Context<D>>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
+    E: Clock + Rng + Spawner + Storage + Metrics,
+    C: Signer,
+    B: Blocker<PublicKey = C::PublicKey>,
+    V: Variant,
+    D: Digest,
+    A: Automaton<Digest = D, Context = Context<D>>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<
             Index = View,
             PublicKey = C::PublicKey,
             Identity = V::Public,
@@ -496,7 +497,7 @@ impl<
             Polynomial = Vec<V::Public>,
             Share = group::Share,
         >,
-    > Actor<E, C, B, V, D, A, R, F, S>
+> Actor<E, C, B, V, D, A, R, F, S>
 {
     pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
@@ -1146,10 +1147,10 @@ impl<
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&view) {
-            if round.broadcast_notarization {
-                return Action::Skip;
-            }
+        if let Some(ref round) = self.views.get_mut(&view)
+            && round.broadcast_notarization
+        {
+            return Action::Skip;
         }
 
         // Verify notarization
@@ -1203,10 +1204,10 @@ impl<
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&nullification.view()) {
-            if round.broadcast_nullification {
-                return Action::Skip;
-            }
+        if let Some(ref round) = self.views.get_mut(&nullification.view())
+            && round.broadcast_nullification
+        {
+            return Action::Skip;
         }
 
         // Verify nullification
@@ -1284,10 +1285,10 @@ impl<
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&view) {
-            if round.broadcast_finalization {
-                return Action::Skip;
-            }
+        if let Some(ref round) = self.views.get_mut(&view)
+            && round.broadcast_finalization
+        {
+            return Action::Skip;
         }
 
         // Verify finalization
@@ -1454,10 +1455,10 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
-                    self.notarization_latency.observe(elapsed);
-                }
+            if let Some((leader, elapsed)) = self.since_view_start(view)
+                && leader
+            {
+                self.notarization_latency.observe(elapsed);
             }
 
             // Update resolver
@@ -1551,10 +1552,10 @@ impl<
                 } else {
                     // Broadcast last finalized
                     debug!(
-                    parent,
-                    last_finalized = self.last_finalized,
-                    "not backfilling because parent is behind finalized tip, broadcasting finalized"
-                );
+                        parent,
+                        last_finalized = self.last_finalized,
+                        "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                    );
                     if let Some(finalization) =
                         self.construct_finalization(self.last_finalized, true).await
                     {
@@ -1601,10 +1602,10 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
-                    self.finalization_latency.observe(elapsed);
-                }
+            if let Some((leader, elapsed)) = self.since_view_start(view)
+                && leader
+            {
+                self.finalization_latency.observe(elapsed);
             }
 
             // Update resolver
@@ -1832,14 +1833,14 @@ impl<
         let mut pending_verify = None;
         loop {
             // Reset pending set if we have moved to a new view
-            if let Some(view) = pending_set {
-                if view != self.view {
-                    pending_set = None;
-                    pending_propose_context = None;
-                    pending_propose = None;
-                    pending_verify_context = None;
-                    pending_verify = None;
-                }
+            if let Some(view) = pending_set
+                && view != self.view
+            {
+                pending_set = None;
+                pending_propose_context = None;
+                pending_propose = None;
+                pending_verify_context = None;
+                pending_verify = None;
             }
 
             // Attempt to propose a container

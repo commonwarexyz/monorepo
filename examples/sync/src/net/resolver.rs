@@ -5,8 +5,8 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{adb::sync, mmr::Location};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use std::num::NonZeroU64;
 
@@ -110,7 +110,7 @@ where
                 return Err(crate::Error::Server {
                     code: err.error_code,
                     message: err.message,
-                })
+                });
             }
             _ => return Err(crate::Error::UnexpectedResponse { request_id }),
         };

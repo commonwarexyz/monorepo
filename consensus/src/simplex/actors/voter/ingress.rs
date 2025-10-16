@@ -1,10 +1,10 @@
 use crate::{
+    Viewable,
     simplex::types::{Notarization, Nullification},
     types::View,
-    Viewable,
 };
 use commonware_cryptography::{Digest, Signature};
-use futures::{channel::mpsc, SinkExt};
+use futures::{SinkExt, channel::mpsc};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<S: Signature, D: Digest> {

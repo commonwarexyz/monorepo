@@ -1,17 +1,17 @@
-use super::{ingress::Message, Config, Error};
+use super::{Config, Error, ingress::Message};
 use crate::authenticated::{
+    Mailbox,
     data::Data,
     lookup::{channels::Channels, metrics, types},
     relay::Relay,
-    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
-use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
+use futures::{SinkExt, StreamExt, channel::mpsc};
+use governor::{Quota, RateLimiter, clock::ReasonablyRealtime};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};

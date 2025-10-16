@@ -1,11 +1,11 @@
-use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
+use crate::{Supervisor, ThresholdSupervisor, types::Epoch};
 use commonware_cryptography::{
+    PublicKey,
     bls12381::primitives::{
         group::Share,
-        poly::{public, Public},
+        poly::{Public, public},
         variant::Variant,
     },
-    PublicKey,
 };
 use std::{collections::HashMap, marker::PhantomData};
 

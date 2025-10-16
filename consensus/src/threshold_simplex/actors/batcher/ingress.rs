@@ -1,8 +1,8 @@
 use crate::{threshold_simplex::types::Voter, types::View};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 
 pub enum Message<P: PublicKey, V: Variant, D: Digest> {

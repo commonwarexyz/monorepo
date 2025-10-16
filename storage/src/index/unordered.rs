@@ -4,8 +4,8 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Index as IndexTrait,
+        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
     },
     translator::Translator,
 };
@@ -13,8 +13,8 @@ use commonware_runtime::Metrics;
 use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
-    hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
+    hash_map::{Entry, OccupiedEntry, VacantEntry},
 };
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we

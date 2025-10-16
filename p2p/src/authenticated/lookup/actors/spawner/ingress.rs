@@ -1,4 +1,4 @@
-use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
+use crate::authenticated::{Mailbox, lookup::actors::tracker::Reservation};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};

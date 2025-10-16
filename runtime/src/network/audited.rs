@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
+use crate::{Error, SinkOf, StreamOf, deterministic::Auditor};
 use commonware_utils::StableBuf;
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
@@ -183,12 +183,12 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Listener as _, Network as _, Sink as _, Stream as _,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use std::{net::SocketAddr, sync::Arc};
 

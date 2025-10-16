@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{hex, StableBuf};
+use commonware_utils::{StableBuf, hex};
 use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 use tokio::task;
 

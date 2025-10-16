@@ -10,22 +10,22 @@
 //! with the log on startup.
 
 use crate::{
-    adb::{align_mmr_and_locations, Error},
+    adb::{Error, align_mmr_and_locations},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
+        journaled::{Config as MmrConfig, Mmr},
     },
     store::operation::Keyless as Operation,
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_runtime::{Clock, Metrics, Storage, ThreadPool, buffer::PoolRef};
 use commonware_utils::NZUsize;
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt as _};
+use futures::{StreamExt as _, future::TryFutureExt, pin_mut, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -715,8 +715,8 @@ mod test {
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
 
     // Use some weird sizes here to test boundary conditions.
     const PAGE_SIZE: usize = 101;

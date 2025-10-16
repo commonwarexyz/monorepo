@@ -59,14 +59,14 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
-    buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
+    buffer::{Append, PoolRef, Read},
 };
 use commonware_utils::hex;
 use futures::{
+    StreamExt,
     future::try_join_all,
     stream::{self, Stream},
-    StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
@@ -622,14 +622,14 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic::{self, Context},
         Blob, Runner, Storage,
+        deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU64};
-    use futures::{pin_mut, StreamExt};
+    use commonware_utils::{NZU64, NZUsize};
+    use futures::{StreamExt, pin_mut};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);

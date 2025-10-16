@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
         immutable::{Config, Immutable},
@@ -12,9 +12,9 @@ use commonware_storage::{
     mmr::Location,
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::num::NonZeroU64;
 
 const MAX_OPERATIONS: usize = 50;
@@ -87,14 +87,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
     let mut data = vec![0u8; rng.gen_range(1..=MAX_KEY_SIZE)];
     for (i, byte) in data.iter_mut().enumerate() {
-        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.gen::<u8>();
+        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.r#gen::<u8>();
     }
     Sha256::hash(&data)
 }
 
 fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
-    (0..actual_size).map(|_| rng.gen()).collect()
+    (0..actual_size).map(|_| rng.r#gen()).collect()
 }
 
 fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
@@ -197,11 +197,11 @@ fn fuzz(input: FuzzInput) {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
-                        if let Ok(()) = db.prune(safe_loc).await {
-                            if let Some(oldest) = db.oldest_retained_loc() {
-                                set_locations.retain(|(_, l)| *l >= oldest);
-                                keys_set.retain(|(_, l)| *l >= oldest);
-                            }
+                        if let Ok(()) = db.prune(safe_loc).await
+                            && let Some(oldest) = db.oldest_retained_loc()
+                        {
+                            set_locations.retain(|(_, l)| *l >= oldest);
+                            keys_set.retain(|(_, l)| *l >= oldest);
                         }
                     }
                 }
@@ -238,12 +238,12 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        if let Some(oldest) = db.oldest_retained_loc() {
-                            if safe_start >= oldest {
-                                let _ = db
-                                    .historical_proof(safe_size, safe_start, safe_max_ops)
-                                    .await;
-                            }
+                        if let Some(oldest) = db.oldest_retained_loc()
+                            && safe_start >= oldest
+                        {
+                            let _ = db
+                                .historical_proof(safe_size, safe_start, safe_max_ops)
+                                .await;
                         }
                     }
                 }

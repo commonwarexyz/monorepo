@@ -216,6 +216,7 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::{
+        PrivateKeyExt as _, Signer as _,
         bls12381::primitives::{
             ops::{
                 partial_sign_proof_of_possession, threshold_signature_recover,
@@ -225,11 +226,10 @@ mod tests {
             variant::{MinPk, MinSig, Variant},
         },
         ed25519::PrivateKey,
-        PrivateKeyExt as _, Signer as _,
     };
     use arbiter::Output;
     use commonware_utils::{quorum, set::Set};
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     use std::collections::{BTreeMap, HashMap};
 
     fn run_dkg_and_reshare<V: Variant>(

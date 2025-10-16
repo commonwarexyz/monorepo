@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::thread_rng;
 use std::hint::black_box;
 

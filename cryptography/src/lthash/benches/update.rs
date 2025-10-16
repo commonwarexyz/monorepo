@@ -1,5 +1,5 @@
 use commonware_cryptography::lthash::LtHash;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 
 fn benchmark_update(c: &mut Criterion) {
     let initial_data: Vec<Vec<u8>> = (0..10_000u32).map(|i| i.to_le_bytes().to_vec()).collect();

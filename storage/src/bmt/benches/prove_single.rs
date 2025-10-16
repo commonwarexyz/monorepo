@@ -1,7 +1,7 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{Digest as _, Hasher, Sha256, sha256};
 use commonware_storage::bmt::Builder;
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -25,11 +25,10 @@ fn bench_prove_single(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples = queries
+                        queries
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()
-                            .collect::<Vec<_>>();
-                        samples
+                            .collect::<Vec<_>>()
                     },
                     |samples| {
                         let mut hasher = Sha256::new();

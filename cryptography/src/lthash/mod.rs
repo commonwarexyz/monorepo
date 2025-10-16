@@ -73,8 +73,8 @@
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
 use crate::{
-    blake3::{Blake3, CoreBlake3, Digest},
     Hasher as _,
+    blake3::{Blake3, CoreBlake3, Digest},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};

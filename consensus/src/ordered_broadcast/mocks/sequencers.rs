@@ -1,4 +1,4 @@
-use crate::{types::Epoch, Supervisor};
+use crate::{Supervisor, types::Epoch};
 use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 

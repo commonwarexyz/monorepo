@@ -6,8 +6,8 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Index as IndexTrait,
+        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
     },
     translator::Translator,
 };
@@ -16,11 +16,11 @@ use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{
+        BTreeMap,
         btree_map::{
             Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
             VacantEntry as BTreeVacantEntry,
         },
-        BTreeMap,
     },
     ops::Bound::{Excluded, Unbounded},
 };
@@ -126,7 +126,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
-    pub fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> impl Iterator<Item = &'a V> + 'a + use<'a, T, V> {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
@@ -146,7 +149,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
     /// the same translated key can appear in any order, keys with the same first byte in this
     /// example would need to be ordered by the caller if a full ordering over the untranslated
     /// keyspace is desired.
-    pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> impl Iterator<Item = &'a V> + 'a + use<'a, T, V> {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))
@@ -311,7 +317,7 @@ mod tests {
     use super::*;
     use crate::translator::OneCap;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     #[test_traced]
     fn test_ordered_index_ordering() {

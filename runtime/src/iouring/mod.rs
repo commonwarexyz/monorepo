@@ -59,15 +59,15 @@
 
 use commonware_utils::StableBuf;
 use futures::{
-    channel::{mpsc, oneshot},
     StreamExt as _,
+    channel::{mpsc, oneshot},
 };
 use io_uring::{
+    IoUring,
     cqueue::Entry as CqueueEntry,
     opcode::LinkTimeout,
     squeue::Entry as SqueueEntry,
     types::{SubmitArgs, Timespec},
-    IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -431,12 +431,12 @@ pub fn should_retry(return_value: i32) -> bool {
 mod tests {
     use crate::iouring::{Config, Op};
     use futures::{
+        SinkExt as _,
         channel::{
             mpsc::channel,
             oneshot::{self, Canceled},
         },
         executor::block_on,
-        SinkExt as _,
     };
     use io_uring::{
         opcode,

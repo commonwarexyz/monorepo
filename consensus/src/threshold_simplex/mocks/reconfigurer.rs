@@ -3,17 +3,17 @@
 //! reject messages from an unexpected epoch.
 
 use crate::{
+    ThresholdSupervisor, Viewable,
     threshold_simplex::types::{Finalize, Notarize, Nullify, Voter},
     types::{Epoch, View},
-    ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
     Hasher,
+    bls12381::primitives::{group, variant::Variant},
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -36,11 +36,11 @@ pub struct Reconfigurer<
 }
 
 impl<
-        E: Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Reconfigurer<E, V, H, S>
+    E: Spawner,
+    V: Variant,
+    H: Hasher,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+> Reconfigurer<E, V, H, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {

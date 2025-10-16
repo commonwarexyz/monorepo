@@ -1,8 +1,8 @@
-use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use crate::{Block, Reporter, marshal::ingress::orchestrator::Orchestrator};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::FixedBytes;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use tracing::{debug, error};
 
 // The key used to store the last indexed height in the metadata store.

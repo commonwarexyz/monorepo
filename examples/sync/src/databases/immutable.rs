@@ -11,7 +11,7 @@ use commonware_storage::{
     mmr::{Location, Proof, StandardHasher as Standard},
     store::operation,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.

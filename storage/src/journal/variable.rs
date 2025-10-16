@@ -104,14 +104,14 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{
-    buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
+    buffer::{Append, PoolRef, Read},
 };
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     io::Cursor,
     marker::PhantomData,
     num::NonZeroUsize,
@@ -842,9 +842,9 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
+    use commonware_runtime::{Blob, Error as RError, Runner, Storage, deterministic};
     use commonware_utils::{NZUsize, StableBuf};
-    use futures::{pin_mut, StreamExt};
+    use futures::{StreamExt, pin_mut};
     use prometheus_client::registry::Metric;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -1086,11 +1086,13 @@ mod tests {
             //
             // Note: We don't remove the partition, so this does not error
             // and instead returns an empty list of blobs.
-            assert!(context
-                .scan(&cfg.partition)
-                .await
-                .expect("Failed to list blobs")
-                .is_empty());
+            assert!(
+                context
+                    .scan(&cfg.partition)
+                    .await
+                    .expect("Failed to list blobs")
+                    .is_empty()
+            );
         });
     }
 

@@ -1,13 +1,13 @@
 use crate::{
+    Block, Reporter,
     threshold_simplex::types::{Activity, Finalization, Notarization},
     types::Round,
-    Block, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use commonware_storage::archive;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use tracing::error;
 

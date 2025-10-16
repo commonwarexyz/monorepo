@@ -9,30 +9,31 @@ use super::{
     },
 };
 use crate::{
+    Block, Reporter,
     marshal::ingress::mailbox::Identifier as BlockID,
     threshold_simplex::types::{Finalization, Notarization},
     types::Round,
-    Block, Reporter,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::{Broadcaster, buffered};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
+use commonware_storage::archive::{Archive as _, Identifier as ArchiveID, immutable};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
+    StreamExt,
     channel::{mpsc, oneshot},
-    try_join, StreamExt,
+    try_join,
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     time::Instant,
 };
 use tracing::{debug, info, warn};
@@ -332,13 +333,13 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             self.cache.put_notarization(round, commitment, notarization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                            match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                 // If found, persist the block
                                 self.cache_block(round, commitment, block).await;
-                            } else {
+                            } _ => {
                                 debug!(?round, "notarized block missing");
                                 resolver.fetch(Request::<B>::Notarized { round }).await;
-                            }
+                            }}
                         }
                         Message::Finalization { finalization } => {
                             // Cache finalization by round
@@ -347,16 +348,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                            match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                 // If found, persist the block
                                 let height = block.height();
                                 self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
                                 debug!(?round, height, "finalized block stored");
-                            } else {
+                            } _ => {
                                 // Otherwise, fetch the block from the network.
                                 debug!(?round, ?commitment, "finalized block missing");
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
-                            }
+                            }}
                         }
                         Message::GetBlock { identifier, response } => {
                             match identifier {
@@ -479,16 +480,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             // Iterate backwards, repairing blocks as we go.
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
-                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                                match self.find_block(&mut buffer, commitment).await { Some(block) => {
                                     let finalization = self.cache.get_finalization_for(commitment).await;
                                     self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
-                                } else {
+                                } _ => {
                                     // Request the next missing block digest
                                     resolver.fetch(Request::<B>::Block(commitment)).await;
                                     break;
-                                }
+                                }}
                             }
 
                             // If we haven't fully repaired the gap, then also request any possible

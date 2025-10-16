@@ -4,9 +4,9 @@ use commonware_storage::{
     index::{Index, Ordered, Unordered},
     translator::TwoCap,
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use prometheus_client::registry::Metric;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::time::{Duration, Instant};
 
 #[cfg(not(full_bench))]

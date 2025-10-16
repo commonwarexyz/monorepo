@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Index, Automaton as A, Epochable};
+use crate::{Automaton as A, Epochable, aggregation::types::Index};
 use commonware_cryptography::{Hasher, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;

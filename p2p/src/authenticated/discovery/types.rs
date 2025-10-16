@@ -1,7 +1,7 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
+    Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write, varint::UInt,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
@@ -346,8 +346,8 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_cryptography::{PrivateKeyExt as _, secp256r1};
+    use commonware_runtime::{Clock, Runner, deterministic};
     use std::time::Duration;
 
     fn signed_peer_info() -> Info<secp256r1::PublicKey> {

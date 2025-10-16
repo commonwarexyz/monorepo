@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
-use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
+use commonware_cryptography::{Committable, Digestible, Hasher, Sha256, sha256::Digest};
 
 /// A simple test message.
 #[derive(Debug, Clone, PartialEq, Eq)]

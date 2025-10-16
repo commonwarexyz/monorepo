@@ -1,6 +1,6 @@
 use crate::{
-    buffer::{tip::Buffer, PoolRef},
     Blob, Error, RwLock,
+    buffer::{PoolRef, tip::Buffer},
 };
 use commonware_utils::{NZUsize, StableBuf};
 use std::{num::NonZeroUsize, sync::Arc};
@@ -229,7 +229,7 @@ impl<B: Blob> Blob for Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner, Storage as _};
+    use crate::{Runner, Storage as _, deterministic};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 

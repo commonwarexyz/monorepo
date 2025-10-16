@@ -1,5 +1,5 @@
 use crate::{
-    archive::{immutable::Config, Error, Identifier},
+    archive::{Error, Identifier, immutable::Config},
     freezer::{self, Checkpoint, Cursor, Freezer},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
@@ -7,7 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
+use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;

@@ -7,17 +7,17 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
     Channel,
+    authenticated::{Mailbox, discovery::types::InfoVerifier, mailbox::UnboundedMailbox},
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner, spawn_cell,
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
-use governor::{clock::ReasonablyRealtime, Quota};
+use governor::{Quota, clock::ReasonablyRealtime};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
 

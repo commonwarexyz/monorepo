@@ -1,18 +1,18 @@
 //! Types used in [crate::ordered_broadcast].
 
-use crate::{types::Epoch, Epochable};
+use crate::{Epochable, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_cryptography::{
+    Digest, PublicKey, Signer,
     bls12381::primitives::{
         group::Share,
         ops,
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PublicKey, Signer,
 };
 use commonware_utils::union;
 use futures::channel::oneshot;
@@ -810,6 +810,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
+        PrivateKeyExt as _, Signer,
         bls12381::{
             dkg::ops,
             primitives::{
@@ -821,10 +822,9 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer,
     };
     use commonware_utils::quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"test";
 

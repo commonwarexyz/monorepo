@@ -1,14 +1,14 @@
 use crate::{Blob, Error, RwLock};
 use commonware_utils::StableBuf;
-use futures::{future::Shared, FutureExt};
+use futures::{FutureExt, future::Shared};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tracing::{debug, trace};
@@ -362,7 +362,7 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{Runner as _, Storage as _, deterministic};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 

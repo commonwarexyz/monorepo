@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{types::Epoch, Supervisor};
+use crate::{Supervisor, types::Epoch};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use governor::Quota;

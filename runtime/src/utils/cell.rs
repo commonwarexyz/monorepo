@@ -1,4 +1,4 @@
-use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use crate::{Error, Handle, SinkOf, StreamOf, signal};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};

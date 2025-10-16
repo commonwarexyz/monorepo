@@ -3,27 +3,28 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
-        current::{verify_key_value_proof, Config, KeyValueProofInfo},
         Error,
+        any::fixed::{Config as AConfig, init_mmr_and_log, unordered::Any},
+        current::{Config, KeyValueProofInfo, verify_key_value_proof},
     },
     index::{Index as _, Unordered as Index},
     mmr::{
+        Location, Proof, StandardHasher as Standard,
         bitmap::BitMap,
         grafting::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        verification, Location, Proof, StandardHasher as Standard,
+        verification,
     },
-    store::{operation::Fixed as Operation, Db},
+    store::{Db, operation::Fixed as Operation},
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use futures::{future::try_join_all, try_join, TryFutureExt as _};
+use futures::{TryFutureExt as _, future::try_join_all, try_join};
 use std::num::NonZeroU64;
 use tracing::{debug, info};
 
@@ -58,13 +59,13 @@ pub struct Current<
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-        const N: usize,
-    > Current<E, K, V, H, T, N>
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: CodecFixed<Cfg = ()>,
+    H: CHasher,
+    T: Translator,
+    const N: usize,
+> Current<E, K, V, H, T, N>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -652,13 +653,13 @@ impl<
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: CodecFixed<Cfg = ()>,
+    H: CHasher,
+    T: Translator,
+    const N: usize,
+> Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()
@@ -704,11 +705,11 @@ impl<
 pub mod test {
     use super::*;
     use crate::{store::operation::FixedOperation as _, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use commonware_runtime::{Runner as _, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
     use tracing::warn;
 
     const PAGE_SIZE: usize = 88;

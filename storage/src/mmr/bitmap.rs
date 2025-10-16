@@ -13,13 +13,14 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        Error,
+        Error::*,
+        Location, Position, Proof,
         hasher::Hasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr},
         storage::Storage,
-        verification, Error,
-        Error::*,
-        Location, Position, Proof,
+        verification,
     },
 };
 use commonware_codec::DecodeExt;
@@ -580,7 +581,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 

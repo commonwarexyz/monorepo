@@ -2,13 +2,13 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::journal::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
 };
-use commonware_utils::{NZUsize, NZU64};
-use futures::{pin_mut, StreamExt};
+use commonware_utils::{NZU64, NZUsize};
+use futures::{StreamExt, pin_mut};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_REPLAY_BUF: usize = 2048;

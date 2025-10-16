@@ -25,9 +25,9 @@
 use crate::iouring::{self, should_retry};
 use commonware_utils::StableBuf;
 use futures::{
+    SinkExt as _,
     channel::{mpsc, oneshot},
     executor::block_on,
-    SinkExt as _,
 };
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
@@ -126,10 +126,10 @@ impl crate::Network for Network {
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Explicitly set non-blocking mode to true
@@ -179,10 +179,10 @@ impl crate::Listener for Listener {
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Explicitly set non-blocking mode to true

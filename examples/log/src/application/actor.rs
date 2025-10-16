@@ -1,12 +1,12 @@
 use super::{
+    Config,
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
-    Config,
 };
 use commonware_cryptography::{Hasher, PublicKey, Signature};
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::hex;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use rand::Rng;
 use std::marker::PhantomData;
 use tracing::info;

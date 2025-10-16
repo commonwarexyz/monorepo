@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -28,9 +28,9 @@ fn benchmark_hashmap_iteration(c: &mut Criterion) {
                         for _ in 0..n {
                             rng.fill(&mut key[..]);
                             let value = MockIndex {
-                                section: rng.gen(),
-                                _offset: rng.gen(),
-                                _len: rng.gen(),
+                                section: rng.r#gen(),
+                                _offset: rng.r#gen(),
+                                _len: rng.r#gen(),
                                 _next: None,
                             };
                             map.insert(key.clone(), value);

@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
-use futures::{channel::mpsc, SinkExt};
+use futures::{SinkExt, channel::mpsc};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.

@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashMap, num::NonZeroUsize};
 

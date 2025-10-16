@@ -3,8 +3,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Digest,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
 
 /// Enum representing incoming messages from validators to the indexer.

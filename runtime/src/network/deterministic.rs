@@ -1,5 +1,5 @@
-use crate::{mocks, Error, StableBuf};
-use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
+use crate::{Error, StableBuf, mocks};
+use futures::{SinkExt as _, StreamExt as _, channel::mpsc};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},

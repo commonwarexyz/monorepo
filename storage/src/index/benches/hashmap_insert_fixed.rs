@@ -1,4 +1,4 @@
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -25,10 +25,10 @@ fn benchmark_hashmap_insert_fixed(c: &mut Criterion) {
 
                     // Populate vec with dummy data
                     for _ in 0..n {
-                        let key: [u8; 4] = rng.gen();
-                        let section = rng.gen();
-                        let offset = rng.gen();
-                        let len = rng.gen();
+                        let key: [u8; 4] = rng.r#gen();
+                        let section = rng.r#gen();
+                        let offset = rng.r#gen();
+                        let len = rng.r#gen();
                         vec.push((key, section, offset, len));
                     }
                     vec

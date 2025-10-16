@@ -1,6 +1,6 @@
 //! Mechanisms for coordinating actions across many tasks.
 
-use futures::{channel::oneshot, future::Shared, FutureExt};
+use futures::{FutureExt, channel::oneshot, future::Shared};
 use std::{
     future::Future,
     pin::Pin,

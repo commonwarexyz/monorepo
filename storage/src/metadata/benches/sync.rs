@@ -1,6 +1,6 @@
 use super::utils::{get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::benchmarks::{context, tokio};
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_sync(c: &mut Criterion) {

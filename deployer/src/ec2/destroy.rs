@@ -1,8 +1,8 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION,
-    PROFILES_PORT, TRACES_PORT,
+    Config, DESTROYED_FILE_NAME, Error, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*, deployer_directory,
 };
 use futures::future::try_join_all;
 use std::{collections::HashSet, fs::File, path::PathBuf};
@@ -90,20 +90,23 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .to_port(LOGS_PORT as i32)
                     .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                     .build();
-                if let Err(e) = ec2_client
+                match ec2_client
                     .revoke_security_group_ingress()
                     .group_id(monitoring_sg)
                     .ip_permissions(logging_permission)
                     .send()
                     .await
                 {
-                    warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
-                } else {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked logs ingress rule between monitoring and binary security groups"
-                    );
+                    Err(e) => {
+                        warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked logs ingress rule between monitoring and binary security groups"
+                        );
+                    }
                 }
 
                 // Revoke ingress rule from monitoring security group to binary security group
@@ -113,20 +116,23 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .to_port(PROFILES_PORT as i32)
                     .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                     .build();
-                if let Err(e) = ec2_client
+                match ec2_client
                     .revoke_security_group_ingress()
                     .group_id(monitoring_sg)
                     .ip_permissions(profiling_permission)
                     .send()
                     .await
                 {
-                    warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
-                } else {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked profiles ingress rule between monitoring and binary security groups"
-                    );
+                    Err(e) => {
+                        warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked profiles ingress rule between monitoring and binary security groups"
+                        );
+                    }
                 }
 
                 // Revoke ingress rule from monitoring security group to binary security group
@@ -136,20 +142,23 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .to_port(TRACES_PORT as i32)
                     .user_id_group_pairs(UserIdGroupPair::builder().group_id(binary_sg).build())
                     .build();
-                if let Err(e) = ec2_client
+                match ec2_client
                     .revoke_security_group_ingress()
                     .group_id(monitoring_sg)
                     .ip_permissions(tracing_permission)
                     .send()
                     .await
                 {
-                    warn!(%e, "failed to revoke traces ingress rule between monitoring and binary security groups");
-                } else {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked traces ingress rule between monitoring and binary security groups"
-                    );
+                    Err(e) => {
+                        warn!(%e, "failed to revoke traces ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked traces ingress rule between monitoring and binary security groups"
+                        );
+                    }
                 }
             }
 

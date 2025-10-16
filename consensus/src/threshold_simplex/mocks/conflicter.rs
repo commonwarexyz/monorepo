@@ -1,17 +1,17 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
+    ThresholdSupervisor, Viewable,
     threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
     types::View,
-    ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
     Digest, Hasher,
+    bls12381::primitives::{group, variant::Variant},
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -35,11 +35,11 @@ pub struct Conflicter<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Conflicter<E, V, H, S>
+    E: Clock + Rng + CryptoRng + Spawner,
+    V: Variant,
+    H: Hasher,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+> Conflicter<E, V, H, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {

@@ -7,16 +7,16 @@ use commonware_runtime::{Metrics, Spawner};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, channel::mpsc};
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Text},
     widgets::{Block, Borders, Paragraph},
-    Terminal,
 };
 use std::{
     io::stdout,
@@ -178,10 +178,10 @@ impl<E: Spawner + Metrics> Gui<E> {
                     Ok(e) => e,
                     Err(_) => break,
                 };
-                if let CEvent::Key(key) = e {
-                    if tx.send(Event::Input(key)).await.is_err() {
-                        break;
-                    }
+                if let CEvent::Key(key) = e
+                    && tx.send(Event::Input(key)).await.is_err()
+                {
+                    break;
                 }
             }
         });

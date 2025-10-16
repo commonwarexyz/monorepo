@@ -1,14 +1,14 @@
-use commonware_cryptography::{sha256, Digest as _, Sha256};
+use commonware_cryptography::{Digest as _, Sha256, sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    mem::{Config as MemConfig, Mmr},
     Position, StandardHasher,
+    mem::{Config as MemConfig, Mmr},
 };
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{collections::HashMap, time::Instant};
 
 #[derive(PartialEq, Debug, Clone, Copy)]

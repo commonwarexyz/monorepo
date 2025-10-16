@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{
-        Element, Point, Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH,
+        Element, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH, Point, Private, Scalar, Share,
     },
     ops::*,
     poly::{Eval, Poly},

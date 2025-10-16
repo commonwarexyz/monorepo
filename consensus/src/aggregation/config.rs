@@ -1,6 +1,6 @@
 use super::types::{Activity, Index};
-use crate::{types::Epoch, Automaton, Monitor, Reporter, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor, types::Epoch};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::{Array, NonZeroDuration};

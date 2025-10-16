@@ -14,10 +14,10 @@ use commonware_cryptography::bls12381::{
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
-    tle::{decrypt, encrypt, Block, Ciphertext},
+    tle::{Block, Ciphertext, decrypt, encrypt},
 };
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 type Message = (Option<Vec<u8>>, Vec<u8>);
 

@@ -2,8 +2,8 @@ use crate::{
     threshold_simplex::types::{Notarization, Nullification},
     types::View,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
-use futures::{channel::mpsc, SinkExt};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use futures::{SinkExt, channel::mpsc};
 
 pub enum Message<V: Variant, D: Digest> {
     Fetch {

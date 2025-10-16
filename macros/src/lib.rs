@@ -8,10 +8,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
+    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
     spanned::Spanned,
-    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 /// Run a test function asynchronously.

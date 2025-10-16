@@ -180,12 +180,12 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{self, PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
+        ed25519::{self, PrivateKey, PublicKey},
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, deterministic};
+    use futures::{SinkExt, StreamExt, channel::mpsc};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -783,8 +783,8 @@ mod tests {
         expected_duration_ms: u64,
     ) {
         // Create two agents
-        let pk1 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
-        let pk2 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
+        let pk1 = PrivateKey::from_seed(context.r#gen::<u64>()).public_key();
+        let pk2 = PrivateKey::from_seed(context.r#gen::<u64>()).public_key();
         let (mut sender, _) = oracle.register(pk1.clone(), 0).await.unwrap();
         let (_, mut receiver) = oracle.register(pk2.clone(), 0).await.unwrap();
 

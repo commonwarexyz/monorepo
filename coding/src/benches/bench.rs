@@ -1,5 +1,5 @@
 use commonware_coding::{Config, Scheme};
-use criterion::{criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_main};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 

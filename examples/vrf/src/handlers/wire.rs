@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
+    Signature,
     bls12381::{
         dkg::types::{Ack, Share},
         primitives::{
@@ -9,7 +10,6 @@ use commonware_cryptography::{
             variant::{MinSig, Variant},
         },
     },
-    Signature,
 };
 use commonware_utils::quorum;
 use std::collections::BTreeMap;
@@ -245,15 +245,15 @@ mod tests {
     use crate::handlers::ACK_NAMESPACE;
     use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
     use commonware_cryptography::{
+        PrivateKeyExt, Signer,
         bls12381::primitives::{
             group::{self, Element},
             poly,
             variant::Variant,
         },
         ed25519::{PrivateKey, Signature},
-        PrivateKeyExt, Signer,
     };
-    use rand::{thread_rng, SeedableRng};
+    use rand::{SeedableRng, thread_rng};
     use rand_chacha::ChaCha8Rng;
 
     const N: usize = 11;

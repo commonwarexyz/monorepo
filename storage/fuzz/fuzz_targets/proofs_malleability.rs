@@ -2,11 +2,11 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{deterministic, Runner};
+use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_runtime::{Runner, deterministic};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::Mmr, Location, StandardHasher as Standard},
+    mmr::{Location, StandardHasher as Standard, mem::Mmr},
 };
 use libfuzzer_sys::fuzz_target;
 

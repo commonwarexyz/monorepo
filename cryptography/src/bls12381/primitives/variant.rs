@@ -1,18 +1,18 @@
 //! Different variants of the BLS signature scheme.
 
 use super::{
-    group::{
-        Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
-        GT,
-    },
     Error,
+    group::{
+        DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, GT,
+        Point,
+    },
 };
 use crate::bls12381::primitives::group::{Element, Scalar};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{
-    blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
-    BLS12_381_NEG_G2,
+    BLS12_381_NEG_G1, BLS12_381_NEG_G2, Pairing as blst_pairing, blst_final_exp, blst_fp12,
+    blst_miller_loop,
 };
 use commonware_codec::FixedSize;
 use core::{
@@ -142,10 +142,12 @@ impl Variant for MinPk {
 
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
-                if scalar != Scalar::zero() {
-                    return scalar;
+            .map(|_| {
+                loop {
+                    let scalar = Scalar::from_rand(rng);
+                    if scalar != Scalar::zero() {
+                        return scalar;
+                    }
                 }
             })
             .collect();
@@ -288,10 +290,12 @@ impl Variant for MinSig {
 
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| loop {
-                let scalar = Scalar::from_rand(rng);
-                if scalar != Scalar::zero() {
-                    return scalar;
+            .map(|_| {
+                loop {
+                    let scalar = Scalar::from_rand(rng);
+                    if scalar != Scalar::zero() {
+                        return scalar;
+                    }
                 }
             })
             .collect();

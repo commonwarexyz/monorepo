@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
+use super::{Metadata, Reservation, metrics::Metrics, record::Record, set::Set};
 use crate::authenticated::discovery::{
     actors::tracker::ingress::Releaser,
     metrics,
@@ -8,10 +8,10 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::SystemTimeExt;
 use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
+    Quota, RateLimiter, clock::Clock as GClock, middleware::NoOpMiddleware,
+    state::keyed::HashMapStateStore,
 };
-use rand::{seq::IteratorRandom, Rng};
+use rand::{Rng, seq::IteratorRandom};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -181,11 +181,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
-            if index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
-                return;
-            }
+        if let Some((last, _)) = self.sets.last_key_value()
+            && index <= *last
+        {
+            debug!(?index, ?last, "index must monotonically increase",);
+            return;
         }
 
         // Create and store new peer set

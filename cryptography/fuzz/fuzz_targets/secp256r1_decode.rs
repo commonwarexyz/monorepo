@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    secp256r1::{PrivateKey, PublicKey, Signature},
     Signer, Verifier,
+    secp256r1::{PrivateKey, PublicKey, Signature},
 };
 use libfuzzer_sys::fuzz_target;
 use p256::{

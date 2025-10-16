@@ -2,11 +2,11 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
-    ed25519::{self, Batch as Ed25519Batch},
     BatchVerifier, PrivateKeyExt, Signer, Verifier,
+    ed25519::{self, Batch as Ed25519Batch},
 };
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[derive(Arbitrary, Debug, Clone)]
 enum BatchOperation {

@@ -2,17 +2,17 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
+use commonware_runtime::{Runner, RwLock, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
-        any::fixed::{unordered::Any, Config},
+        any::fixed::{Config, unordered::Any},
         sync,
     },
     mmr::StandardHasher as Standard,
     store::operation::Fixed,
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
@@ -109,9 +109,9 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
 
 async fn test_sync<
     R: sync::resolver::Resolver<
-        Digest = commonware_cryptography::sha256::Digest,
-        Op = Fixed<Key, Value>,
-    >,
+            Digest = commonware_cryptography::sha256::Digest,
+            Op = Fixed<Key, Value>,
+        >,
 >(
     context: deterministic::Context,
     resolver: R,
@@ -134,17 +134,18 @@ async fn test_sync<
             max_outstanding_requests: 10,
         };
 
-    if let Ok(synced) = sync::sync(sync_config).await {
-        let mut hasher = Standard::<Sha256>::new();
-        let actual_root = synced.root(&mut hasher);
-        assert_eq!(
-            actual_root, expected_root,
-            "Synced root must match target root"
-        );
+    match sync::sync(sync_config).await {
+        Ok(synced) => {
+            let mut hasher = Standard::<Sha256>::new();
+            let actual_root = synced.root(&mut hasher);
+            assert_eq!(
+                actual_root, expected_root,
+                "Synced root must match target root"
+            );
 
-        synced.destroy().await.is_ok()
-    } else {
-        false
+            synced.destroy().await.is_ok()
+        }
+        _ => false,
     }
 }
 

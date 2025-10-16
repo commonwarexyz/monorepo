@@ -1,4 +1,4 @@
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 fn bench_connect(c: &mut Criterion) {
     c.bench_function(module_path!(), |b| b.iter(|| super::connect().unwrap()));

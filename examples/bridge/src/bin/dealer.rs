@@ -1,14 +1,15 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
 use commonware_cryptography::{
+    PrivateKeyExt as _, Signer as _,
     bls12381::{
         dkg::ops,
         primitives::{poly, variant::MinSig},
     },
-    ed25519, PrivateKeyExt as _, Signer as _,
+    ed25519,
 };
 use commonware_utils::{hex, quorum};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 fn main() {
     // Setup parsing

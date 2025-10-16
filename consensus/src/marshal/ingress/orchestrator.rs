@@ -1,7 +1,7 @@
 use crate::Block;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use tracing::error;
 

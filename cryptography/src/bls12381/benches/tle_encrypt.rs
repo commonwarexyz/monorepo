@@ -1,8 +1,8 @@
 use commonware_cryptography::bls12381::{
     primitives::{ops::keypair, variant::MinSig},
-    tle::{encrypt, Block},
+    tle::{Block, encrypt},
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::thread_rng;
 use std::hint::black_box;
 

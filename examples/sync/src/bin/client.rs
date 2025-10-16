@@ -6,11 +6,11 @@
 use clap::{Arg, Command};
 use commonware_codec::{Encode, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
+    Clock, Metrics, Network, Runner, Spawner, Storage, tokio as tokio_runtime,
 };
 use commonware_storage::{adb::sync, mmr::StandardHasher};
 use commonware_sync::{
-    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+    Digest, Error, Key, any, crate_version, databases::DatabaseType, immutable, net::Resolver,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;
@@ -320,7 +320,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .to_string();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-            let suffix: u64 = rand::thread_rng().gen();
+            let suffix: u64 = rand::thread_rng().r#gen();
             format!("{storage_dir}-{suffix}")
         } else {
             storage_dir

@@ -14,7 +14,7 @@ pub use write::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Blob as _, Error, Runner, Storage};
+    use crate::{Blob as _, Error, Runner, Storage, deterministic};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 
@@ -1104,7 +1104,7 @@ mod tests {
                 .write_at(b"XXXXX".to_vec(), writer.size().await)
                 .await
                 .unwrap(); // 5 bytes
-                           // inner.buffer = "XXXXX", inner.position = 5
+            // inner.buffer = "XXXXX", inner.position = 5
             assert_eq!(writer.size().await, 10); // 5 (resized) + 5 (XXXXX)
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 10);

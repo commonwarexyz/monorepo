@@ -2,15 +2,16 @@
 //! verifies activities, records votes/faults, and exposes a simple subscription.
 
 use crate::{
+    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
         Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable,
     },
     types::View,
-    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
+    Digest, PublicKey,
     bls12381::{
         dkg::ops::evaluate_all,
         primitives::{
@@ -19,7 +20,6 @@ use commonware_cryptography::{
             variant::Variant,
         },
     },
-    Digest, PublicKey,
 };
 use commonware_utils::modulo;
 use futures::channel::mpsc::{Receiver, Sender};

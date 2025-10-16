@@ -12,7 +12,7 @@
 
 use crate::{
     journal::fixed::Journal,
-    mmr::{journaled, Location},
+    mmr::{Location, journaled},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};

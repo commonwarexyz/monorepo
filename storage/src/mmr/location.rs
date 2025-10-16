@@ -364,7 +364,7 @@ impl LocationRangeExt for Range<Location> {
 #[cfg(test)]
 mod tests {
     use super::{Location, MAX_LOCATION};
-    use crate::mmr::{position::Position, LocationError, MAX_POSITION};
+    use crate::mmr::{LocationError, MAX_POSITION, position::Position};
 
     // Test that the [Location::try_from] function returns the correct location for leaf positions.
     #[test]
@@ -443,9 +443,11 @@ mod tests {
         assert!(Location::new_unchecked(u64::MAX).checked_add(1).is_none());
 
         // Exceeding MAX_LOCATION returns None
-        assert!(Location::new_unchecked(MAX_LOCATION)
-            .checked_add(1)
-            .is_none());
+        assert!(
+            Location::new_unchecked(MAX_LOCATION)
+                .checked_add(1)
+                .is_none()
+        );
 
         // At MAX_LOCATION is OK
         let loc = Location::new_unchecked(MAX_LOCATION - 10);

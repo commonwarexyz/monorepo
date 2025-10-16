@@ -1,7 +1,7 @@
 use super::{
+    Config,
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config,
 };
 use crate::authenticated::{
     discovery::{
@@ -12,12 +12,12 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
-use commonware_utils::{union, SystemTimeExt};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{SystemTimeExt, union};
+use futures::{StreamExt, channel::mpsc};
 use governor::clock::Clock as GClock;
-use rand::{seq::SliceRandom, Rng};
+use rand::{Rng, seq::SliceRandom};
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -232,24 +232,24 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
+        Blocker,
+        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
         authenticated::{
+            Mailbox,
             discovery::{
                 actors::{peer, tracker},
                 config::Bootstrapper,
                 types,
             },
-            Mailbox,
         },
-        Blocker,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey, Signature},
         PrivateKeyExt as _, Signer,
+        ed25519::{PrivateKey, PublicKey, Signature},
     };
-    use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, NZU32};
+    use commonware_runtime::{Clock, Runner, deterministic};
+    use commonware_utils::{NZU32, bitmap::BitMap};
     use futures::future::Either;
     use governor::Quota;
     use std::{

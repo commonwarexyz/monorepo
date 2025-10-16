@@ -1,7 +1,7 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
+    telemetry::metrics::{histogram, status},
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,

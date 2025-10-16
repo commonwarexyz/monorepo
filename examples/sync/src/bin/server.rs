@@ -5,21 +5,21 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
-    Storage, StreamOf,
+    Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner, Storage, StreamOf,
+    tokio as tokio_runtime,
 };
 use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
+    Error, Key,
     any::{self},
     crate_version,
     databases::{DatabaseType, Syncable},
     immutable::{self},
-    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
-    Error, Key,
+    net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::DurationExt;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, channel::mpsc};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -564,7 +564,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .to_string();
             // Only add suffix if using the default value
             if storage_dir == "/tmp/commonware-sync/server" {
-                let suffix: u64 = rand::thread_rng().gen();
+                let suffix: u64 = rand::thread_rng().r#gen();
                 format!("{storage_dir}-{suffix}")
             } else {
                 storage_dir

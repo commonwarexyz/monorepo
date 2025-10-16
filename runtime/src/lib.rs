@@ -517,9 +517,10 @@ mod tests {
     use bytes::Bytes;
     use commonware_macros::select;
     use futures::{
+        FutureExt, SinkExt, StreamExt,
         channel::{mpsc, oneshot},
         future::{pending, ready},
-        join, pin_mut, FutureExt, SinkExt, StreamExt,
+        join, pin_mut,
     };
     use prometheus_client::metrics::counter::Counter;
     use std::{
@@ -527,12 +528,12 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, Ordering},
             Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
         },
         task::{Context as TContext, Poll, Waker},
     };
-    use tracing::{error, Level};
+    use tracing::{Level, error};
     use utils::reschedule;
 
     fn test_error_future<R: Runner>(runner: R) {

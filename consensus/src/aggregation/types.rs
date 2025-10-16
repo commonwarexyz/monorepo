@@ -1,13 +1,13 @@
 //! Types used in [aggregation](super).
 
-use crate::{types::Epoch, Epochable};
+use crate::{Epochable, types::Epoch};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
     Digest,
+    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
 };
 use commonware_utils::union;
 use futures::channel::oneshot;
@@ -357,13 +357,13 @@ mod tests {
     use bytes::BytesMut;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::{
             dkg::ops::{self, evaluate_all},
             primitives::{ops::sign_message, variant::MinSig},
         },
-        Hasher, Sha256,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     #[test]
     fn test_ack_namespace() {

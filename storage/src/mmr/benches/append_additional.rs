@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher};
-use criterion::{criterion_group, Criterion};
+use commonware_cryptography::{Digest as _, Sha256, sha256};
+use commonware_storage::mmr::{StandardHasher, mem::Mmr};
+use criterion::{Criterion, criterion_group};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[cfg(not(full_bench))]
 const N_LEAVES: [usize; 2] = [10_000, 100_000];

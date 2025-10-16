@@ -1,13 +1,13 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
+    Runner as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
-use criterion::{black_box, criterion_group, Criterion};
-use futures::{pin_mut, StreamExt};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
+use criterion::{Criterion, black_box, criterion_group};
+use futures::{StreamExt, pin_mut};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},

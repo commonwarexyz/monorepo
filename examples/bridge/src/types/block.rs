@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::MinSig};
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]

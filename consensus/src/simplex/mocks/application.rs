@@ -1,17 +1,17 @@
 use super::relay::Relay;
 use crate::{
+    Automaton as Au, Epochable, Relay as Re,
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Epochable, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -195,7 +195,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Generate the payload
         let parent = context.parent.1;
-        let random = self.context.gen::<u64>(); // Ensures we always have a unique payload
+        let random = self.context.r#gen::<u64>(); // Ensures we always have a unique payload
         let payload = (context.round, parent, random).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();

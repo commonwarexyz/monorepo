@@ -105,10 +105,10 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, buffer::PoolRef};
 use commonware_utils::{Array, NZUsize};
 use core::future::Future;
-use futures::{pin_mut, try_join, StreamExt};
+use futures::{StreamExt, pin_mut, try_join};
 use std::{
     collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -559,8 +559,10 @@ where
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
                         let expected = *loc / self.log_items_per_section;
-                        assert_eq!(section, expected,
-                                "given section {section} did not match expected section {expected} from location {loc}");
+                        assert_eq!(
+                            section, expected,
+                            "given section {section} did not match expected section {expected} from location {loc}"
+                        );
 
                         if self.log_size > locations_size {
                             warn!(section, offset, "operation was missing from location map");
@@ -853,12 +855,12 @@ mod test {
     use super::*;
     use crate::translator::TwoCap;
     use commonware_cryptography::{
-        blake3::{hash, Digest},
         Digest as _,
+        blake3::{Digest, hash},
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{Runner, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;

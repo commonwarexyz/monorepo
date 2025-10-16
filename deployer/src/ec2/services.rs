@@ -227,8 +227,8 @@ pub fn install_monitoring_cmd(
     tempo_version: &str,
 ) -> String {
     let prometheus_url = format!(
-    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
-);
+        "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
+    );
     let grafana_url =
         format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_arm64.deb");
     let loki_url = format!(

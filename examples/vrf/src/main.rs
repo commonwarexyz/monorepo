@@ -78,14 +78,14 @@
 
 mod handlers;
 
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{quorum, set::Set, NZU32};
+use commonware_runtime::{Metrics, Runner, tokio};
+use commonware_utils::{NZU32, quorum, set::Set};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -2,11 +2,11 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{time::SYSTEM_TIME_PRECISION, BigRationalExt, SystemTimeExt};
+use commonware_utils::{BigRationalExt, SystemTimeExt, time::SYSTEM_TIME_PRECISION};
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     time::{Duration, SystemTime},
 };
 use tracing::trace;
@@ -353,10 +353,10 @@ impl<P: PublicKey> State<P> {
                 continue;
             };
 
-            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
-                if ready_at <= now {
-                    ready_pairs.push(key.clone());
-                }
+            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival)
+                && ready_at <= now
+            {
+                ready_pairs.push(key.clone());
             }
         }
 
@@ -557,16 +557,15 @@ impl<P: PublicKey> State<P> {
 
         loop {
             let buffered = match self.buffered.entry(key.clone()) {
-                Entry::Occupied(mut occ) => {
-                    if let Some(p) = occ.get_mut().remove(expected_entry) {
+                Entry::Occupied(mut occ) => match occ.get_mut().remove(expected_entry) {
+                    Some(p) => {
                         if occ.get().is_empty() {
                             occ.remove();
                         }
                         Some(p)
-                    } else {
-                        None
                     }
-                }
+                    _ => None,
+                },
                 Entry::Vacant(_) => None,
             };
             let Some(buffered) = buffered else { break };
@@ -721,7 +720,7 @@ impl<P: PublicKey> State<P> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{PrivateKeyExt as _, Signer as _, ed25519};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CHANNEL: Channel = 0;
@@ -1113,16 +1112,20 @@ mod tests {
                 .get(&pair)
                 .expect("messages remain queued while first in flight");
             assert_eq!(queued.len(), 2);
-            assert!(queued
-                .front()
-                .expect("front queued entry")
-                .ready_at
-                .is_none());
-            assert!(queued
-                .get(1)
-                .expect("second queued entry")
-                .ready_at
-                .is_none());
+            assert!(
+                queued
+                    .front()
+                    .expect("front queued entry")
+                    .ready_at
+                    .is_none()
+            );
+            assert!(
+                queued
+                    .get(1)
+                    .expect("second queued entry")
+                    .ready_at
+                    .is_none()
+            );
         }
         assert!(state.active_flows.contains_key(&pair));
 
@@ -1150,11 +1153,13 @@ mod tests {
                 .ready_at
                 .expect("ready_at populated once head inspected");
             assert_eq!(ready_at, start + Duration::from_secs(5));
-            assert!(queued
-                .get(1)
-                .expect("third message queued")
-                .ready_at
-                .is_none());
+            assert!(
+                queued
+                    .get(1)
+                    .expect("third message queued")
+                    .ready_at
+                    .is_none()
+            );
         }
 
         // schedule() should advertise the next wake-up using the refreshed ready_at.
@@ -1173,11 +1178,13 @@ mod tests {
                 .get(&pair)
                 .expect("third message remains queued while second active");
             assert_eq!(queued.len(), 1);
-            assert!(queued
-                .front()
-                .expect("third queued entry")
-                .ready_at
-                .is_none());
+            assert!(
+                queued
+                    .front()
+                    .expect("third queued entry")
+                    .ready_at
+                    .is_none()
+            );
         }
 
         // The second send now proceeds and completes one second later.
@@ -1332,12 +1339,16 @@ mod tests {
         let origin_large = key(61);
         let recipient = key(62);
 
-        assert!(state
-            .limit(now, &origin_small, Some(30_000), None)
-            .is_empty());
-        assert!(state
-            .limit(now, &origin_large, Some(30_000), None)
-            .is_empty());
+        assert!(
+            state
+                .limit(now, &origin_small, Some(30_000), None)
+                .is_empty()
+        );
+        assert!(
+            state
+                .limit(now, &origin_large, Some(30_000), None)
+                .is_empty()
+        );
         assert!(state.limit(now, &recipient, None, Some(30_000)).is_empty());
 
         let completions = state.enqueue(

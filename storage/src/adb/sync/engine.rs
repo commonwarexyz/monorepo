@@ -4,11 +4,11 @@ use crate::{
     adb::{
         self,
         sync::{
+            Database, Error as SyncError, Journal, Target,
             error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, Error as SyncError, Journal, Target,
         },
     },
     mmr::{Location, StandardHasher},
@@ -17,7 +17,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
-use futures::{channel::mpsc, future::Either, StreamExt};
+use futures::{StreamExt, channel::mpsc, future::Either};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
@@ -429,12 +429,12 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
+            if self.pinned_nodes.is_none()
+                && start_loc == self.target.range.start
+                && let Ok(nodes) =
                     crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
-                    self.pinned_nodes = Some(nodes);
-                }
+            {
+                self.pinned_nodes = Some(nodes);
             }
 
             // Store operations for later application

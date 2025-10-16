@@ -67,9 +67,10 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{Config, Engine, mocks};
     use crate::{aggregation::mocks::Strategy, types::Epoch};
     use commonware_cryptography::{
+        PrivateKeyExt as _, Signer as _,
         bls12381::{
             dkg::ops,
             primitives::{
@@ -80,18 +81,17 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        Clock, Metrics, Runner, Spawner,
         buffer::PoolRef,
         deterministic::{self, Context},
-        Clock, Metrics, Runner, Spawner,
     };
     use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
@@ -519,10 +519,9 @@ mod tests {
                                 loop {
                                     if let Some(tip_index) =
                                         reporter_mailbox.get_contiguous_tip().await
+                                        && tip_index >= target_index
                                     {
-                                        if tip_index >= target_index {
-                                            break;
-                                        }
+                                        break;
                                     }
                                     context.sleep(Duration::from_millis(50)).await;
                                 }

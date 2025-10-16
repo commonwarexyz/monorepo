@@ -1,10 +1,10 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
+    Error,
     ingress::{self, Oracle},
     metrics,
     transmitter::{self, Completion},
-    Error,
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
@@ -12,13 +12,14 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
+    Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner, spawn_cell,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use either::Either;
 use futures::{
+    SinkExt, StreamExt,
     channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
+    future,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
@@ -755,8 +756,8 @@ mod tests {
     use super::*;
     use crate::{Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_cryptography::{PrivateKeyExt as _, Signer as _, ed25519};
+    use commonware_runtime::{Runner as _, deterministic};
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     #[test]

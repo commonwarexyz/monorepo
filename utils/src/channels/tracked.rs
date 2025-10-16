@@ -47,8 +47,8 @@
 //! ```
 
 use futures::{
-    channel::mpsc::{self, Receiver as FutReceiver, SendError, Sender as FutSender, TrySendError},
     SinkExt, Stream, StreamExt,
+    channel::mpsc::{self, Receiver as FutReceiver, SendError, Sender as FutSender, TrySendError},
 };
 use std::{
     collections::HashMap,

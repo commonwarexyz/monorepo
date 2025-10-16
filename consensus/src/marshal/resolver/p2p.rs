@@ -1,11 +1,11 @@
 //! P2P resolver initialization and config.
 
 use crate::{
-    marshal::ingress::handler::{self, Handler},
     Block,
+    marshal::ingress::handler::{self, Handler},
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, Receiver, Sender};
+use commonware_p2p::{Receiver, Sender, utils::requester};
 use commonware_resolver::p2p::{self, Coordinator};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;

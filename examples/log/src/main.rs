@@ -47,12 +47,12 @@
 mod application;
 mod gui;
 
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_consensus::simplex;
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
+use commonware_cryptography::{PrivateKeyExt as _, Sha256, Signer as _, ed25519};
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{union, NZUsize, NZU32};
+use commonware_runtime::{Metrics, Runner, buffer::PoolRef, tokio};
+use commonware_utils::{NZU32, NZUsize, union};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

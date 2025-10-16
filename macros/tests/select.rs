@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use commonware_macros::select;
-    use futures::{channel::mpsc, executor::block_on, SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt, channel::mpsc, executor::block_on};
 
     #[test]
     fn test_select_macro() {

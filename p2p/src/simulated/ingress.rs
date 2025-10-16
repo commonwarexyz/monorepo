@@ -2,8 +2,8 @@ use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use rand_distr::Normal;
 use std::time::Duration;

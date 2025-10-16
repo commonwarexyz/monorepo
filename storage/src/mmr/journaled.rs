@@ -7,25 +7,25 @@
 use crate::{
     adb::any::fixed::sync::{init_journal, init_journal_at_size},
     journal::{
-        fixed::{Config as JConfig, Journal},
         Error as JError,
+        fixed::{Config as JConfig, Journal},
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        Error::{self, *},
+        Proof,
         hasher::Hasher,
-        iterator::{nodes_to_pin, PeakIterator},
+        iterator::{PeakIterator, nodes_to_pin},
         location::Location,
         mem::{Config as MemConfig, Mmr as MemMmr},
         position::Position,
         storage::Storage,
         verification,
-        Error::{self, *},
-        Proof,
     },
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool, buffer::PoolRef};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
 use std::{
@@ -825,13 +825,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H>
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
-        StandardHasher as Standard,
+        Location, StandardHasher as Standard, hasher::Hasher as _, location::LocationRangeExt as _,
+        stability::ROOTS,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{hex, NZUsize, NZU64};
+    use commonware_runtime::{Blob as _, Runner, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU64, NZUsize, hex};
 
     fn test_digest(v: usize) -> Digest {
         Sha256::hash(&v.to_be_bytes())
@@ -897,10 +897,11 @@ mod tests {
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert!(mmr.prune_all(&mut hasher).await.is_ok());
             assert_eq!(mmr.pruned_to_pos(), 0);
-            assert!(mmr
-                .prune_to_pos(&mut hasher, Position::new(0))
-                .await
-                .is_ok());
+            assert!(
+                mmr.prune_to_pos(&mut hasher, Position::new(0))
+                    .await
+                    .is_ok()
+            );
             assert!(mmr.sync(&mut hasher).await.is_ok());
             assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
 

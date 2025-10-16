@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
