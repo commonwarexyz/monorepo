@@ -360,3 +360,7 @@ details.podcast-episode summary.podcast-title {
         font-size: 0.85em;
     }
 }
+
+.katex {
+    font-size: 1.0em !important;
+}
