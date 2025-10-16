@@ -3,8 +3,7 @@
 //! This module provides a unified `Contiguous` trait for journals that support sequential
 //! append operations with monotonically increasing positions. It includes:
 //!
-//! - [Contiguous]: Core trait for append/replay/prune operations
-//! - [ContiguousRead]: Extension trait adding random read support
+//! - [Contiguous]: Core trait for append/replay/prune/read operations
 //! - [variable::Variable]: Wrapper for `variable::Journal` that implements [Contiguous]
 
 use super::Error;
@@ -82,6 +81,18 @@ pub trait Contiguous {
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
     > + Send;
 
+    /// Read the item at the given position.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
+    /// - Returns other errors if storage or decoding fails.
+    fn read(
+        &self,
+        position: u64,
+    ) -> impl std::future::Future<Output = Result<Self::Item, Error>> + Send;
+
     /// Sync all pending writes to storage.
     ///
     /// This ensures all previously appended items are durably persisted.
@@ -102,23 +113,4 @@ pub trait Contiguous {
     ///
     /// Returns an error if the underlying storage operations fail.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-}
-
-/// Extension trait for contiguous journals that support random reads by position.
-///
-/// This trait can only be efficiently implemented for fixed-length items where the position
-/// directly maps to a storage offset. Variable-length journals cannot implement this without
-/// an auxiliary index mapping positions to offsets.
-pub trait ContiguousRead: Contiguous {
-    /// Read the item at the given position.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    /// - Returns other errors if storage or decoding fails.
-    fn read(
-        &self,
-        position: u64,
-    ) -> impl std::future::Future<Output = Result<Self::Item, Error>> + Send;
 }

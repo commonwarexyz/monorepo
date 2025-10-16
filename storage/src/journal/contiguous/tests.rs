@@ -30,6 +30,9 @@ where
     test_prune_beyond_size(&factory).await;
     test_persistence_basic(&factory).await;
     test_persistence_after_prune(&factory).await;
+    test_read_by_position(&factory).await;
+    test_read_out_of_range(&factory).await;
+    test_read_after_prune(&factory).await;
 }
 
 /// Test that an empty journal has size 0.
@@ -58,6 +61,11 @@ where
     assert_eq!(pos2, 1);
     assert_eq!(pos3, 2);
     assert_eq!(journal.size().await.unwrap(), 3);
+
+    // Verify values can be read back
+    assert_eq!(journal.read(0).await.unwrap(), 100);
+    assert_eq!(journal.read(1).await.unwrap(), 200);
+    assert_eq!(journal.read(2).await.unwrap(), 300);
 }
 
 /// Test appending many items across section boundaries.
@@ -74,6 +82,10 @@ where
     }
 
     assert_eq!(journal.size().await.unwrap(), 25);
+
+    for i in 0..25u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i * 10);
+    }
 }
 
 /// Test replay from the start of the journal.
@@ -243,6 +255,12 @@ where
         assert_eq!(pos, i);
     }
 
+    // Verify reads work for retained items after pruning
+    assert_eq!(journal.read(10).await.unwrap(), 1000);
+    assert_eq!(journal.read(15).await.unwrap(), 1500);
+    assert_eq!(journal.read(20).await.unwrap(), 2000);
+    assert_eq!(journal.read(24).await.unwrap(), 2400);
+
     // Replay from position 10 and verify positions
     let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
     futures::pin_mut!(stream);
@@ -275,8 +293,10 @@ where
     journal.sync().await.unwrap();
 
     // Verify operations work after sync
+    assert_eq!(journal.read(0).await.unwrap(), 0);
     let pos = journal.append(100).await.unwrap();
     assert_eq!(pos, 5);
+    assert_eq!(journal.read(5).await.unwrap(), 100);
 
     let size = journal.size().await.unwrap();
     assert_eq!(size, 6);
@@ -345,6 +365,8 @@ where
 
     let size = journal.size().await.unwrap();
     assert_eq!(size, 20);
+    assert_eq!(journal.read(10).await.unwrap(), 10);
+    assert_eq!(journal.read(19).await.unwrap(), 19);
 }
 
 /// Test pruning beyond the current size.
@@ -368,6 +390,7 @@ where
 
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
+    assert_eq!(journal.read(10).await.unwrap(), 999);
 }
 
 /// Test basic persistence: append items, close, re-open, verify state.
@@ -399,6 +422,11 @@ where
 
         let size = journal.size().await.unwrap();
         assert_eq!(size, 15);
+
+        // Verify reads work after persistence
+        for i in 0..15u64 {
+            assert_eq!(journal.read(i).await.unwrap(), i * 10);
+        }
 
         // Replay and verify all items
         {
@@ -455,6 +483,11 @@ where
         let size = journal.size().await.unwrap();
         assert_eq!(size, 25);
 
+        // Verify reads work after pruning and persistence
+        for i in 0..25u64 {
+            assert_eq!(journal.read(i).await.unwrap(), i * 100);
+        }
+
         // Replay from position 10 (first non-pruned position)
         {
             let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
@@ -477,6 +510,62 @@ where
         let pos = journal.append(999).await.unwrap();
         assert_eq!(pos, 25);
 
+        // Verify the newly appended item can be read
+        assert_eq!(journal.read(25).await.unwrap(), 999);
+
         journal.destroy().await.unwrap();
     }
+}
+
+/// Test reading items by position.
+pub(super) async fn test_read_by_position<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("read_by_position".to_string()).await.unwrap();
+
+    for i in 0..1000u64 {
+        journal.append(i * 100).await.unwrap();
+        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+    }
+
+    for i in 0..1000u64 {
+        assert!(journal.read(i).await.is_err());
+    }
+}
+
+/// Test read errors for out-of-range positions.
+pub(super) async fn test_read_out_of_range<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("read_out_of_range".to_string()).await.unwrap();
+
+    journal.append(42).await.unwrap();
+
+    // Try to read beyond size
+    let result = journal.read(10).await;
+    assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
+}
+
+/// Test read after pruning.
+pub(super) async fn test_read_after_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("read_after_prune".to_string()).await.unwrap();
+
+    for i in 0..20u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    journal.prune(10).await.unwrap();
+
+    // Try to read pruned item (section-aligned, so might still exist)
+    // Try reading before oldest_retained_pos
+    let result = journal.read(5).await;
+    assert!(matches!(result, Err(Error::ItemPruned(_))));
 }

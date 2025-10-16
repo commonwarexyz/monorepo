@@ -1,6 +1,6 @@
 //! Contiguous trait implementation for fixed-length journals.
 
-use super::{Contiguous, ContiguousRead};
+use super::Contiguous;
 use crate::journal::{fixed, Error};
 use commonware_codec::CodecFixed;
 use commonware_runtime::{Metrics, Storage};
@@ -32,6 +32,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
         fixed::Journal::replay(self, buffer, start_pos).await
     }
 
+    async fn read(&self, position: u64) -> Result<Self::Item, Error> {
+        fixed::Journal::read(self, position).await
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         fixed::Journal::sync(self).await
     }
@@ -42,14 +46,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
 
     async fn destroy(self) -> Result<(), Error> {
         fixed::Journal::destroy(self).await
-    }
-}
-
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> ContiguousRead
-    for fixed::Journal<E, A>
-{
-    async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        fixed::Journal::read(self, position).await
     }
 }
 

@@ -318,6 +318,20 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             }))
     }
 
+    /// Read the item at the given position.
+    ///
+    /// # Note
+    ///
+    /// This is currently unimplemented and will panic with `todo!()`.
+    /// A full implementation requires maintaining a position-to-offset index.
+    ///
+    /// # Panics
+    ///
+    /// Always panics - not yet implemented.
+    pub async fn read(&self, _position: u64) -> Result<V, Error> {
+        todo!("read() for variable journal requires position-to-offset index")
+    }
+
     /// Sync all pending writes to storage.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync all sections in the underlying journal
@@ -364,6 +378,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
         Variable::replay(self, start_pos, buffer).await
+    }
+
+    async fn read(&self, _position: u64) -> Result<Self::Item, Error> {
+        todo!("read() for variable journal requires position-to-offset index")
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
