@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{ContextCell, spawn_cell, Clock, Handle, Metrics, Spawner};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
@@ -75,7 +75,7 @@ where
     P: PublicKey,
 {
     /// Context held by the actor.
-    context: E,
+    context: ContextCell<E>,
 
     /// Receiver for incoming messages to the actor.
     mailbox: mpsc::Receiver<Message<V, B, S, P>>,
@@ -126,7 +126,7 @@ where
         let (sender, mailbox) = mpsc::channel(1000);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox,
                 buffer,
                 block_codec_cfg,
@@ -141,7 +141,7 @@ where
 
     /// Start the actor.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     /// Run the shard actor.

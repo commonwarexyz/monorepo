@@ -244,8 +244,8 @@ where
         let participants = self
             .supervisor
             .participants(round)
-            .cloned()
-            .expect("failed to get participants for round");
+            .expect("failed to get participants for round")
+            .to_vec();
 
         debug!(
             round = %round,
