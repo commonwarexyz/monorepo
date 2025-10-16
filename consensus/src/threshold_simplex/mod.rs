@@ -218,7 +218,7 @@ pub(crate) fn interesting(
 /// If the active [`SigningScheme`] exposes a seed (e.g. BLS threshold certificates), the
 /// seed is encoded and reduced modulo the number of participants. Otherwise we fall back
 /// to simple round-robin using the view number.
-pub fn select_leader<S, P>(participants: &[P], view: View, seed: Option<S::Seed>) -> (&P, u32)
+pub fn select_leader<S, P>(participants: &[P], view: View, seed: Option<S::Seed>) -> u32
 where
     S: SigningScheme,
 {
@@ -229,7 +229,8 @@ where
     } else {
         (view as usize) % participants.len()
     };
-    (&participants[idx], idx as u32)
+
+    idx as u32
 }
 
 #[cfg(test)]

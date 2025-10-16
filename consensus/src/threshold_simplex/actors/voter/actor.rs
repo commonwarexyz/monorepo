@@ -157,9 +157,9 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_index) =
-            select_leader::<S, _>(&self.participants, self.round.view(), seed);
-        self.leader = Some((leader.clone(), leader_index));
+        let leader_index = select_leader::<S, _>(&self.participants, self.round.view(), seed);
+        let leader = self.participants[leader_index as usize].clone();
+        self.leader = Some((leader, leader_index));
     }
 
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {

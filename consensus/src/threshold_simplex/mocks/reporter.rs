@@ -89,9 +89,8 @@ where
     fn record_leader(&self, view: View, seed: Option<S::Seed>) {
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(view).or_insert_with(|| {
-            select_leader::<S, _>(&self.participants, view, seed)
-                .0
-                .clone()
+            let leader_index = select_leader::<S, _>(&self.participants, view, seed);
+            self.participants[leader_index as usize].clone()
         });
     }
 }
