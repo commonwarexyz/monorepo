@@ -1127,7 +1127,7 @@ impl Clock for Context {
 enum FutureState<F: Future> {
     Pending(#[pin] F),
     Ready(F::Output),
-    Finished,
+    Completed,
 }
 
 #[cfg(feature = "external")]
@@ -1171,18 +1171,13 @@ where
             *this.started = true;
             let waker = noop_waker();
             let mut cx_noop = task::Context::from_waker(&waker);
-            match this.future.as_mut().project() {
-                FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_noop) {
-                    Poll::Ready(value) => {
-                        this.future
-                            .as_mut()
-                            .project_replace(FutureState::Ready(value));
-                    }
-                    Poll::Pending => {}
-                },
-                FutureStateProj::Ready(_) | FutureStateProj::Finished => {
-                    unreachable!("future polled after completion");
-                }
+            let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
+                unreachable!("future polled before started");
+            };
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
+                this.future
+                    .as_mut()
+                    .project_replace(FutureState::Ready(value));
             };
         }
 
@@ -1218,11 +1213,11 @@ where
                     return this
                         .future
                         .as_mut()
-                        .project_replace(FutureState::Finished)
+                        .project_replace(FutureState::Completed)
                         .into_ready();
                 }
-                FutureStateProj::Finished => {
-                    panic!("future already polled at scheduled time");
+                FutureStateProj::Completed => {
+                    panic!("future polled after completion");
                 }
             }
         }
