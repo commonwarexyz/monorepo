@@ -9,8 +9,7 @@ use commonware_p2p::{
     },
     Blocker, Channel, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{deterministic, Clock, Handle, Metrics, Runner};
-use commonware_runtime::deterministic::Context;
+use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::NZU32;
 use futures::future::BoxFuture;
 use governor::Quota;
@@ -84,6 +83,8 @@ pub struct PeerInfo {
     pub address: SocketAddr,
 }
 
+pub type NetworkComponents<S, R, O> = (S, R, O, Handle<()>);
+
 pub trait NetworkScheme: Send + 'static {
     type Sender: Sender<PublicKey = ed25519::PublicKey> + Send;
     type Receiver: Receiver<PublicKey = ed25519::PublicKey> + Send;
@@ -96,7 +97,7 @@ pub trait NetworkScheme: Send + 'static {
         peer_idx: usize,
         base_port: u16,
         rng: &'a mut StdRng,
-    ) -> BoxFuture<'a, (Self::Sender, Self::Receiver, Self::Oracle, Handle<()>)>;
+    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>>;
 
     fn register_peers<'a>(
         oracle: &'a mut Self::Oracle,
@@ -121,9 +122,12 @@ impl NetworkScheme for Discovery {
         peer_idx: usize,
         base_port: u16,
         rng: &'a mut StdRng,
-    ) -> BoxFuture<'a, (Self::Sender, Self::Receiver, Self::Oracle, Handle<()>)> {
+    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
         Box::pin(async move {
-            let addresses = peers.iter().map(|p| p.public_key.clone()).collect::<Vec<_>>();
+            let addresses = peers
+                .iter()
+                .map(|p| p.public_key.clone())
+                .collect::<Vec<_>>();
             let mut bootstrappers = Vec::new();
             if peer_idx > 0 {
                 bootstrappers.push((
@@ -144,10 +148,8 @@ impl NetworkScheme for Discovery {
             config.allow_private_ips = true;
             config.tracked_peer_sets = PEER_SUBSET_NUMBER;
 
-            let (mut network, mut oracle) = discovery::Network::new(
-                context.with_label("fuzzed-discovery-network"),
-                config,
-            );
+            let (mut network, mut oracle) =
+                discovery::Network::new(context.with_label("fuzzed-discovery-network"), config);
 
             for index in 0..PEER_SUBSET_NUMBER {
                 let mut addrs = addresses.clone();
@@ -191,7 +193,7 @@ impl NetworkScheme for Lookup {
         _peer_idx: usize,
         _base_port: u16,
         rng: &'a mut StdRng,
-    ) -> BoxFuture<'a, (Self::Sender, Self::Receiver, Self::Oracle, Handle<()>)> {
+    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
         Box::pin(async move {
             let mut config = lookup::Config::recommended(
                 peer.private_key.clone(),
@@ -202,10 +204,8 @@ impl NetworkScheme for Lookup {
             );
             config.allow_private_ips = true;
 
-            let (mut network, mut oracle) = LookupNetwork::new(
-                context.with_label("fuzzed-lookup-network"),
-                config,
-            );
+            let (mut network, mut oracle) =
+                LookupNetwork::new(context.with_label("fuzzed-lookup-network"), config);
 
             // For lookup, register peers by address instead of discovery
             let peer_list: Vec<_> = peers
