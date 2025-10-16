@@ -242,7 +242,8 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
             let mut items_in_last_section = 0u64;
-            while stream.next().await.is_some() {
+            while let Some(result) = stream.next().await {
+                result?; // Propagate any corruption/replay errors
                 items_in_last_section += 1;
             }
             items_in_last_section
@@ -590,7 +591,7 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
     use test_case::test_case;
@@ -849,6 +850,56 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that init() detects and errors on corrupted data in the last section.
+    ///
+    /// Verifies that replay errors (e.g., checksum failures, truncated data) are
+    /// properly propagated during init() rather than being silently ignored.
+    #[test]
+    fn test_variable_init_detects_last_section_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_corruption".to_string(),
+                locations_partition: "init_corruption_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Setup: Create journal with data ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..15u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            journal.close().await.unwrap();
+
+            // === Simulate corruption: Truncate the last section blob ===
+            // This simulates a crash that corrupted the last section
+            let last_section_name = 1u64.to_be_bytes();
+            let (blob, size) = context
+                .open(&cfg.partition, &last_section_name)
+                .await
+                .unwrap();
+            assert!(size > 10);
+
+            // Truncate to corrupt the data (remove last few bytes)
+            blob.resize(size - 10).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // === Verify: Init should detect corruption and error ===
+            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
+
+            // Should fail due to corruption detected during replay
+            assert!(result.is_err(), "Init should fail on corrupted data");
         });
     }
 }
