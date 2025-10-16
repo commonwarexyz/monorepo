@@ -12,11 +12,11 @@ use std::num::NonZeroUsize;
 mod fixed;
 mod variable;
 
-#[cfg(test)]
-pub(super) mod tests;
-
 // Re-export public types
 pub use variable::{Config, Variable};
+
+#[cfg(test)]
+pub(super) mod tests;
 
 /// Core trait for contiguous journals supporting sequential append operations.
 ///
@@ -59,9 +59,14 @@ pub trait Contiguous {
     ) -> impl std::future::Future<Output = Result<Option<u64>, Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.
-    /// Some items with positions less than `min_position` may be retained.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
+    ///
+    /// # Behavior
+    ///
+    /// - If `min_position > size()`, the prune is capped to `size()` (no error is returned)
+    /// - Some items with positions less than `min_position` may be retained due to
+    ///   section/blob alignment
     ///
     /// # Errors
     ///

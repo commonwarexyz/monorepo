@@ -6,7 +6,7 @@
 use super::Contiguous;
 use crate::journal::{fixed, variable, Error};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, FixedSize, Read as CodecRead, Write as CodecWrite};
+use commonware_codec::{Codec, FixedSize, Read, Write};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use futures::{Stream, StreamExt as _};
@@ -27,7 +27,7 @@ struct Location {
     offset: u32,
 }
 
-impl CodecWrite for Location {
+impl Write for Location {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.section);
         buf.put_u32(self.offset);
@@ -38,7 +38,7 @@ impl FixedSize for Location {
     const SIZE: usize = 12; // u64 + u32
 }
 
-impl CodecRead for Location {
+impl Read for Location {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -94,12 +94,10 @@ const fn position_to_section(
 /// Configuration for a contiguous variable-length journal.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The storage partition to use for journal blobs.
-    pub partition: String,
+    /// The storage partition to use for the data journal.
+    pub data_partition: String,
 
     /// The storage partition to use for the locations journal.
-    ///
-    /// This journal maps positions to (section, offset) pairs for O(1) reads.
     pub locations_partition: String,
 
     /// The number of items to store in each section.
@@ -178,7 +176,6 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     ///
     /// Always section-aligned: `oldest_retained_pos % items_per_section == 0`.
     /// Never decreases (pruning only moves forward).
-    /// Derived from first section on disk.
     oldest_retained_pos: u64,
 }
 
@@ -191,10 +188,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate that partitions are different to prevent blob name collisions
-        if cfg.partition == cfg.locations_partition {
+        if cfg.data_partition == cfg.locations_partition {
             return Err(Error::InvalidConfiguration(format!(
                 "partition and locations_partition must be different: both are '{}'",
-                cfg.partition
+                cfg.data_partition
             )));
         }
 
@@ -204,7 +201,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let data = variable::Journal::init(
             context.clone(),
             variable::Config {
-                partition: cfg.partition,
+                partition: cfg.data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
@@ -267,21 +264,21 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         };
 
         // Calculate expected size based on actual data on disk
-        let expected_size = (last_section * items_per_section) + items_in_last_section;
+        let expected_locations_size = (last_section * items_per_section) + items_in_last_section;
         let last_section_start_pos = last_section * items_per_section;
 
         // Check locations journal state
         let locations_size = locations.size().await?;
 
         // Fix any inconsistency between the locations journal and the data journal
-        if locations_size > expected_size {
+        if locations_size > expected_locations_size {
             // We violated the invariant that locations is never ahead of data
             return Err(Error::Corruption(format!(
-                "locations journal size {locations_size} > data journal size {expected_size}"
+                "locations journal size {locations_size} > data journal size {expected_locations_size}"
             )));
         }
-        if locations_size < expected_size {
-            let size_diff = expected_size - locations_size;
+        if locations_size < expected_locations_size {
+            let size_diff = expected_locations_size - locations_size;
             if size_diff > items_per_section {
                 // This should never happen because `append` writes both data and locations when
                 // a section becomes full.
@@ -320,10 +317,8 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         // The data journal is the source of truth - its first section determines oldest_retained_pos.
         // If a crash occurred during prune(), the data journal may have been pruned but the
         // locations journal may still contain entries for pruned positions.
-        if expected_size > 0 {
-            let locations_oldest = locations.oldest_retained_pos().await?;
-
-            if let Some(locations_oldest_pos) = locations_oldest {
+        if expected_locations_size > 0 {
+            if let Some(locations_oldest_pos) = locations.oldest_retained_pos().await? {
                 if locations_oldest_pos < oldest_retained_pos {
                     // Locations journal is behind on pruning - repair it to match data journal
                     locations.prune(oldest_retained_pos).await?;
@@ -336,24 +331,18 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             }
         }
 
+        assert_eq!(locations.size().await?, expected_locations_size);
+
         Ok(Self {
             data,
             locations,
             items_per_section,
-            size: expected_size,
+            size: expected_locations_size,
             oldest_retained_pos,
         })
     }
 
     /// Return the section number where the next append will write.
-    ///
-    /// This is a convenience method that calculates the section for the current
-    /// journal size, accounting for pruning. It's equivalent to calling
-    /// `position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)`.
-    ///
-    /// # Returns
-    ///
-    /// The section number where the next appended item will be stored.
     const fn current_section(&self) -> u64 {
         position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)
     }
@@ -420,12 +409,6 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
     /// This prunes both the data journal and the locations journal to maintain consistency.
-    ///
-    /// # Note on Section Alignment
-    ///
-    /// Pruning is section-aligned. This means some items with positions less than
-    /// `min_position` may be retained if they are in the same section as items >= `min_position`.
-    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
@@ -687,7 +670,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "data_loss_test".to_string(),
+                data_partition: "data_loss_test".to_string(),
                 locations_partition: "data_loss_test_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -710,7 +693,7 @@ mod tests {
 
             // === Simulate data loss: Delete data partition but keep locations ===
             context
-                .remove(&cfg.partition, None)
+                .remove(&cfg.data_partition, None)
                 .await
                 .expect("Failed to remove data partition");
 
@@ -750,7 +733,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "same_partition".to_string(),
+                data_partition: "same_partition".to_string(),
                 locations_partition: "same_partition".to_string(), // Same as partition!
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -780,7 +763,7 @@ mod tests {
                     Variable::<_, u64>::init(
                         context,
                         Config {
-                            partition: format!("generic_test_{}", test_name),
+                            data_partition: format!("generic_test_{}", test_name),
                             locations_partition: format!("generic_test_{}_locations", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
@@ -803,7 +786,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "sequential_prunes".to_string(),
+                data_partition: "sequential_prunes".to_string(),
                 locations_partition: "sequential_prunes_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -892,7 +875,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "prune_all_reinit".to_string(),
+                data_partition: "prune_all_reinit".to_string(),
                 locations_partition: "prune_all_reinit_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -977,7 +960,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_corruption".to_string(),
+                data_partition: "init_corruption".to_string(),
                 locations_partition: "init_corruption_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1001,7 +984,7 @@ mod tests {
             // This simulates a crash that corrupted the last section
             let last_section_name = 1u64.to_be_bytes();
             let (blob, size) = context
-                .open(&cfg.partition, &last_section_name)
+                .open(&cfg.data_partition, &last_section_name)
                 .await
                 .unwrap();
             assert!(size > 10);
@@ -1025,7 +1008,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_prune_crash".to_string(),
+                data_partition: "recovery_prune_crash".to_string(),
                 locations_partition: "recovery_prune_crash_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1087,7 +1070,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_locations_ahead".to_string(),
+                data_partition: "recovery_locations_ahead".to_string(),
                 locations_partition: "recovery_locations_ahead_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1133,7 +1116,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
-                partition: "recovery_append_crash".to_string(),
+                data_partition: "recovery_append_crash".to_string(),
                 locations_partition: "recovery_append_crash_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1192,7 +1175,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_multiple_prunes".to_string(),
+                data_partition: "recovery_multiple_prunes".to_string(),
                 locations_partition: "recovery_multiple_prunes_locations".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,

@@ -8,13 +8,19 @@ use futures::{future::BoxFuture, StreamExt};
 ///
 /// The factory function receives a test identifier string that should be used
 /// to create unique partitions for each test to avoid conflicts.
+///
+/// # Assumptions
+///
+/// These tests assume the journal is configured with **`items_per_section = 10`**
+/// (or `items_per_blob = 10` for fixed journals). Some tests rely on this value
+/// for section boundary calculations and pruning behavior.
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
     J: Contiguous<Item = u64> + Send + 'static,
 {
-    test_empty_journal(&factory).await;
-    test_oldest_retained_pos_empty(&factory).await;
+    test_empty_journal_size(&factory).await;
+    test_empty_journal_oldest_retained_pos(&factory).await;
     test_oldest_retained_pos_with_items(&factory).await;
     test_oldest_retained_pos_after_prune(&factory).await;
     test_append_and_size(&factory).await;
@@ -39,7 +45,7 @@ where
 }
 
 /// Test that an empty journal has size 0.
-async fn test_empty_journal<F, J>(factory: &F)
+async fn test_empty_journal_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
     J: Contiguous<Item = u64> + Send + 'static,
@@ -50,7 +56,7 @@ where
 }
 
 /// Test that oldest_retained_pos returns None for empty journal.
-async fn test_oldest_retained_pos_empty<F, J>(factory: &F)
+async fn test_empty_journal_oldest_retained_pos<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
     J: Contiguous<Item = u64> + Send + 'static,
@@ -642,8 +648,7 @@ where
 
     journal.prune(10).await.unwrap();
 
-    // Try to read pruned item (section-aligned, so might still exist)
-    // Try reading before oldest_retained_pos
-    let result = journal.read(5).await;
+    let oldest_retained_pos = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let result = journal.read(oldest_retained_pos - 1).await;
     assert!(matches!(result, Err(Error::ItemPruned(_))));
 }
