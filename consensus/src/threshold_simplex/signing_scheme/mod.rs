@@ -6,7 +6,7 @@ pub mod bls12381_threshold;
 pub mod ed25519;
 
 use crate::threshold_simplex::types::{Vote, VoteContext, VoteVerification};
-use commonware_codec::{Codec, CodecFixed, Encode, Read};
+use commonware_codec::{Codec, CodecFixed, EncodeFixed, Read};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 use rand::{CryptoRng, Rng};
@@ -22,7 +22,7 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
-    type Seed: Clone + Encode + Send;
+    type Seed: Clone + EncodeFixed + Send;
 
     /// Converts the scheme into a pure verifier.
     ///
