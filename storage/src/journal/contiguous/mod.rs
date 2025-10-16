@@ -1,17 +1,16 @@
 //! A contiguous journal interface for position-based append-only logging.
 //!
-//! This module provides a unified `Contiguous` trait for journals that support sequential
-//! append operations with monotonically increasing positions. It includes:
+//! This module includes:
 //!
-//! - [Contiguous]: Core trait for append/replay/prune/read operations
-//! - [variable::Variable]: Wrapper for `variable::Journal` that implements [Contiguous]
+//! - [Contiguous]: Trait for append-only log
+//! - [Variable]: Wrapper for [super::variable::Journal] that implements [Contiguous]
 
 use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
 
 mod fixed;
-pub mod variable;
+mod variable;
 
 #[cfg(test)]
 pub(super) mod tests;
