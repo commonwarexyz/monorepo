@@ -65,7 +65,7 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 /// Signed vote emitted by a participant.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Vote<S: SigningScheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
@@ -78,6 +78,8 @@ impl<S: SigningScheme> PartialEq for Vote<S> {
         self.signer == other.signer && self.signature == other.signature
     }
 }
+
+impl<S: SigningScheme> Eq for Vote<S> {}
 
 impl<S: SigningScheme> Hash for Vote<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -893,7 +895,7 @@ impl<D: Digest> Viewable for Proposal<D> {
 }
 
 /// Validator vote that endorses a proposal for notarization.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
@@ -913,6 +915,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
         self.proposal == other.proposal && self.vote == other.vote
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for Notarize<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for Notarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -999,7 +1003,7 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
 /// leader rotation), it can be accessed via [`SigningScheme::seed`].
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     /// The proposal that has been notarized.
     pub proposal: Proposal<D>,
@@ -1041,6 +1045,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for Notarization<S, D> {
         self.proposal == other.proposal && self.certificate == other.certificate
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for Notarization<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1110,7 +1116,7 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarization<S, D> {
 
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Nullify<S: SigningScheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
@@ -1123,6 +1129,8 @@ impl<S: SigningScheme> PartialEq for Nullify<S> {
         self.round == other.round && self.vote == other.vote
     }
 }
+
+impl<S: SigningScheme> Eq for Nullify<S> {}
 
 impl<S: SigningScheme> Hash for Nullify<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1199,7 +1207,7 @@ impl<S: SigningScheme> Viewable for Nullify<S> {
 
 /// Aggregated nullification certificate recovered from nullify votes.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Nullification<S: SigningScheme> {
     /// The round in which this nullification is made.
     pub round: Round,
@@ -1236,6 +1244,8 @@ impl<S: SigningScheme> PartialEq for Nullification<S> {
         self.round == other.round && self.certificate == other.certificate
     }
 }
+
+impl<S: SigningScheme> Eq for Nullification<S> {}
 
 impl<S: SigningScheme> Hash for Nullification<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1306,7 +1316,7 @@ impl<S: SigningScheme> Viewable for Nullification<S> {
 /// Validator vote to finalize a proposal.
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this round.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
@@ -1326,6 +1336,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
         self.proposal == other.proposal && self.vote == other.vote
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for Finalize<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for Finalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1412,7 +1424,7 @@ impl<S: SigningScheme, D: Digest> Viewable for Finalize<S, D> {
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
 /// leader rotation), it can be accessed via [`SigningScheme::seed`].
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
     /// The proposal that has been finalized.
     pub proposal: Proposal<D>,
@@ -1472,6 +1484,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for Finalization<S, D> {
         self.proposal == other.proposal && self.certificate == other.certificate
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for Finalization<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -2038,7 +2052,7 @@ impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct ConflictingNotarize<S: SigningScheme, D: Digest> {
     /// The first conflicting notarize
     notarize_1: Notarize<S, D>,
@@ -2051,6 +2065,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for ConflictingNotarize<S, D> {
         self.notarize_1 == other.notarize_1 && self.notarize_2 == other.notarize_2
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for ConflictingNotarize<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for ConflictingNotarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -2135,7 +2151,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct ConflictingFinalize<S: SigningScheme, D: Digest> {
     /// The second conflicting finalize
     finalize_1: Finalize<S, D>,
@@ -2148,6 +2164,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for ConflictingFinalize<S, D> {
         self.finalize_1 == other.finalize_1 && self.finalize_2 == other.finalize_2
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for ConflictingFinalize<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for ConflictingFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -2233,7 +2251,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct NullifyFinalize<S: SigningScheme, D: Digest> {
     /// The conflicting nullify
     nullify: Nullify<S>,
@@ -2246,6 +2264,8 @@ impl<S: SigningScheme, D: Digest> PartialEq for NullifyFinalize<S, D> {
         self.nullify == other.nullify && self.finalize == other.finalize
     }
 }
+
+impl<S: SigningScheme, D: Digest> Eq for NullifyFinalize<S, D> {}
 
 impl<S: SigningScheme, D: Digest> Hash for NullifyFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
