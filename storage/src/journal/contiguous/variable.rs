@@ -137,12 +137,6 @@ pub struct Config<C> {
 /// - `locations.size()` must NEVER exceed the number of items in the data journal
 /// - On crash recovery, locations may be behind data (expected), but never ahead
 /// - If locations are ahead, this indicates a critical bug and will return [Error::Corruption]
-///
-/// ## 3. Crash Recovery
-///
-/// Because of the write ordering (data first, then locations) and section fullness,
-/// crash recovery divergence is bounded by `items_per_section`. Any divergence exceeding
-/// this indicates corruption and will return an error.
 pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
