@@ -8,14 +8,9 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::quorum_from_slice;
+use commonware_utils::{quorum_from_slice, set::Set};
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    hash::Hash,
-    ops::Deref,
-};
+use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -138,29 +133,21 @@ impl<S: SigningScheme> VoteVerification<S> {
 /// Keys are stored in sorted order to provide stable, deterministic indices for
 /// signing schemes.
 #[derive(Clone, Debug)]
-pub struct Participants<P: PublicKey + Eq + Hash> {
-    /// Sorted list of participant public keys.
-    keys: Vec<P>,
-    /// Reverse lookup from public key to signer index.
-    index_by_key: HashMap<P, u32>,
+pub struct Participants<P: PublicKey> {
+    /// Set of participants' public keys.
+    keys: Set<P>,
     /// Quorum (2f+1) computed from the participant set.
     quorum: u32,
 }
 
-impl<P: PublicKey + Eq + Hash> Participants<P> {
+impl<P: PublicKey> Participants<P> {
     /// Builds a new participant set from the provided keys.
-    pub fn new(mut keys: Vec<P>) -> Self {
-        let quorum = quorum_from_slice(&keys);
-        keys.sort();
-        let index_by_key = keys
-            .iter()
-            .enumerate()
-            .map(|(idx, key)| (key.clone(), idx as u32))
-            .collect();
+    pub fn new(keys: Vec<P>) -> Self {
+        let keys: Set<_> = keys.into_iter().collect();
+        let quorum = quorum_from_slice(keys.as_ref());
 
         Self {
-            keys,
-            index_by_key,
+            keys: keys.into(),
             quorum,
         }
     }
@@ -172,7 +159,7 @@ impl<P: PublicKey + Eq + Hash> Participants<P> {
 
     /// Returns the signer index for the given key, if present.
     pub fn signer_index(&self, key: &P) -> Option<u32> {
-        self.index_by_key.get(key).copied()
+        self.keys.position(key).map(|index| index as u32)
     }
 
     /// Returns the cached quorum value for this participant set.
@@ -181,15 +168,15 @@ impl<P: PublicKey + Eq + Hash> Participants<P> {
     }
 }
 
-impl<P: PublicKey + Eq + Hash> Deref for Participants<P> {
+impl<P: PublicKey> Deref for Participants<P> {
     type Target = [P];
 
     fn deref(&self) -> &Self::Target {
-        self.keys.as_slice()
+        self.keys.as_ref()
     }
 }
 
-impl<P: PublicKey + Eq + Hash> From<Vec<P>> for Participants<P> {
+impl<P: PublicKey> From<Vec<P>> for Participants<P> {
     fn from(keys: Vec<P>) -> Self {
         Self::new(keys)
     }

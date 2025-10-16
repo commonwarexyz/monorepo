@@ -21,6 +21,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::set::Set;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -151,7 +152,8 @@ impl<
             timeout: cfg.fetch_timeout,
         };
         let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        requester.reconcile(&cfg.participants);
+        let participants: Set<_> = cfg.participants.into_iter().collect();
+        requester.reconcile(participants.as_ref());
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
