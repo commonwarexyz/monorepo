@@ -318,6 +318,13 @@ cfg_if::cfg_if! {
             /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
             /// multiple runtimes to be tested with no code changes).
             ///
+            /// # Setting Latency
+            ///
+            /// `pace` is not meant to be a time penalty applied to awaited futures and should be set to
+            /// the expected resolution latency of the future. To better explore the possible behavior of an
+            /// application, users can set latency to a randomly chosen value in the range of
+            /// `[expected latency / 2, expected latency * 2]`.
+            ///
             /// # Warning
             ///
             /// Because `pace` blocks if the future is not ready, it is important that the future's completion
