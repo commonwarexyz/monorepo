@@ -279,13 +279,18 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
             }
 
             // Determine where to start replaying
-            // If locations has entries, replay from the last indexed item's offset.
-            // We'll skip that first item (already indexed) and append the rest.
-            let (resume_offset, skip_first) = if locations_size > 0 {
-                let last_loc = locations.read(locations_size - 1).await?;
-                (last_loc.offset, true) // Replay from last item, skip first item
-            } else {
-                (0, false) // Start from beginning of section, don't skip first item
+            // If locations has retained entries (not fully pruned), replay from the last indexed item.
+            // Otherwise, start from the beginning of the section.
+            let (resume_offset, skip_first) = match locations.oldest_retained_pos().await? {
+                Some(oldest) if oldest < locations_size => {
+                    // Locations has retained items - read the last one to get resume offset
+                    let last_loc = locations.read(locations_size - 1).await?;
+                    (last_loc.offset, true) // Replay from last item, skip first item
+                }
+                _ => {
+                    // Locations is empty or fully pruned - start from beginning
+                    (0, false) // Start from beginning of section, don't skip first item
+                }
             };
 
             // Replay and append exactly the missing locations
@@ -295,13 +300,13 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
             futures::pin_mut!(stream);
 
             let mut appended = 0;
-            let mut seen = 0;
+            let mut skipped_first = false;
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, _item) = result?;
 
                 // Skip the first item if we're resuming from the last indexed location
-                if skip_first && seen == 0 {
-                    seen += 1;
+                if skip_first && !skipped_first {
+                    skipped_first = true;
                     continue;
                 }
 
