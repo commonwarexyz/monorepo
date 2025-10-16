@@ -97,9 +97,9 @@ pub struct Config<C> {
     /// The storage partition to use for journal blobs.
     pub partition: String,
 
-    /// The storage partition to use for the locations index.
+    /// The storage partition to use for the locations journal.
     ///
-    /// This index maps positions to (section, offset) pairs for O(1) reads.
+    /// This journal maps positions to (section, offset) pairs for O(1) reads.
     pub locations_partition: String,
 
     /// The number of items to store in each section.
@@ -135,10 +135,10 @@ pub struct Config<C> {
 ///
 /// ## 2. Data Journal is Source of Truth
 ///
-/// The data journal is always written before the locations index. This means:
+/// The data journal is always written before the locations journal. This means:
 /// - `locations.size()` must NEVER exceed the number of items in the data journal
 /// - On crash recovery, locations may be behind data (expected), but never ahead
-/// - If locations are ahead, this indicates a critical bug and will return `Error::Corruption`
+/// - If locations are ahead, this indicates a critical bug and will return [Error::Corruption]
 ///
 /// ## 3. Crash Recovery
 ///
@@ -146,8 +146,8 @@ pub struct Config<C> {
 /// crash recovery divergence is bounded by `items_per_section`. Any divergence exceeding
 /// this indicates corruption and will return an error.
 pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
-    /// The underlying variable-length journal.
-    journal: variable::Journal<E, V>,
+    /// The underlying variable-length data journal.
+    data: variable::Journal<E, V>,
 
     /// Index mapping positions to (section, offset) pairs for O(1) reads.
     ///
@@ -169,7 +169,7 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     ///
     /// # Invariant
     ///
-    /// Always >= `oldest_retained_pos`. Equal when journal is empty or fully pruned.
+    /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
     size: u64,
 
     /// The position of the first item that remains after pruning.
@@ -192,8 +192,8 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_section = cfg.items_per_section.get();
 
-        // Initialize underlying variable journal
-        let journal = variable::Journal::init(
+        // Initialize underlying variable data journal
+        let data = variable::Journal::init(
             context.clone(),
             variable::Config {
                 partition: cfg.partition,
@@ -218,7 +218,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         .await?;
 
         // Synchronize locations to match data
-        if journal.blobs.is_empty() {
+        if data.blobs.is_empty() {
             // Empty data journal - locations should also be empty
             let locations_size = locations.size().await?;
             if locations_size > 0 {
@@ -227,7 +227,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
                 )));
             }
             return Ok(Self {
-                journal,
+                data,
                 locations,
                 items_per_section,
                 size: 0,
@@ -235,13 +235,13 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             });
         }
 
-        let first_section = *journal.blobs.first_key_value().unwrap().0;
+        let first_section = *data.blobs.first_key_value().unwrap().0;
         let oldest_retained_pos = first_section * items_per_section;
-        let last_section = *journal.blobs.last_key_value().unwrap().0;
+        let last_section = *data.blobs.last_key_value().unwrap().0;
 
         // Count items in last section
         let items_in_last_section = {
-            let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+            let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
             let mut items_in_last_section = 0u64;
             while stream.next().await.is_some() {
@@ -261,7 +261,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         if locations_size > expected_size {
             // We violated the invariant that locations is never ahead of data
             return Err(Error::Corruption(format!(
-                "locations ahead of data journal: locations_size={locations_size} > expected_size={expected_size}"
+                "locations journal size {locations_size} > data journal size {expected_size}"
             )));
         }
         if locations_size < expected_size {
@@ -270,12 +270,12 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
                 // This should never happen because `append` writes both data and locations when
                 // a section becomes full.
                 return Err(Error::Corruption(format!(
-                    "locations divergence {size_diff} exceeds items_per_section {items_per_section}",
+                    "size difference {size_diff} > items_per_section {items_per_section}",
                 )));
             }
 
             // Replay last section and append items we're missing
-            let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+            let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
 
             let Some(items_already_indexed) = locations_size.checked_sub(last_section_start_pos)
@@ -283,7 +283,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
                 // This should never happen because `append` writes both data and locations when
                 // a section becomes full.
                 return Err(Error::Corruption(format!(
-                    "locations size {locations_size} < last section start position {last_section_start_pos}"
+                    "locations journal size {locations_size} < last section start position {last_section_start_pos}"
                 )));
             };
 
@@ -300,7 +300,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         }
         locations.sync().await?;
         Ok(Self {
-            journal,
+            data,
             locations,
             items_per_section,
             size: expected_size,
@@ -327,7 +327,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// This position is independent of section boundaries and remains constant even after
     /// pruning.
     ///
-    /// When a section becomes full, both the data journal and locations index are synced
+    /// When a section becomes full, both the data journal and locations journal are synced
     /// to maintain the invariant that all non-final sections are full and consistent.
     ///
     /// # Errors
@@ -339,9 +339,9 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let section = self.current_section();
 
         // Append to data journal, get offset
-        let (offset, _size) = self.journal.append(section, item).await?;
+        let (offset, _size) = self.data.append(section, item).await?;
 
-        // Append location to index
+        // Append location to locations journal
         self.locations.append(Location { section, offset }).await?;
 
         // Return the current position and increment for next time
@@ -350,7 +350,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
         // If we just filled a section, sync both journals together
         if self.size.is_multiple_of(self.items_per_section) {
-            self.journal.sync(section).await?;
+            self.data.sync(section).await?;
             self.locations.sync().await?;
         }
 
@@ -369,7 +369,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
-    /// This prunes both the data journal and the locations index to maintain consistency.
+    /// This prunes both the data journal and the locations journal to maintain consistency.
     ///
     /// # Note on Section Alignment
     ///
@@ -390,7 +390,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let relative_pos = capped_min_position - self.oldest_retained_pos;
         let min_section = relative_pos / self.items_per_section;
 
-        let pruned = self.journal.prune(min_section).await?;
+        let pruned = self.data.prune(min_section).await?;
         if pruned {
             self.oldest_retained_pos += min_section * self.items_per_section;
             self.locations.prune(self.oldest_retained_pos).await?;
@@ -422,7 +422,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             + (self.oldest_retained_pos / self.items_per_section);
 
         // Get the stream from the underlying journal
-        let stream = self.journal.replay(start_section, 0, buffer).await?;
+        let stream = self.data.replay(start_section, 0, buffer).await?;
 
         // Transform the stream to include position information
         let items_per_section = self.items_per_section;
@@ -471,16 +471,16 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         let location = self.locations.read(position).await?;
 
         // Read item from data journal using the location
-        self.journal.get(location.section, location.offset).await
+        self.data.get(location.section, location.offset).await
     }
 
     /// Sync all pending writes to storage.
     ///
-    /// This syncs both the data journal and the locations index.
+    /// This syncs both the data journal and the locations journal.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync all sections in the underlying journal
-        for &section in self.journal.blobs.keys() {
-            self.journal.sync(section).await?;
+        for &section in self.data.blobs.keys() {
+            self.data.sync(section).await?;
         }
 
         // Sync locations journal
@@ -491,11 +491,11 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
     /// Close the journal, syncing all pending writes.
     ///
-    /// This closes both the data journal and the locations index.
+    /// This closes both the data journal and the locations journal.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
         self.locations.close().await?;
-        self.journal.close().await
+        self.data.close().await
     }
 
     /// Remove any underlying blobs created by the journal.
@@ -503,10 +503,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     /// This is useful for cleaning up test journals. After calling this method,
     /// the journal cannot be used again.
     ///
-    /// This destroys both the data journal and the locations index.
+    /// This destroys both the data journal and the locations journal.
     pub async fn destroy(self) -> Result<(), Error> {
         self.locations.destroy().await?;
-        self.journal.destroy().await
+        self.data.destroy().await
     }
 }
 
@@ -554,500 +554,11 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::{tests::run_contiguous_tests, Contiguous};
+    use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
     use test_case::test_case;
-
-    #[test]
-    fn test_variable_empty_journal() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_empty".to_string(),
-                    locations_partition: "test_variable_empty_locations".to_string(),
-                    items_per_section: NZU64!(10),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Empty journal should have size 0
-            assert_eq!(journal.size().await.unwrap(), 0);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_append_and_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_append".to_string(),
-                    locations_partition: "test_variable_append_locations".to_string(),
-                    items_per_section: NZU64!(10),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append some items
-            let pos1 = journal.append(100u64).await.unwrap();
-            let pos2 = journal.append(200u64).await.unwrap();
-            let pos3 = journal.append(300u64).await.unwrap();
-
-            // Positions should be sequential
-            assert_eq!(pos1, 0);
-            assert_eq!(pos2, 1);
-            assert_eq!(pos3, 2);
-
-            // Size should match
-            assert_eq!(journal.size().await.unwrap(), 3);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_multiple_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_sections".to_string(),
-                    locations_partition: "test_variable_sections_locations".to_string(),
-                    items_per_section: NZU64!(5), // Small sections to test crossing boundaries
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append 12 items (will span 3 sections: 0-4, 5-9, 10-11)
-            for i in 0..12u64 {
-                let pos = journal.append(i * 10).await.unwrap();
-                assert_eq!(pos, i);
-            }
-
-            assert_eq!(journal.size().await.unwrap(), 12);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_persistence_across_restart() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "test_variable_persist";
-            let cfg = Config {
-                partition: partition.to_string(),
-                locations_partition: format!("{}_locations", partition),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // First session: append some items
-            {
-                let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                for i in 0..5u64 {
-                    let pos = journal.append(i * 100).await.unwrap();
-                    assert_eq!(pos, i);
-                }
-
-                assert_eq!(journal.size().await.unwrap(), 5);
-                journal.close().await.unwrap();
-            }
-
-            // Second session: should recover position and continue
-            {
-                let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // Size should reflect previous appends
-                assert_eq!(journal.size().await.unwrap(), 5);
-
-                // New appends should continue from position 5
-                let pos = journal.append(500u64).await.unwrap();
-                assert_eq!(pos, 5);
-
-                assert_eq!(journal.size().await.unwrap(), 6);
-                journal.close().await.unwrap();
-            }
-        });
-    }
-
-    #[test]
-    fn test_variable_prune() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_prune".to_string(),
-                    locations_partition: "test_variable_prune_locations".to_string(),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append 12 items (spans 3 sections: 0-4, 5-9, 10-11)
-            for i in 0..12u64 {
-                journal.append(i * 10).await.unwrap();
-            }
-
-            // Prune up to position 7 (should prune section 0, keep sections 1-2)
-            let pruned = journal.prune(7).await.unwrap();
-            assert!(pruned);
-
-            // Size should still be 12
-            assert_eq!(journal.size().await.unwrap(), 12);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_replay".to_string(),
-                    locations_partition: "test_variable_replay_locations".to_string(),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append some items
-            for i in 0..10u64 {
-                journal.append(i * 10).await.unwrap();
-            }
-
-            // Replay from start
-            use futures::StreamExt;
-            {
-                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
-                futures::pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    items.push(result.unwrap());
-                }
-
-                assert_eq!(items.len(), 10);
-                for (i, (pos, value)) in items.iter().enumerate() {
-                    assert_eq!(*pos, i as u64);
-                    assert_eq!(*value, (i as u64) * 10);
-                }
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_replay_from_middle() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_replay_middle".to_string(),
-                    locations_partition: "test_variable_replay_middle_locations".to_string(),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append 10 items
-            for i in 0..10u64 {
-                journal.append(i * 10).await.unwrap();
-            }
-
-            // Replay from position 5
-            use futures::StreamExt;
-            {
-                let stream = journal.replay(5, NZUsize!(1024)).await.unwrap();
-                futures::pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    items.push(result.unwrap());
-                }
-
-                assert_eq!(items.len(), 5);
-                for (i, (pos, value)) in items.iter().enumerate() {
-                    assert_eq!(*pos, (i + 5) as u64);
-                    assert_eq!(*value, ((i + 5) as u64) * 10);
-                }
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_through_contiguous_trait() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_variable_trait".to_string(),
-                    locations_partition: "test_variable_trait_locations".to_string(),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Use through Contiguous trait
-            let pos1 = Contiguous::append(&mut journal, 42u64).await.unwrap();
-            let pos2 = Contiguous::append(&mut journal, 100u64).await.unwrap();
-            assert_eq!(pos1, 0);
-            assert_eq!(pos2, 1);
-
-            let size = Contiguous::size(&journal).await.unwrap();
-            assert_eq!(size, 2);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_variable_destroy() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "test_variable_destroy";
-            let cfg = Config {
-                partition: partition.to_string(),
-                locations_partition: format!("{}_locations", partition),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Create journal and append items
-            {
-                let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                for i in 0..10u64 {
-                    journal.append(i * 10).await.unwrap();
-                }
-
-                // Destroy should remove all blobs and metadata
-                journal.destroy().await.unwrap();
-            }
-
-            // After destroy, initializing again should start fresh
-            {
-                let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // Should be empty
-                assert_eq!(journal.size().await.unwrap(), 0);
-                journal.destroy().await.unwrap();
-            }
-        });
-    }
-
-    // TODO: Re-enable this test after debugging metadata persistence issue
-    // The metadata saving/loading works (as evidenced by test_variable_persistence_across_restart)
-    // but there's a subtle issue with multiple sessions in the deterministic runtime
-    #[test]
-    #[ignore]
-    fn test_variable_metadata_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "test_variable_metadata";
-            let cfg = Config {
-                partition: partition.to_string(),
-                locations_partition: format!("{}_locations", partition),
-                items_per_section: NZU64!(7),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // First session: append items and close (saves metadata)
-            {
-                let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                for i in 0..10u64 {
-                    journal.append(i * 10).await.unwrap();
-                }
-
-                journal.close().await.unwrap();
-            }
-
-            // Second session: should load from metadata (not replay)
-            {
-                let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
-
-                assert_eq!(journal.size().await.unwrap(), 10);
-
-                // Continue appending
-                let pos = journal.append(100u64).await.unwrap();
-                assert_eq!(pos, 10);
-
-                journal.close().await.unwrap();
-            }
-
-            // Third session: verify again
-            {
-                let journal = Variable::<_, u64>::init(context, cfg).await.unwrap();
-
-                assert_eq!(journal.size().await.unwrap(), 11);
-                journal.close().await.unwrap();
-            }
-        });
-    }
-
-    #[test]
-    fn test_current_section_no_pruning() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_current_section".to_string(),
-                    locations_partition: "test_current_section_locations".to_string(),
-                    items_per_section: NZU64!(10),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Initially, should be in section 0
-            assert_eq!(journal.current_section(), 0);
-
-            // After appending 5 items, still in section 0
-            for _ in 0..5 {
-                journal.append(42u64).await.unwrap();
-            }
-            assert_eq!(journal.current_section(), 0);
-
-            // After appending 5 more items (total 10), should be in section 1
-            for _ in 0..5 {
-                journal.append(42u64).await.unwrap();
-            }
-            assert_eq!(journal.current_section(), 1);
-
-            // After appending 15 more items (total 25), should be in section 2
-            for _ in 0..15 {
-                journal.append(42u64).await.unwrap();
-            }
-            assert_eq!(journal.current_section(), 2);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_current_section_after_pruning() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = Variable::<_, u64>::init(
-                context,
-                Config {
-                    partition: "test_current_section_prune".to_string(),
-                    locations_partition: "test_current_section_prune_locations".to_string(),
-                    items_per_section: NZU64!(5),
-                    compression: None,
-                    codec_config: (),
-                    buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                    write_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Append 12 items (sections 0, 1, 2)
-            for _ in 0..12 {
-                journal.append(42u64).await.unwrap();
-            }
-
-            // Current section should be 2 (positions 10-14 are in section 2)
-            assert_eq!(journal.current_section(), 2);
-
-            // Prune up to position 7 (removes section 0, keeps sections 1+)
-            journal.prune(7).await.unwrap();
-
-            // Should still be in section 2
-            assert_eq!(journal.current_section(), 2);
-
-            // Append a few more items
-            for _ in 0..3 {
-                journal.append(42u64).await.unwrap();
-            }
-
-            // Should now be in section 3 (15 items total)
-            assert_eq!(journal.current_section(), 3);
-
-            journal.destroy().await.unwrap();
-        });
-    }
 
     // No pruning cases
     #[test_case(0, 0, 10, 0; "first section start")]
