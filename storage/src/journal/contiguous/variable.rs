@@ -9,8 +9,11 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
-use futures::{Stream, StreamExt as _};
-use std::num::{NonZeroU64, NonZeroUsize};
+use futures::{stream, Stream, StreamExt as _};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
+};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -179,7 +182,7 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
+impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -418,10 +421,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         }
 
         // Cap min_position to size to maintain the invariant oldest_retained_pos <= size
-        let capped_min_position = min_position.min(self.size);
+        let min_position = min_position.min(self.size);
 
         // Calculate section number
-        let min_section = capped_min_position / self.items_per_section;
+        let min_section = min_position / self.items_per_section;
 
         let pruned = self.data.prune(min_section).await?;
         if pruned {
@@ -445,43 +448,38 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + '_, Error> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<(u64, V), Error>> + Send + '_>>, Error> {
         if start_pos > self.size {
             return Err(Error::ItemOutOfRange(start_pos));
         }
 
-        // Calculate starting section and offset within that section
-        let relative_start = start_pos.saturating_sub(self.oldest_retained_pos);
-        let start_section = (relative_start / self.items_per_section)
-            + (self.oldest_retained_pos / self.items_per_section);
+        // Check if position has been pruned
+        if start_pos < self.oldest_retained_pos {
+            return Err(Error::ItemPruned(start_pos));
+        }
 
-        // Get the stream from the underlying journal
-        let stream = self.data.replay(start_section, 0, buffer).await?;
+        // If replaying at exactly size, return empty stream
+        if start_pos == self.size {
+            return Ok(Box::pin(stream::empty()));
+        }
+
+        // Use locations index to find section/offset to start from
+        let location = self.locations.read(start_pos).await?;
+        let data_stream = self
+            .data
+            .replay(location.section, location.offset, buffer)
+            .await?;
 
         // Transform the stream to include position information
-        let items_per_section = self.items_per_section;
+        let transformed = data_stream.enumerate().map(move |(idx, result)| {
+            result.map(|(_section, _offset, _size, item)| {
+                // Calculate position: start_pos + items read
+                let pos = start_pos + idx as u64;
+                (pos, item)
+            })
+        });
 
-        // Use enumerate to track the index, then calculate position from section info
-        Ok(stream
-            .enumerate()
-            .filter_map(move |(idx, result)| async move {
-                match result {
-                    Ok((_section, _offset, _size, item)) => {
-                        // Calculate position: start of section + index within all replayed items
-                        // Since we start replaying from start_section at offset 0, the first item
-                        // is at position start_section * items_per_section
-                        let pos = start_section * items_per_section + idx as u64;
-
-                        // Only yield items at or after start_pos
-                        if pos >= start_pos {
-                            Some(Ok((pos, item)))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(e) => Some(Err(e)),
-                }
-            }))
+        Ok(Box::pin(transformed))
     }
 
     /// Read the item at the given position.
@@ -512,7 +510,7 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
     ///
     /// This syncs both the data journal and the locations journal.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync all sections in the underlying journal
+        // Sync all sections in the data journal
         for &section in self.data.blobs.keys() {
             self.data.sync(section).await?;
         }
@@ -534,13 +532,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
     /// Remove any underlying blobs created by the journal.
     ///
-    /// This is useful for cleaning up test journals. After calling this method,
-    /// the journal cannot be used again.
-    ///
     /// This destroys both the data journal and the locations journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.locations.destroy().await?;
-        self.data.destroy().await
+        self.data.destroy().await?;
+        self.locations.destroy().await
     }
 }
 
