@@ -11,7 +11,7 @@ use crate::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             SigningScheme,
         },
-        types::{Vote, VoteContext, VoteVerification},
+        types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -247,6 +247,24 @@ impl<V: Variant> Read for Seed<V> {
 impl<V: Variant> EncodeSize for Seed<V> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.signature.encode_size()
+    }
+}
+
+/// Seedable is a trait that provides access to the seed associated with a message.
+pub trait Seedable<V: Variant> {
+    /// Returns the seed associated with this object.
+    fn seed(&self) -> Seed<V>;
+}
+
+impl<V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<V>, D> {
+    fn seed(&self) -> Seed<V> {
+        Seed::new(self.proposal.round, self.certificate.seed_signature)
+    }
+}
+
+impl<V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<V>, D> {
+    fn seed(&self) -> Seed<V> {
+        Seed::new(self.proposal.round, self.certificate.seed_signature)
     }
 }
 
@@ -859,7 +877,7 @@ mod tests {
     use crate::{
         threshold_simplex::{
             signing_scheme::{notarize_namespace, seed_namespace},
-            types::{Proposal, VoteContext},
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
         types::Round,
     };
@@ -1295,6 +1313,42 @@ mod tests {
     fn test_seed_verify() {
         seed_verify::<MinPk>();
         seed_verify::<MinSig>();
+    }
+
+    fn seedable<V: Variant>() {
+        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let proposal = sample_proposal(0, 1, 0);
+
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .collect();
+
+        let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
+
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
+            .collect();
+
+        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes, None).unwrap();
+
+        assert_eq!(notarization.seed(), finalization.seed());
+        assert!(notarization.seed().verify(&schemes[0], NAMESPACE));
+
+        // Re-use the seed singature from the notarization
+        let finalization =
+            Finalization::from_finalizes(&schemes[0], &finalizes, Some(&notarization)).unwrap();
+
+        assert_eq!(notarization.seed(), finalization.seed());
+    }
+
+    #[test]
+    fn test_seedable() {
+        seedable::<MinPk>();
+        seedable::<MinSig>();
     }
 
     fn scheme_clone_and_into_verifier<V: Variant>() {
