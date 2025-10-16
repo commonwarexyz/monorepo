@@ -406,6 +406,17 @@ impl<
         )
     }
 
+    fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
+        Round::new(
+            self.participants.clone(),
+            self.signing.clone(),
+            self.blocker.clone(),
+            self.reporter.clone(),
+            self.inbound_messages.clone(),
+            batch,
+        )
+    }
+
     pub fn start(
         mut self,
         consensus: voter::Mailbox<S, D>,
@@ -444,16 +455,9 @@ impl<
                             current = new_current;
                             finalized = new_finalized;
                             let leader_index = self.participants.signer_index(&leader).unwrap();
-                            work.entry(current).or_insert(
-                                Round::new(
-                                    self.participants.clone(),
-                                    self.signing.clone(),
-                                    self.blocker.clone(),
-                                    self.reporter.clone(),
-                                    self.inbound_messages.clone(),
-                                    initialized
-                                )
-                            ).set_leader(leader_index);
+                            work.entry(current)
+                                .or_insert(self.new_round(initialized))
+                                .set_leader(leader_index);
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
@@ -499,16 +503,10 @@ impl<
                             }
 
                             // Add the message to the verifier
-                            work.entry(view).or_insert(
-                                Round::new(
-                                    self.participants.clone(),
-                                    self.signing.clone(),
-                                    self.blocker.clone(),
-                                    self.reporter.clone(),
-                                    self.inbound_messages.clone(),
-                                    initialized
-                                )
-                            ).add_constructed(message).await;
+                            work.entry(view)
+                                .or_insert(self.new_round(initialized))
+                                .add_constructed(message)
+                                .await;
                             self.added.inc();
                         }
                         None => {
@@ -549,16 +547,11 @@ impl<
                     }
 
                     // Add the message to the verifier
-                    let added = work.entry(view).or_insert(
-                        Round::new(
-                            self.participants.clone(),
-                            self.signing.clone(),
-                            self.blocker.clone(),
-                            self.reporter.clone(),
-                            self.inbound_messages.clone(),
-                            initialized
-                        )
-                    ).add(sender, message).await;
+                    let added = work
+                        .entry(view)
+                        .or_insert(self.new_round(initialized))
+                        .add(sender, message)
+                        .await;
                     if added {
                         self.added.inc();
                     }
