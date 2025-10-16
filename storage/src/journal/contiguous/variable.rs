@@ -299,6 +299,27 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
             }
         }
         locations.sync().await?;
+
+        // Ensure pruning boundaries match between data and locations journals.
+        // The data journal is the source of truth - its first section determines oldest_retained_pos.
+        // If a crash occurred during prune(), the data journal may have been pruned but the
+        // locations journal may still contain entries for pruned positions.
+        if expected_size > 0 {
+            let locations_oldest = locations.oldest_retained_pos().await?;
+
+            if let Some(locations_oldest_pos) = locations_oldest {
+                if locations_oldest_pos < oldest_retained_pos {
+                    // Locations journal is behind on pruning - repair it to match data journal
+                    locations.prune(oldest_retained_pos).await?;
+                } else if locations_oldest_pos > oldest_retained_pos {
+                    // Locations pruned ahead of data - this should never happen due to write ordering
+                    return Err(Error::Corruption(format!(
+                        "locations pruned ahead of data: locations_oldest={locations_oldest_pos} > data_oldest={oldest_retained_pos}"
+                    )));
+                }
+            }
+        }
+
         Ok(Self {
             data,
             locations,
