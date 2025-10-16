@@ -45,7 +45,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
     }
 }
 
-// Implement ContiguousRead for fixed::Journal
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> ContiguousRead
     for fixed::Journal<E, A>
 {
