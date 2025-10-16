@@ -22,6 +22,9 @@ futures = { workspace = true }
 bytes = { workspace = true }
 governor = { workspace = true }
 
+[lib]
+bench = false
+
 [[bin]]
 name = "simulated"
 path = "fuzz_targets/simulated.rs"
@@ -30,8 +33,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "authenticated"
-path = "fuzz_targets/authenticated.rs"
+name = "lookup"
+path = "fuzz_targets/lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "discovery"
+path = "fuzz_targets/discovery.rs"
 test = false
 doc = false
 bench = false
