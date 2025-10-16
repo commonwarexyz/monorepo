@@ -262,7 +262,7 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(seed);
     executor.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(seed);
-        
+
         // Create peers
         let mut peers = Vec::new();
         let base_port = 63000;
@@ -300,11 +300,11 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
                 &mut rng,
             )
             .await;
-            
+
             networks.push((sender, receiver, Some(handle)));
             oracles.push(oracle);
         }
-        
+
         // Process operations
         let mut expected_messages: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
         let mut pending_by_receiver: HashMap<u8, Vec<u8>> = HashMap::new();
@@ -326,56 +326,38 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
                     rng.fill(&mut bytes[..]);
                     let message = Bytes::from(bytes);
 
-                    let recipients = match recipient_mode {
-                        RecipientMode::All => Recipients::All,
+                    let (recipients, recipients_indices) = match recipient_mode {
+                        RecipientMode::All => {
+                            let target_recipients: Vec<u8> = (0..peers.len())
+                                .map(|i| i as u8)
+                                .filter(|&to_idx| to_idx != sender_idx_u8)
+                                .collect();
+                            (Recipients::All, target_recipients)
+                        }
                         RecipientMode::One => {
                             let recipient_idx = (recipient_idx as usize) % peers.len();
                             if recipient_idx == sender_idx {
                                 continue;
                             }
                             let recipient_pk = peers[recipient_idx].public_key.clone();
-                            Recipients::One(recipient_pk)
+                            (Recipients::One(recipient_pk), vec![recipient_idx as u8])
                         }
                         RecipientMode::Some => {
                             let num_recipients = rng.gen_range(1..peers.len() - 1);
                             let mut recipients_set = HashSet::new();
+                            let mut target_recipients = Vec::new();
+
                             for _ in 0..num_recipients {
                                 let idx = rng.gen::<usize>() % peers.len();
-                                if idx != sender_idx {
-                                    recipients_set.insert(peers[idx].public_key.clone());
+                                if idx != sender_idx && recipients_set.insert(peers[idx].public_key.clone()) {
+                                    target_recipients.push(idx as u8);
                                 }
                             }
+
                             if recipients_set.is_empty() {
                                 continue;
                             }
-                            Recipients::Some(recipients_set.into_iter().collect())
-                        }
-                    };
-
-                    // Collect target recipient indices
-                    let target_recipients: Vec<u8> = match &recipients {
-                        Recipients::One(pk) => {
-                            if let Some(&to_idx) = pk_to_idx.get(pk) {
-                                if to_idx != sender_idx_u8 {
-                                    vec![to_idx]
-                                } else {
-                                    vec![]
-                                }
-                            } else {
-                                vec![]
-                            }
-                        }
-                        Recipients::Some(pk_list) => pk_list
-                            .iter()
-                            .filter_map(|pk| pk_to_idx.get(pk).copied())
-                            .filter(|&to_idx| to_idx != sender_idx_u8)
-                            .collect(),
-                        Recipients::All => {
-                            let all_recipients: Vec<u8> = (0..peers.len())
-                                .map(|i| i as u8)
-                                .filter(|&to_idx| to_idx != sender_idx_u8)
-                                .collect();
-                            all_recipients
+                            (Recipients::Some(recipients_set.into_iter().collect()), target_recipients)
                         }
                     };
 
@@ -386,7 +368,7 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
                         .is_ok();
 
                     if sent {
-                        for to_idx in target_recipients {
+                        for to_idx in recipients_indices {
                             expected_messages
                                 .entry((to_idx, sender_idx_u8))
                                 .or_default()
