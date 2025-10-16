@@ -49,7 +49,7 @@ pub trait Contiguous {
 
     /// Return the position of the oldest item still retained in the journal.
     ///
-    /// Returns `None` if the journal is empty.
+    /// Returns `None` if the journal is empty or if all items have been pruned.
     ///
     /// After pruning, this returns the position of the first item that remains.
     /// Note that due to section/blob alignment, this may be less than the `min_position`

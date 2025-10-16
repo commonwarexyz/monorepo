@@ -396,9 +396,10 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
     /// Return the position of the oldest item still retained in the journal.
     ///
-    /// Returns `None` if the journal is empty.
+    /// Returns `None` if the journal is empty or if all items have been pruned.
     pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        if self.size == 0 {
+        if self.size == self.oldest_retained_pos {
+            // No items retained: either never had data or fully pruned
             Ok(None)
         } else {
             Ok(Some(self.oldest_retained_pos))
@@ -840,9 +841,9 @@ mod tests {
             let pruned = journal.prune(100).await.unwrap();
             assert!(pruned);
 
-            // All data is pruned
+            // All data is pruned - no items remain
             assert_eq!(journal.size().await.unwrap(), 100);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
             // All reads should fail with ItemPruned
             for i in 0..100 {
@@ -859,9 +860,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Size should be preserved (monotonic counter)
+            // Size should be preserved (monotonic counter), but no items remain
             assert_eq!(journal.size().await.unwrap(), 100);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
             // All reads should still fail
             for i in 0..100 {
@@ -875,6 +876,7 @@ mod tests {
             // Next append should get position 100 (monotonic!)
             journal.append(10000).await.unwrap();
             assert_eq!(journal.size().await.unwrap(), 101);
+            // Now we have one item at position 100
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
 
             // Can read the new item
