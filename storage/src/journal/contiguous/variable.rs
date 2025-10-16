@@ -217,21 +217,19 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         )
         .await?;
 
-        // Synchronize locations to match data
+        // Handle case where all data has been pruned or journal is empty
         if data.blobs.is_empty() {
-            // Empty data journal - locations should also be empty
-            let locations_size = locations.size().await?;
-            if locations_size > 0 {
-                return Err(Error::Corruption(format!(
-                    "locations ahead of empty data journal: locations_size={locations_size}"
-                )));
-            }
+            // No sections retained - either never had data or everything was pruned.
+            // The locations journal (fixed::Journal) maintains the global size counter,
+            // which continues to increment even after pruning (preserving monotonicity).
+            let size = locations.size().await?;
+
             return Ok(Self {
                 data,
                 locations,
                 items_per_section,
-                size: 0,
-                oldest_retained_pos: 0,
+                size,
+                oldest_retained_pos: size,
             });
         }
 
@@ -768,6 +766,87 @@ mod tests {
 
             // Size should still be 40 (pruning doesn't affect size)
             assert_eq!(journal.size().await.unwrap(), 40);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that pruning all data and re-initializing preserves monotonic positions.
+    #[test]
+    fn test_variable_prune_all_then_reinit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune_all_reinit".to_string(),
+                locations_partition: "prune_all_reinit_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Phase 1: Create journal and append data ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..100u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            assert_eq!(journal.size().await.unwrap(), 100);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+
+            // === Phase 2: Prune all data ===
+            let pruned = journal.prune(100).await.unwrap();
+            assert!(pruned);
+
+            // All data is pruned
+            assert_eq!(journal.size().await.unwrap(), 100);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+
+            // All reads should fail with ItemPruned
+            for i in 0..100 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            journal.close().await.unwrap();
+
+            // === Phase 3: Re-init and verify monotonic position preserved ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Size should be preserved (monotonic counter)
+            assert_eq!(journal.size().await.unwrap(), 100);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+
+            // All reads should still fail
+            for i in 0..100 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // === Phase 4: Append new data ===
+            // Next append should get position 100 (monotonic!)
+            journal.append(10000).await.unwrap();
+            assert_eq!(journal.size().await.unwrap(), 101);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+
+            // Can read the new item
+            assert_eq!(journal.read(100).await.unwrap(), 10000);
+
+            // Old positions still fail
+            assert!(matches!(
+                journal.read(99).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
 
             journal.destroy().await.unwrap();
         });
