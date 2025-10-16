@@ -1162,24 +1162,26 @@ where
             let waker = noop_waker();
             let mut cx_noop = task::Context::from_waker(&waker);
 
-            match this.future.as_mut().project() {
-                FutureStateProj::Pending(mut future) => {
-                    if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
-                        drop(future);
-                        match this
-                            .future
-                            .as_mut()
-                            .project_replace(FutureState::Ready(value))
-                        {
-                            FutureStateOwned::Pending(_) => {}
-                            FutureStateOwned::Ready(_) | FutureStateOwned::Finished => {
-                                unreachable!("future already cached")
-                            }
-                        }
-                    }
-                }
+            let ready_now = match this.future.as_mut().project() {
+                FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_noop) {
+                    Poll::Ready(value) => Some(value),
+                    Poll::Pending => None,
+                },
                 FutureStateProj::Ready(_) | FutureStateProj::Finished => {
                     unreachable!("future polled after completion");
+                }
+            };
+
+            if let Some(value) = ready_now {
+                match this
+                    .future
+                    .as_mut()
+                    .project_replace(FutureState::Ready(value))
+                {
+                    FutureStateOwned::Pending(_) => {}
+                    FutureStateOwned::Ready(_) | FutureStateOwned::Finished => {
+                        unreachable!("future already cached")
+                    }
                 }
             }
         }
@@ -1201,21 +1203,18 @@ where
         }
 
         // If the underlying future completed during the noop pre-poll, surface the cached value.
-        if matches!(
-            this.future.as_ref().project_ref(),
-            FutureStateProjRef::Ready(_)
-        ) {
-            let value = match this.future.as_mut().project_replace(FutureState::Finished) {
-                FutureStateOwned::Ready(value) => value,
-                _ => unreachable!("future already cached"),
-            };
-            return Poll::Ready(value);
-        }
-        if matches!(
-            this.future.as_ref().project_ref(),
-            FutureStateProjRef::Finished
-        ) {
-            unreachable!("future polled after completion");
+        match this.future.as_ref().project_ref() {
+            FutureStateProjRef::Ready(_) => {
+                let value = match this.future.as_mut().project_replace(FutureState::Finished) {
+                    FutureStateOwned::Ready(value) => value,
+                    _ => unreachable!("future already cached"),
+                };
+                return Poll::Ready(value);
+            }
+            FutureStateProjRef::Finished => {
+                unreachable!("future polled after completion");
+            }
+            FutureStateProjRef::Pending(_) => {}
         }
 
         // Block the current thread until the future reschedules itself, keeping polling
@@ -1224,20 +1223,17 @@ where
         loop {
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
+
             match this.future.as_mut().project() {
                 FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_block) {
-                    Poll::Ready(value) => {
-                        drop(future);
-                        break Poll::Ready(value);
-                    }
+                    Poll::Ready(value) => break Poll::Ready(value),
                     Poll::Pending => blocker.wait(),
                 },
                 FutureStateProj::Ready(_) => {
-                    let value =
-                        match this.future.as_mut().project_replace(FutureState::Finished) {
-                            FutureStateOwned::Ready(value) => value,
-                            _ => unreachable!("future already cached"),
-                        };
+                    let value = match this.future.as_mut().project_replace(FutureState::Finished) {
+                        FutureStateOwned::Ready(value) => value,
+                        _ => unreachable!("future already cached"),
+                    };
                     break Poll::Ready(value);
                 }
                 FutureStateProj::Finished => {
