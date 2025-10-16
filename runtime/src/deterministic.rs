@@ -1122,6 +1122,13 @@ impl Clock for Context {
     }
 }
 
+/// State machine wrapper that isolates the inner paced future and its cached output.
+///
+/// The inner future is polled while in `Pending`. Once it returns `Poll::Ready`, the
+/// result is stored in `Ready` and the future itself is dropped so any captured
+/// resources are released before we honour the pacing delay. After the paced wake-up
+/// the cached value is returned and the state transitions to `Completed` to guard
+/// against double polling.
 #[cfg(feature = "external")]
 #[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
 enum FutureState<F: Future> {
@@ -1132,11 +1139,13 @@ enum FutureState<F: Future> {
 
 #[cfg(feature = "external")]
 impl<F: Future> FutureState<F> {
+    /// Cache the completed output and drop the underlying future immediately.
     fn store(self: Pin<&mut Self>, value: F::Output) {
         self.project_replace(FutureState::Ready(value))
             .expect_pending();
     }
 
+    /// Consume the cached output if present, transitioning to `Completed`.
     fn take(self: Pin<&mut Self>) -> Option<F::Output> {
         match self.as_ref().project_ref() {
             FutureStateProjRef::Ready(_) => {
@@ -1149,6 +1158,7 @@ impl<F: Future> FutureState<F> {
         }
     }
 
+    /// Transition directly to `Completed`, keeping the cached value unchanged.
     fn complete(self: Pin<&mut Self>) {
         self.project_replace(FutureState::Completed)
             .expect_pending();
@@ -1157,6 +1167,9 @@ impl<F: Future> FutureState<F> {
 
 #[cfg(feature = "external")]
 impl<F: Future> FutureStateOwned<F> {
+    /// Assert that the previous state contained the pending future. Used when we
+    /// replace the future with either `Ready` or `Completed` and need to ensure
+    /// no cached value existed yet.
     fn expect_pending(self) {
         match self {
             FutureStateOwned::Pending(_) => {}
@@ -1164,6 +1177,7 @@ impl<F: Future> FutureStateOwned<F> {
         }
     }
 
+    /// Extract the cached output from a `Ready` state.
     fn into_ready(self) -> F::Output {
         match self {
             FutureStateOwned::Ready(value) => value,
