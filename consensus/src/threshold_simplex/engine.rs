@@ -211,13 +211,13 @@ impl<
                 debug!("shutdown");
             },
             _ = &mut voter_task => {
-                unreachable!("voter should not finish");
+                panic!("voter should not finish");
             },
             _ = &mut batcher_task => {
-                unreachable!("batcher should not finish");
+                panic!("batcher should not finish");
             },
             _ = &mut resolver_task => {
-                unreachable!("resolver should not finish");
+                panic!("resolver should not finish");
             },
         }
     }
