@@ -12,7 +12,7 @@
 //!
 //! To support such applications, the runtime can be built with the `external` feature to both
 //! sleep for each [Config::cycle] (opting to wait if all futures are pending) and to constrain
-//! the duration of any future to some reproducible latency (with `pace()`).
+//! the resolution latency of any future (with `pace()`).
 //!
 //! **Applications that do not interact with external processes (or are able to mock them) should never
 //! need to enable this feature. It is commonly used when testing consensus with external execution environments
