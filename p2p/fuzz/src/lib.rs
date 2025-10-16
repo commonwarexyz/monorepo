@@ -255,7 +255,7 @@ impl NetworkScheme for Lookup {
     }
 }
 
-pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
+pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
     let n = input.peers;
     let seed = input.seed;
 
@@ -328,36 +328,36 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
 
                     let (recipients, recipients_indices) = match recipient_mode {
                         RecipientMode::All => {
-                            let target_recipients: Vec<u8> = (0..peers.len())
+                            let indices: Vec<u8> = (0..peers.len())
                                 .map(|i| i as u8)
                                 .filter(|&to_idx| to_idx != sender_idx_u8)
                                 .collect();
-                            (Recipients::All, target_recipients)
+                            (Recipients::All, indices)
                         }
                         RecipientMode::One => {
-                            let recipient_idx = (recipient_idx as usize) % peers.len();
-                            if recipient_idx == sender_idx {
+                            let idx = (recipient_idx as usize) % peers.len();
+                            if idx == sender_idx {
                                 continue;
                             }
-                            let recipient_pk = peers[recipient_idx].public_key.clone();
-                            (Recipients::One(recipient_pk), vec![recipient_idx as u8])
+                            let recipient_pk = peers[idx].public_key.clone();
+                            (Recipients::One(recipient_pk), vec![idx as u8])
                         }
                         RecipientMode::Some => {
                             let num_recipients = rng.gen_range(1..peers.len() - 1);
                             let mut recipients_set = HashSet::new();
-                            let mut target_recipients = Vec::new();
+                            let mut indices = Vec::new();
 
                             for _ in 0..num_recipients {
                                 let idx = rng.gen::<usize>() % peers.len();
                                 if idx != sender_idx && recipients_set.insert(peers[idx].public_key.clone()) {
-                                    target_recipients.push(idx as u8);
+                                    indices.push(idx as u8);
                                 }
                             }
 
                             if recipients_set.is_empty() {
                                 continue;
                             }
-                            (Recipients::Some(recipients_set.into_iter().collect()), target_recipients)
+                            (Recipients::Some(recipients_set.into_iter().collect()), indices)
                         }
                     };
 
@@ -499,8 +499,4 @@ pub async fn fuzz_network<N: NetworkScheme>(input: FuzzInput) {
             }
         }
     });
-}
-
-pub fn fuzz(input: FuzzInput) {
-    futures::executor::block_on(fuzz_network::<Discovery>(input));
 }
