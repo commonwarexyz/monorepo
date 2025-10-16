@@ -247,6 +247,7 @@ mod tests {
     use futures::{
         executor::block_on,
         future::{pending, AbortHandle, Abortable, Aborted},
+        FutureExt,
     };
     use prometheus_client::metrics::gauge::Gauge;
 
@@ -277,5 +278,41 @@ mod tests {
 
         assert!(matches!(block_on(parent_future), Err(Aborted)));
         assert!(matches!(block_on(child_future), Err(Aborted)));
+    }
+
+    #[test]
+    fn reparented_idle_child_survives_descendant_abort() {
+        let root = SupervisionTree::root();
+        let (parent, aborted) = SupervisionTree::spawn_child(&root);
+        assert!(!aborted, "parent node unexpectedly aborted");
+
+        // Parent creates an idle clone that it intends to use later.
+        let (helper, aborted) = SupervisionTree::child(&parent);
+        assert!(!aborted, "helper node unexpectedly aborted");
+
+        // Parent spawns a new task; the idle helper is reparented under this child.
+        let (child, aborted) = SupervisionTree::spawn_child(&parent);
+        assert!(!aborted, "child node unexpectedly aborted");
+
+        // Parent starts using the helper after the reparenting occurred.
+        let (helper_aborter, helper_future) = pending_aborter();
+        helper.register_task(helper_aborter);
+
+        // Simulate the spawned task finishing, which aborts its descendants.
+        let (child_aborter, child_future) = pending_aborter();
+        child.register_task(child_aborter);
+        child.abort_descendants();
+
+        // The spawned task should abort.
+        assert!(
+            matches!(child_future.now_or_never(), Some(Err(Aborted))),
+            "child future did not abort as expected"
+        );
+
+        // The helper belongs to the parent and should remain pending.
+        assert!(
+            helper_future.now_or_never().is_none(),
+            "reparented helper was aborted by descendant task"
+        );
     }
 }
