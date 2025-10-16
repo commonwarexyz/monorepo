@@ -54,6 +54,7 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use cfg_if::cfg_if;
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -1122,147 +1123,146 @@ impl Clock for Context {
     }
 }
 
-/// State machine wrapper that isolates the inner paced future and its cached output.
-///
-/// The inner future is polled while in `Pending`. Once it returns `Poll::Ready`, the
-/// result is stored in `Ready` and the future itself is dropped so any captured
-/// resources are released before we honor the pacing delay. After the paced latency
-/// has elapsed, the cached value is returned and the state transitions to `Completed`.
-#[cfg(feature = "external")]
-#[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
-enum FutureState<F: Future> {
-    Pending(#[pin] F),
-    Ready(F::Output),
-    Completed,
-}
-
-#[cfg(feature = "external")]
-impl<F: Future> FutureState<F> {
-    /// Cache the completed output and drop the underlying future.
-    fn resolve(self: Pin<&mut Self>, value: F::Output) {
-        self.project_replace(FutureState::Ready(value));
-    }
-
-    /// Consume the cached output if present, transitioning to `Completed`.
-    fn take(self: Pin<&mut Self>) -> Option<F::Output> {
-        match self.as_ref().project_ref() {
-            FutureStateProjRef::Ready(_) => {
-                let FutureStateOwned::Ready(value) = self.project_replace(FutureState::Completed)
-                else {
-                    unreachable!("value not ready");
-                };
-                Some(value)
-            }
-            FutureStateProjRef::Pending(_) => None,
-            FutureStateProjRef::Completed => {
-                panic!("future polled after completion");
-            }
+cfg_if! {
+    if #[cfg(feature = "external")] {
+        /// State machine wrapper that isolates the inner paced future and its cached output.
+        ///
+        /// The inner future is polled while in `Pending`. Once it returns `Poll::Ready`, the
+        /// result is stored in `Ready` and the future itself is dropped so any captured
+        /// resources are released before we honor the pacing delay. After the paced latency
+        /// has elapsed, the cached value is returned and the state transitions to `Completed`.
+        #[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
+        enum FutureState<F: Future> {
+            Pending(#[pin] F),
+            Ready(F::Output),
+            Completed,
         }
-    }
-}
 
-/// A future that resolves when a given target time is reached.
-///
-/// If the future is not ready at the target time, the future is blocked until the target time is reached.
-#[cfg(feature = "external")]
-#[pin_project]
-struct Waiter<F: Future> {
-    executor: Weak<Executor>,
-    target: SystemTime,
-    #[pin]
-    future: FutureState<F>,
-    started: bool,
-    registered: bool,
-}
+        impl<F: Future> FutureState<F> {
+            /// Cache the completed output and drop the underlying future.
+            fn resolve(self: Pin<&mut Self>, value: F::Output) {
+                self.project_replace(FutureState::Ready(value));
+            }
 
-#[cfg(feature = "external")]
-impl<F> Future for Waiter<F>
-where
-    F: Future + Send,
-{
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-
-        // Poll once with a noop waker so the future can register interest or start work
-        // without being able to wake this task before the sampled delay expires. Any ready
-        // value is cached and only released after the clock reaches `self.target`.
-        if !*this.started {
-            *this.started = true;
-            let waker = noop_waker();
-            let mut cx_noop = task::Context::from_waker(&waker);
-            let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
-                unreachable!("future polled before started");
-            };
-            if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
-                // Drop the completed future immediately so resources are released
-                // while we wait for the pacing delay to elapse.
-                this.future.as_mut().resolve(value);
+            /// Consume the cached output if present, transitioning to `Completed`.
+            fn take(self: Pin<&mut Self>) -> Option<F::Output> {
+                match self.as_ref().project_ref() {
+                    FutureStateProjRef::Ready(_) => {
+                        let FutureStateOwned::Ready(value) = self.project_replace(FutureState::Completed)
+                        else {
+                            unreachable!("value not ready");
+                        };
+                        Some(value)
+                    }
+                    FutureStateProjRef::Pending(_) => None,
+                    FutureStateProjRef::Completed => {
+                        panic!("future polled after completion");
+                    }
+                }
             }
         }
 
-        // Only allow the task to progress once the sampled delay has elapsed.
-        let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock().unwrap();
-        if current_time < *this.target {
-            // Register exactly once with the deterministic sleeper queue so the executor
-            // wakes us once the clock reaches the scheduled target time.
-            if !*this.registered {
-                *this.registered = true;
-                executor.sleeping.lock().unwrap().push(Alarm {
-                    time: *this.target,
-                    waker: cx.waker().clone(),
-                });
-            }
-            return Poll::Pending;
+        /// A future that resolves when a given target time is reached.
+        ///
+        /// If the future is not ready at the target time, the future is blocked until the target time is reached.
+        #[pin_project]
+        struct Waiter<F: Future> {
+            executor: Weak<Executor>,
+            target: SystemTime,
+            #[pin]
+            future: FutureState<F>,
+            started: bool,
+            registered: bool,
         }
 
-        // Block the current thread until the future reschedules itself, keeping polling
-        // deterministic with respect to executor time.
-        let blocker = Blocker::new();
-        loop {
-            // If the future has resolved, return the cached value.
-            if let Some(value) = this.future.as_mut().take() {
-                return Poll::Ready(value);
+        impl<F> Future for Waiter<F>
+        where
+            F: Future + Send,
+        {
+            type Output = F::Output;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+                let mut this = self.project();
+
+                // Poll once with a noop waker so the future can register interest or start work
+                // without being able to wake this task before the sampled delay expires. Any ready
+                // value is cached and only released after the clock reaches `self.target`.
+                if !*this.started {
+                    *this.started = true;
+                    let waker = noop_waker();
+                    let mut cx_noop = task::Context::from_waker(&waker);
+                    let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
+                        unreachable!("future polled before started");
+                    };
+                    if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
+                        // Drop the completed future immediately so resources are released
+                        // while we wait for the pacing delay to elapse.
+                        this.future.as_mut().resolve(value);
+                    }
+                }
+
+                // Only allow the task to progress once the sampled delay has elapsed.
+                let executor = this.executor.upgrade().expect("executor already dropped");
+                let current_time = *executor.time.lock().unwrap();
+                if current_time < *this.target {
+                    // Register exactly once with the deterministic sleeper queue so the executor
+                    // wakes us once the clock reaches the scheduled target time.
+                    if !*this.registered {
+                        *this.registered = true;
+                        executor.sleeping.lock().unwrap().push(Alarm {
+                            time: *this.target,
+                            waker: cx.waker().clone(),
+                        });
+                    }
+                    return Poll::Pending;
+                }
+
+                // Block the current thread until the future reschedules itself, keeping polling
+                // deterministic with respect to executor time.
+                let blocker = Blocker::new();
+                loop {
+                    // If the future has resolved, return the cached value.
+                    if let Some(value) = this.future.as_mut().take() {
+                        return Poll::Ready(value);
+                    }
+
+                    // Poll the future again.
+                    let waker = waker(blocker.clone());
+                    let mut cx_block = task::Context::from_waker(&waker);
+                    let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
+                        unreachable!("future polled after completion");
+                    };
+                    match future.as_mut().poll(&mut cx_block) {
+                        Poll::Ready(value) => this.future.as_mut().resolve(value),
+                        Poll::Pending => blocker.wait(),
+                    };
+                }
             }
-
-            // Poll the future again.
-            let waker = waker(blocker.clone());
-            let mut cx_block = task::Context::from_waker(&waker);
-            let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
-                unreachable!("future polled after completion");
-            };
-            match future.as_mut().poll(&mut cx_block) {
-                Poll::Ready(value) => this.future.as_mut().resolve(value),
-                Poll::Pending => blocker.wait(),
-            };
         }
-    }
-}
 
-#[cfg(feature = "external")]
-impl Pacer for Context {
-    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
-    where
-        F: Future<Output = T> + Send + 'a,
-        T: Send + 'a,
-    {
-        // Compute target time
-        let target = self
-            .executor()
-            .time
-            .lock()
-            .unwrap()
-            .checked_add(latency)
-            .expect("overflow when setting wake time");
+        impl Pacer for Context {
+            fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
+            where
+                F: Future<Output = T> + Send + 'a,
+                T: Send + 'a,
+            {
+                // Compute target time
+                let target = self
+                    .executor()
+                    .time
+                    .lock()
+                    .unwrap()
+                    .checked_add(latency)
+                    .expect("overflow when setting wake time");
 
-        Waiter {
-            executor: self.executor.clone(),
-            target,
-            future: FutureState::Pending(future),
-            started: false,
-            registered: false,
+                Waiter {
+                    executor: self.executor.clone(),
+                    target,
+                    future: FutureState::Pending(future),
+                    started: false,
+                    registered: false,
+                }
+            }
         }
     }
 }
