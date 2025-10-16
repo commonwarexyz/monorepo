@@ -2749,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn test_notarize_verify_wrong_polynomial() {
+    fn test_notarize_verify_wrong_scheme() {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 221);
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 501);
         notarize_verify_wrong_scheme(&bls_threshold_schemes[0], &bls_threshold_wrong_scheme);
@@ -2779,7 +2779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_notarization_verify_wrong_keys() {
+    fn test_notarization_verify_wrong_scheme() {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 222);
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 502);
         notarization_verify_wrong_scheme(&bls_threshold_schemes, &bls_threshold_wrong_scheme);
@@ -2912,7 +2912,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finalization_wrong_signature() {
+    fn test_finalization_wrong_scheme() {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 227);
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 505);
         finalization_verify_wrong_scheme(&bls_threshold_schemes, &bls_threshold_wrong_scheme);
