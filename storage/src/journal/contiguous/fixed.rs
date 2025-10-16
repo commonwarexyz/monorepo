@@ -51,6 +51,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
     async fn destroy(self) -> Result<(), Error> {
         fixed::Journal::destroy(self).await
     }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        fixed::Journal::rewind(self, size).await
+    }
 }
 
 #[cfg(test)]

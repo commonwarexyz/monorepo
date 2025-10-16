@@ -76,6 +76,28 @@ pub trait Contiguous {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<bool, Error>> + Send;
 
+    /// Rewind the journal to the given size, discarding items from the end.
+    ///
+    /// After rewinding to size N, the journal will contain exactly N items
+    /// (positions 0 to N-1), and the next append will receive position N.
+    ///
+    /// # Behavior
+    ///
+    /// - If `size > current_size()`, returns [Error::InvalidRewind]
+    /// - If `size == current_size()`, this is a no-op
+    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned data)
+    ///
+    /// # Warnings
+    ///
+    /// - This operation is not guaranteed to survive restarts until `sync()` is called
+    /// - This operation is not atomic, but implementations should leave the journal in a consistent state
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns an error if the underlying storage operation fails.
+    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
     /// Return a stream of all items in the journal starting from `start_pos`.
     ///
     /// Each item is yielded as a tuple `(position, item)` where position is the item's

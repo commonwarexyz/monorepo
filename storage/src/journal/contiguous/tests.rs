@@ -42,6 +42,12 @@ where
     test_read_by_position(&factory).await;
     test_read_out_of_range(&factory).await;
     test_read_after_prune(&factory).await;
+    test_rewind_to_middle(&factory).await;
+    test_rewind_to_zero(&factory).await;
+    test_rewind_current_size(&factory).await;
+    test_rewind_invalid_forward(&factory).await;
+    test_rewind_invalid_pruned(&factory).await;
+    test_rewind_then_append(&factory).await;
 }
 
 /// Test that an empty journal has size 0.
@@ -651,4 +657,155 @@ where
     let oldest_retained_pos = journal.oldest_retained_pos().await.unwrap().unwrap();
     let result = journal.read(oldest_retained_pos - 1).await;
     assert!(matches!(result, Err(Error::ItemPruned(_))));
+}
+
+/// Test rewinding to the middle of the journal
+async fn test_rewind_to_middle<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_to_middle".to_string()).await.unwrap();
+
+    // Append 20 items
+    for i in 0..20u64 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Rewind to 12 items
+    journal.rewind(12).await.unwrap();
+
+    assert_eq!(journal.size().await.unwrap(), 12);
+
+    // Verify first 12 items are still readable
+    for i in 0..12u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+    }
+
+    // Verify items 12-19 are gone
+    for i in 12..20u64 {
+        assert!(matches!(
+            journal.read(i).await,
+            Err(Error::ItemOutOfRange(_))
+        ));
+    }
+
+    // Next append should get position 12
+    let pos = journal.append(999).await.unwrap();
+    assert_eq!(pos, 12);
+    assert_eq!(journal.read(12).await.unwrap(), 999);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test rewinding to empty journal
+async fn test_rewind_to_zero<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_to_zero".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    journal.rewind(0).await.unwrap();
+
+    assert_eq!(journal.size().await.unwrap(), 0);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+    // Next append should get position 0
+    let pos = journal.append(42).await.unwrap();
+    assert_eq!(pos, 0);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test rewind to current size is no-op
+async fn test_rewind_current_size<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_current_size".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    // Rewind to current size should be no-op
+    journal.rewind(10).await.unwrap();
+    assert_eq!(journal.size().await.unwrap(), 10);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test rewind with invalid forward size
+async fn test_rewind_invalid_forward<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_invalid_forward".to_string()).await.unwrap();
+
+    for i in 0..10u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    // Try to rewind forward (invalid)
+    let result = journal.rewind(20).await;
+    assert!(matches!(result, Err(Error::InvalidRewind(20))));
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test rewind to pruned position
+async fn test_rewind_invalid_pruned<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_invalid_pruned".to_string()).await.unwrap();
+
+    for i in 0..20u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    // Prune first 10 items
+    journal.prune(10).await.unwrap();
+
+    // Try to rewind to pruned position (invalid)
+    let result = journal.rewind(5).await;
+    assert!(matches!(result, Err(Error::InvalidRewind(5))));
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test rewind then append maintains position continuity
+async fn test_rewind_then_append<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_then_append".to_string()).await.unwrap();
+
+    // Append across section boundary (assuming items_per_section = 10)
+    for i in 0..15u64 {
+        journal.append(i).await.unwrap();
+    }
+
+    // Rewind to position 8 (within first section)
+    journal.rewind(8).await.unwrap();
+
+    // Append should continue from position 8
+    let pos1 = journal.append(888).await.unwrap();
+    let pos2 = journal.append(999).await.unwrap();
+
+    assert_eq!(pos1, 8);
+    assert_eq!(pos2, 9);
+    assert_eq!(journal.read(8).await.unwrap(), 888);
+    assert_eq!(journal.read(9).await.unwrap(), 999);
+
+    journal.destroy().await.unwrap();
 }

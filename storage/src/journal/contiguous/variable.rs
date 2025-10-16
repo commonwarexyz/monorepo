@@ -183,128 +183,148 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
-    /// Validate and repair the locations journal to match the data journal.
+    /// Repair the locations journal to match the data journal.
     ///
-    /// This function determines the state of the data journal, validates that the locations
-    /// journal is consistent, and repairs any inconsistencies found.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The data journal (source of truth)
-    /// * `locations` - The locations journal to validate/repair
-    /// * `items_per_section` - Number of items per section
+    /// The data journal is the source of truth. This function scans it to determine
+    /// what SHOULD be in the locations journal, then fixes any mismatches.
     ///
     /// # Returns
     ///
-    /// Returns `(size, oldest_retained_pos)` on success, or `Err` if corruption is detected.
+    /// Returns `(size, oldest_retained_pos)`.
     async fn validate_and_repair_locations(
         data: &variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
-        // Determine the state of the data journal
-        let (data_last_section, data_oldest_retained_pos, expected_locations_size) =
-            if data.blobs.is_empty() {
-                // No data retained
-                let size = locations.size().await?;
-                (None, size, size)
-            } else {
-                // Data exists: determine last section, oldest position, and expected size
-                let first_section = *data.blobs.first_key_value().unwrap().0;
-                let oldest_retained_pos = first_section * items_per_section;
-                let last_section = *data.blobs.last_key_value().unwrap().0;
+        // === Step 1: Scan data journal to determine expected state ===
 
-                // Count items in last section
-                let items_in_last_section = {
-                    let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-                    futures::pin_mut!(stream);
-                    let mut count = 0u64;
-                    while let Some(result) = stream.next().await {
-                        result?; // Propagate any corruption/replay errors
-                        count += 1;
-                    }
-                    count
-                };
+        let (expected_size, expected_oldest_pos) = if data.blobs.is_empty() {
+            // No data blobs → journal is empty or fully pruned
+            // Size comes from locations journal.
+            (locations.size().await?, locations.size().await?)
+        } else {
+            // Data exists → count items
+            let first_section = *data.blobs.first_key_value().unwrap().0;
+            let last_section = *data.blobs.last_key_value().unwrap().0;
+            let oldest_pos = first_section * items_per_section;
 
-                let expected_size = (last_section * items_per_section) + items_in_last_section;
-                (Some(last_section), oldest_retained_pos, expected_size)
+            // Count items in last section by replaying it
+            let items_in_last_section = {
+                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                futures::pin_mut!(stream);
+                let mut count = 0u64;
+                while let Some(result) = stream.next().await {
+                    result?; // Propagate replay errors (corruption, etc.)
+                    count += 1;
+                }
+                count
             };
 
-        let locations_size = locations.size().await?;
-        let locations_oldest_retained_pos = locations.oldest_retained_pos().await?;
-
-        // Handle case where data journal is empty (no blobs retained)
-        let Some(data_last_section) = data_last_section else {
-            // No sections retained - could be:
-            // 1. Empty / fully pruned
-            // 2. Crashed during prune (data pruned, locations not yet pruned)
-            // 3. Data partition lost (external corruption)
-            // For cases 2 & 3, repair by pruning locations to match empty data
-            if let Some(_oldest) = locations_oldest_retained_pos {
-                // Prune all locations to match empty data
-                locations.prune(locations_size).await?;
-            }
-            return Ok((expected_locations_size, data_oldest_retained_pos));
+            let size = (last_section * items_per_section) + items_in_last_section;
+            (size, oldest_pos)
         };
 
-        // Check for corruption: locations ahead of data (violates invariant)
-        if locations_size > expected_locations_size {
+        // === Step 2: Check current locations state ===
+
+        let locations_size = locations.size().await?;
+        let locations_oldest = locations.oldest_retained_pos().await?;
+
+        // === Step 3: Fix size mismatch ===
+
+        if locations_size > expected_size {
+            // Locations ahead of data → should never happen (violates write ordering)
             return Err(Error::Corruption(format!(
-                "locations journal ahead of data: locations_size={locations_size} > expected={expected_locations_size}"
+                "locations ahead of data: locations_size={locations_size} > data_size={expected_size}"
             )));
         }
 
-        // Check pruning consistency
-        match locations_oldest_retained_pos {
-            Some(loc_oldest) if loc_oldest < data_oldest_retained_pos => {
-                // Crash during prune: data was pruned but locations wasn't
-                locations.prune(data_oldest_retained_pos).await?;
-            }
-            Some(loc_oldest) if loc_oldest > data_oldest_retained_pos => {
-                // Corruption: locations pruned ahead of data (violates write ordering)
-                return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations_oldest={loc_oldest} > data_oldest={data_oldest_retained_pos}"
-                )));
-            }
-            _ => {} // Locations pruning is consistent with data pruning
+        if locations_size < expected_size {
+            // Locations behind data → rebuild missing entries
+            Self::rebuild_locations(data, locations, expected_size).await?;
         }
 
-        // Rebuild missing locations if needed
-        if locations_size < expected_locations_size {
-            let missing_count = expected_locations_size - locations_size;
-            if missing_count > items_per_section {
+        // === Step 4: Fix pruning mismatch ===
+
+        match locations_oldest {
+            Some(loc_oldest) if loc_oldest > expected_oldest_pos => {
+                // Locations pruned ahead of data → should never happen (violates write ordering)
                 return Err(Error::Corruption(format!(
-                    "missing {missing_count} locations exceeds items_per_section {items_per_section}"
+                    "locations pruned ahead of data: locations_oldest={loc_oldest} > data_oldest={expected_oldest_pos}"
                 )));
             }
+            Some(loc_oldest) if loc_oldest < expected_oldest_pos => {
+                // Locations behind on pruning → prune to catch up
+                locations.prune(expected_oldest_pos).await?;
+            }
+            None if expected_oldest_pos < expected_size => {
+                // Locations says "fully pruned" but data has items → prune to match
+                locations.prune(expected_oldest_pos).await?;
+            }
+            _ => {
+                // Pruning is consistent
+            }
+        }
 
-            // Determine where to start replaying
-            // If locations has retained entries (not fully pruned), replay from the last indexed item.
-            // Otherwise, start from the beginning of the section.
-            let (resume_offset, skip_first) = match locations.oldest_retained_pos().await? {
-                Some(oldest) if oldest < locations_size => {
-                    // Locations has retained items - read the last one to get resume offset
+        // === Step 5: Verify and return ===
+
+        locations.sync().await?;
+        assert_eq!(locations.size().await?, expected_size);
+
+        Ok((expected_size, expected_oldest_pos))
+    }
+
+    /// Rebuild missing location entries by replaying the data journal.
+    ///
+    /// Locations journal is behind data journal, so we need to append missing entries.
+    /// This may require replaying multiple sections if the divergence is large (e.g. crash during
+    /// rewind).
+    async fn rebuild_locations(
+        data: &variable::Journal<E, V>,
+        locations: &mut fixed::Journal<E, Location>,
+        expected_size: u64,
+    ) -> Result<(), Error> {
+        let locations_size = locations.size().await?;
+        let missing_count = expected_size - locations_size;
+
+        // Find where to start replaying
+        let (start_section, resume_offset, skip_first) =
+            if let Some(oldest) = locations.oldest_retained_pos().await? {
+                if oldest < locations_size {
+                    // Locations has items → resume from last indexed position
                     let last_loc = locations.read(locations_size - 1).await?;
-                    (last_loc.offset, true) // Replay from last item, skip first item
+                    (last_loc.section, last_loc.offset, true)
+                } else {
+                    // Locations fully pruned but data has items → start from first data section
+                    let first_section = *data.blobs.first_key_value().unwrap().0;
+                    (first_section, 0, false)
                 }
-                _ => {
-                    // Locations is empty or fully pruned - start from beginning
-                    (0, false) // Start from beginning of section, don't skip first item
-                }
+            } else {
+                // Locations empty → start from first data section
+                let first_section = *data.blobs.first_key_value().unwrap().0;
+                (first_section, 0, false)
             };
 
-            // Replay and append exactly the missing locations
-            let stream = data
-                .replay(data_last_section, resume_offset, REPLAY_BUFFER_SIZE)
-                .await?;
+        // Find last section
+        let last_section = *data.blobs.last_key_value().unwrap().0;
+
+        // Replay sections and append locations
+        let mut appended = 0u64;
+        let mut skipped_first = false;
+
+        for section in start_section..=last_section {
+            let offset = if section == start_section {
+                resume_offset
+            } else {
+                0
+            };
+
+            let stream = data.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
 
-            let mut appended = 0;
-            let mut skipped_first = false;
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, _item) = result?;
 
-                // Skip the first item if we're resuming from the last indexed location
+                // Skip first item if resuming from last indexed location
                 if skip_first && !skipped_first {
                     skipped_first = true;
                     continue;
@@ -312,16 +332,25 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
 
                 locations.append(Location { section, offset }).await?;
                 appended += 1;
+
                 if appended == missing_count {
                     break;
                 }
             }
+
+            if appended == missing_count {
+                break;
+            }
         }
 
-        locations.sync().await?;
-        assert_eq!(locations.size().await?, expected_locations_size);
+        // Ensure we rebuilt exactly the right amount
+        if appended != missing_count {
+            return Err(Error::Corruption(format!(
+                "failed to rebuild all missing locations: rebuilt {appended} but expected {missing_count}"
+            )));
+        }
 
-        Ok((expected_locations_size, data_oldest_retained_pos))
+        Ok(())
     }
 
     /// Initialize a contiguous variable journal.
@@ -382,6 +411,72 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
     /// Return the section number where the next append will write.
     const fn current_section(&self) -> u64 {
         position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)
+    }
+
+    /// Rewind the journal to the given size, discarding items from the end.
+    ///
+    /// After rewinding to size N, the journal will contain exactly N items,
+    /// and the next append will receive position N.
+    ///
+    /// # Crash Safety
+    ///
+    /// This method maintains crash-safety by rewinding the locations journal BEFORE
+    /// the data journal. This ensures that if a crash occurs mid-operation:
+    /// - Locations is at or behind data (recoverable via init repair)
+    /// - Never locations ahead of data (which would be unrecoverable corruption)
+    ///
+    /// The write ordering is opposite of append (which writes data first, then locations).
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        // Validate rewind target
+        match size.cmp(&self.size) {
+            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
+            std::cmp::Ordering::Equal => return Ok(()), // No-op
+            std::cmp::Ordering::Less => {}
+        }
+
+        if size < self.oldest_retained_pos {
+            return Err(Error::InvalidRewind(size));
+        }
+
+        // Special case: rewind to empty
+        if size == 0 {
+            // Rewind locations first to maintain crash-safety invariant
+            self.locations.rewind(0).await?;
+            let first_section = self.oldest_retained_pos / self.items_per_section;
+            self.data.rewind(first_section, 0).await?;
+            self.size = 0;
+            return Ok(());
+        }
+
+        // Read the location of the first item to discard (at position 'size').
+        // Location contains:
+        //   - section: which blob the item is in
+        //   - offset: index within that blob (NOT byte offset)
+        let discard_location = self.locations.read(size).await?;
+
+        // Rewind locations journal FIRST (opposite order from append!)
+        // This ensures crash-safety: if we crash after locations.rewind() but before
+        // data.rewind(), init() will see locations behind data and repair it by
+        // appending missing location entries. If we did data first, locations would
+        // be ahead (unrecoverable corruption).
+        self.locations.rewind(size).await?;
+
+        // Convert aligned offset index to byte offset.
+        // The variable journal aligns items to 16 bytes, so e.g. offset 5 means byte 80.
+        let byte_offset = discard_location.offset as u64 * variable::ITEM_ALIGNMENT;
+        self.data
+            .rewind(discard_location.section, byte_offset)
+            .await?;
+
+        // Update our size
+        self.size = size;
+
+        Ok(())
     }
 
     /// Append a new item to the journal, returning its position.
@@ -615,6 +710,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
 
     async fn destroy(self) -> Result<(), Error> {
         Variable::destroy(self).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Variable::rewind(self, size).await
     }
 }
 
@@ -1255,6 +1354,75 @@ mod tests {
             // Reads at position 30+ should succeed
             assert_eq!(variable.read(30).await.unwrap(), 3000);
             assert_eq!(variable.read(49).await.unwrap(), 4900);
+
+            variable.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery from crash during rewind operation.
+    ///
+    /// Simulates a crash after locations.rewind() completes but before data.rewind() completes.
+    /// This creates a situation where locations journal has been rewound but data journal still
+    /// contains items across multiple sections. Verifies that init() correctly rebuilds the
+    /// locations index across all sections to match the data journal.
+    #[test]
+    fn test_variable_recovery_rewind_crash_multi_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // === Setup: Create Variable wrapper with data across multiple sections ===
+            let cfg = Config {
+                data_partition: "recovery_rewind_crash".to_string(),
+                locations_partition: "recovery_rewind_crash_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 25 items across 3 sections (section 0: 0-9, section 1: 10-19, section 2: 20-24)
+            for i in 0..25u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            assert_eq!(variable.size().await.unwrap(), 25);
+
+            // === Simulate crash during rewind(5) ===
+            // Rewind locations journal to size 5 (keeps positions 0-4)
+            variable.locations.rewind(5).await.unwrap();
+            // CRASH before data.rewind() completes - data still has all 3 sections
+
+            variable.close().await.unwrap();
+
+            // === Verify recovery ===
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Init should rebuild locations[5-24] from data journal across all 3 sections
+            assert_eq!(variable.size().await.unwrap(), 25);
+            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
+
+            // All items should be readable - locations rebuilt correctly across all sections
+            for i in 0..25u64 {
+                assert_eq!(
+                    variable.read(i).await.unwrap(),
+                    i * 100,
+                    "Failed to read position {i}"
+                );
+            }
+
+            // Verify locations journal fully rebuilt
+            assert_eq!(variable.locations.size().await.unwrap(), 25);
+
+            // Verify next append gets position 25
+            let pos = variable.append(2500).await.unwrap();
+            assert_eq!(pos, 25);
+            assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
         });
