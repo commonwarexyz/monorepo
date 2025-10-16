@@ -6,7 +6,7 @@ pub mod bls12381_threshold;
 pub mod ed25519;
 
 use crate::threshold_simplex::types::{Vote, VoteContext, VoteVerification};
-use commonware_codec::{Codec, CodecFixed, Encode};
+use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 use rand::{CryptoRng, Rng};
@@ -20,19 +20,9 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// the provided defaults to take advantage of scheme-specific batching strategies.
 pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
-
-    type Certificate: Clone
-        + Debug
-        + PartialEq
-        + Eq
-        + Hash
-        + Send
-        + Sync
-        + Codec<Cfg = Self::CertificateCfg>;
+    type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     type Seed: Clone + Encode + Send;
-
-    type CertificateCfg: Clone + Send + Sync;
 
     /// Converts the scheme into a pure verifier.
     ///
@@ -132,13 +122,13 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
     fn seed(&self, certificate: &Self::Certificate) -> Option<Self::Seed>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
-    fn certificate_codec_config(&self) -> Self::CertificateCfg;
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
 
     /// Encoding configuration that allows unbounded certificate decoding.
     ///
     /// Only use this when decoding data from trusted local storage, it must not be exposed to
     /// adversarial inputs or network payloads.
-    fn certificate_codec_config_unbounded() -> Self::CertificateCfg;
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
 // Constants for domain separation in signature verification

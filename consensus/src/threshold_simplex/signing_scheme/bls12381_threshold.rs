@@ -179,8 +179,6 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Certificate = Signature<V>;
     type Seed = V::Signature;
 
-    type CertificateCfg = ();
-
     fn into_verifier(self) -> Self {
         match self {
             Scheme::Signer {
@@ -774,9 +772,9 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         Some(certificate.seed_signature)
     }
 
-    fn certificate_codec_config(&self) -> Self::CertificateCfg {}
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
 
-    fn certificate_codec_config_unbounded() -> Self::CertificateCfg {}
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
 }
 
 #[cfg(test)]

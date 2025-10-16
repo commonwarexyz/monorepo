@@ -124,8 +124,6 @@ impl SigningScheme for Scheme {
     type Certificate = Certificate;
     type Seed = ();
 
-    type CertificateCfg = usize;
-
     fn into_verifier(mut self) -> Self {
         self.signer = None;
         self
@@ -365,11 +363,11 @@ impl SigningScheme for Scheme {
         None
     }
 
-    fn certificate_codec_config(&self) -> Self::CertificateCfg {
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.participants.len()
     }
 
-    fn certificate_codec_config_unbounded() -> Self::CertificateCfg {
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
         u32::MAX as usize
     }
 }

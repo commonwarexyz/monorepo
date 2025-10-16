@@ -762,7 +762,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Voter<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
-    type Cfg = S::CertificateCfg;
+    type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
@@ -1077,7 +1077,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Notarization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
-    type Cfg = S::CertificateCfg;
+    type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
@@ -1265,7 +1265,7 @@ impl<S: SigningScheme> EncodeSize for Nullification<S> {
 }
 
 impl<S: SigningScheme> Read for Nullification<S> {
-    type Cfg = S::CertificateCfg;
+    type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let round = Round::read(reader)?;
@@ -1484,7 +1484,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Finalization<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
-    type Cfg = S::CertificateCfg;
+    type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
@@ -1548,7 +1548,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Backfiller<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Backfiller<S, D> {
-    type Cfg = (usize, S::CertificateCfg);
+    type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
@@ -1713,7 +1713,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Response<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
-    type Cfg = (usize, S::CertificateCfg);
+    type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let (max_len, certificate_cfg) = cfg;
@@ -1925,7 +1925,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Activity<S, D> {
 }
 
 impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
-    type Cfg = S::CertificateCfg;
+    type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
