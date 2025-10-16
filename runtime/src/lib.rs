@@ -337,7 +337,7 @@ cfg_if::cfg_if! {
         /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
         /// runtime should delay completion relative to the clock.
         pub trait FutureExt: Future + Send + Sized {
-            /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
+            /// Delay completion of the future until a specified `latency` on `pacer`.
             fn pace<'a, E>(
                 self,
                 pacer: &'a E,
