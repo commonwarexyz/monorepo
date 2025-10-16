@@ -590,6 +590,12 @@ impl<
                                 Request::Finalized { height } => {
                                     let mut reader = value;
 
+                                    // We can't decode the Finalization immediately, as we first need to know
+                                    // which epoch it belongs to in order to use the appropriate signing
+                                    // scheme. The signing scheme determines the certificate codec
+                                    // configuration, for example in Ed25519 it depends on the number of
+                                    // participants in the epoch.
+
                                     // Decode the proposal to learn the epoch.
                                     let Ok(proposal) = Proposal::<B::Commitment>::read(&mut reader) else {
                                         let _ = response.send(false);
