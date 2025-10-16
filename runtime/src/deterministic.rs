@@ -1142,17 +1142,14 @@ cfg_if! {
             /// Consume the cached output if present, transitioning to `Completed`.
             fn take(self: Pin<&mut Self>) -> Option<F::Output> {
                 match self.as_ref().project_ref() {
-                    FutureStateProjRef::Ready(_) => {
-                        let FutureStateOwned::Ready(value) = self.project_replace(FutureState::Completed)
-                        else {
-                            unreachable!("value not ready");
-                        };
-                        Some(value)
-                    }
-                    FutureStateProjRef::Pending(_) => None,
-                    FutureStateProjRef::Completed => {
-                        panic!("future polled after completion");
-                    }
+                    FutureStateProjRef::Ready(_) => {}
+                    FutureStateProjRef::Pending(_) => return None,
+                    FutureStateProjRef::Completed => panic!("future polled after completion"),
+                }
+
+                match self.project_replace(FutureState::Completed) {
+                    FutureStateOwned::Ready(value) => Some(value),
+                    _ => unreachable!("value not ready"),
                 }
             }
         }
