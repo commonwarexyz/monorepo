@@ -5,7 +5,7 @@ TARGETS := $(SOURCES:.md=.html)
 
 # Re-runs when the template file changes, or any markdown file changes
 %.html: %.md template.html
-	pandoc $< -o $@ --template=template.html --katex --standalone
+	pandoc $< -o $@ --template=template.html --mathjax --standalone
 
 all: $(TARGETS)
 
