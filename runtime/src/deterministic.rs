@@ -1131,7 +1131,7 @@ struct Waiter<F: Future> {
     executor: Weak<Executor>,
     target: SystemTime,
     #[pin]
-    future: Option<F>,
+    future: F,
     ready: Option<F::Output>,
     started: bool,
     registered: bool,
@@ -1152,13 +1152,10 @@ where
         // value is cached and only released after the clock reaches `self.target`.
         if !*this.started {
             *this.started = true;
-            if let Some(future) = this.future.as_mut().as_pin_mut() {
-                let waker = noop_waker();
-                let mut cx_noop = task::Context::from_waker(&waker);
-                if let Poll::Ready(value) = future.poll(&mut cx_noop) {
-                    this.future.set(None);
-                    *this.ready = Some(value);
-                }
+            let waker = noop_waker();
+            let mut cx_noop = task::Context::from_waker(&waker);
+            if let Poll::Ready(value) = this.future.as_mut().poll(&mut cx_noop) {
+                *this.ready = Some(value);
             }
         }
 
@@ -1187,16 +1184,10 @@ where
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
-            let future = this
-                .future
-                .as_mut()
-                .as_pin_mut()
-                .expect("future already polled at scheduled time");
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-            match future.poll(&mut cx_block) {
+            match this.future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
-                    this.future.set(None);
                     break Poll::Ready(value);
                 }
                 Poll::Pending => blocker.wait(),
@@ -1224,7 +1215,7 @@ impl Pacer for Context {
         Waiter {
             executor: self.executor.clone(),
             target,
-            future: Some(future),
+            future,
             ready: None,
             started: false,
             registered: false,
