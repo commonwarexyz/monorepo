@@ -146,6 +146,8 @@ where
     assert_eq!(journal.read(0).await.unwrap(), 100);
     assert_eq!(journal.read(1).await.unwrap(), 200);
     assert_eq!(journal.read(2).await.unwrap(), 300);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test appending many items across section boundaries.
@@ -166,6 +168,8 @@ where
     for i in 0..25u64 {
         assert_eq!(journal.read(i).await.unwrap(), i * 10);
     }
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test replay from the start of the journal.
@@ -180,19 +184,23 @@ where
         journal.append(i * 10).await.unwrap();
     }
 
-    let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
+    {
+        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 10);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            assert_eq!(*pos, i as u64);
+            assert_eq!(*value, (i as u64) * 10);
+        }
     }
 
-    assert_eq!(items.len(), 10);
-    for (i, (pos, value)) in items.iter().enumerate() {
-        assert_eq!(*pos, i as u64);
-        assert_eq!(*value, (i as u64) * 10);
-    }
+    journal.destroy().await.unwrap();
 }
 
 /// Test replay from the middle of the journal.
@@ -207,19 +215,23 @@ where
         journal.append(i * 10).await.unwrap();
     }
 
-    let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
+    {
+        let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 8);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            assert_eq!(*pos, (i + 7) as u64);
+            assert_eq!(*value, ((i + 7) as u64) * 10);
+        }
     }
 
-    assert_eq!(items.len(), 8);
-    for (i, (pos, value)) in items.iter().enumerate() {
-        assert_eq!(*pos, (i + 7) as u64);
-        assert_eq!(*value, ((i + 7) as u64) * 10);
-    }
+    journal.destroy().await.unwrap();
 }
 
 /// Test that size is unchanged after pruning.
@@ -240,6 +252,8 @@ where
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test using journal through Contiguous trait methods.
@@ -258,6 +272,8 @@ where
 
     let size = Contiguous::size(&journal).await.unwrap();
     assert_eq!(size, 2);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test replay after pruning items.
@@ -274,21 +290,25 @@ where
 
     journal.prune(10).await.unwrap();
 
-    // Replay from a position that may or may not be pruned (section-aligned)
-    // We replay from position 10 which should be safe
-    let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
+    {
+        // Replay from a position that may or may not be pruned (section-aligned)
+        // We replay from position 10 which should be safe
+        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 10);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            assert_eq!(*pos, (i + 10) as u64);
+            assert_eq!(*value, ((i + 10) as u64) * 10);
+        }
     }
 
-    assert_eq!(items.len(), 10);
-    for (i, (pos, value)) in items.iter().enumerate() {
-        assert_eq!(*pos, (i + 10) as u64);
-        assert_eq!(*value, ((i + 10) as u64) * 10);
-    }
+    journal.destroy().await.unwrap();
 }
 
 /// Test pruning all items then appending new ones.
@@ -311,6 +331,8 @@ where
 
     let size = journal.size().await.unwrap();
     assert_eq!(size, 11);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test that positions remain stable after pruning and further appends.
@@ -341,21 +363,25 @@ where
     assert_eq!(journal.read(20).await.unwrap(), 2000);
     assert_eq!(journal.read(24).await.unwrap(), 2400);
 
-    // Replay from position 10 and verify positions
-    let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
+    {
+        // Replay from position 10 and verify positions
+        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 15);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            let expected_pos = (i + 10) as u64;
+            assert_eq!(*pos, expected_pos);
+            assert_eq!(*value, expected_pos * 100);
+        }
     }
 
-    assert_eq!(items.len(), 15);
-    for (i, (pos, value)) in items.iter().enumerate() {
-        let expected_pos = (i + 10) as u64;
-        assert_eq!(*pos, expected_pos);
-        assert_eq!(*value, expected_pos * 100);
-    }
+    journal.destroy().await.unwrap();
 }
 
 /// Test sync behavior.
@@ -380,6 +406,8 @@ where
 
     let size = journal.size().await.unwrap();
     assert_eq!(size, 6);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test replay on an empty journal.
@@ -390,15 +418,19 @@ where
 {
     let journal = factory("replay_on_empty".to_string()).await.unwrap();
 
-    let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
+    {
+        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 0);
     }
 
-    assert_eq!(items.len(), 0);
+    journal.destroy().await.unwrap();
 }
 
 /// Test replay at exact size position.
@@ -414,15 +446,20 @@ where
     }
 
     let size = journal.size().await.unwrap();
-    let stream = journal.replay(size, NZUsize!(1024)).await.unwrap();
-    futures::pin_mut!(stream);
 
-    let mut items = Vec::new();
-    while let Some(result) = stream.next().await {
-        items.push(result.unwrap());
+    {
+        let stream = journal.replay(size, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
+
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 0);
     }
 
-    assert_eq!(items.len(), 0);
+    journal.destroy().await.unwrap();
 }
 
 /// Test multiple prunes with same min_position for idempotency.
@@ -473,6 +510,8 @@ where
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.read(10).await.unwrap(), 999);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test basic persistence: append items, close, re-open, verify state.
@@ -638,6 +677,8 @@ where
     // Try to read beyond size
     let result = journal.read(10).await;
     assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test read after pruning.
@@ -657,6 +698,8 @@ where
     let oldest_retained_pos = journal.oldest_retained_pos().await.unwrap().unwrap();
     let result = journal.read(oldest_retained_pos - 1).await;
     assert!(matches!(result, Err(Error::ItemPruned(_))));
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test rewinding to the middle of the journal
