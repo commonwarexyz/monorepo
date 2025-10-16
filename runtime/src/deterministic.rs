@@ -1159,11 +1159,6 @@ impl<F: Future> FutureState<F> {
             }
         }
     }
-
-    /// Transition to `Completed`.
-    fn complete(self: Pin<&mut Self>) {
-        self.project_replace(FutureState::Completed);
-    }
 }
 
 /// A future that resolves when a given target time is reached.
@@ -1223,25 +1218,23 @@ where
             return Poll::Pending;
         }
 
-        // If the future is already completed, return the cached value.
-        if let Some(value) = this.future.as_mut().take() {
-            return Poll::Ready(value);
-        }
-
         // Block the current thread until the future reschedules itself, keeping polling
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
+            // If the future has resolved, return the cached value.
+            if let Some(value) = this.future.as_mut().take() {
+                return Poll::Ready(value);
+            }
+
+            // Poll the future again.
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
             let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
                 unreachable!("future polled after completion");
             };
             match future.as_mut().poll(&mut cx_block) {
-                Poll::Ready(value) => {
-                    this.future.as_mut().complete();
-                    return Poll::Ready(value);
-                }
+                Poll::Ready(value) => this.future.as_mut().resolve(value),
                 Poll::Pending => blocker.wait(),
             };
         }
