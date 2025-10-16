@@ -228,10 +228,12 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Unlike `with_label`, this method does not create a new context.
     fn scoped_label(&self, label: &str) -> String {
+        // Normalize label: replace '-' with '_' for Prometheus compatibility
+        let normalized_label = label.replace('-', "_");
         let label = if self.label().is_empty() {
-            label.to_string()
+            normalized_label
         } else {
-            format!("{}_{}", self.label(), label)
+            format!("{}_{}", self.label(), normalized_label)
         };
         assert!(
             !label.starts_with(METRICS_PREFIX),
@@ -1857,6 +1859,25 @@ mod tests {
         })
     }
 
+    fn test_metrics_label_normalization<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Test that '-' is normalized to '_' in labels
+            let ctx = context.with_label("my-label");
+            assert_eq!(ctx.label(), "my_label");
+
+            // Test nested labels with dashes
+            let nested = ctx.with_label("nested-part");
+            assert_eq!(nested.label(), "my_label_nested_part");
+
+            // Test scoped_label normalization
+            let scoped = context.scoped_label("scoped-label");
+            assert_eq!(scoped, "scoped_label");
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let runner = deterministic::Runner::default();
@@ -2129,6 +2150,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_metrics_label_normalization() {
+        let executor = deterministic::Runner::default();
+        test_metrics_label_normalization(executor);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let runner = tokio::Runner::default();
         test_error_future(runner);
@@ -2397,6 +2424,12 @@ mod tests {
     fn test_tokio_metrics_label() {
         let executor = tokio::Runner::default();
         test_metrics_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_label_normalization() {
+        let executor = tokio::Runner::default();
+        test_metrics_label_normalization(executor);
     }
 
     #[test]
