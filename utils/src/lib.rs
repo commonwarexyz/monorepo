@@ -166,7 +166,7 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZUsize {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroUsize::new($val).expect("value must be non-zero")
@@ -176,7 +176,7 @@ macro_rules! NZUsize {
 /// A macro to create a `NonZeroU8` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU8 {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         core::num::NonZeroU8::new($val).expect("value must be non-zero")
     };
 }
@@ -184,7 +184,7 @@ macro_rules! NZU8 {
 /// A macro to create a `NonZeroU16` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU16 {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         core::num::NonZeroU16::new($val).expect("value must be non-zero")
     };
 }
@@ -192,7 +192,7 @@ macro_rules! NZU16 {
 /// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU32 {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroU32::new($val).expect("value must be non-zero")
@@ -202,7 +202,7 @@ macro_rules! NZU32 {
 /// A macro to create a `NonZeroU64` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU64 {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
         core::num::NonZeroU64::new($val).expect("value must be non-zero")
@@ -243,7 +243,7 @@ impl From<NonZeroDuration> for Duration {
 /// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
 #[macro_export]
 macro_rules! NZDuration {
-    ($val:expr_2021) => {
+    ($val:expr) => {
         // This will panic at runtime if $val is zero.
         $crate::NonZeroDuration::new_panic($val)
     };

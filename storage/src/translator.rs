@@ -86,7 +86,7 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
 }
 
 macro_rules! define_cap_translator {
-    ($name:ident, $size:expr_2021, $int:ty) => {
+    ($name:ident, $size:expr, $int:ty) => {
         #[doc = concat!("Translator that caps the key to ", stringify!($size), " byte(s) and returns it packed in a ", stringify!($int), ".")]
         #[derive(Clone, Default)]
         pub struct $name;
