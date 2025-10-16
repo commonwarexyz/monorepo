@@ -1130,16 +1130,6 @@ enum FutureState<F: Future> {
     Completed,
 }
 
-#[cfg(feature = "external")]
-impl<F: Future> FutureStateOwned<F> {
-    fn into_ready(self) -> Poll<F::Output> {
-        match self {
-            FutureStateOwned::Ready(value) => Poll::Ready(value),
-            _ => unreachable!("future already cached"),
-        }
-    }
-}
-
 /// A future that resolves when a given target time is reached.
 ///
 /// If the future is not ready at the target time, the future is blocked until the target time is reached.
@@ -1210,11 +1200,12 @@ where
                     Poll::Pending => blocker.wait(),
                 },
                 FutureStateProj::Ready(_) => {
-                    return this
-                        .future
-                        .as_mut()
-                        .project_replace(FutureState::Completed)
-                        .into_ready();
+                    let FutureStateOwned::Ready(value) =
+                        this.future.as_mut().project_replace(FutureState::Completed)
+                    else {
+                        unreachable!("value not ready");
+                    };
+                    break Poll::Ready(value);
                 }
                 FutureStateProj::Completed => {
                     panic!("future polled after completion");
