@@ -227,11 +227,20 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
 
         // Handle case where all data has been pruned or journal is empty
         if data.blobs.is_empty() {
-            // No sections retained - either never had data or everything was pruned.
-            // The locations journal (fixed::Journal) maintains the global size counter,
-            // which continues to increment even after pruning (preserving monotonicity).
+            // No sections retained - could be:
+            // 1. Empty / fully pruned
+            // 2. Crashed during prune (data pruned, locations not yet pruned)
+            // 3. Data partition lost (external corruption)
+            // For cases 2 & 3, we need to repair by pruning locations to match data
             let size = locations.size().await?;
+            let locations_oldest = locations.oldest_retained_pos().await?;
+            // If locations has unpruned entries, repair by pruning to match empty data
+            if let Some(_oldest) = locations_oldest {
+                // Prune all locations to match empty data
+                locations.prune(size).await?;
+            }
 
+            // Both journals now consistent (empty / fully pruned)
             return Ok(Self {
                 data,
                 locations,
@@ -664,6 +673,73 @@ mod tests {
             position_to_section(position, oldest_retained_pos, items_per_section),
             expected_section
         );
+    }
+
+    /// Test that init repairs state when data is pruned/lost but locations survives.
+    ///
+    /// This handles both:
+    /// 1. Crash during prune-all (data pruned, locations not yet)
+    /// 2. External data partition loss
+    ///
+    /// In both cases, we repair by pruning locations to match.
+    #[test]
+    fn test_variable_repair_data_locations_mismatch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "data_loss_test".to_string(),
+                locations_partition: "data_loss_test_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Setup: Create journal with data ===
+            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 20 items across 2 sections
+            for i in 0..20u64 {
+                variable.append(i * 100).await.unwrap();
+            }
+
+            variable.close().await.unwrap();
+
+            // === Simulate data loss: Delete data partition but keep locations ===
+            context
+                .remove(&cfg.partition, None)
+                .await
+                .expect("Failed to remove data partition");
+
+            // === Verify init repairs the mismatch ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Should repair locations to match empty data");
+
+            // Size should be preserved (monotonic counter)
+            assert_eq!(journal.size().await.unwrap(), 20);
+
+            // But no items remain (both journals pruned)
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // All reads should fail with ItemPruned
+            for i in 0..20 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Can append new data starting at position 20 (monotonic!)
+            let pos = journal.append(999).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// Test that init rejects when partition and locations_partition are the same.
