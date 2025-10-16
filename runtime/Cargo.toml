@@ -33,7 +33,7 @@ libc = { workspace = true }
 sysinfo = { workspace = true }
 
 [features]
-default = []
+default = ["external"]
 external = ["pin-project"]
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]

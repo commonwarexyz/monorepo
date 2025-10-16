@@ -1122,6 +1122,13 @@ impl Clock for Context {
     }
 }
 
+#[cfg(feature = "external")]
+#[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
+enum FutureState<F: Future> {
+    Pending(#[pin] F),
+    Ready(Option<F::Output>),
+}
+
 /// A future that resolves when a given target time is reached.
 ///
 /// If the future is not ready at the target time, the future is blocked until the target time is reached.
@@ -1131,8 +1138,7 @@ struct Waiter<F: Future> {
     executor: Weak<Executor>,
     target: SystemTime,
     #[pin]
-    future: F,
-    ready: Option<F::Output>,
+    future: FutureState<F>,
     started: bool,
     registered: bool,
 }
@@ -1154,8 +1160,21 @@ where
             *this.started = true;
             let waker = noop_waker();
             let mut cx_noop = task::Context::from_waker(&waker);
-            if let Poll::Ready(value) = this.future.as_mut().poll(&mut cx_noop) {
-                *this.ready = Some(value);
+
+            match this.future.as_mut().project() {
+                FutureStateProj::Pending(mut future) => {
+                    if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
+                        match this
+                            .future
+                            .as_mut()
+                            .project_replace(FutureState::Ready(Some(value)))
+                        {
+                            FutureStateOwned::Pending(_) => {}
+                            FutureStateOwned::Ready(_) => unreachable!("future already cached"),
+                        }
+                    }
+                }
+                FutureStateProj::Ready(_) => unreachable!("future polled after completion"),
             }
         }
 
@@ -1176,8 +1195,11 @@ where
         }
 
         // If the underlying future completed during the noop pre-poll, surface the cached value.
-        if let Some(value) = this.ready.take() {
-            return Poll::Ready(value);
+        if let FutureStateProj::Ready(value) = this.future.as_mut().project() {
+            if let Some(value) = value.take() {
+                return Poll::Ready(value);
+            }
+            unreachable!("cached result already taken");
         }
 
         // Block the current thread until the future reschedules itself, keeping polling
@@ -1186,11 +1208,17 @@ where
         loop {
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-            match this.future.as_mut().poll(&mut cx_block) {
-                Poll::Ready(value) => {
-                    break Poll::Ready(value);
-                }
-                Poll::Pending => blocker.wait(),
+            match this.future.as_mut().project() {
+                FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_block) {
+                    Poll::Ready(value) => {
+                        break Poll::Ready(value);
+                    }
+                    Poll::Pending => blocker.wait(),
+                },
+                FutureStateProj::Ready(value) => match value.take() {
+                    Some(value) => break Poll::Ready(value),
+                    None => unreachable!("cached result already taken"),
+                },
             }
         }
     }
@@ -1215,8 +1243,7 @@ impl Pacer for Context {
         Waiter {
             executor: self.executor.clone(),
             target,
-            future,
-            ready: None,
+            future: FutureState::Pending(future),
             started: false,
             registered: false,
         }
