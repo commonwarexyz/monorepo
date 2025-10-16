@@ -1126,9 +1126,8 @@ impl Clock for Context {
 ///
 /// The inner future is polled while in `Pending`. Once it returns `Poll::Ready`, the
 /// result is stored in `Ready` and the future itself is dropped so any captured
-/// resources are released before we honour the pacing delay. After the paced wake-up
-/// the cached value is returned and the state transitions to `Completed` to guard
-/// against double polling.
+/// resources are released before we honor the pacing delay. After the paced latency
+/// has elapsed, the cached value is returned and the state transitions to `Completed`.
 #[cfg(feature = "external")]
 #[pin_project(project = FutureStateProj, project_ref = FutureStateProjRef, project_replace = FutureStateOwned)]
 enum FutureState<F: Future> {
@@ -1139,7 +1138,7 @@ enum FutureState<F: Future> {
 
 #[cfg(feature = "external")]
 impl<F: Future> FutureState<F> {
-    /// Cache the completed output and drop the underlying future immediately.
+    /// Cache the completed output and drop the underlying future.
     fn resolve(self: Pin<&mut Self>, value: F::Output) {
         self.project_replace(FutureState::Ready(value));
     }
@@ -1161,7 +1160,7 @@ impl<F: Future> FutureState<F> {
         }
     }
 
-    /// Transition directly to `Completed`, keeping the cached value unchanged.
+    /// Transition to `Completed`.
     fn complete(self: Pin<&mut Self>) {
         self.project_replace(FutureState::Completed);
     }
