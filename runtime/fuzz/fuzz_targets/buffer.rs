@@ -2,8 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
+    Blob, Runner, Storage,
     buffer::{Append, PoolRef, Read, Write},
-    deterministic, Blob, Runner, Storage,
+    deterministic,
 };
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;

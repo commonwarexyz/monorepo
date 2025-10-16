@@ -297,7 +297,7 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use crate::mmr::{MAX_LOCATION, MAX_POSITION, StandardHasher as Standard, mem::Mmr};
     use commonware_cryptography::Sha256;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.

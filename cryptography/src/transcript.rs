@@ -6,12 +6,12 @@
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write, varint::UInt};
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
 use rand_core::{
-    impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
+    impls::{next_u32_via_fill, next_u64_via_fill},
 };
 use zeroize::ZeroizeOnDrop;
 

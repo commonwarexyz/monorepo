@@ -1,14 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::mmr::{
+    Position, StandardHasher as Standard,
     journaled::{Config, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
-    Position, StandardHasher as Standard,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 200;

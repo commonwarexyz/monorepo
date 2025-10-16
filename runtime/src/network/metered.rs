@@ -167,11 +167,11 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Listener as _, Network as _, Sink as _, Stream as _,
         network::{
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use prometheus_client::registry::Registry;
     use std::net::SocketAddr;

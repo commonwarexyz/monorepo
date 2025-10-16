@@ -1,11 +1,11 @@
 use super::types::{Activity, Context};
 use crate::{
-    types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
+    types::{Epoch, View},
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
+    bls12381::primitives::{group, variant::Variant},
 };
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
@@ -22,12 +22,12 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Index = View,
-        Identity = V::Public,
-        Seed = V::Signature,
-        PublicKey = C::PublicKey,
-        Share = group::Share,
-    >,
+            Index = View,
+            Identity = V::Public,
+            Seed = V::Signature,
+            PublicKey = C::PublicKey,
+            Share = group::Share,
+        >,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
@@ -110,21 +110,21 @@ pub struct Config<
 }
 
 impl<
-        C: Signer,
-        B: Blocker<PublicKey = C::PublicKey>,
-        V: Variant,
-        D: Digest,
-        A: Automaton<Context = Context<D>>,
-        R: Relay,
-        F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
+    C: Signer,
+    B: Blocker<PublicKey = C::PublicKey>,
+    V: Variant,
+    D: Digest,
+    A: Automaton<Context = Context<D>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Config<C, B, V, D, A, R, F, S>
+> Config<C, B, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

@@ -1,5 +1,5 @@
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics};
+use commonware_runtime::{Metrics as RuntimeMetrics, telemetry::metrics::status};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},

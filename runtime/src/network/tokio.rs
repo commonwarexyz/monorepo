@@ -4,8 +4,8 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     time::timeout,
 };
@@ -67,9 +67,10 @@ impl crate::Listener for Listener {
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
+        }
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
@@ -197,9 +198,10 @@ impl crate::Network for Network {
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
+        }
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();

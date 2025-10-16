@@ -30,7 +30,7 @@ pub trait Consumer: Clone + Send + 'static {
     ///
     /// The failure is used to indicate why.
     fn failed(&mut self, key: Self::Key, failure: Self::Failure)
-        -> impl Future<Output = ()> + Send;
+    -> impl Future<Output = ()> + Send;
 }
 
 /// Responsible for fetching data and notifying a `Consumer`.

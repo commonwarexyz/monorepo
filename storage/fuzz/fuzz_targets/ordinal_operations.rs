@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{Runner, deterministic};
 use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 

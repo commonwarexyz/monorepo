@@ -159,8 +159,8 @@ impl<T: Codec + FixedSize> CodecFixed for T {}
 mod tests {
     use super::*;
     use crate::{
-        extensions::{DecodeExt, ReadExt},
         Error,
+        extensions::{DecodeExt, ReadExt},
     };
     use bytes::Bytes;
 

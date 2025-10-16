@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, quorum_from_slice, union,
-    union_unique, NZUsize, NonZeroDuration, NZU32, NZU64,
+    NZU32, NZU64, NZUsize, NonZeroDuration, from_hex, from_hex_formatted, hex, max_faults, modulo,
+    quorum, quorum_from_slice, union, union_unique,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;

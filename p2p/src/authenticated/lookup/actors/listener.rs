@@ -1,19 +1,19 @@
 //! Listener
 
 use crate::authenticated::{
+    Mailbox,
     lookup::actors::{spawner, tracker},
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
+    Clock, ContextCell, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf, spawn_cell,
 };
-use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
-use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
+use commonware_stream::{Config as StreamConfig, listen};
+use commonware_utils::{IpAddrExt, concurrency::Limiter, net::SubnetMask};
+use futures::{StreamExt, channel::mpsc};
+use governor::{Quota, RateLimiter, clock::ReasonablyRealtime};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -263,9 +263,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
+    use commonware_cryptography::{PrivateKeyExt as _, ed25519::PrivateKey};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
+    use commonware_runtime::{Error as RuntimeError, Runner as _, Stream, deterministic};
     use commonware_utils::NZU32;
     use futures::SinkExt;
     use std::{

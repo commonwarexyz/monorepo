@@ -1,10 +1,10 @@
-use crate::{types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
+use crate::{Supervisor as S, ThresholdSupervisor as TS, types::Epoch};
 use commonware_cryptography::{
+    PublicKey,
     bls12381::{
         dkg::ops::evaluate_all,
         primitives::{group::Share, poly, variant::Variant},
     },
-    PublicKey,
 };
 use std::collections::HashMap;
 

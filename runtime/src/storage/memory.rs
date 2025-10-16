@@ -1,4 +1,4 @@
-use commonware_utils::{hex, StableBuf};
+use commonware_utils::{StableBuf, hex};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, RwLock},

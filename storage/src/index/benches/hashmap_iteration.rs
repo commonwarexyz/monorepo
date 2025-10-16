@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group};
 use rand::Rng;
 use std::collections::HashMap;
 

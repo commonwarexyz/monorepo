@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
-use criterion::{criterion_group, Criterion};
+use commonware_cryptography::{Digest as _, Sha256, sha256};
+use commonware_storage::mmr::{Location, StandardHasher, mem::Mmr};
+use criterion::{Criterion, criterion_group};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -33,7 +33,6 @@ fn bench_prove_single_element(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        
                         elements
                             .choose_multiple(&mut sampler, SAMPLE_SIZE)
                             .cloned()

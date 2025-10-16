@@ -1,10 +1,10 @@
 use commonware_consensus::{
-    simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
+    Automaton as Au, Epochable, Relay as Re, simplex::types::Context, types::Epoch,
 };
 use commonware_cryptography::Digest;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 
 pub enum Message<D: Digest> {

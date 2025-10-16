@@ -1,6 +1,6 @@
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
+    telemetry::metrics::{histogram, status},
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;

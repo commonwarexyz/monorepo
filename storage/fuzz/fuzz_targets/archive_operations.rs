@@ -1,15 +1,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     archive::{
-        prunable::{Archive, Config},
         Archive as _, Identifier,
+        prunable::{Archive, Config},
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroUsize;
 

@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{hex, StableBuf};
+use commonware_utils::{StableBuf, hex};
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,

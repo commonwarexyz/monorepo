@@ -1,8 +1,8 @@
 use super::Error;
-use crate::{authenticated::lookup::actors::router, Channel, Message, Recipients};
+use crate::{Channel, Message, Recipients, authenticated::lookup::actors::router};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use governor::Quota;
 use std::collections::BTreeMap;
 

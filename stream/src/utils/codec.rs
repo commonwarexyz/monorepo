@@ -46,7 +46,7 @@ pub async fn recv_frame<T: Stream>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, mocks, Runner};
+    use commonware_runtime::{Runner, deterministic, mocks};
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: usize = 1024;

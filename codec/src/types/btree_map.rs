@@ -6,9 +6,9 @@
 extern crate alloc;
 
 use crate::{
+    RangeCfg,
     codec::{EncodeSize, Read, Write},
     error::Error,
-    RangeCfg,
 };
 use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};

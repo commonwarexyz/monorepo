@@ -1,7 +1,7 @@
 use crate::{append_random_data, get_journal};
 use commonware_runtime::benchmarks::{context, tokio};
 use commonware_utils::NZU64;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},

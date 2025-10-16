@@ -2,13 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     mmr::Location,
     store::{Config, Store},
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 50;

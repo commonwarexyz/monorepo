@@ -11,7 +11,7 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
+use crate::mmr::{Error, Location, Position, Proof, hasher::Hasher, proof, storage::Storage};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 use futures::future::try_join_all;
@@ -170,10 +170,10 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use crate::mmr::{StandardHasher as Standard, location::LocationRangeExt as _, mem::Mmr};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[v])

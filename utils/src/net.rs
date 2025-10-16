@@ -35,11 +35,7 @@ impl SubnetMask {
     /// Clamp the given bits to the maximum value.
     #[inline]
     const fn clamp(bits: u8, max: u8) -> u8 {
-        if bits > max {
-            max
-        } else {
-            bits
-        }
+        if bits > max { max } else { bits }
     }
 
     /// Generate an IPv4 subnet mask that retains the upper `bits`.
@@ -347,10 +343,10 @@ mod tests {
 
         // Test unique local addresses (fc00::/7)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("fc00::1").unwrap()).is_global()); // fc00::/8
-        assert!(!IpAddr::V6(
-            Ipv6Addr::from_str("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff").unwrap()
-        )
-        .is_global()); // fd00::/8
+        assert!(
+            !IpAddr::V6(Ipv6Addr::from_str("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff").unwrap())
+                .is_global()
+        ); // fd00::/8
 
         // Test link-local unicast addresses (fe80::/10)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("fe80::1").unwrap()).is_global());

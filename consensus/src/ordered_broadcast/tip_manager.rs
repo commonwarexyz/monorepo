@@ -1,6 +1,6 @@
 use super::types::Node;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
-use std::collections::{hash_map::Entry, HashMap};
+use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use std::collections::{HashMap, hash_map::Entry};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]

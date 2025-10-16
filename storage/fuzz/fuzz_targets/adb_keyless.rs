@@ -2,15 +2,15 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
         keyless::{Config, Keyless},
         verify_proof,
     },
-    mmr::{hasher::Standard, Location},
+    mmr::{Location, hasher::Standard},
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 50;

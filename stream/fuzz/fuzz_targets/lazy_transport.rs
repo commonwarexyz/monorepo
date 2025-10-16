@@ -1,8 +1,8 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
-use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{dial, listen, Config, Receiver, Sender};
+use commonware_cryptography::{PrivateKeyExt as _, Signer, ed25519::PrivateKey};
+use commonware_runtime::{Runner, Spawner, deterministic, mocks};
+use commonware_stream::{Config, Receiver, Sender, dial, listen};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};

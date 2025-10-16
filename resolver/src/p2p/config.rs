@@ -1,6 +1,6 @@
 use crate::{
-    p2p::{Coordinator, Producer},
     Consumer,
+    p2p::{Coordinator, Producer},
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;

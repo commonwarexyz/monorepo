@@ -1,5 +1,5 @@
 use crate::Span;
-use futures::{channel::mpsc, SinkExt};
+use futures::{SinkExt, channel::mpsc};
 use std::collections::HashMap;
 
 /// An event that indicates the messages that were sent to the consumer

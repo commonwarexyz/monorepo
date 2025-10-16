@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Storage, buffer::Append};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
@@ -272,17 +272,16 @@ mod tests {
         adb::{
             self,
             any::fixed::unordered::{
-                test::{
-                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest,
-                },
                 Any,
+                test::{
+                    AnyTest, any_db_config, apply_ops, create_test_config, create_test_db,
+                    create_test_ops,
+                },
             },
             sync::{
-                self,
+                self, Engine, Target,
                 engine::{Config, NextStep},
                 resolver::tests::FailResolver,
-                Engine, Target,
             },
         },
         journal::{self, fixed},
@@ -291,18 +290,18 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{
-        sha256::{self, Digest},
         Digest as _, Hasher, Sha256,
+        sha256::{self, Digest},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        Runner as _, RwLock,
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner as _, RwLock,
     };
-    use commonware_utils::{NZUsize, NZU64};
-    use futures::{channel::mpsc, future::join_all, SinkExt as _};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use commonware_utils::{NZU64, NZUsize};
+    use futures::{SinkExt as _, channel::mpsc, future::join_all};
+    use rand::{RngCore as _, SeedableRng as _, rngs::StdRng};
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU64,
@@ -2038,7 +2037,7 @@ mod tests {
                 assert_eq!(journal.size().await.unwrap(), 7);
                 assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
-                                                    // Tail blob should have 2 items worth of space (7 % 5 = 2)
+                // Tail blob should have 2 items worth of space (7 % 5 = 2)
                 assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(5)); // First item in tail blob
 
                 // Operations 0-4 should be pruned (blob 0 doesn't exist)

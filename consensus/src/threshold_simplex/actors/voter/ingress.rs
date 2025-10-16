@@ -1,6 +1,6 @@
 use crate::threshold_simplex::types::Voter;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
-use futures::{channel::mpsc, stream, SinkExt};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use futures::{SinkExt, channel::mpsc, stream};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<V: Variant, D: Digest> {

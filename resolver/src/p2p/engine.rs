@@ -1,30 +1,30 @@
 use super::{
+    Coordinator, Producer,
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
-    metrics, wire, Coordinator, Producer,
+    metrics, wire,
 };
 use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Span};
+use commonware_utils::{Span, futures::Pool as FuturesPool};
 use futures::{
+    StreamExt,
     channel::{mpsc, oneshot},
     future::{self, Either},
-    StreamExt,
 };
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -92,15 +92,15 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Spawner + Rng + Metrics,
-        P: PublicKey,
-        D: Coordinator<PublicKey = P>,
-        Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
-        Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
+    E: Clock + GClock + Spawner + Rng + Metrics,
+    P: PublicKey,
+    D: Coordinator<PublicKey = P>,
+    Key: Span,
+    Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
+    Pro: Producer<Key = Key>,
+    NetS: Sender<PublicKey = P>,
+    NetR: Receiver<PublicKey = P>,
+> Engine<E, P, D, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
     ///

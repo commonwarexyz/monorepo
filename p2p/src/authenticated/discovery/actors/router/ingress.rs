@@ -1,6 +1,6 @@
 use crate::{
-    authenticated::{data::Data, discovery::channels::Channels, relay::Relay, Mailbox},
     Channel, Recipients,
+    authenticated::{Mailbox, data::Data, discovery::channels::Channels, relay::Relay},
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;

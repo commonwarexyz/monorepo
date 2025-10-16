@@ -7,7 +7,7 @@ use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::{num::NonZeroUsize, ops::Range};
-use futures::{pin_mut, StreamExt as _};
+use futures::{StreamExt as _, pin_mut};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -134,8 +134,8 @@ mod tests {
     use super::*;
     use crate::journal::Error;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{Runner as _, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: usize = 101;

@@ -1,14 +1,14 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
+    Supervisor, Viewable,
     simplex::types::{Finalize, Nullify, Voter},
     types::View,
-    Supervisor, Viewable,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use std::marker::PhantomData;
 use tracing::debug;
 

@@ -2,9 +2,9 @@ mod actor;
 mod ingress;
 
 use crate::{
+    Automaton, Relay, Reporter, Supervisor,
     simplex::types::{Activity, Context},
     types::{Epoch, View},
-    Automaton, Relay, Reporter, Supervisor,
 };
 pub use actor::Actor;
 use commonware_cryptography::{Digest, Signer};
@@ -45,24 +45,24 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
+        Viewable,
         simplex::{
             actors::resolver,
             mocks,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
-        Viewable,
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{ed25519, Hasher as _, PrivateKeyExt as _, Sha256};
+    use commonware_cryptography::{Hasher as _, PrivateKeyExt as _, Sha256, ed25519};
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
+        simulated::{Config as NConfig, Link, Network},
     };
-    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZUsize};
-    use futures::{channel::mpsc, StreamExt};
+    use commonware_runtime::{Metrics, Runner, Spawner, deterministic};
+    use commonware_utils::{NZUsize, quorum};
+    use futures::{StreamExt, channel::mpsc};
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);

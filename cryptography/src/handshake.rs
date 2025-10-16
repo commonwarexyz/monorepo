@@ -33,8 +33,8 @@
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use crate::{
-    transcript::{Summary, Transcript},
     PublicKey, Signature, Signer, Verifier,
+    transcript::{Summary, Transcript},
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
@@ -47,7 +47,7 @@ mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
-pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
+pub use cipher::{CIPHERTEXT_OVERHEAD, RecvCipher, SendCipher};
 
 const NAMESPACE: &[u8] = b"commonware/handshake";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
@@ -350,7 +350,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use crate::{PrivateKeyExt as _, Signer, ed25519::PrivateKey};
     use commonware_codec::{Codec, DecodeExt};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;

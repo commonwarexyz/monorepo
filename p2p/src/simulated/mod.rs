@@ -180,12 +180,12 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{self, PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
+        ed25519::{self, PrivateKey, PublicKey},
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, deterministic};
+    use futures::{SinkExt, StreamExt, channel::mpsc};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},

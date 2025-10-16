@@ -253,7 +253,7 @@ macro_rules! NZDuration {
 mod tests {
     use super::*;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[test]
     fn test_hex() {

@@ -3,11 +3,11 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
+use crate::{Automaton, Relay, Reporter, Supervisor, types::View};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -31,14 +31,14 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Signer,
-        D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Engine<E, C, D, A, R, F, S>
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    C: Signer,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+> Engine<E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
     pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> Self {

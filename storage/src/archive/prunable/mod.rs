@@ -183,10 +183,10 @@ mod tests {
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
-    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
+    use commonware_codec::{DecodeExt, EncodeSize, Error as CodecError, varint::UInt};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_runtime::{Blob, Metrics, Runner, Storage, deterministic};
+    use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
     use rand::Rng;
     use std::collections::BTreeMap;
 

@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Element, Share, G1, G2},
+    group::{Element, G1, G2, Share},
     ops::*,
     poly::{Eval, Poly, Weight},
     variant::{MinPk, MinSig},

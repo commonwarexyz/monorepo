@@ -1,5 +1,5 @@
 use commonware_cryptography::lthash::LtHash;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 
 fn benchmark_combine(c: &mut Criterion) {
     c.bench_function(module_path!(), |b| {

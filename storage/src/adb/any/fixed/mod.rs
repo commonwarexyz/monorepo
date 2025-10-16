@@ -11,15 +11,15 @@ use crate::{
     adb::Error,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
+        journaled::{Config as MmrConfig, Mmr},
     },
     store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_runtime::{Clock, Metrics, Storage, ThreadPool, buffer::PoolRef};
 use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};

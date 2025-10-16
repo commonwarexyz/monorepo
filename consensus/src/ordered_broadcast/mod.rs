@@ -54,9 +54,10 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{Config, Engine, mocks};
     use crate::types::Epoch;
     use commonware_cryptography::{
+        PrivateKeyExt as _, Signer as _,
         bls12381::{
             dkg::ops,
             primitives::{
@@ -67,18 +68,17 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        Clock, Metrics, Runner, Spawner,
         buffer::PoolRef,
         deterministic::{self, Context},
-        Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::{NZUsize, quorum};
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, SeedableRng as _};
+    use rand::{SeedableRng as _, rngs::StdRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroUsize,
@@ -123,9 +123,10 @@ mod tests {
                     continue;
                 }
                 if let Some(f) = restrict_to
-                    && !f(participants.len(), i1, i2) {
-                        continue;
-                    }
+                    && !f(participants.len(), i1, i2)
+                {
+                    continue;
+                }
                 if matches!(action, Action::Update(_) | Action::Unlink) {
                     oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
                 }
@@ -905,7 +906,7 @@ mod tests {
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(111),
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![
-                            sequencer.public_key()
+                            sequencer.public_key(),
                         ]),
                         validators: mocks::Validators::<PublicKey, V>::new(
                             polynomial.clone(),

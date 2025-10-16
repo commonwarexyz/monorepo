@@ -1,15 +1,15 @@
 use crate::{
+    Reporter as Z,
     ordered_broadcast::types::{Activity, Chunk, Lock, Proposal},
     types::Epoch,
-    Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
 };
-use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, V: Variant, D: Digest> {

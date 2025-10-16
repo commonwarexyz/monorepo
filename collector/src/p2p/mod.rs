@@ -42,25 +42,25 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
 #[cfg(test)]
 mod tests {
     use super::{
+        Config, Engine, Mailbox,
         mocks::{
             handler::Handler as MockHandler,
             monitor::Monitor as MockMonitor,
             types::{Request, Response},
         },
-        Config, Engine, Mailbox,
     };
     use crate::{Error, Handler, Monitor, Originator};
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Committable, PrivateKeyExt, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{Clock, Metrics, Runner, deterministic};
     use futures::StreamExt;
     use std::time::Duration;
 

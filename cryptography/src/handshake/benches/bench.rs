@@ -1,9 +1,9 @@
 use commonware_cryptography::{
+    PrivateKeyExt as _, Signer,
     ed25519::PrivateKey,
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
+        Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
     },
-    PrivateKeyExt as _, Signer,
 };
 use criterion::criterion_main;
 use rand::SeedableRng as _;

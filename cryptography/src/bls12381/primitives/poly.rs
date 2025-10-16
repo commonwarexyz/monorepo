@@ -8,15 +8,15 @@
 
 use super::variant::Variant;
 use crate::bls12381::primitives::{
-    group::{self, Element, Scalar},
     Error,
+    group::{self, Element, Scalar},
 };
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
 use core::hash::Hash;
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
@@ -388,7 +388,7 @@ pub fn public<V: Variant>(public: &Public<V>) -> &V::Public {
 pub mod tests {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/poly.rs#L355-L604
     use super::*;
-    use crate::bls12381::primitives::group::{Scalar, G2};
+    use crate::bls12381::primitives::group::{G2, Scalar};
     use commonware_codec::{Decode, Encode};
 
     #[test]

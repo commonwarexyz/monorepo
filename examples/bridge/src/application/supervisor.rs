@@ -1,6 +1,7 @@
 use commonware_codec::Encode;
-use commonware_consensus::{types::View, Supervisor as Su, ThresholdSupervisor as TSu};
+use commonware_consensus::{Supervisor as Su, ThresholdSupervisor as TSu, types::View};
 use commonware_cryptography::{
+    PublicKey,
     bls12381::{
         dkg::ops::evaluate_all,
         primitives::{
@@ -9,7 +10,6 @@ use commonware_cryptography::{
             variant::{MinSig, Variant},
         },
     },
-    PublicKey,
 };
 use commonware_utils::{modulo, set::Set};
 

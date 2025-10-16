@@ -1,8 +1,8 @@
-use super::{actors::Messenger, Error};
+use super::{Error, actors::Messenger};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use governor::Quota;
 use std::collections::BTreeMap;
 

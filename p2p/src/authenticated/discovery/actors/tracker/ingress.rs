@@ -1,11 +1,11 @@
 use super::Reservation;
 use crate::authenticated::{
+    Mailbox,
     discovery::{
         actors::{peer, tracker::Metadata},
         types,
     },
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::PublicKey;
 use futures::channel::oneshot;

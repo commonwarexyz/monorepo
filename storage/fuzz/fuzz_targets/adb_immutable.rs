@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
         immutable::{Config, Immutable},
@@ -12,9 +12,9 @@ use commonware_storage::{
     mmr::Location,
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::num::NonZeroU64;
 
 const MAX_OPERATIONS: usize = 50;
@@ -198,10 +198,11 @@ fn fuzz(input: FuzzInput) {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
                         if let Ok(()) = db.prune(safe_loc).await
-                            && let Some(oldest) = db.oldest_retained_loc() {
-                                set_locations.retain(|(_, l)| *l >= oldest);
-                                keys_set.retain(|(_, l)| *l >= oldest);
-                            }
+                            && let Some(oldest) = db.oldest_retained_loc()
+                        {
+                            set_locations.retain(|(_, l)| *l >= oldest);
+                            keys_set.retain(|(_, l)| *l >= oldest);
+                        }
                     }
                 }
 
@@ -238,11 +239,12 @@ fn fuzz(input: FuzzInput) {
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                         if let Some(oldest) = db.oldest_retained_loc()
-                            && safe_start >= oldest {
-                                let _ = db
-                                    .historical_proof(safe_size, safe_start, safe_max_ops)
-                                    .await;
-                            }
+                            && safe_start >= oldest
+                        {
+                            let _ = db
+                                .historical_proof(safe_size, safe_start, safe_max_ops)
+                                .await;
+                        }
                     }
                 }
 

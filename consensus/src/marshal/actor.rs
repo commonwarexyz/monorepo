@@ -9,30 +9,31 @@ use super::{
     },
 };
 use crate::{
+    Block, Reporter,
     marshal::ingress::mailbox::Identifier as BlockID,
     threshold_simplex::types::{Finalization, Notarization},
     types::Round,
-    Block, Reporter,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::{Broadcaster, buffered};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
+use commonware_storage::archive::{Archive as _, Identifier as ArchiveID, immutable};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
+    StreamExt,
     channel::{mpsc, oneshot},
-    try_join, StreamExt,
+    try_join,
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     time::Instant,
 };
 use tracing::{debug, info, warn};

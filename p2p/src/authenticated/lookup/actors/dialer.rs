@@ -1,6 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
+    Mailbox,
     lookup::{
         actors::{
             spawner,
@@ -9,18 +10,17 @@ use crate::authenticated::{
         metrics,
     },
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
+    Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf, spawn_cell,
 };
-use commonware_stream::{dial, Config as StreamConfig};
+use commonware_stream::{Config as StreamConfig, dial};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{seq::SliceRandom, CryptoRng, Rng};
+use rand::{CryptoRng, Rng, seq::SliceRandom};
 use std::time::Duration;
 use tracing::debug;
 

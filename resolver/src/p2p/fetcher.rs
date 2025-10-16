@@ -2,11 +2,11 @@ use crate::p2p::wire;
 use bimap::BiHashMap;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
+    Recipients, Sender,
     utils::{
         codec::WrappedSender,
-        requester::{Config, Requester, ID},
+        requester::{Config, ID, Requester},
     },
-    Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{PrioritySet, Span};
@@ -275,11 +275,11 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PrivateKeyExt, Signer};
-    use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
+    use commonware_cryptography::{PrivateKeyExt, Signer, ed25519::PublicKey as Ed25519PublicKey};
+    use commonware_p2p::{Recipients, Sender, utils::requester::Config as RequesterConfig};
     use commonware_runtime::{
-        deterministic::{Context, Runner},
         Runner as _,
+        deterministic::{Context, Runner},
     };
     use governor::Quota;
     use std::{fmt, time::Duration};

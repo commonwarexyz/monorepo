@@ -59,10 +59,10 @@
 //! base MMR, yielding node 13 as its grafting point.
 
 use crate::mmr::{
-    hasher::Hasher as HasherTrait,
-    iterator::{pos_to_height, PeakIterator},
-    storage::Storage as StorageTrait,
     Error, Location, Position, StandardHasher,
+    hasher::Hasher as HasherTrait,
+    iterator::{PeakIterator, pos_to_height},
+    storage::Storage as StorageTrait,
 };
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
@@ -234,7 +234,9 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first");
+            panic!(
+                "missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first"
+            );
         };
 
         // We do not include position in the digest material here since the position information is
@@ -290,7 +292,9 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first");
+            panic!(
+                "missing grafted digest for leaf_pos {pos} - load_grafted_digests must be called first"
+            );
         };
 
         // We do not include position in the digest material here since the position information is
@@ -515,13 +519,14 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
+        Position, StandardHasher,
         mem::Mmr,
-        stability::{build_test_mmr, ROOTS},
-        verification, Position, StandardHasher,
+        stability::{ROOTS, build_test_mmr},
+        verification,
     };
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::hex;
 
     #[test]

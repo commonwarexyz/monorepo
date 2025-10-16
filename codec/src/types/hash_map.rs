@@ -4,9 +4,9 @@
 //! the size of the map must fit within a [u32].
 
 use crate::{
+    RangeCfg,
     codec::{EncodeSize, Read, Write},
     error::Error,
-    RangeCfg,
 };
 use bytes::{Buf, BufMut};
 use std::{cmp::Ordering, collections::HashMap, hash::Hash};

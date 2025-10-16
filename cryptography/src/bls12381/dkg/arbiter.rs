@@ -37,14 +37,14 @@
 //! the context in which the dealer is being used.
 
 use crate::{
+    PublicKey,
     bls12381::{
         dkg::{
-            ops::{construct_public, recover_public, verify_commitment, verify_share},
             Error,
+            ops::{construct_public, recover_public, verify_commitment, verify_share},
         },
         primitives::{group::Share, poly, variant::Variant},
     },
-    PublicKey,
 };
 use commonware_utils::{max_faults, quorum, set::Set};
 use std::collections::{BTreeMap, HashSet};

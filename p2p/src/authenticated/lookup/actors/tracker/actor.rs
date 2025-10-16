@@ -1,18 +1,18 @@
 use super::{
+    Config,
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config,
 };
 use crate::authenticated::{
+    Mailbox,
     lookup::actors::{peer, tracker::ingress::Releaser},
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -178,17 +178,17 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::actors::peer,
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
+        authenticated::lookup::actors::peer,
     };
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic::{self},
         Clock, Runner,
+        deterministic::{self},
     };
     use commonware_utils::NZU32;
     use governor::Quota;

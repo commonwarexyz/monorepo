@@ -1,21 +1,21 @@
 use crate::{
+    Reporter as Z,
     aggregation::types::{Ack, Activity, Certificate, Index},
     types::Epoch,
-    Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
+    Digest,
     bls12381::{
         dkg::ops::evaluate_all,
         primitives::{poly, variant::Variant},
     },
-    Digest,
 };
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
 };
-use std::collections::{btree_map::Entry, BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map::Entry};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<V: Variant, D: Digest> {

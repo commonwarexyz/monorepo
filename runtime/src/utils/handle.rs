@@ -1,16 +1,16 @@
-use crate::{utils::extract_panic_message, Error};
+use crate::{Error, utils::extract_panic_message};
 use futures::{
+    FutureExt as _,
     channel::oneshot,
-    future::{select, Either},
+    future::{Either, select},
     pin_mut,
     stream::{AbortHandle, Abortable},
-    FutureExt as _,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, resume_unwind},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -255,7 +255,7 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{deterministic, Metrics, Runner, Spawner};
+    use crate::{Metrics, Runner, Spawner, deterministic};
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";

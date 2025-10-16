@@ -1,12 +1,12 @@
 use commonware_consensus::{
+    Automaton as Au, Epochable, Relay as Re, Reporter,
     threshold_simplex::types::{Activity, Context},
     types::{Epoch, Round},
-    Automaton as Au, Epochable, Relay as Re, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
+use commonware_cryptography::{Digest, bls12381::primitives::variant::MinSig};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 
 #[allow(clippy::large_enum_variant)]

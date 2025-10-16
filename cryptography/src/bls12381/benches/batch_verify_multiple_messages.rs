@@ -1,6 +1,6 @@
-use commonware_cryptography::{bls12381, BatchVerifier as _, PrivateKeyExt as _, Signer as _};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use commonware_cryptography::{BatchVerifier as _, PrivateKeyExt as _, Signer as _, bls12381};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{Rng, thread_rng};
 use std::hint::black_box;
 
 fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {

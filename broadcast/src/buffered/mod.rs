@@ -37,15 +37,15 @@ mod tests {
     use crate::Broadcaster;
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Recipients,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
-    use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
+    use commonware_runtime::{Clock, Error, Metrics, Runner, deterministic};
     use std::{collections::BTreeMap, time::Duration};
 
     // Number of messages to cache per sender

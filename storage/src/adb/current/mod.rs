@@ -5,12 +5,12 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
-    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof},
+    mmr::{Location, Proof, bitmap::BitMap, grafting::Verifier, hasher::Hasher},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, ThreadPool};
+use commonware_runtime::{ThreadPool, buffer::PoolRef};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;

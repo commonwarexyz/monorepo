@@ -2,11 +2,11 @@
 //! to players and collect their acknowledgements.
 
 use crate::{
+    PublicKey,
     bls12381::{
-        dkg::{ops::generate_shares, Error},
+        dkg::{Error, ops::generate_shares},
         primitives::{group::Share, poly, variant::Variant},
     },
-    PublicKey,
 };
 use commonware_utils::{quorum, set::Set};
 use rand_core::CryptoRngCore;

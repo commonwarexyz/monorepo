@@ -3,7 +3,7 @@ use crate::{
     types::View,
 };
 use commonware_cryptography::{Digest, Signature};
-use futures::{channel::mpsc, SinkExt};
+use futures::{SinkExt, channel::mpsc};
 
 pub enum Message<S: Signature, D: Digest> {
     Fetch {

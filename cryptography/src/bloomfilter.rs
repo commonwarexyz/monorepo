@@ -1,17 +1,17 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
 use crate::{
-    sha256::{Digest, Sha256},
     Hasher,
+    sha256::{Digest, Sha256},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
+    EncodeSize, FixedSize,
     codec::{Read, Write},
     error::Error as CodecError,
-    EncodeSize, FixedSize,
 };
 use commonware_utils::bitmap::BitMap;
-use core::num::{NonZeroU64, NonZeroU8, NonZeroUsize};
+use core::num::{NonZeroU8, NonZeroU64, NonZeroUsize};
 
 /// The length of a half of a [Digest].
 const HALF_DIGEST_LEN: usize = 16;
@@ -125,7 +125,7 @@ impl EncodeSize for BloomFilter {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_utils::{NZUsize, NZU64, NZU8};
+    use commonware_utils::{NZU8, NZU64, NZUsize};
 
     #[test]
     fn test_insert_and_contains() {

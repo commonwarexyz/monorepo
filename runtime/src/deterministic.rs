@@ -36,7 +36,10 @@
 //! });
 //! ```
 
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use crate::{
+    Clock, Error, Handle, ListenerOf, METRICS_PREFIX, Model, Panicked,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -47,20 +50,17 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        signal::{Signal, Stopper},
         Aborter, Panicker,
+        signal::{Signal, Stopper},
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use commonware_macros::select;
-use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
+use commonware_utils::{SystemTimeExt, hex, time::SYSTEM_TIME_PRECISION};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    task::{waker, ArcWake},
     Future,
+    task::{ArcWake, waker},
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -70,7 +70,7 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand::{CryptoRng, RngCore, SeedableRng, prelude::SliceRandom, rngs::StdRng};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap},
@@ -308,9 +308,10 @@ impl Executor {
         {
             let sleeping = self.sleeping.lock().unwrap();
             if let Some(next) = sleeping.peek()
-                && next.time > current {
-                    skip_until = Some(next.time);
-                }
+                && next.time > current
+            {
+                skip_until = Some(next.time);
+            }
         }
 
         if let Some(deadline) = skip_until {
@@ -443,9 +444,10 @@ impl Runner {
             {
                 let current = executor.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline
-                    && *current >= deadline {
-                        panic!("runtime timeout");
-                    }
+                    && *current >= deadline
+                {
+                    panic!("runtime timeout");
+                }
             }
 
             // Drain all ready tasks
@@ -972,7 +974,7 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         let executor = self.executor();
         executor.auditor.event(b"stopped", |_| {});
-        
+
         executor.shutdown.lock().unwrap().stopped()
     }
 }
@@ -1259,7 +1261,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        
+
         executor.rng.lock().unwrap().next_u32()
     }
 
@@ -1268,7 +1270,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        
+
         executor.rng.lock().unwrap().next_u64()
     }
 
@@ -1285,7 +1287,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        
+
         executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
@@ -1315,12 +1317,12 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{Blob, Metrics, Runner as _, Storage, deterministic, reschedule, utils::run_tasks};
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
     #[cfg(feature = "external")]
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt, channel::mpsc};
     use futures::{channel::oneshot, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {

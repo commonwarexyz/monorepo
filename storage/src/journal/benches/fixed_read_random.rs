@@ -1,14 +1,14 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
+    Runner as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::{sequence::FixedBytes, NZU64};
-use criterion::{black_box, criterion_group, Criterion};
+use commonware_utils::{NZU64, sequence::FixedBytes};
+use criterion::{Criterion, black_box, criterion_group};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},

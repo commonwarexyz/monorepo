@@ -4,10 +4,10 @@ use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
         group::{
-            Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
-            SCALAR_LENGTH,
+            Element, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, SCALAR_LENGTH, Scalar,
+            Share,
         },
-        poly::{compute_weights, Eval, Poly, Weight},
+        poly::{Eval, Poly, Weight, compute_weights},
         variant::{MinPk, MinSig, Variant},
     },
     tle::{Block, Ciphertext},

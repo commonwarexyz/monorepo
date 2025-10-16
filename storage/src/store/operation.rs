@@ -6,10 +6,10 @@
 use crate::mmr::Location;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, varint::UInt, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize,
-    Read, ReadExt, Write,
+    Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    util::at_least, varint::UInt,
 };
-use commonware_utils::{hex, Array};
+use commonware_utils::{Array, hex};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},

@@ -10,7 +10,7 @@ use crate::bls12381::{
     },
 };
 use rand_core::CryptoRngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{ThreadPoolBuilder, prelude::*};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.

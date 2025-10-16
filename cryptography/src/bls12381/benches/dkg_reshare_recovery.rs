@@ -1,13 +1,14 @@
 use commonware_cryptography::{
+    PrivateKeyExt as _, Signer as _,
     bls12381::{
         dkg::{Dealer, Player},
         primitives::variant::MinSig,
     },
-    ed25519, PrivateKeyExt as _, Signer as _,
+    ed25519,
 };
 use commonware_utils::{quorum, set::Set};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{SeedableRng, rngs::StdRng};
 use std::{collections::BTreeMap, hint::black_box};
 
 // Configure contributors based on context

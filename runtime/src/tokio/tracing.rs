@@ -6,8 +6,8 @@ use opentelemetry::{
 };
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
-    trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
     Resource,
+    trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
 };
 use std::time::Duration;
 

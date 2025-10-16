@@ -1,14 +1,15 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::{
-    types::{Epoch, Round, View},
     Epochable, Viewable,
+    types::{Epoch, Round, View},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
+    Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt,
 };
 use commonware_cryptography::{
+    Digest,
     bls12381::primitives::{
         group::Share,
         ops::{
@@ -18,7 +19,6 @@ use commonware_cryptography::{
         poly::PartialSignature,
         variant::Variant,
     },
-    Digest,
 };
 use commonware_utils::union;
 use std::{
@@ -224,9 +224,10 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             Voter::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal
-                    && leader_proposal != &finalize.proposal {
-                        return;
-                    }
+                    && leader_proposal != &finalize.proposal
+                {
+                    return;
+                }
 
                 // If we've made it this far, add the finalize
                 if verified {
@@ -2523,7 +2524,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_utils::quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -3490,7 +3491,7 @@ mod tests {
 
         // Set leader and leader proposal
         verifier.set_leader(shares[0].index); // Leader is s0
-                                              // Manually set leader proposal, as set_leader won't do it without a notarize from leader.
+        // Manually set leader proposal, as set_leader won't do it without a notarize from leader.
         verifier.set_leader_proposal(leader_proposal.clone());
 
         // Add some (verified and unverified)
@@ -3857,7 +3858,7 @@ mod tests {
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
         verifier.set_leader(shares[0].index);
         verifier.add(Voter::Notarize(leader_notarize), false); // This sets leader_proposal and notarizes_force
-                                                               // Manually set notarizes_force to false as if verify_notarizes was called.
+        // Manually set notarizes_force to false as if verify_notarizes was called.
         verifier.notarizes_force = false;
 
         for share in shares.iter().take(threshold as usize) {

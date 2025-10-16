@@ -1,8 +1,8 @@
 use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use std::collections::HashMap;
 

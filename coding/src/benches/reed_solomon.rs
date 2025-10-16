@@ -1,7 +1,7 @@
 use crate::{benchmark_decode_generic, benchmark_encode_generic};
 use commonware_coding::ReedSolomon;
 use commonware_cryptography::Sha256;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 fn benchmark_encode(c: &mut Criterion) {
     benchmark_encode_generic::<ReedSolomon<Sha256>>("reed_solomon encode", c);

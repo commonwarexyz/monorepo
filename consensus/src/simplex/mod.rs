@@ -135,16 +135,16 @@ mod tests {
     use super::*;
     use crate::Monitor;
     use commonware_cryptography::{
+        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZUsize, NZU32};
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU32, NZUsize, quorum};
     use engine::Engine;
-    use futures::{future::join_all, StreamExt};
+    use futures::{StreamExt, future::join_all};
     use governor::Quota;
     use rand::Rng as _;
     use std::{
@@ -208,9 +208,10 @@ mod tests {
 
                 // Restrict to certain connections
                 if let Some(f) = restrict_to
-                    && !f(validators.len(), i1, i2) {
-                        continue;
-                    }
+                    && !f(validators.len(), i1, i2)
+                {
+                    continue;
+                }
 
                 // Do any unlinking first
                 match action {
@@ -1220,14 +1221,15 @@ mod tests {
                 if line.contains("_engine_voter_skipped_views_total") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let Some(number_str) = parts.last()
-                        && let Ok(number) = number_str.parse::<u64>() {
-                            if number > 0 {
-                                nodes_skipping += 1;
-                            }
-                            if number > skipped_views {
-                                skipped_views = number;
-                            }
+                        && let Ok(number) = number_str.parse::<u64>()
+                    {
+                        if number > 0 {
+                            nodes_skipping += 1;
                         }
+                        if number > skipped_views {
+                            skipped_views = number;
+                        }
+                    }
                 }
             }
             assert!(

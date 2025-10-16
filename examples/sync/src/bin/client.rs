@@ -6,11 +6,11 @@
 use clap::{Arg, Command};
 use commonware_codec::{Encode, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
+    Clock, Metrics, Network, Runner, Spawner, Storage, tokio as tokio_runtime,
 };
 use commonware_storage::{adb::sync, mmr::StandardHasher};
 use commonware_sync::{
-    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+    Digest, Error, Key, any, crate_version, databases::DatabaseType, immutable, net::Resolver,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;

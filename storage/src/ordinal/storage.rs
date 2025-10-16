@@ -3,14 +3,14 @@ use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
-    buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
+    buffer::{Read as ReadBuffer, Write},
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
     mem::take,
 };
@@ -146,10 +146,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         for (section, blob) in &blobs {
             // Skip if bits are provided and the section is not in the bits
             if let Some(bits) = &bits
-                && !bits.contains_key(section) {
-                    warn!(section, "skipping section without bits");
-                    continue;
-                }
+                && !bits.contains_key(section)
+            {
+                warn!(section, "skipping section without bits");
+                continue;
+            }
 
             // Initialize read buffer
             let size = blob.size().await;
@@ -189,11 +190,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
                 // If record is valid, add to intervals
                 if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice())
-                    && record.is_valid() {
-                        items += 1;
-                        intervals.insert(index);
-                        continue;
-                    };
+                    && record.is_valid()
+                {
+                    items += 1;
+                    intervals.insert(index);
+                    continue;
+                };
 
                 // If record is invalid, it may either be empty or corrupted. We only care
                 // which is which if the provided bits indicate that the record must exist.

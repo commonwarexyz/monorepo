@@ -1,6 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Spawner;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use std::sync::{Arc, Mutex};
 
 /// Message type for coordinator updates

@@ -1,25 +1,25 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     Signer as _,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated::discovery, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
-use commonware_utils::{from_hex_formatted, union, NZU32};
+use commonware_p2p::{Receiver, Recipients, Sender, authenticated::discovery};
+use commonware_runtime::{Metrics, Runner, Spawner, tokio};
+use commonware_utils::{NZU32, from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::atomic::AtomicU64,
 };
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
 

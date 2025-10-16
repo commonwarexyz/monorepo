@@ -1,29 +1,29 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
+    Epochable, ThresholdSupervisor, Viewable,
     threshold_simplex::{
         actors::voter,
         types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
-    Epochable, ThresholdSupervisor, Viewable,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::select;
 use commonware_p2p::{
+    Blocker, Receiver, Recipients, Sender,
     utils::{
-        codec::{wrap, WrappedSender},
+        codec::{WrappedSender, wrap},
         requester,
     },
-    Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use futures::{channel::mpsc, future::Either, StreamExt};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use futures::{StreamExt, channel::mpsc, future::Either};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{Rng, seq::IteratorRandom};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -105,11 +105,11 @@ pub struct Actor<
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C,
-        Identity = V::Public,
-        Polynomial = Vec<V::Public>,
-    >,
+            Index = View,
+            PublicKey = C,
+            Identity = V::Public,
+            Polynomial = Vec<V::Public>,
+        >,
 > {
     context: ContextCell<E>,
     blocker: B,
@@ -139,18 +139,18 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
-        D: Digest,
-        S: ThresholdSupervisor<
+    E: Clock + GClock + Rng + Metrics + Spawner,
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
+    V: Variant,
+    D: Digest,
+    S: ThresholdSupervisor<
             Index = View,
             PublicKey = C,
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-    > Actor<E, C, B, V, D, S>
+> Actor<E, C, B, V, D, S>
 {
     pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester

@@ -77,18 +77,18 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::{
-        mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},
         Config, Engine, Mailbox,
+        mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},
     };
     use crate::Resolver;
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{Clock, Metrics, Runner, deterministic};
     use commonware_utils::NZU32;
     use futures::{SinkExt, StreamExt};
     use std::time::Duration;

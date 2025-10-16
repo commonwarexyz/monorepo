@@ -136,8 +136,8 @@ mod tests {
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_runtime::{Blob, Metrics, Runner, Storage, deterministic};
+    use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -1885,7 +1885,7 @@ mod tests {
                 let mut bitmap1 = BitMap::zeroes(5);
                 bitmap1.set(0, true); // Index 5
                 bitmap1.set(2, true); // Index 7
-                                      // Note: not setting bit for index 9, so it should be ignored
+                // Note: not setting bit for index 9, so it should be ignored
                 let bitmap1_option = Some(bitmap1);
                 bits_map.insert(1, &bitmap1_option);
 

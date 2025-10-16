@@ -10,12 +10,12 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, Write, varint::UInt};
 use commonware_macros::select;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
 };
 use std::{collections::HashMap, fmt::Debug};
 use thiserror::Error;
@@ -255,13 +255,13 @@ impl<R: Receiver> Drop for SubReceiver<R> {
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle},
         Recipients,
+        simulated::{self, Link, Network, Oracle},
     };
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{PrivateKeyExt, Signer, ed25519::PrivateKey};
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{Clock, Metrics, Runner, deterministic};
     use std::time::Duration;
 
     type Pk = commonware_cryptography::ed25519::PublicKey;

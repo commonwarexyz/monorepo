@@ -1,10 +1,10 @@
-use super::{metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{Metadata, Reservation, metrics::Metrics, record::Record};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
+    Quota, RateLimiter, clock::Clock as GClock, middleware::NoOpMiddleware,
+    state::keyed::HashMapStateStore,
 };
 use rand::Rng;
 use std::{
@@ -113,10 +113,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value()
-            && index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
-                return Vec::new();
-            }
+            && index <= *last
+        {
+            debug!(?index, ?last, "index must monotonically increase",);
+            return Vec::new();
+        }
 
         // Create and store new peer set
         for (peer, addr) in &peers {
@@ -271,8 +272,8 @@ mod tests {
     use crate::authenticated::{
         lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
     };
-    use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_cryptography::{PrivateKeyExt, Signer, ed25519};
+    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::NZU32;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

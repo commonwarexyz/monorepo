@@ -1,24 +1,24 @@
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-#[cfg(feature = "external")]
-use crate::Pacer;
-#[cfg(feature = "iouring-network")]
 use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
-};
-use crate::{
+    Clock, Error, Handle, METRICS_PREFIX, Model, SinkOf, StreamOf,
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Aborter, Panicker},
-    Clock, Error, Handle, Model, SinkOf, StreamOf, METRICS_PREFIX,
+    utils::{Aborter, Panicker, signal::Stopper},
+};
+#[cfg(feature = "iouring-network")]
+use crate::{
+    iouring,
+    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -27,7 +27,7 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand::{CryptoRng, RngCore, rngs::OsRng};
 use std::{
     env,
     future::Future,

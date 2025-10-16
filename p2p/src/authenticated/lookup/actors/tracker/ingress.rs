@@ -1,8 +1,8 @@
 use super::Reservation;
 use crate::authenticated::{
+    Mailbox,
     lookup::actors::{peer, tracker::Metadata},
     mailbox::UnboundedMailbox,
-    Mailbox,
 };
 use commonware_cryptography::PublicKey;
 use futures::channel::oneshot;

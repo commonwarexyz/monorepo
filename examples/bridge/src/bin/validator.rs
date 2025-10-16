@@ -1,21 +1,22 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::threshold_simplex::{self, Engine};
 use commonware_cryptography::{
+    PrivateKeyExt as _, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         poly::{Poly, Public},
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519,
 };
 use commonware_p2p::authenticated;
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
-use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, quorum, union, NZUsize, NZU32};
+use commonware_runtime::{Metrics, Network, Runner, buffer::PoolRef, tokio};
+use commonware_stream::{Config as StreamConfig, dial};
+use commonware_utils::{NZU32, NZUsize, from_hex, quorum, union};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

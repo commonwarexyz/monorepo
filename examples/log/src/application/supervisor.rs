@@ -1,5 +1,5 @@
 use commonware_consensus::{
-    simplex::types::Activity, types::View, Reporter, Supervisor as Su, Viewable,
+    Reporter, Supervisor as Su, Viewable, simplex::types::Activity, types::View,
 };
 use commonware_cryptography::{Digest, PublicKey, Signature};
 use std::{collections::HashMap, marker::PhantomData};

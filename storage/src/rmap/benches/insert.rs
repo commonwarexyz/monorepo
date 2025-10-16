@@ -1,6 +1,6 @@
 use commonware_storage::rmap::RMap;
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use criterion::{Criterion, criterion_group};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::time::{Duration, Instant};
 
 fn bench_insert(c: &mut Criterion) {

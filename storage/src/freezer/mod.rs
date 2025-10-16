@@ -243,8 +243,8 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_runtime::{Blob, Metrics, Runner, Storage, deterministic};
+    use commonware_utils::{NZUsize, sequence::FixedBytes};
     use rand::{Rng, RngCore};
 
     const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
@@ -657,16 +657,20 @@ mod tests {
                     .expect("Failed to initialize freezer");
 
                 // Should not find any data
-                assert!(freezer
-                    .get(Identifier::Key(&test_key("destroy1")))
-                    .await
-                    .unwrap()
-                    .is_none());
-                assert!(freezer
-                    .get(Identifier::Key(&test_key("destroy2")))
-                    .await
-                    .unwrap()
-                    .is_none());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&test_key("destroy1")))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&test_key("destroy2")))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
             }
         });
     }
@@ -1133,11 +1137,13 @@ mod tests {
 
             // Test get() on all keys
             for (key, _) in &pairs {
-                assert!(freezer
-                    .get(Identifier::Key(key))
-                    .await
-                    .expect("Failed to check key")
-                    .is_some());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(key))
+                        .await
+                        .expect("Failed to check key")
+                        .is_some()
+                );
             }
 
             // Check some non-existent keys
@@ -1145,11 +1151,13 @@ mod tests {
                 let mut key = [0u8; 96];
                 context.fill_bytes(&mut key);
                 let key = FixedBytes::<96>::new(key);
-                assert!(freezer
-                    .get(Identifier::Key(&key))
-                    .await
-                    .expect("Failed to check key")
-                    .is_none());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to check key")
+                        .is_none()
+                );
             }
 
             // Close the freezer

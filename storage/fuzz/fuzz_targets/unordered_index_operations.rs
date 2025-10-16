@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{Runner, deterministic};
 use commonware_storage::{
     index::{Cursor as _, Index as _, Unordered as Index},
     translator::TwoCap,
@@ -152,16 +152,18 @@ fn fuzz(input: FuzzInput) {
 
                 IndexOperation::CursorUpdate { key, new_value } => {
                     if let Some(mut cursor) = index.get_mut(key)
-                        && cursor.next().is_some() {
-                            cursor.update(*new_value);
-                        }
+                        && cursor.next().is_some()
+                    {
+                        cursor.update(*new_value);
+                    }
                 }
 
                 IndexOperation::CursorDelete { key } => {
                     if let Some(mut cursor) = index.get_mut(key)
-                        && cursor.next().is_some() {
-                            cursor.delete();
-                        }
+                        && cursor.next().is_some()
+                    {
+                        cursor.delete();
+                    }
                 }
 
                 IndexOperation::CursorInsert { key, value } => {

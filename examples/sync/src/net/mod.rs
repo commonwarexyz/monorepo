@@ -113,7 +113,7 @@ impl Read for ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
+    use crate::net::{ErrorCode, request_id::Generator, wire::GetOperationsRequest};
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_storage::mmr::Location;
     use commonware_utils::NZU64;

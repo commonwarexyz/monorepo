@@ -1,38 +1,38 @@
 //! Engine for the module.
 
 use super::{
-    metrics,
+    Config, metrics,
     safe_tip::SafeTip,
     types::{Ack, Activity, Error, Index, Item, TipAck},
-    Config,
 };
 use crate::{
-    aggregation::types::Certificate, types::Epoch, Automaton, Monitor, Reporter,
-    ThresholdSupervisor,
+    Automaton, Monitor, Reporter, ThresholdSupervisor, aggregation::types::Certificate,
+    types::Epoch,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
+    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
 };
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::PoolRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
+use commonware_utils::{PrioritySet, futures::Pool as FuturesPool, quorum_from_slice};
 use futures::{
+    StreamExt,
     future::{self, Either},
-    pin_mut, StreamExt,
+    pin_mut,
 };
 use std::{
     cmp::max,
@@ -76,11 +76,11 @@ pub struct Engine<
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = P>,
     TSu: ThresholdSupervisor<
-        Index = Epoch,
-        PublicKey = P,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
+            Index = Epoch,
+            PublicKey = P,
+            Polynomial = Vec<V::Public>,
+            Share = group::Share,
+        >,
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
@@ -159,21 +159,21 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
-        P: PublicKey,
-        V: Variant,
-        D: Digest,
-        A: Automaton<Context = Index, Digest = D> + Clone,
-        Z: Reporter<Activity = Activity<V, D>>,
-        M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = P>,
-        TSu: ThresholdSupervisor<
+    E: Clock + Spawner + Storage + Metrics,
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    A: Automaton<Context = Index, Digest = D> + Clone,
+    Z: Reporter<Activity = Activity<V, D>>,
+    M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = P>,
+    TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
             Polynomial = Vec<V::Public>,
             Share = group::Share,
         >,
-    > Engine<E, P, V, D, A, Z, M, B, TSu>
+> Engine<E, P, V, D, A, Z, M, B, TSu>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
@@ -270,10 +270,11 @@ impl<
             let next = self.next();
             if next < self.tip + self.window {
                 trace!(next, "requesting new digest");
-                assert!(self
-                    .pending
-                    .insert(next, Pending::Unverified(BTreeMap::new()))
-                    .is_none());
+                assert!(
+                    self.pending
+                        .insert(next, Pending::Unverified(BTreeMap::new()))
+                        .is_none()
+                );
                 self.get_digest(next);
                 continue;
             }

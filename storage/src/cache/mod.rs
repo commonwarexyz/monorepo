@@ -126,10 +126,10 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
-    use commonware_codec::{varint::UInt, EncodeSize};
+    use commonware_codec::{EncodeSize, varint::UInt};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{Blob, Metrics, Runner, Storage, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
     use rand::Rng;
     use std::collections::BTreeMap;
 

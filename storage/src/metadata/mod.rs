@@ -92,7 +92,7 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{Blob, Metrics, Runner, Storage, deterministic};
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 
@@ -1027,9 +1027,10 @@ mod tests {
                     let selected_index = context.gen_range(0..=i);
                     let mut_key = U64::new(selected_index as u64);
                     if let Some(value) = metadata.get_mut(&mut_key)
-                        && !value.is_empty() {
-                            value[0] = value[0].wrapping_add(1);
-                        }
+                        && !value.is_empty()
+                    {
+                        value[0] = value[0].wrapping_add(1);
+                    }
                 }
             }
             metadata.sync().await.unwrap();

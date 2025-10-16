@@ -965,9 +965,11 @@ mod tests {
         // Use a wrong root (hash of a different input).
         let mut hasher = Sha256::default();
         let wrong_root = Sha256::hash(b"wrong_root");
-        assert!(proof
-            .verify(&mut hasher, &digests[0], 0, &wrong_root)
-            .is_err());
+        assert!(
+            proof
+                .verify(&mut hasher, &digests[0], 0, &wrong_root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1084,16 +1086,20 @@ mod tests {
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..6];
 
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_ok());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_ok()
+        );
 
         // Serialize and deserialize
         let mut serialized = range_proof.encode();
         let deserialized = RangeProof::<Sha256>::decode(&mut serialized).unwrap();
-        assert!(deserialized
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_ok());
+        assert!(
+            deserialized
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1154,21 +1160,27 @@ mod tests {
 
         // Test first half
         let range_proof = tree.range_proof(0, 7).unwrap();
-        assert!(range_proof
-            .verify(&mut hasher, 0, &digests[0..8], &root)
-            .is_ok());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 0, &digests[0..8], &root)
+                .is_ok()
+        );
 
         // Test second half
         let range_proof = tree.range_proof(8, 14).unwrap();
-        assert!(range_proof
-            .verify(&mut hasher, 8, &digests[8..15], &root)
-            .is_ok());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 8, &digests[8..15], &root)
+                .is_ok()
+        );
 
         // Test last elements
         let range_proof = tree.range_proof(13, 14).unwrap();
-        assert!(range_proof
-            .verify(&mut hasher, 13, &digests[13..15], &root)
-            .is_ok());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 13, &digests[13..15], &root)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1214,14 +1226,18 @@ mod tests {
             Sha256::hash(b"wrong2"),
             Sha256::hash(b"wrong3"),
         ];
-        assert!(range_proof
-            .verify(&mut hasher, 2, &wrong_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, &wrong_leaves, &root)
+                .is_err()
+        );
 
         // Test with wrong number of leaves
-        assert!(range_proof
-            .verify(&mut hasher, 2, &digests[2..4], &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, &digests[2..4], &root)
+                .is_err()
+        );
 
         // Test with tampered proof
         let mut tampered_proof = range_proof.clone();
@@ -1232,15 +1248,19 @@ mod tests {
         } else if let Some(ref mut right) = tampered_proof.siblings[0].right {
             *right = Sha256::hash(b"tampered");
         }
-        assert!(tampered_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_err());
+        assert!(
+            tampered_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err()
+        );
 
         // Test with wrong root
         let wrong_root = Sha256::hash(b"wrong_root");
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &wrong_root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &wrong_root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1297,12 +1317,16 @@ mod tests {
         let range_leaves = &digests[2..5];
 
         // Try to verify with wrong position
-        assert!(range_proof
-            .verify(&mut hasher, 3, range_leaves, &root)
-            .is_err());
-        assert!(range_proof
-            .verify(&mut hasher, 1, range_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 3, range_leaves, &root)
+                .is_err()
+        );
+        assert!(
+            range_proof
+                .verify(&mut hasher, 1, range_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1324,9 +1348,11 @@ mod tests {
 
         // Try to verify with reordered leaves
         let reordered_leaves = vec![digests[3], digests[2], digests[4]];
-        assert!(range_proof
-            .verify(&mut hasher, 2, &reordered_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, &reordered_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1355,9 +1381,11 @@ mod tests {
         } else if range_proof.siblings[0].right.is_none() {
             range_proof.siblings[0].right = Some(Sha256::hash(b"extra"));
         }
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1385,9 +1413,11 @@ mod tests {
         // Remove a sibling from a level
         range_proof.siblings[0].left = None;
         range_proof.siblings[0].right = None;
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1431,17 +1461,21 @@ mod tests {
             left: Some(Sha256::hash(b"fake_level")),
             right: None,
         });
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err()
+        );
 
         // Remove a level
         let mut range_proof = tree.range_proof(2, 2).unwrap();
         assert!(!range_proof.siblings.is_empty());
         range_proof.siblings.pop();
-        assert!(range_proof
-            .verify(&mut hasher, 2, range_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1469,14 +1503,16 @@ mod tests {
             // Last element only
             let last_idx = tree_size - 1;
             let proof = tree.range_proof(last_idx as u32, last_idx as u32).unwrap();
-            assert!(proof
-                .verify(
-                    &mut hasher,
-                    last_idx as u32,
-                    &digests[last_idx..tree_size],
-                    &root
-                )
-                .is_ok());
+            assert!(
+                proof
+                    .verify(
+                        &mut hasher,
+                        last_idx as u32,
+                        &digests[last_idx..tree_size],
+                        &root
+                    )
+                    .is_ok()
+            );
 
             // Full tree
             let proof = tree.range_proof(0, (tree_size - 1) as u32).unwrap();
@@ -1526,26 +1562,34 @@ mod tests {
         // Verify empty range proof against empty tree root
         let mut hasher = Sha256::default();
         let empty_leaves: &[Digest] = &[];
-        assert!(range_proof
-            .verify(&mut hasher, 0, empty_leaves, &root)
-            .is_ok());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 0, empty_leaves, &root)
+                .is_ok()
+        );
 
         // Should fail with non-empty leaves
         let non_empty_leaves = vec![Sha256::hash(b"leaf")];
-        assert!(range_proof
-            .verify(&mut hasher, 0, &non_empty_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 0, &non_empty_leaves, &root)
+                .is_err()
+        );
 
         // Should fail with wrong root
         let wrong_root = Sha256::hash(b"wrong");
-        assert!(range_proof
-            .verify(&mut hasher, 0, empty_leaves, &wrong_root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 0, empty_leaves, &wrong_root)
+                .is_err()
+        );
 
         // Should fail with wrong position
-        assert!(range_proof
-            .verify(&mut hasher, 1, empty_leaves, &root)
-            .is_err());
+        assert!(
+            range_proof
+                .verify(&mut hasher, 1, empty_leaves, &root)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1605,9 +1649,11 @@ mod tests {
             let end = start as usize + count as usize;
 
             // Verify the proof works
-            assert!(range_proof
-                .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                .is_ok());
+            assert!(
+                range_proof
+                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                    .is_ok()
+            );
 
             // For each level with siblings, try removing them and verify the proof fails
             for level_idx in 0..range_proof.siblings.len() {
@@ -1617,36 +1663,44 @@ mod tests {
                 if bounds.left.is_some() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].left = None;
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
+                    assert!(
+                        tampered_proof
+                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                            .is_err()
+                    );
                 }
 
                 // If there's a right sibling, removing it should make the proof fail
                 if bounds.right.is_some() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].right = None;
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
+                    assert!(
+                        tampered_proof
+                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                            .is_err()
+                    );
                 }
 
                 // If there's no left sibling, adding one should make the proof fail
                 if bounds.left.is_none() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].left = Some(Sha256::hash(b"fake_left"));
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
+                    assert!(
+                        tampered_proof
+                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                            .is_err()
+                    );
                 }
 
                 // If there's no right sibling, adding one should make the proof fail
                 if bounds.right.is_none() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].right = Some(Sha256::hash(b"fake_right"));
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
+                    assert!(
+                        tampered_proof
+                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                            .is_err()
+                    );
                 }
             }
         }
@@ -1674,9 +1728,11 @@ mod tests {
             let proof = tree
                 .range_proof(start as u32, (tree_size - 1) as u32)
                 .unwrap();
-            assert!(proof
-                .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
-                .is_ok());
+            assert!(
+                proof
+                    .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
+                    .is_ok()
+            );
         }
     }
 }

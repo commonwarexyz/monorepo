@@ -1,6 +1,7 @@
 use crate::handlers::wire;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
+    PublicKey,
     bls12381::{
         dkg::player::Output,
         primitives::{
@@ -8,12 +9,11 @@ use commonware_cryptography::{
             variant::{MinSig, Variant},
         },
     },
-    PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use futures::{StreamExt, channel::mpsc};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,

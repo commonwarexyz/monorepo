@@ -8,10 +8,10 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, Element, Point, Scalar, Share, DST},
+    Error,
+    group::{self, DST, Element, Point, Scalar, Share},
     poly::{self, Eval, PartialSignature, Weight},
     variant::Variant,
-    Error,
 };
 use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 #[cfg(not(feature = "std"))]
@@ -20,7 +20,7 @@ use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{ThreadPoolBuilder, prelude::*};
 #[cfg(feature = "std")]
 use std::{borrow::Cow, collections::BTreeMap};
 
@@ -717,7 +717,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
     use commonware_utils::{from_hex_formatted, quorum};
-    use group::{Private, G1_MESSAGE, G2_MESSAGE};
+    use group::{G1_MESSAGE, G2_MESSAGE, Private};
     use poly::Poly;
     use rand::{prelude::*, rngs::OsRng};
 

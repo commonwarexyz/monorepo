@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use blake3::Hasher as RefBlake3;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    blake3::{hash as our_hash, Blake3 as OurBlake3, Digest},
     Hasher,
+    blake3::{Blake3 as OurBlake3, Digest, hash as our_hash},
 };
 use libfuzzer_sys::fuzz_target;
 use zeroize::Zeroize;

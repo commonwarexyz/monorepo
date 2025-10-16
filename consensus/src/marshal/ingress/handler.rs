@@ -1,11 +1,11 @@
-use crate::{types::Round, Block};
+use crate::{Block, types::Round};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{Consumer, p2p::Producer};
 use commonware_utils::Span;
 use futures::{
-    channel::{mpsc, oneshot},
     SinkExt,
+    channel::{mpsc, oneshot},
 };
 use std::{
     fmt::{Debug, Display},
@@ -243,8 +243,8 @@ mod tests {
     use crate::marshal::mocks::block::Block as TestBlock;
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
-        sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _,
+        sha256::{Digest as Sha256Digest, Sha256},
     };
     use std::collections::BTreeSet;
 

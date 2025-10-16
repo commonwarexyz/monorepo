@@ -2,10 +2,11 @@
 //! and eventually maintain a share of a shared secret.
 
 use crate::{
+    PublicKey,
     bls12381::{
         dkg::{
-            ops::{recover_public_with_weights, verify_commitment, verify_share},
             Error,
+            ops::{recover_public_with_weights, verify_commitment, verify_share},
         },
         primitives::{
             group::{self, Element, Share},
@@ -13,10 +14,9 @@ use crate::{
             variant::Variant,
         },
     },
-    PublicKey,
 };
 use commonware_utils::{quorum, set::Set};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{BTreeMap, btree_map::Entry};
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]

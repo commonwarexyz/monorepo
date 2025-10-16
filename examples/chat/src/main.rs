@@ -55,10 +55,10 @@ mod handler;
 #[doc(hidden)]
 mod logger;
 
-use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+use clap::{Arg, Command, value_parser};
+use commonware_cryptography::{PrivateKeyExt as _, Signer as _, ed25519};
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Runner as _};
+use commonware_runtime::{Metrics, Runner as _, tokio};
 use commonware_utils::NZU32;
 use governor::Quota;
 use std::{

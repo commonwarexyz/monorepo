@@ -3,12 +3,12 @@
 //! participants are active at a given view.
 
 use commonware_cryptography::{
+    Hasher, PublicKey,
     bls12381::primitives::{
         group,
         poly::Public,
         variant::{MinSig, Variant},
     },
-    Hasher, PublicKey,
 };
 
 mod actor;

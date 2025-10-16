@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, SinkExt as _};
+use futures::{SinkExt as _, channel::mpsc};
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]

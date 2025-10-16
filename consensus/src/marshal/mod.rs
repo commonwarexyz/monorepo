@@ -76,17 +76,18 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
+        Block as _, Reporter,
         marshal::ingress::mailbox::Identifier,
         threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
-            Notarization, Proposal,
+            Activity, Finalization, Notarization, Proposal, finalize_namespace, notarize_namespace,
+            seed_namespace,
         },
         types::Round,
-        Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
     use commonware_cryptography::{
+        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
         bls12381::{
             dkg::ops::generate_shares,
             primitives::{
@@ -98,7 +99,6 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -106,10 +106,10 @@ mod tests {
         utils::requester,
     };
     use commonware_resolver::p2p;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{Clock, Metrics, Runner, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
     use governor::Quota;
-    use rand::{seq::SliceRandom, Rng};
+    use rand::{Rng, seq::SliceRandom};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},

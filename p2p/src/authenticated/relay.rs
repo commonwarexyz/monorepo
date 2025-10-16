@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, SinkExt as _};
+use futures::{SinkExt as _, channel::mpsc};
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
@@ -25,7 +25,7 @@ impl<T> Relay<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     #[test]
     fn test_relay_content_priority() {

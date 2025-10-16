@@ -2,16 +2,16 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{Runner, buffer::PoolRef, deterministic};
 use commonware_storage::{
     adb::{
-        any::fixed::{ordered::Any, Config},
+        any::fixed::{Config, ordered::Any},
         verify_proof,
     },
     mmr::{Location, StandardHasher as Standard},
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 

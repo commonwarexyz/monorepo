@@ -4,9 +4,9 @@
 //! the size of the set must fit within a [u32].
 
 use crate::{
+    RangeCfg,
     codec::{EncodeSize, Read, Write},
     error::Error,
-    RangeCfg,
 };
 use bytes::{Buf, BufMut};
 use std::{cmp::Ordering, collections::HashSet, hash::Hash};
@@ -98,8 +98,8 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
 mod tests {
     use super::*;
     use crate::{
-        codec::{Decode, Encode},
         FixedSize,
+        codec::{Decode, Encode},
     };
     use bytes::{Bytes, BytesMut};
     use std::fmt::Debug;

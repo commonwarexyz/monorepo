@@ -1,12 +1,12 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    types::{Epoch, Round, View},
     Epochable, Viewable,
+    types::{Epoch, Round, View},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
+    Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write, varint::UInt,
 };
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
@@ -1612,9 +1612,9 @@ mod tests {
     use super::*;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
+        PrivateKeyExt as _,
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _,
     };
 
     const NAMESPACE: &[u8] = b"test";

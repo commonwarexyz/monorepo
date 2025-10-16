@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error};
+use crate::{Error, deterministic::Auditor};
 use commonware_utils::StableBuf;
 use sha2::digest::Update;
 use std::sync::Arc;
@@ -106,11 +106,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Blob as _, Storage as _,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, Storage as _,
     };
     use std::sync::Arc;
 

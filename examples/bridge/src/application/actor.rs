@@ -1,7 +1,7 @@
 use super::{
+    Config,
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
-    Config,
 };
 use crate::types::{
     block::BlockFormat,
@@ -9,17 +9,17 @@ use crate::types::{
     outbound::Outbound,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
+use commonware_consensus::{Viewable, threshold_simplex::types::Activity};
 use commonware_cryptography::{
+    Hasher, PublicKey,
     bls12381::primitives::{
         poly,
         variant::{MinSig, Variant},
     },
-    Hasher, PublicKey,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use rand::Rng;
 use tracing::{debug, info};
 

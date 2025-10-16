@@ -1,9 +1,9 @@
 use crate::{
     adb::{
+        Error,
         any::variable::sync::{get_size, init_journal},
         immutable,
         sync::{self, Journal as _},
-        Error,
     },
     journal::variable,
     mmr::{Location, StandardHasher as Standard},
@@ -177,21 +177,20 @@ mod tests {
         adb::{
             immutable,
             sync::{
-                self,
+                self, Engine, Journal, Target,
                 engine::{Config, NextStep},
-                Engine, Journal, Target,
             },
         },
         mmr::{Location, StandardHasher as Standard},
         store::operation::Variable,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256, Digest, Sha256};
+    use commonware_cryptography::{Digest, Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
-    use commonware_utils::{NZUsize, NZU64};
-    use futures::{channel::mpsc, SinkExt as _};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use commonware_runtime::{Runner as _, RwLock, buffer::PoolRef, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
+    use futures::{SinkExt as _, channel::mpsc};
+    use rand::{RngCore as _, SeedableRng as _, rngs::StdRng};
     use std::{
         collections::HashMap,
         num::{NonZeroU64, NonZeroUsize},

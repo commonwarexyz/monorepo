@@ -3,16 +3,16 @@
 use super::{Config, PeerLabel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::{CounterExt, Status},
     Clock, Metrics,
+    telemetry::metrics::status::{CounterExt, Status},
 };
 use commonware_utils::PrioritySet;
 use either::Either;
 use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
+    RateLimiter, clock::Clock as GClock, middleware::NoOpMiddleware,
+    state::keyed::HashMapStateStore,
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{Rng, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
@@ -259,8 +259,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_cryptography::{PrivateKeyExt as _, Signer as _, ed25519::PrivateKey};
+    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::time::Duration;

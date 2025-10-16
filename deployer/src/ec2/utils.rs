@@ -3,7 +3,7 @@
 use crate::ec2::Error;
 use tokio::{
     process::Command,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::warn;
 

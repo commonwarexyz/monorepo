@@ -1,6 +1,6 @@
 use super::types::{Activity, Context};
-use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
+use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor, types::Epoch};
+use commonware_cryptography::{Digest, Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 

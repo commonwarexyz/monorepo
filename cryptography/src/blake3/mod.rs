@@ -24,7 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, Array, Span};
+use commonware_utils::{Array, Span, hex};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,

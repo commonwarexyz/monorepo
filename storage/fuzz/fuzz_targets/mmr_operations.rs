@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
+use commonware_runtime::{Runner, deterministic};
+use commonware_storage::mmr::{Location, Position, StandardHasher as Standard, mem::Mmr};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]

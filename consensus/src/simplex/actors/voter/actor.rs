@@ -1,32 +1,33 @@
 use super::{Config, Mailbox, Message};
 use crate::{
+    Automaton, Epochable, LATENCY, Relay, Reporter, Supervisor, Viewable,
     simplex::{
         actors::resolver,
         metrics,
         types::{
-            threshold, Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, Voter,
+            NullifyFinalize, Proposal, Voter, threshold,
         },
     },
     types::{Epoch, Round as Rnd, View},
-    Automaton, Epochable, Relay, Reporter, Supervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::PoolRef, spawn_cell,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
+    StreamExt,
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -34,7 +35,7 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry},
     num::NonZeroUsize,
     sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
@@ -94,11 +95,11 @@ struct Round<
 }
 
 impl<
-        C: PublicKey,
-        D: Digest,
-        R: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C>,
-    > Round<C, D, R, S>
+    C: PublicKey,
+    D: Digest,
+    R: Reporter<Activity = Activity<C::Signature, D>>,
+    S: Supervisor<Index = View, PublicKey = C>,
+> Round<C, D, R, S>
 {
     pub fn new(current: SystemTime, reporter: R, supervisor: S, round: Rnd) -> Self {
         let leader = supervisor
@@ -367,14 +368,14 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Signer,
-        D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Actor<E, C, D, A, R, F, S>
+    E: Clock + Rng + Spawner + Storage + Metrics,
+    C: Signer,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Reporter<Activity = Activity<C::Signature, D>>,
+    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+> Actor<E, C, D, A, R, F, S>
 {
     pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
@@ -641,33 +642,42 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            match self.construct_finalization(past_view, true) { Some(finalization) => {
-                let msg = Voter::Finalization(finalization);
-                sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::FINALIZATION)
-                    .inc();
-                debug!(view = past_view, "rebroadcast entry finalization");
-            } _ => { match self.construct_notarization(past_view, true) { Some(notarization) => {
-                let msg = Voter::Notarization(notarization);
-                sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NOTARIZATION)
-                    .inc();
-                debug!(view = past_view, "rebroadcast entry notarization");
-            } _ => { match self.construct_nullification(past_view, true) { Some(nullification) => {
-                let msg = Voter::Nullification(nullification);
-                sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NULLIFICATION)
-                    .inc();
-                debug!(view = past_view, "rebroadcast entry nullification");
-            } _ => {
-                warn!(
-                    current = self.view,
-                    "unable to rebroadcast entry notarization/nullification/finalization"
-                );
-            }}}}}}
+            match self.construct_finalization(past_view, true) {
+                Some(finalization) => {
+                    let msg = Voter::Finalization(finalization);
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    self.broadcast_messages
+                        .get_or_create(&metrics::FINALIZATION)
+                        .inc();
+                    debug!(view = past_view, "rebroadcast entry finalization");
+                }
+                _ => match self.construct_notarization(past_view, true) {
+                    Some(notarization) => {
+                        let msg = Voter::Notarization(notarization);
+                        sender.send(Recipients::All, msg, true).await.unwrap();
+                        self.broadcast_messages
+                            .get_or_create(&metrics::NOTARIZATION)
+                            .inc();
+                        debug!(view = past_view, "rebroadcast entry notarization");
+                    }
+                    _ => match self.construct_nullification(past_view, true) {
+                        Some(nullification) => {
+                            let msg = Voter::Nullification(nullification);
+                            sender.send(Recipients::All, msg, true).await.unwrap();
+                            self.broadcast_messages
+                                .get_or_create(&metrics::NULLIFICATION)
+                                .inc();
+                            debug!(view = past_view, "rebroadcast entry nullification");
+                        }
+                        _ => {
+                            warn!(
+                                current = self.view,
+                                "unable to rebroadcast entry notarization/nullification/finalization"
+                            );
+                        }
+                    },
+                },
+            }
         }
 
         // Construct nullify
@@ -1078,9 +1088,10 @@ impl<
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view)
-            && round.broadcast_notarization {
-                return false;
-            }
+            && round.broadcast_notarization
+        {
+            return false;
+        }
 
         // Verify notarization
         let Some(participants) = self.supervisor.participants(view) else {
@@ -1146,9 +1157,10 @@ impl<
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&nullification.view())
-            && round.broadcast_nullification {
-                return false;
-            }
+            && round.broadcast_nullification
+        {
+            return false;
+        }
 
         // Verify nullification
         let Some(participants) = self.supervisor.participants(nullification.view()) else {
@@ -1255,9 +1267,10 @@ impl<
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view)
-            && round.broadcast_finalization {
-                return false;
-            }
+            && round.broadcast_finalization
+        {
+            return false;
+        }
 
         // Verify finalization
         let Some(participants) = self.supervisor.participants(view) else {
@@ -1511,9 +1524,10 @@ impl<
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view)
-                && leader {
-                    self.notarization_latency.observe(elapsed);
-                }
+                && leader
+            {
+                self.notarization_latency.observe(elapsed);
+            }
 
             // Update backfiller
             backfiller.notarized(notarization.clone()).await;
@@ -1649,9 +1663,10 @@ impl<
         if let Some(finalization) = self.construct_finalization(view, false) {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view)
-                && leader {
-                    self.finalization_latency.observe(elapsed);
-                }
+                && leader
+            {
+                self.finalization_latency.observe(elapsed);
+            }
 
             // Update backfiller
             backfiller.finalized(view).await;
@@ -1820,13 +1835,14 @@ impl<
         loop {
             // Reset pending set if we have moved to a new view
             if let Some(view) = pending_set
-                && view != self.view {
-                    pending_set = None;
-                    pending_propose_context = None;
-                    pending_propose = None;
-                    pending_verify_context = None;
-                    pending_verify = None;
-                }
+                && view != self.view
+            {
+                pending_set = None;
+                pending_propose_context = None;
+                pending_propose = None;
+                pending_verify_context = None;
+                pending_verify = None;
+            }
 
             // Attempt to propose a container
             if let Some((context, new_propose)) = self.propose(&mut backfiller).await {

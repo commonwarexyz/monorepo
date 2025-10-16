@@ -6,7 +6,7 @@ use commonware_cryptography::BloomFilter;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashSet,
-    num::{NonZeroU16, NonZeroU8},
+    num::{NonZeroU8, NonZeroU16},
 };
 
 #[derive(Arbitrary, Debug)]

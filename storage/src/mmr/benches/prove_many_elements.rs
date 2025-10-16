@@ -1,10 +1,10 @@
-use commonware_cryptography::{sha256, Digest as _, Sha256};
+use commonware_cryptography::{Digest as _, Sha256, sha256};
 use commonware_storage::mmr::{
-    location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
+    Location, StandardHasher, location::LocationRangeExt as _, mem::Mmr,
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 const SAMPLE_SIZE: usize = 100;
 

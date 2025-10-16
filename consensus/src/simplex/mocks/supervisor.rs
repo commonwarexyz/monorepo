@@ -1,10 +1,10 @@
 use crate::{
+    Monitor, Reporter, Supervisor as Su, Viewable,
     simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
         Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
     },
     types::View,
-    Monitor, Reporter, Supervisor as Su, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};

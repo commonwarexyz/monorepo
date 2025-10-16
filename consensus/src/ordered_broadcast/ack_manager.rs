@@ -1,8 +1,8 @@
 use super::types::Ack;
 use crate::types::Epoch;
 use commonware_cryptography::{
-    bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
     Digest, PublicKey,
+    bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -155,12 +155,12 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::{
             dkg::ops::generate_shares,
             primitives::variant::{MinPk, MinSig},
         },
         ed25519::PublicKey,
-        Hasher, Sha256,
     };
 
     /// Aggregated helper functions to reduce duplication in tests.
@@ -168,8 +168,8 @@ mod tests {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
-        use commonware_cryptography::{bls12381::primitives::group::Share, Hasher};
-        use rand::{rngs::StdRng, SeedableRng as _};
+        use commonware_cryptography::{Hasher, bls12381::primitives::group::Share};
+        use rand::{SeedableRng as _, rngs::StdRng};
 
         const NAMESPACE: &[u8] = b"1234";
 

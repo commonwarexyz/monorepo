@@ -125,9 +125,10 @@ impl RMap {
     /// Returns the range that contains the given value.
     pub fn get(&self, value: &u64) -> Option<(u64, u64)> {
         if let Some((&start, &end)) = self.ranges.range(..=value).next_back()
-            && *value <= end {
-                return Some((start, end));
-            }
+            && *value <= end
+        {
+            return Some((start, end));
+        }
         None
     }
 

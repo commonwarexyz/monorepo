@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{Rng, thread_rng};
 
 fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
     let namespace = b"namespace";

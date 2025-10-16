@@ -1,10 +1,10 @@
 //! Utilities for working with futures.
 
 use futures::{
+    StreamExt,
     channel::oneshot,
     future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
-    StreamExt,
 };
 use std::{future::Future, pin::Pin, task::Poll};
 
@@ -205,15 +205,16 @@ impl<T> ClosedExt<T> for oneshot::Sender<T> {
 mod tests {
     use super::*;
     use futures::{
+        FutureExt,
         channel::oneshot,
         executor::block_on,
-        future::{self, select, Either},
-        pin_mut, FutureExt,
+        future::{self, Either, select},
+        pin_mut,
     };
     use std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
         thread,
         time::Duration,

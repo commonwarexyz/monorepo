@@ -1,6 +1,6 @@
-use crate::{ordered_broadcast::types::Context, Automaton as A, Epochable, Relay as R};
+use crate::{Automaton as A, Epochable, Relay as R, ordered_broadcast::types::Context};
 use bytes::Bytes;
-use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
+use commonware_cryptography::{Hasher, PublicKey, Sha256, sha256};
 use futures::channel::oneshot;
 use tracing::trace;
 

@@ -1,8 +1,8 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION,
-    PROFILES_PORT, TRACES_PORT,
+    Config, DESTROYED_FILE_NAME, Error, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*, deployer_directory,
 };
 use futures::future::try_join_all;
 use std::{collections::HashSet, fs::File, path::PathBuf};
@@ -96,15 +96,18 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .ip_permissions(logging_permission)
                     .send()
                     .await
-                { Err(e) => {
-                    warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
-                } _ => {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked logs ingress rule between monitoring and binary security groups"
-                    );
-                }}
+                {
+                    Err(e) => {
+                        warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked logs ingress rule between monitoring and binary security groups"
+                        );
+                    }
+                }
 
                 // Revoke ingress rule from monitoring security group to binary security group
                 let profiling_permission = IpPermission::builder()
@@ -119,15 +122,18 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .ip_permissions(profiling_permission)
                     .send()
                     .await
-                { Err(e) => {
-                    warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
-                } _ => {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked profiles ingress rule between monitoring and binary security groups"
-                    );
-                }}
+                {
+                    Err(e) => {
+                        warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked profiles ingress rule between monitoring and binary security groups"
+                        );
+                    }
+                }
 
                 // Revoke ingress rule from monitoring security group to binary security group
                 let tracing_permission = IpPermission::builder()
@@ -142,15 +148,18 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     .ip_permissions(tracing_permission)
                     .send()
                     .await
-                { Err(e) => {
-                    warn!(%e, "failed to revoke traces ingress rule between monitoring and binary security groups");
-                } _ => {
-                    info!(
-                        monitoring_sg,
-                        binary_sg,
-                        "revoked traces ingress rule between monitoring and binary security groups"
-                    );
-                }}
+                {
+                    Err(e) => {
+                        warn!(%e, "failed to revoke traces ingress rule between monitoring and binary security groups");
+                    }
+                    _ => {
+                        info!(
+                            monitoring_sg,
+                            binary_sg,
+                            "revoked traces ingress rule between monitoring and binary security groups"
+                        );
+                    }
+                }
             }
 
             // Remove network resources

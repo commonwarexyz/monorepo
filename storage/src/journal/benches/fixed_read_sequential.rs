@@ -4,8 +4,8 @@ use commonware_runtime::{
     tokio::Context,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::{sequence::FixedBytes, NZU64};
-use criterion::{black_box, criterion_group, Criterion};
+use commonware_utils::{NZU64, sequence::FixedBytes};
+use criterion::{Criterion, black_box, criterion_group};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},

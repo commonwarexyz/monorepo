@@ -236,12 +236,16 @@ mod tests {
         // Verify iteration over only the kept items
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .any(|e| *e.0 == key1 && *e.1 == Duration::from_secs(10)));
-        assert!(entries
-            .iter()
-            .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2)));
+        assert!(
+            entries
+                .iter()
+                .any(|e| *e.0 == key1 && *e.1 == Duration::from_secs(10))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2))
+        );
     }
 
     #[test]

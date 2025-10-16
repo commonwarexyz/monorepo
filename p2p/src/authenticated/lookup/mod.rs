@@ -166,14 +166,14 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{PrivateKeyExt as _, Signer as _, ed25519};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        Clock, Metrics, Network as RNetwork, Runner, Spawner, deterministic, tokio,
     };
     use commonware_utils::NZU32;
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::{clock::ReasonablyRealtime, Quota};
+    use futures::{SinkExt, StreamExt, channel::mpsc};
+    use governor::{Quota, clock::ReasonablyRealtime};
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,

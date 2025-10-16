@@ -1,17 +1,17 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
+    Runner as _,
     benchmarks::{context, tokio},
     buffer::PoolRef,
     tokio::{Config, Context, Runner},
-    Runner as _,
 };
 use commonware_storage::{
     store::{Config as SConfig, Store},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU64};
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use commonware_utils::{NZU64, NZUsize};
+use criterion::{Criterion, criterion_group};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Instant,

@@ -8,7 +8,7 @@ cfg_if::cfg_if! {
 use crate::PrivateKeyExt;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, union_unique, Array, Span};
+use commonware_utils::{Array, Span, hex, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -16,8 +16,8 @@ use core::{
 };
 use p256::{
     ecdsa::{
-        signature::{Signer, Verifier},
         SigningKey, VerifyingKey,
+        signature::{Signer, Verifier},
     },
     elliptic_curve::scalar::IsHigh,
 };

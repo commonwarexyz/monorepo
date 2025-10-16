@@ -105,9 +105,10 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::GenerateProof { position } => {
                 if let Some(ref t) = tree
-                    && let Ok(p) = t.proof(*position) {
-                        proof = Some(p);
-                    }
+                    && let Ok(p) = t.proof(*position)
+                {
+                    proof = Some(p);
+                }
             }
 
             BmtOperation::VerifyProof {
@@ -154,9 +155,10 @@ fn fuzz(input: FuzzInput) {
             // Range proof operations
             BmtOperation::GenerateRangeProof { start, end } => {
                 if let Some(ref t) = tree
-                    && let Ok(rp) = t.range_proof(*start, *end) {
-                        range_proof = Some(rp);
-                    }
+                    && let Ok(rp) = t.range_proof(*start, *end)
+                {
+                    range_proof = Some(rp);
+                }
             }
 
             BmtOperation::VerifyRangeProof {

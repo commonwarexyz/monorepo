@@ -1,13 +1,13 @@
 use crate::{
-    net::{request_id::RequestId, Message, MAX_MESSAGE_SIZE},
     Error,
+    net::{MAX_MESSAGE_SIZE, Message, request_id::RequestId},
 };
 use commonware_macros::select;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
-    channel::{mpsc, oneshot},
     StreamExt,
+    channel::{mpsc, oneshot},
 };
 use std::collections::HashMap;
 

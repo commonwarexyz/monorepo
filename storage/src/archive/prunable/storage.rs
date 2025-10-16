@@ -6,10 +6,10 @@ use crate::{
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{StreamExt, future::try_join_all, pin_mut};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
@@ -242,11 +242,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed
-            && min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
+            && min <= oldest_allowed
+        {
+            // We don't return an error in this case because the caller
+            // shouldn't be burdened with converting `min` to some section.
+            return Ok(());
+        }
         debug!(min, "pruning archive");
 
         // Prune journal

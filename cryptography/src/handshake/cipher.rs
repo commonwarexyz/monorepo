@@ -1,8 +1,8 @@
 // Intentionally avoid depending directly on super, to depend on the sibling.
 use super::error::Error;
 use chacha20poly1305::{
-    aead::{generic_array::typenum::Unsigned, Aead},
     AeadCore, ChaCha20Poly1305, KeyInit as _,
+    aead::{Aead, generic_array::typenum::Unsigned},
 };
 use rand_core::CryptoRngCore;
 use std::vec::Vec;

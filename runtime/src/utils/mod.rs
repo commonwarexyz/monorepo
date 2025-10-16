@@ -303,7 +303,7 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, tokio, Metrics};
+    use crate::{Metrics, deterministic, tokio};
     use commonware_macros::test_traced;
     use futures::task::waker;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
