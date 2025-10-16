@@ -1187,30 +1187,36 @@ where
             return Poll::Pending;
         }
 
+        // If the future is already completed, return the cached value.
+        if let FutureStateProj::Ready(_) = this.future.as_mut().project() {
+            let FutureStateOwned::Ready(value) =
+                this.future.as_mut().project_replace(FutureState::Completed)
+            else {
+                unreachable!("value not ready");
+            };
+            return Poll::Ready(value);
+        }
+
         // Block the current thread until the future reschedules itself, keeping polling
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-
-            match this.future.as_mut().project() {
-                FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_block) {
-                    Poll::Ready(value) => break Poll::Ready(value),
-                    Poll::Pending => blocker.wait(),
-                },
-                FutureStateProj::Ready(_) => {
+            let FutureStateProj::Pending(mut future) = this.future.as_mut().project() else {
+                unreachable!("future not pending");
+            };
+            match future.as_mut().poll(&mut cx_block) {
+                Poll::Ready(_) => {
                     let FutureStateOwned::Ready(value) =
                         this.future.as_mut().project_replace(FutureState::Completed)
                     else {
                         unreachable!("value not ready");
                     };
-                    break Poll::Ready(value);
+                    return Poll::Ready(value);
                 }
-                FutureStateProj::Completed => {
-                    panic!("future polled after completion");
-                }
-            }
+                Poll::Pending => blocker.wait(),
+            };
         }
     }
 }
