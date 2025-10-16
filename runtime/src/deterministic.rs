@@ -1171,7 +1171,6 @@ where
             *this.started = true;
             let waker = noop_waker();
             let mut cx_noop = task::Context::from_waker(&waker);
-
             match this.future.as_mut().project() {
                 FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_noop) {
                     Poll::Ready(value) => {
