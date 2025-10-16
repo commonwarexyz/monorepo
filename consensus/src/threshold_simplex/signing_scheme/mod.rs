@@ -6,7 +6,7 @@ pub mod bls12381_threshold;
 pub mod ed25519;
 
 use crate::threshold_simplex::types::{Vote, VoteContext, VoteVerification};
-use commonware_codec::{EncodeSize, Read, Write};
+use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 use rand::{CryptoRng, Rng};
@@ -19,16 +19,7 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// available, derives a randomness seed for leader rotation. Implementations may override
 /// the provided defaults to take advantage of scheme-specific batching strategies.
 pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
-    type Signature: Clone
-        + Debug
-        + PartialEq
-        + Eq
-        + Hash
-        + Send
-        + Sync
-        + EncodeSize
-        + Write
-        + Read<Cfg = ()>;
+    type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
     type Certificate: Clone
         + Debug
@@ -37,11 +28,9 @@ pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
         + Hash
         + Send
         + Sync
-        + EncodeSize
-        + Write
-        + Read<Cfg = Self::CertificateCfg>;
+        + Codec<Cfg = Self::CertificateCfg>;
 
-    type Seed: Clone + EncodeSize + Write + Send;
+    type Seed: Clone + Encode + Send;
 
     type CertificateCfg: Clone + Send + Sync;
 

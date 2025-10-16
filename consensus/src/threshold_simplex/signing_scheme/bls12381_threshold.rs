@@ -16,7 +16,7 @@ use crate::{
     Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Encode, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -170,10 +170,8 @@ impl<V: Variant> Read for Signature<V> {
     }
 }
 
-impl<V: Variant> EncodeSize for Signature<V> {
-    fn encode_size(&self) -> usize {
-        self.message_signature.encode_size() + self.seed_signature.encode_size()
-    }
+impl<V: Variant> FixedSize for Signature<V> {
+    const SIZE: usize = V::Signature::SIZE * 2;
 }
 
 impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
