@@ -120,11 +120,11 @@ mod tests {
 
     type D = Sha256Digest;
     type B = Block<D>;
-    type P = PublicKey;
+    type K = PublicKey;
     type V = MinPk;
     type E = PrivateKey;
     type S = bls12381_threshold::Scheme<V>;
-    type Pr = ConstantSigningSchemeProvider;
+    type P = ConstantSigningSchemeProvider;
 
     struct ConstantSigningSchemeProvider(S);
     impl SigningSchemeProvider<S> for ConstantSigningSchemeProvider {
@@ -158,10 +158,10 @@ mod tests {
 
     async fn setup_validator(
         context: deterministic::Context,
-        oracle: &mut Oracle<P>,
-        coordinator: p2p::mocks::Coordinator<P>,
+        oracle: &mut Oracle<K>,
+        coordinator: p2p::mocks::Coordinator<K>,
         secret: E,
-        signing_provider: Pr,
+        signing_provider: P,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
@@ -258,7 +258,7 @@ mod tests {
         Notarization::from_notarizes(&signing_schemes[0], &notarizes).unwrap()
     }
 
-    fn setup_network(context: deterministic::Context) -> Oracle<P> {
+    fn setup_network(context: deterministic::Context) -> Oracle<K> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -272,7 +272,7 @@ mod tests {
 
     fn setup_validators_and_shares(
         context: &mut deterministic::Context,
-    ) -> (Vec<E>, Vec<P>, Vec<S>) {
+    ) -> (Vec<E>, Vec<K>, Vec<S>) {
         let (schemes, peers, signing_schemes) =
             threshold_simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(
                 context,
@@ -282,7 +282,7 @@ mod tests {
         (schemes, peers, signing_schemes)
     }
 
-    async fn setup_network_links(oracle: &mut Oracle<P>, peers: &[P], link: Link) {
+    async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
                 if p2 == p1 {

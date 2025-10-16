@@ -110,12 +110,12 @@ pub struct Actor<
 impl<
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        Pr: SigningSchemeProvider<S>,
+        P: SigningSchemeProvider<S>,
         S: SigningScheme,
-    > Actor<E, B, Pr, S>
+    > Actor<E, B, P, S>
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, Pr, S>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -242,28 +242,28 @@ impl<
     }
 
     /// Start the actor.
-    pub fn start<R, P>(
+    pub fn start<R, K>(
         mut self,
         application: impl Reporter<Activity = B>,
-        buffer: buffered::Mailbox<P, B>,
+        buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
         R: Resolver<Key = handler::Request<B>>,
-        P: PublicKey,
+        K: PublicKey,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, P>(
+    async fn run<R, K>(
         mut self,
         application: impl Reporter<Activity = B>,
-        mut buffer: buffered::Mailbox<P, B>,
+        mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
         R: Resolver<Key = handler::Request<B>>,
-        P: PublicKey,
+        K: PublicKey,
     {
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -807,9 +807,9 @@ impl<
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<P: PublicKey>(
+    async fn find_block<K: PublicKey>(
         &mut self,
-        buffer: &mut buffered::Mailbox<P, B>,
+        buffer: &mut buffered::Mailbox<K, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
         // Check buffer.
