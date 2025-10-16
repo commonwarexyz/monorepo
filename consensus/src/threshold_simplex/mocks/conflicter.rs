@@ -1,6 +1,9 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
-use crate::threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter};
+use crate::threshold_simplex::{
+    signing_scheme::SigningScheme,
+    types::{Finalize, Notarize, Proposal, Voter},
+};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};

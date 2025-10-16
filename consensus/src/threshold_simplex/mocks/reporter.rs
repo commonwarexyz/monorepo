@@ -3,10 +3,11 @@
 use crate::{
     threshold_simplex::{
         select_leader,
+        signing_scheme::SigningScheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
-            Participants, SigningScheme, VoteContext,
+            Participants, VoteContext,
         },
     },
     types::View,

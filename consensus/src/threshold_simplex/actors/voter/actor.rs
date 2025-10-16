@@ -5,9 +5,10 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active, select_leader,
+        signing_scheme::SigningScheme,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Participants, Proposal, SigningScheme, Voter,
+            Nullification, Nullify, Participants, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},

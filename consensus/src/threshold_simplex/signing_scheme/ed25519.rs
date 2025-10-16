@@ -4,8 +4,8 @@
 //! and packages them as certificates that satisfy the generic consensus interface.
 
 use crate::threshold_simplex::{
-    signing_scheme::{finalize_namespace, notarize_namespace, nullify_namespace},
-    types::{Participants, SigningScheme, Vote, VoteContext, VoteVerification},
+    signing_scheme::{finalize_namespace, notarize_namespace, nullify_namespace, SigningScheme},
+    types::{Participants, Vote, VoteContext, VoteVerification},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadRangeExt, Write};

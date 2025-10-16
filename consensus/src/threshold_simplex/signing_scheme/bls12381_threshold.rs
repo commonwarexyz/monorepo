@@ -9,8 +9,9 @@ use crate::{
     threshold_simplex::{
         signing_scheme::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+            SigningScheme,
         },
-        types::{SigningScheme, Vote, VoteContext, VoteVerification},
+        types::{Vote, VoteContext, VoteVerification},
     },
     Viewable,
 };

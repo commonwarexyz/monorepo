@@ -5,7 +5,8 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, SigningScheme, Voter},
+        signing_scheme::SigningScheme,
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,

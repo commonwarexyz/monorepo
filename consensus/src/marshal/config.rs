@@ -1,5 +1,5 @@
 use super::SigningSchemeProvider;
-use crate::{threshold_simplex::types::SigningScheme, Block};
+use crate::{threshold_simplex::signing_scheme::SigningScheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::{
     marker::PhantomData,

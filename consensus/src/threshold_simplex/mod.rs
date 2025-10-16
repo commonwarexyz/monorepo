@@ -173,7 +173,7 @@ use crate::types::View;
 pub mod signing_scheme;
 pub mod types;
 
-use types::SigningScheme;
+use signing_scheme::SigningScheme;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {

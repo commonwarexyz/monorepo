@@ -64,7 +64,7 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{threshold_simplex::types::SigningScheme, types::Epoch};
+use crate::{threshold_simplex::signing_scheme::SigningScheme, types::Epoch};
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
 pub trait SigningSchemeProvider<S: SigningScheme>: Send + Sync + 'static {

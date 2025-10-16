@@ -1,7 +1,10 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter},
+    threshold_simplex::{
+        signing_scheme::SigningScheme,
+        types::{Finalize, Notarize, Proposal, Voter},
+    },
     Viewable,
 };
 use commonware_codec::{Decode, Encode};

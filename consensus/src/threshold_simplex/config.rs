@@ -1,6 +1,6 @@
 use super::types::{Activity, Context};
 use crate::{
-    threshold_simplex::types::SigningScheme,
+    threshold_simplex::signing_scheme::SigningScheme,
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };

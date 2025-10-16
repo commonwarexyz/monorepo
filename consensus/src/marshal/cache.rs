@@ -1,6 +1,9 @@
 use super::SigningSchemeProvider;
 use crate::{
-    threshold_simplex::types::{Finalization, Notarization, SigningScheme},
+    threshold_simplex::{
+        signing_scheme::SigningScheme,
+        types::{Finalization, Notarization},
+    },
     types::{Epoch, Round, View},
     Block,
 };

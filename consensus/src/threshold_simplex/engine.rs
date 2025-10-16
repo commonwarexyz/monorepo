@@ -3,7 +3,7 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{threshold_simplex::types::SigningScheme, Automaton, Relay, Reporter};
+use crate::{threshold_simplex::signing_scheme::SigningScheme, Automaton, Relay, Reporter};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};

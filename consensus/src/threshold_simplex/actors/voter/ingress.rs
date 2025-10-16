@@ -1,4 +1,4 @@
-use crate::threshold_simplex::types::{SigningScheme, Voter};
+use crate::threshold_simplex::{signing_scheme::SigningScheme, types::Voter};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, stream, SinkExt};
 
