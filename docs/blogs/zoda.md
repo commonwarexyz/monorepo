@@ -56,7 +56,7 @@ All together, the participants hold it all, distributed as thinly as possible.
 (They do still need to communicate to recover the data, of course, but it is
 recoverable).
 
-In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m}$ = D$,
+In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m} = D$,
 quite the improvement.
 If the participants want to recover the whole data, each of them will need to
 send their shard to the others, at a cost of $(m - 1) \cdot \frac{D}{m}$ bytes.
@@ -228,7 +228,7 @@ We also receive proofs of inclusion for each row.
 In order to convince us that our rows $Y_S$ came from $G X$,
 a random matrix $H$ of dimension $c \times S'$ is sampled from a (potentially)
 larger field $F' \supseteq F$.
-Then, we are given $Z \coloneqq X H$, of dimension $n \times S'.
+Then, we are given $Z \coloneqq X H$, of dimension $n \times S'$.
 
 Because encoding is linear, we can check that:
 
