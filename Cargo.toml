@@ -21,6 +21,7 @@ members = [
     "examples/log",
     "examples/sync",
     "examples/vrf",
+    "examples/dkg",
 
     # Fuzz builds
     "broadcast/fuzz",
