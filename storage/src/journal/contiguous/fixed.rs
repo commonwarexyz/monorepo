@@ -20,6 +20,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
         fixed::Journal::size(self).await
     }
 
+    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
+        fixed::Journal::oldest_retained_pos(self).await
+    }
+
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         fixed::Journal::prune(self, min_position).await
     }

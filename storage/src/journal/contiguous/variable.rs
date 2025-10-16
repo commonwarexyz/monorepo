@@ -365,6 +365,17 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         Ok(self.size)
     }
 
+    /// Return the position of the oldest item still retained in the journal.
+    ///
+    /// Returns `None` if the journal is empty.
+    pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
+        if self.size == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(self.oldest_retained_pos))
+        }
+    }
+
     /// Prune items at positions strictly less than `min_position`.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
@@ -387,12 +398,13 @@ impl<E: Storage + Metrics + Clock, V: Codec> Variable<E, V> {
         // Cap min_position to size to maintain the invariant oldest_retained_pos <= size
         let capped_min_position = min_position.min(self.size);
 
-        let relative_pos = capped_min_position - self.oldest_retained_pos;
-        let min_section = relative_pos / self.items_per_section;
+        // Calculate section number
+        let min_section = capped_min_position / self.items_per_section;
 
         let pruned = self.data.prune(min_section).await?;
         if pruned {
-            self.oldest_retained_pos += min_section * self.items_per_section;
+            // Update to the actual pruned position (section-aligned)
+            self.oldest_retained_pos = min_section * self.items_per_section;
             self.locations.prune(self.oldest_retained_pos).await?;
         }
         Ok(pruned)
@@ -522,6 +534,10 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variab
         Variable::size(self).await
     }
 
+    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
+        Variable::oldest_retained_pos(self).await
+    }
+
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         Variable::prune(self, min_position).await
     }
@@ -644,6 +660,95 @@ mod tests {
                 .boxed()
             })
             .await;
+        });
+    }
+
+    /// Test multiple sequential prunes with Variable-specific guarantees.
+    #[test]
+    fn test_variable_multiple_sequential_prunes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "sequential_prunes".to_string(),
+                locations_partition: "sequential_prunes_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Variable::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append items across 4 sections: [0-9], [10-19], [20-29], [30-39]
+            for i in 0..40u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            // Initial state: all items accessible
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+            assert_eq!(journal.size().await.unwrap(), 40);
+
+            // First prune: remove section 0 (positions 0-9)
+            let pruned = journal.prune(10).await.unwrap();
+            assert!(pruned);
+
+            // Variable-specific guarantee: oldest is EXACTLY at section boundary
+            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            assert_eq!(oldest, 10);
+
+            // Items 0-9 should be pruned, 10+ should be accessible
+            assert!(matches!(
+                journal.read(0).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            assert_eq!(journal.read(19).await.unwrap(), 1900);
+
+            // Second prune: remove section 1 (positions 10-19)
+            let pruned = journal.prune(20).await.unwrap();
+            assert!(pruned);
+
+            // Variable-specific guarantee: oldest is EXACTLY at section boundary
+            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            assert_eq!(oldest, 20);
+
+            // Items 0-19 should be pruned, 20+ should be accessible
+            assert!(matches!(
+                journal.read(10).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert!(matches!(
+                journal.read(19).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert_eq!(journal.read(20).await.unwrap(), 2000);
+            assert_eq!(journal.read(29).await.unwrap(), 2900);
+
+            // Third prune: remove section 2 (positions 20-29)
+            let pruned = journal.prune(30).await.unwrap();
+            assert!(pruned);
+
+            // Variable-specific guarantee: oldest is EXACTLY at section boundary
+            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            assert_eq!(oldest, 30);
+
+            // Items 0-29 should be pruned, 30+ should be accessible
+            assert!(matches!(
+                journal.read(20).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert!(matches!(
+                journal.read(29).await,
+                Err(crate::journal::Error::ItemPruned(_))
+            ));
+            assert_eq!(journal.read(30).await.unwrap(), 3000);
+            assert_eq!(journal.read(39).await.unwrap(), 3900);
+
+            // Size should still be 40 (pruning doesn't affect size)
+            assert_eq!(journal.size().await.unwrap(), 40);
+
+            journal.destroy().await.unwrap();
         });
     }
 }

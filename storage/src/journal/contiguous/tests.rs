@@ -14,6 +14,9 @@ where
     J: Contiguous<Item = u64> + Send + 'static,
 {
     test_empty_journal(&factory).await;
+    test_oldest_retained_pos_empty(&factory).await;
+    test_oldest_retained_pos_with_items(&factory).await;
+    test_oldest_retained_pos_after_prune(&factory).await;
     test_append_and_size(&factory).await;
     test_sequential_appends(&factory).await;
     test_replay_from_start(&factory).await;
@@ -43,6 +46,71 @@ where
 {
     let journal = factory("empty".to_string()).await.unwrap();
     assert_eq!(journal.size().await.unwrap(), 0);
+    journal.destroy().await.unwrap();
+}
+
+/// Test that oldest_retained_pos returns None for empty journal.
+async fn test_oldest_retained_pos_empty<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let journal = factory("oldest_empty".to_string()).await.unwrap();
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+    journal.destroy().await.unwrap();
+}
+
+/// Test that oldest_retained_pos returns Some(0) for journal with items.
+async fn test_oldest_retained_pos_with_items<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("oldest_with_items".to_string()).await.unwrap();
+
+    // Append some items
+    for i in 0..10 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Should return 0 (first position)
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+    journal.destroy().await.unwrap();
+}
+
+/// Test that oldest_retained_pos updates after pruning.
+async fn test_oldest_retained_pos_after_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("oldest_after_prune".to_string()).await.unwrap();
+
+    // Append items across multiple sections (assuming items_per_section = 10)
+    for i in 0..30 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Oldest should be 0
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+
+    // Prune first section - trait only guarantees section-aligned pruning
+    journal.prune(10).await.unwrap();
+
+    // Oldest should be at most 10 (due to section alignment, might keep items before 10)
+    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    assert!(oldest <= 10);
+
+    // Prune more
+    let prev_oldest = oldest;
+    journal.prune(25).await.unwrap();
+
+    // Oldest should have advanced and be at most 25
+    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    assert!(oldest > prev_oldest);
+    assert!(oldest <= 25);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test that append returns sequential positions and size increments.
@@ -367,6 +435,8 @@ where
     assert_eq!(size, 20);
     assert_eq!(journal.read(10).await.unwrap(), 10);
     assert_eq!(journal.read(19).await.unwrap(), 19);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test pruning beyond the current size.

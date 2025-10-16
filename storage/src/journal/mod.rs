@@ -67,6 +67,4 @@ pub enum Error {
     DecompressionFailed,
     #[error("corruption detected: {0}")]
     Corruption(String),
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
 }

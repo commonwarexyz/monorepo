@@ -47,6 +47,17 @@ pub trait Contiguous {
     /// position as its value.
     fn size(&self) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
+    /// Return the position of the oldest item still retained in the journal.
+    ///
+    /// Returns `None` if the journal is empty.
+    ///
+    /// After pruning, this returns the position of the first item that remains.
+    /// Note that due to section/blob alignment, this may be less than the `min_position`
+    /// passed to `prune()`.
+    fn oldest_retained_pos(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<u64>, Error>> + Send;
+
     /// Prune items at positions strictly less than `min_position`.
     /// Some items with positions less than `min_position` may be retained.
     ///
