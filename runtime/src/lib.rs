@@ -25,8 +25,6 @@
 use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     future::Future,
     io::Error as IoError,
@@ -312,9 +310,9 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "external")] {
         /// Interface that runtimes can implement to constrain the execution latency of a future.
         pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-            /// Defer completion of a future until a randomly selected delay within `range` has elapsed. If
-            /// the future is not yet ready at the desired time of completion, the runtime will block until
-            /// the future is ready.
+            /// Defer completion of a future until a specified `latency` has elapsed. If the future is
+            /// not yet ready at the desired time of completion, the runtime will block until the future
+            /// is ready.
             ///
             /// In [crate::deterministic], this is used to ensure interactions with external systems can
             /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
@@ -326,7 +324,7 @@ cfg_if::cfg_if! {
             /// doesn't require anything in the current thread to complete (or else it will deadlock).
             fn pace<'a, F, T>(
                 &'a self,
-                range: Range<Duration>,
+                latency: Duration,
                 future: F,
             ) -> impl Future<Output = T> + Send + 'a
             where
@@ -339,18 +337,18 @@ cfg_if::cfg_if! {
         /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
         /// runtime should delay completion relative to the clock.
         pub trait FutureExt: Future + Send + Sized {
-            /// Delay completion of the future until a random delay sampled from `range` on `pacer`.
+            /// Delay completion of the future until a specified `latency` on `pacer`.
             fn pace<'a, E>(
                 self,
                 pacer: &'a E,
-                range: Range<Duration>,
+                latency: Duration,
             ) -> impl Future<Output = Self::Output> + Send + 'a
             where
                 E: Pacer + 'a,
                 Self: Send + 'a,
                 Self::Output: Send + 'a,
             {
-                pacer.pace(range, self)
+                pacer.pace(latency, self)
             }
         }
 

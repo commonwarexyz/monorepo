@@ -2,8 +2,6 @@ use crate::{signal, Error, Handle, SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -178,16 +176,12 @@ impl<C> crate::Pacer for Cell<C>
 where
     C: crate::Pacer,
 {
-    fn pace<'a, F, T>(
-        &'a self,
-        range: Range<Duration>,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'a
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().pace(range, future)
+        self.as_ref().pace(latency, future)
     }
 }
 

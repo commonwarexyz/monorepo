@@ -12,10 +12,10 @@
 //!
 //! To support such applications, the runtime can be built with the `external` feature to both
 //! sleep for each [Config::cycle] (opting to wait if all futures are pending) and to constrain
-//! the duration of any future to some reproducible latency (with `pace()`).
+//! the resolution latency of any future (with `pace()`).
 //!
 //! **Applications that do not interact with external processes (or are able to mock them) should never
-//! need to enable this feature. It is commonly used when tests consensus with external execution environments
+//! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
 //! # Example
@@ -36,8 +36,6 @@
 //! });
 //! ```
 
-#[cfg(feature = "external")]
-use crate::Pacer;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -52,27 +50,28 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Blocker, Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
+#[cfg(feature = "external")]
+use futures::task::noop_waker;
 use futures::{
-    task::{noop_waker, waker, ArcWake},
+    task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use pin_project_lite::pin_project;
+#[cfg(feature = "external")]
+use pin_project::pin_project;
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-#[cfg(feature = "external")]
-use rand::Rng;
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest as _, Sha256};
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
@@ -1123,20 +1122,21 @@ impl Clock for Context {
     }
 }
 
-pin_project! {
-    /// A future that resolves when a given target time is reached.
-    ///
-    /// If the future is not ready at the target time, the future is blocked until the target time is reached.
-    struct Waiter<F: Future> {
-        executor: Weak<Executor>,
-        target: SystemTime,
-        future: Option<Pin<Box<F>>>,
-        ready: Option<F::Output>,
-        started: bool,
-        registered: bool,
-    }
+/// A future that resolves when a given target time is reached.
+///
+/// If the future is not ready at the target time, the future is blocked until the target time is reached.
+#[cfg(feature = "external")]
+#[pin_project]
+struct Waiter<F: Future> {
+    executor: Weak<Executor>,
+    target: SystemTime,
+    future: Option<Pin<Box<F>>>,
+    ready: Option<F::Output>,
+    started: bool,
+    registered: bool,
 }
 
+#[cfg(feature = "external")]
 impl<F> Future for Waiter<F>
 where
     F: Future + Send,
@@ -1205,35 +1205,19 @@ where
 
 #[cfg(feature = "external")]
 impl Pacer for Context {
-    fn pace<'a, F, T>(
-        &'a self,
-        range: Range<Duration>,
-        future: F,
-    ) -> impl Future<Output = T> + Send + 'a
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
     where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        // Compute delay
-        let executor = self.executor();
-        let Range { start, end } = range;
-        let delay = if start < end {
-            let mut rng = executor.rng.lock().unwrap();
-            rng.gen_range(start..end)
-        } else if start == end {
-            start
-        } else {
-            panic!("invalid delay range");
-        };
-
         // Compute target time
-        let target = executor
+        let target = self
+            .executor()
             .time
             .lock()
             .unwrap()
-            .checked_add(delay)
+            .checked_add(latency)
             .expect("overflow when setting wake time");
-        drop(executor);
 
         Waiter {
             executor: self.executor.clone(),
@@ -1630,10 +1614,7 @@ mod tests {
             let first = context.clone().spawn({
                 let mut results_tx = results_tx.clone();
                 move |context| async move {
-                    first_rx
-                        .pace(&context, Duration::ZERO..Duration::ZERO)
-                        .await
-                        .unwrap();
+                    first_rx.pace(&context, Duration::ZERO).await.unwrap();
                     let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
                     assert!(elapsed_real > first_wait);
                     let elapsed_sim = context.current().duration_since(start_sim).unwrap();
@@ -1644,10 +1625,7 @@ mod tests {
 
             // Wait for a delay sampled after the external send occurs
             let second = context.clone().spawn(move |context| async move {
-                second_rx
-                    .pace(&context, first_wait..(first_wait * 2))
-                    .await
-                    .unwrap();
+                second_rx.pace(&context, first_wait).await.unwrap();
                 let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
                 assert!(elapsed_real >= first_wait);
                 let elapsed_sim = context.current().duration_since(start_sim).unwrap();

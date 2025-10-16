@@ -28,8 +28,6 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
-#[cfg(feature = "external")]
-use std::ops::Range;
 use std::{
     env,
     future::Future,
@@ -567,7 +565,7 @@ impl Clock for Context {
 impl Pacer for Context {
     fn pace<'a, F, T>(
         &'a self,
-        _range: Range<Duration>,
+        _latency: Duration,
         future: F,
     ) -> impl Future<Output = T> + Send + 'a
     where

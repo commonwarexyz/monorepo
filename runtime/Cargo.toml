@@ -22,7 +22,7 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
-pin-project-lite = { workspace = true }
+pin-project = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -34,7 +34,7 @@ sysinfo = { workspace = true }
 
 [features]
 default = []
-external = []
+external = ["pin-project"]
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 
