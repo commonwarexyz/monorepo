@@ -1130,6 +1130,16 @@ enum FutureState<F: Future> {
     Finished,
 }
 
+#[cfg(feature = "external")]
+impl<F: Future> FutureStateOwned<F> {
+    fn into_ready(self) -> Poll<F::Output> {
+        match self {
+            FutureStateOwned::Ready(value) => Poll::Ready(value),
+            _ => unreachable!("future already cached"),
+        }
+    }
+}
+
 /// A future that resolves when a given target time is reached.
 ///
 /// If the future is not ready at the target time, the future is blocked until the target time is reached.
@@ -1162,28 +1172,19 @@ where
             let waker = noop_waker();
             let mut cx_noop = task::Context::from_waker(&waker);
 
-            let ready_now = match this.future.as_mut().project() {
+            match this.future.as_mut().project() {
                 FutureStateProj::Pending(mut future) => match future.as_mut().poll(&mut cx_noop) {
-                    Poll::Ready(value) => Some(value),
-                    Poll::Pending => None,
+                    Poll::Ready(value) => {
+                        this.future
+                            .as_mut()
+                            .project_replace(FutureState::Ready(value));
+                    }
+                    Poll::Pending => {}
                 },
                 FutureStateProj::Ready(_) | FutureStateProj::Finished => {
                     unreachable!("future polled after completion");
                 }
             };
-
-            if let Some(value) = ready_now {
-                match this
-                    .future
-                    .as_mut()
-                    .project_replace(FutureState::Ready(value))
-                {
-                    FutureStateOwned::Pending(_) => {}
-                    FutureStateOwned::Ready(_) | FutureStateOwned::Finished => {
-                        unreachable!("future already cached")
-                    }
-                }
-            }
         }
 
         // Only allow the task to progress once the sampled delay has elapsed.
@@ -1202,21 +1203,6 @@ where
             return Poll::Pending;
         }
 
-        // If the underlying future completed during the noop pre-poll, surface the cached value.
-        match this.future.as_ref().project_ref() {
-            FutureStateProjRef::Ready(_) => {
-                let value = match this.future.as_mut().project_replace(FutureState::Finished) {
-                    FutureStateOwned::Ready(value) => value,
-                    _ => unreachable!("future already cached"),
-                };
-                return Poll::Ready(value);
-            }
-            FutureStateProjRef::Finished => {
-                unreachable!("future polled after completion");
-            }
-            FutureStateProjRef::Pending(_) => {}
-        }
-
         // Block the current thread until the future reschedules itself, keeping polling
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
@@ -1230,11 +1216,11 @@ where
                     Poll::Pending => blocker.wait(),
                 },
                 FutureStateProj::Ready(_) => {
-                    let value = match this.future.as_mut().project_replace(FutureState::Finished) {
-                        FutureStateOwned::Ready(value) => value,
-                        _ => unreachable!("future already cached"),
-                    };
-                    break Poll::Ready(value);
+                    return this
+                        .future
+                        .as_mut()
+                        .project_replace(FutureState::Finished)
+                        .into_ready();
                 }
                 FutureStateProj::Finished => {
                     panic!("future already polled at scheduled time");
