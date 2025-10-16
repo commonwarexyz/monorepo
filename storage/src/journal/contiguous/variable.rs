@@ -183,6 +183,142 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
+    /// Validate and repair the locations journal to match the data journal.
+    ///
+    /// This function determines the state of the data journal, validates that the locations
+    /// journal is consistent, and repairs any inconsistencies found.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data journal (source of truth)
+    /// * `locations` - The locations journal to validate/repair
+    /// * `items_per_section` - Number of items per section
+    ///
+    /// # Returns
+    ///
+    /// Returns `(size, oldest_retained_pos)` on success, or `Err` if corruption is detected.
+    async fn validate_and_repair_locations(
+        data: &variable::Journal<E, V>,
+        locations: &mut fixed::Journal<E, Location>,
+        items_per_section: u64,
+    ) -> Result<(u64, u64), Error> {
+        // Determine the state of the data journal
+        let (data_last_section, data_oldest_retained_pos, expected_locations_size) =
+            if data.blobs.is_empty() {
+                // No data retained
+                let size = locations.size().await?;
+                (None, size, size)
+            } else {
+                // Data exists: determine last section, oldest position, and expected size
+                let first_section = *data.blobs.first_key_value().unwrap().0;
+                let oldest_retained_pos = first_section * items_per_section;
+                let last_section = *data.blobs.last_key_value().unwrap().0;
+
+                // Count items in last section
+                let items_in_last_section = {
+                    let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                    futures::pin_mut!(stream);
+                    let mut count = 0u64;
+                    while let Some(result) = stream.next().await {
+                        result?; // Propagate any corruption/replay errors
+                        count += 1;
+                    }
+                    count
+                };
+
+                let expected_size = (last_section * items_per_section) + items_in_last_section;
+                (Some(last_section), oldest_retained_pos, expected_size)
+            };
+
+        let locations_size = locations.size().await?;
+        let locations_oldest_retained_pos = locations.oldest_retained_pos().await?;
+
+        // Handle case where data journal is empty (no blobs retained)
+        let Some(data_last_section) = data_last_section else {
+            // No sections retained - could be:
+            // 1. Empty / fully pruned
+            // 2. Crashed during prune (data pruned, locations not yet pruned)
+            // 3. Data partition lost (external corruption)
+            // For cases 2 & 3, repair by pruning locations to match empty data
+            if let Some(_oldest) = locations_oldest_retained_pos {
+                // Prune all locations to match empty data
+                locations.prune(locations_size).await?;
+            }
+            return Ok((expected_locations_size, data_oldest_retained_pos));
+        };
+
+        // Check for corruption: locations ahead of data (violates invariant)
+        if locations_size > expected_locations_size {
+            return Err(Error::Corruption(format!(
+                "locations journal ahead of data: locations_size={locations_size} > expected={expected_locations_size}"
+            )));
+        }
+
+        // Check pruning consistency
+        match locations_oldest_retained_pos {
+            Some(loc_oldest) if loc_oldest < data_oldest_retained_pos => {
+                // Crash during prune: data was pruned but locations wasn't
+                locations.prune(data_oldest_retained_pos).await?;
+            }
+            Some(loc_oldest) if loc_oldest > data_oldest_retained_pos => {
+                // Corruption: locations pruned ahead of data (violates write ordering)
+                return Err(Error::Corruption(format!(
+                    "locations pruned ahead of data: locations_oldest={loc_oldest} > data_oldest={data_oldest_retained_pos}"
+                )));
+            }
+            _ => {} // Locations pruning is consistent with data pruning
+        }
+
+        // Rebuild missing locations if needed
+        if locations_size < expected_locations_size {
+            let missing_count = expected_locations_size - locations_size;
+            if missing_count > items_per_section {
+                return Err(Error::Corruption(format!(
+                    "missing {missing_count} locations exceeds items_per_section {items_per_section}"
+                )));
+            }
+
+            // Determine where to start replaying
+            // If locations has entries, replay from the last indexed item's offset.
+            // We'll skip that first item (already indexed) and append the rest.
+            let (resume_offset, skip_first) = if locations_size > 0 {
+                let last_loc = locations.read(locations_size - 1).await?;
+                (last_loc.offset, true) // Replay from last item, skip first item
+            } else {
+                (0, false) // Start from beginning of section, don't skip first item
+            };
+
+            // Replay and append exactly the missing locations
+            let stream = data
+                .replay(data_last_section, resume_offset, REPLAY_BUFFER_SIZE)
+                .await?;
+            futures::pin_mut!(stream);
+
+            let mut appended = 0;
+            let mut seen = 0;
+            while let Some(result) = stream.next().await {
+                let (section, offset, _size, _item) = result?;
+
+                // Skip the first item if we're resuming from the last indexed location
+                if skip_first && seen == 0 {
+                    seen += 1;
+                    continue;
+                }
+
+                locations.append(Location { section, offset }).await?;
+                appended += 1;
+                if appended == missing_count {
+                    break;
+                }
+            }
+        }
+
+        locations.sync().await?;
+        assert_eq!(locations.size().await?, expected_locations_size);
+
+        Ok((expected_locations_size, data_oldest_retained_pos))
+    }
+
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -225,122 +361,15 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
         )
         .await?;
 
-        // Handle case where all data has been pruned or journal is empty
-        if data.blobs.is_empty() {
-            // No sections retained - could be:
-            // 1. Empty / fully pruned
-            // 2. Crashed during prune (data pruned, locations not yet pruned)
-            // 3. Data partition lost (external corruption)
-            // For cases 2 & 3, we need to repair by pruning locations to match data
-            let size = locations.size().await?;
-            let locations_oldest = locations.oldest_retained_pos().await?;
-            // If locations has unpruned entries, repair by pruning to match empty data
-            if let Some(_oldest) = locations_oldest {
-                // Prune all locations to match empty data
-                locations.prune(size).await?;
-            }
-
-            // Both journals now consistent (empty / fully pruned)
-            return Ok(Self {
-                data,
-                locations,
-                items_per_section,
-                size,
-                oldest_retained_pos: size,
-            });
-        }
-
-        let first_section = *data.blobs.first_key_value().unwrap().0;
-        let oldest_retained_pos = first_section * items_per_section;
-        let last_section = *data.blobs.last_key_value().unwrap().0;
-
-        // Count items in last section
-        let items_in_last_section = {
-            let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-            futures::pin_mut!(stream);
-            let mut items_in_last_section = 0u64;
-            while let Some(result) = stream.next().await {
-                result?; // Propagate any corruption/replay errors
-                items_in_last_section += 1;
-            }
-            items_in_last_section
-        };
-
-        // Calculate expected size based on actual data on disk
-        let expected_locations_size = (last_section * items_per_section) + items_in_last_section;
-        let last_section_start_pos = last_section * items_per_section;
-
-        // Check locations journal state
-        let locations_size = locations.size().await?;
-
-        // Fix any inconsistency between the locations journal and the data journal
-        if locations_size > expected_locations_size {
-            // We violated the invariant that locations is never ahead of data
-            return Err(Error::Corruption(format!(
-                "locations journal size {locations_size} > data journal size {expected_locations_size}"
-            )));
-        }
-        if locations_size < expected_locations_size {
-            let size_diff = expected_locations_size - locations_size;
-            if size_diff > items_per_section {
-                // This should never happen because `append` writes both data and locations when
-                // a section becomes full.
-                return Err(Error::Corruption(format!(
-                    "size difference {size_diff} > items_per_section {items_per_section}",
-                )));
-            }
-
-            // Replay last section and append items we're missing
-            let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-            futures::pin_mut!(stream);
-
-            let Some(items_already_indexed) = locations_size.checked_sub(last_section_start_pos)
-            else {
-                // This should never happen because `append` writes both data and locations when
-                // a section becomes full.
-                return Err(Error::Corruption(format!(
-                    "locations journal size {locations_size} < last section start position {last_section_start_pos}"
-                )));
-            };
-
-            let mut index = 0u64;
-            while let Some(result) = stream.next().await {
-                let (section, offset, _size, _item) = result?;
-
-                // Only append locations we don't have yet
-                if index >= items_already_indexed {
-                    locations.append(Location { section, offset }).await?;
-                }
-                index += 1;
-            }
-        }
-        locations.sync().await?;
-
-        // Ensure pruning boundaries match between data and locations journals.
-        // The data journal is the source of truth - its first section determines oldest_retained_pos.
-        // If a crash occurred during prune(), the data journal may have been pruned but the
-        // locations journal may still contain entries for pruned positions.
-        if expected_locations_size > 0 {
-            if let Some(locations_oldest_pos) = locations.oldest_retained_pos().await? {
-                if locations_oldest_pos < oldest_retained_pos {
-                    // Locations journal is behind on pruning - repair it to match data journal
-                    locations.prune(oldest_retained_pos).await?;
-                } else if locations_oldest_pos > oldest_retained_pos {
-                    // Locations pruned ahead of data - this should never happen due to write ordering
-                    return Err(Error::Corruption(format!(
-                        "locations pruned ahead of data: locations_oldest={locations_oldest_pos} > data_oldest={oldest_retained_pos}"
-                    )));
-                }
-            }
-        }
-
-        assert_eq!(locations.size().await?, expected_locations_size);
+        // Validate and repair locations journal to match data journal
+        let (size, oldest_retained_pos) =
+            Self::validate_and_repair_locations(&data, &mut locations, items_per_section).await?;
 
         Ok(Self {
             data,
             locations,
             items_per_section,
-            size: expected_locations_size,
+            size,
             oldest_retained_pos,
         })
     }
