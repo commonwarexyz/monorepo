@@ -236,12 +236,18 @@ impl Matrix {
     /// Interpret the columns of this matrix as polynomials, with at least `min_coefficients`.
     ///
     /// This will, in fact, produce a matrix padded to the next power of 2 of that number.
-    pub fn as_polynomials(&self, min_coefficients: usize) -> PolynomialVector {
-        PolynomialVector::new(
+    ///
+    /// This will return `None` if `min_coefficients < self.rows`, which would mean
+    /// discarding data, instead of padding it.
+    pub fn as_polynomials(&self, min_coefficients: usize) -> Option<PolynomialVector> {
+        if min_coefficients < self.rows {
+            return None;
+        }
+        Some(PolynomialVector::new(
             min_coefficients,
             self.cols,
             (0..self.rows).flat_map(|i| self[i].iter().copied()),
-        )
+        ))
     }
 
     /// Multiply this matrix by another.
