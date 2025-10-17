@@ -12,7 +12,7 @@ You can come to consensus over a mere fingerprint of the block---a hash for exam
 but doing anything interesting with the block, like processing transactions, requires
 the data.
 
-We've invested some effort in this part of the Commonware stack recently, and I'd
+We've invested some effort in this part of the Commonware Library recently, and I'd
 like to share some fruits of that effort in this post.
 As an outline, we'll cover:
 
@@ -20,7 +20,7 @@ As an outline, we'll cover:
 - how to increase efficiency with coding,
 - and, finally, how to get quicker guarantees about the data with [ZODA](https://eprint.iacr.org/2025/034).
 
-In a future post we could cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
+In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
 
@@ -32,7 +32,7 @@ The simplest approach is to have the leader send the data to every follower.
 The leader's transmission cost is $m \cdot D$ bytes, and the followers' cost
 is $0$ bytes, since they send nothing.
 
-![](/blogs/zoda/img-000.png)
+![Figure 1: A leader transmits a block of data to 4 followers](/blogs/zoda/img-000.png)
 
 Networked protocols are often bottlenecked by sending data, since moving
 bits around the planet, a country, or a building is hopelessly slow compared
@@ -43,6 +43,7 @@ if our leader has a 1 Gb / s link, and needs to send a 1 MB block to 50 follower
 we would expect this to take at least 400 ms, assuming no overhead at all
 in transmitting.
 Our [estimator crate](https://docs.rs/commonware-estimator/latest/estimator/)
+can be used to test out this example, as well as [others](https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy).
 
 This protocol is bottlenecked more so, with all of its communication going through
 the single leader node.
@@ -67,7 +68,7 @@ All together, the participants hold it all, distributed as thinly as possible.
 (They do still need to communicate to recover the data, of course, but it is
 recoverable).
 
-![](/blogs/zoda/img-001.png)
+![Figure 2: A leader splits data into 4 chunks, each sent to 1 follower](/blogs/zoda/img-001.png)
 
 In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m} = D$,
 quite the improvement.
@@ -133,7 +134,7 @@ Each shard can be a row of this matrix.
 Given $n$ shards, the original matrix can be recovered, proceeding columnwise
 once more.
 
-![](/blogs/zoda/img-002.png)
+![Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers](/blogs/zoda/img-002.png)
 
 The cost of this scheme is now:
 - $m \cdot \frac{D}{n}$ for the leader,
@@ -181,7 +182,7 @@ in the vector is that of the shard.
 A binary Merkle Tree is an example of such a scheme (but others might work better,
 e.g. playing with arity, or using a Polynomial Commitment Scheme).
 
-![](/blogs/zoda/img-003.png)
+![Figure 4: The encoded rows are hashed into a tree](/blogs/zoda/img-003.png)
 
 As a side-effect, our scheme now produces a fingerprint, attesting uniquely to
 the encoded data.
@@ -364,8 +365,11 @@ until re-assembling it,
 and re-encoding it to see if it matches our commitment.
 
 [ZODA](https://eprint.iacr.org/2025/034) alleviates this by guaranteeing
-that a shard originates from a valid encoding,
-by adding additional check data to each shard.
+that a shard originates from a valid encoding of the data,
+by adding additional checksums to each shard.
+Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
+can potentially allow for verifying arbitrary properties of the data, which
+we're excited about.
 
 Our work-in-progress implementation of this scheme can be found here:
 [](https://github.com/commonwarexyz/monorepo/blob/cronokirby/ZODA/coding/src/zoda.rs).
