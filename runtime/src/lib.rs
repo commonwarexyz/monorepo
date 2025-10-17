@@ -140,17 +140,19 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// This is not the default behavior. See [`Spawner::shared`] for more information.
     fn dedicated(self) -> Self;
 
-    /// Spawn a task for execution with the current configuration.
+    /// Spawn a task from the current context.
     ///
     /// Unlike directly awaiting a future, the task starts running immediately even if the caller
     /// never awaits the returned [`Handle`].
     ///
-    /// Spawning consumes the context so that each task receives its own [`Spawner`]; contexts are
-    /// never implicitly shared between tasks.
+    /// # Supervision
+    ///
+    /// All tasks are supervised. When cloning a context, the context becomes a child of the context
+    /// it came from. A task spawned from a context will abort all descendants when it finishes or is aborted.
     ///
     /// # Spawn Configuration Reset
     ///
-    /// When a context passes through [`Spawner::spawn`], its configuration resets to the default
+    /// When context passes through [`Spawner::spawn`], its configuration resets to the default
     /// (shared executor, `blocking == false`). Child tasks can therefore assume they start from a
     /// clean configuration without needing to inspect how they were spawned.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
