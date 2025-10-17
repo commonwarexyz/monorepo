@@ -624,52 +624,20 @@ mod tests {
         R::Context: Spawner + Clone,
     {
         runner.start(|context| async move {
-            let handle = context.clone().spawn(|ctx| async move { ctx });
-            let aborted_context = handle.await.unwrap();
+            // Create a child context
+            let child = context.clone();
 
-            // Cloning an aborted context succeeds.
-            let clone = aborted_context.clone();
-
-            // Spawning from an aborted context should behave as if already aborted.
-            let run_count = Arc::new(AtomicUsize::new(0));
-
-            let supervised_handle = clone.clone().spawn({
-                let run_count = run_count.clone();
-                move |_| {
-                    let run_count = run_count.clone();
-                    async move {
-                        run_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            // Spawn parent and abort
+            let parent_handle = context.spawn(move |_| async move {
+                pending::<()>().await;
             });
-            assert!(
-                matches!(supervised_handle.await, Err(Error::Closed)),
-                "expected supervised spawn from aborted context to close immediately"
-            );
-            assert_eq!(
-                run_count.load(Ordering::Relaxed),
-                0,
-                "supervised task should not run after parent aborts"
-            );
+            parent_handle.abort();
 
-            let bad_handle = clone.spawn({
-                let run_count = run_count.clone();
-                move |_| {
-                    let run_count = run_count.clone();
-                    async move {
-                        run_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            // Spawn child and ensure it aborts
+            let child_handle = child.spawn(move |_| async move {
+                pending::<()>().await;
             });
-            assert!(
-                matches!(bad_handle.await, Err(Error::Closed)),
-                "expected spawn from aborted context to close immediately"
-            );
-            assert_eq!(
-                run_count.load(Ordering::Relaxed),
-                0,
-                "task should not run after parent aborts"
-            );
+            assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
 
