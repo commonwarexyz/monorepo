@@ -544,7 +544,7 @@ mod tests {
         });
     }
 
-    fn test_supervised_after_abort_graceful<R>(runner: R)
+    fn test_spawn_after_abort<R>(runner: R)
     where
         R: Runner,
         R::Context: Spawner + Clone,
@@ -599,7 +599,7 @@ mod tests {
         });
     }
 
-    fn test_supervised_spawn_uses_child_tree<R: Runner>(runner: R)
+    fn test_spawn_uses_child_tree<R: Runner>(runner: R)
     where
         R::Context: Spawner,
     {
@@ -1739,16 +1739,6 @@ mod tests {
         assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_spawn_blocking_supervised_panics<R: Runner>(runner: R)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|context| async move {
-            let handle = context.shared(true).spawn(|_| async move {});
-            let _ = handle.await;
-        });
-    }
-
     fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -1942,15 +1932,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_supervised_spawn_uses_child_tree() {
+    fn test_deterministic_spawn_uses_child_tree() {
         let executor = deterministic::Runner::default();
-        test_supervised_spawn_uses_child_tree(executor);
+        test_spawn_uses_child_tree(executor);
     }
 
     #[test]
-    fn test_deterministic_supervised_after_abort_graceful() {
+    fn test_deterministic_spawn_after_abort() {
         let executor = deterministic::Runner::default();
-        test_supervised_after_abort_graceful(executor);
+        test_spawn_after_abort(executor);
     }
 
     #[test]
@@ -2162,12 +2152,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_blocking_supervised_ignored() {
-        let executor = deterministic::Runner::default();
-        test_spawn_blocking_supervised_panics(executor);
-    }
-
-    #[test]
     fn test_deterministic_spawn_blocking_abort() {
         for (dedicated, blocking) in [(false, true), (true, false)] {
             let executor = deterministic::Runner::default();
@@ -2231,15 +2215,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_supervised_spawn_uses_child_tree() {
+    fn test_tokio_spawn_uses_child_tree() {
         let executor = tokio::Runner::default();
-        test_supervised_spawn_uses_child_tree(executor);
+        test_spawn_uses_child_tree(executor);
     }
 
     #[test]
-    fn test_tokio_supervised_after_abort_graceful() {
+    fn test_tokio_spawn_after_abort() {
         let executor = tokio::Runner::default();
-        test_supervised_after_abort_graceful(executor);
+        test_spawn_after_abort(executor);
     }
 
     #[test]
@@ -2448,12 +2432,6 @@ mod tests {
             let executor = tokio::Runner::new(cfg);
             test_spawn_blocking_panic_caught(executor, dedicated);
         }
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_supervised_ignored() {
-        let executor = tokio::Runner::default();
-        test_spawn_blocking_supervised_panics(executor);
     }
 
     #[test]
