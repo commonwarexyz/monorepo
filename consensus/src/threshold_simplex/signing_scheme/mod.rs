@@ -7,6 +7,7 @@
 //! * [`bls12381_threshold`] – aggregated threshold signatures that also expose per-view randomness.
 //! * [`ed25519`] – quorum signatures collected into a vector.
 
+pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 
