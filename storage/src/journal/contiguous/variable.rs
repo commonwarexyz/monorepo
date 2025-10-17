@@ -226,6 +226,70 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         })
     }
 
+    /// Initialize a journal in a fully pruned state at a specific logical size.
+    ///
+    /// This creates a journal that reports `size()` as `start_size` but contains no data.
+    /// The `oldest_retained_pos()` will return `None`, indicating all positions before
+    /// `start_size` have been pruned. This is useful for state sync when starting from
+    /// a non-zero position without historical data.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_size` - The logical size to initialize at. The next append will get position `start_size`.
+    ///
+    /// # Post-conditions
+    ///
+    /// * `size()` returns `start_size`
+    /// * `oldest_retained_pos()` returns `None` (fully pruned)
+    /// * Next append receives position `start_size`
+    pub async fn init_at_size(
+        context: E,
+        cfg: Config<V::Cfg>,
+        start_size: u64,
+    ) -> Result<Self, Error> {
+        // Validate that partitions are different to prevent blob name collisions
+        if cfg.data_partition == cfg.locations_partition {
+            return Err(Error::InvalidConfiguration(format!(
+                "partition and locations_partition must be different: both are '{}'",
+                cfg.data_partition
+            )));
+        }
+
+        // Initialize empty data journal
+        let data = variable::Journal::init(
+            context.clone(),
+            variable::Config {
+                partition: cfg.data_partition,
+                compression: cfg.compression,
+                codec_config: cfg.codec_config,
+                buffer_pool: cfg.buffer_pool.clone(),
+                write_buffer: cfg.write_buffer,
+            },
+        )
+        .await?;
+
+        // Initialize locations journal at the target size
+        let locations = crate::adb::any::fixed::sync::init_journal_at_size(
+            context,
+            fixed::Config {
+                partition: cfg.locations_partition,
+                items_per_blob: cfg.items_per_section,
+                buffer_pool: cfg.buffer_pool,
+                write_buffer: cfg.write_buffer,
+            },
+            start_size,
+        )
+        .await?;
+
+        Ok(Self {
+            data,
+            locations,
+            items_per_section: cfg.items_per_section.get(),
+            size: start_size,
+            oldest_retained_pos: start_size,
+        })
+    }
+
     /// Rewind the journal to the given size, discarding items from the end.
     ///
     /// After rewinding to size N, the journal will contain exactly N items,
@@ -727,6 +791,7 @@ impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V>
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
+    use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
@@ -1431,6 +1496,244 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_zero".to_string(),
+                locations_partition: "init_at_size_zero_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 0)
+                .await
+                .unwrap();
+
+            // Size should be 0
+            assert_eq!(journal.size().await.unwrap(), 0);
+
+            // No oldest retained position (empty journal)
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Next append should get position 0
+            let pos = journal.append(100).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.read(0).await.unwrap(), 100);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_section_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_boundary".to_string(),
+                locations_partition: "init_at_size_boundary_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 10 (exactly at section 1 boundary with items_per_section=5)
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 10)
+                .await
+                .unwrap();
+
+            // Size should be 10
+            assert_eq!(journal.size().await.unwrap(), 10);
+
+            // No data yet, so no oldest retained position
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Next append should get position 10
+            let pos = journal.append(1000).await.unwrap();
+            assert_eq!(pos, 10);
+            assert_eq!(journal.size().await.unwrap(), 11);
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+
+            // Can continue appending
+            let pos = journal.append(1001).await.unwrap();
+            assert_eq!(pos, 11);
+            assert_eq!(journal.read(11).await.unwrap(), 1001);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_mid_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_mid".to_string(),
+                locations_partition: "init_at_size_mid_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 7 (middle of section 1 with items_per_section=5)
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 7)
+                .await
+                .unwrap();
+
+            // Size should be 7
+            assert_eq!(journal.size().await.unwrap(), 7);
+
+            // No data yet, so no oldest retained position
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Next append should get position 7
+            let pos = journal.append(700).await.unwrap();
+            assert_eq!(pos, 7);
+            assert_eq!(journal.size().await.unwrap(), 8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_persist".to_string(),
+                locations_partition: "init_at_size_persist_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 15
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
+                .await
+                .unwrap();
+
+            // Append some items
+            for i in 0..5u64 {
+                let pos = journal.append(1500 + i).await.unwrap();
+                assert_eq!(pos, 15 + i);
+            }
+
+            assert_eq!(journal.size().await.unwrap(), 20);
+
+            // Close and reopen
+            journal.close().await.unwrap();
+
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Size and data should be preserved
+            assert_eq!(journal.size().await.unwrap(), 20);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(15));
+
+            // Verify data
+            for i in 0..5u64 {
+                assert_eq!(journal.read(15 + i).await.unwrap(), 1500 + i);
+            }
+
+            // Can continue appending
+            let pos = journal.append(9999).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), 9999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_large_offset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_large".to_string(),
+                locations_partition: "init_at_size_large_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at a large position (position 1000)
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1000)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size().await.unwrap(), 1000);
+            // No data yet, so no oldest retained position
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Next append should get position 1000
+            let pos = journal.append(100000).await.unwrap();
+            assert_eq!(pos, 1000);
+            assert_eq!(journal.read(1000).await.unwrap(), 100000);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_prune_and_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "init_at_size_prune".to_string(),
+                locations_partition: "init_at_size_prune_locations".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 20
+            let mut journal = Variable::<_, u64>::init_at_size(context.clone(), cfg.clone(), 20)
+                .await
+                .unwrap();
+
+            // Append items 20-29
+            for i in 0..10u64 {
+                journal.append(2000 + i).await.unwrap();
+            }
+
+            assert_eq!(journal.size().await.unwrap(), 30);
+
+            // Prune to position 25
+            journal.prune(25).await.unwrap();
+
+            assert_eq!(journal.size().await.unwrap(), 30);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(25));
+
+            // Verify remaining items are readable
+            for i in 25..30u64 {
+                assert_eq!(journal.read(i).await.unwrap(), 2000 + (i - 20));
+            }
+
+            // Continue appending
+            let pos = journal.append(3000).await.unwrap();
+            assert_eq!(pos, 30);
+
+            journal.destroy().await.unwrap();
         });
     }
 }
