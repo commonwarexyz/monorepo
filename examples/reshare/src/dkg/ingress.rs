@@ -28,7 +28,10 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block<H, C, V> },
+    Finalized {
+        block: Block<H, C, V>,
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// Inbox for sending messages to the DKG [Actor].
@@ -78,9 +81,14 @@ where
     type Activity = Block<H, C, V>;
 
     async fn report(&mut self, block: Self::Activity) {
+        let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Finalized { block })
+            .send(Message::Finalized {
+                block,
+                response: sender,
+            })
             .await
             .expect("mailbox closed");
+        receiver.await.expect("response channel closed")
     }
 }

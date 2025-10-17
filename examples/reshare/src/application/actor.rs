@@ -1,7 +1,7 @@
 use crate::{
     application::{types::genesis_block, Block, Mailbox, Message},
     dkg,
-    utils::{get_last_height, height_in_epoch, BLOCKS_PER_EPOCH},
+    utils::{get_last_height, height_in_epoch},
 };
 use commonware_consensus::{marshal, types::Round};
 use commonware_cryptography::{
@@ -15,7 +15,7 @@ use futures::{
     StreamExt,
 };
 use rand::Rng;
-use std::{future, sync::Arc, time::Duration};
+use std::{future, marker::PhantomData, sync::Arc, time::Duration};
 use tracing::{info, warn};
 
 /// The application [Actor].
@@ -26,7 +26,9 @@ where
     V: Variant,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<H, C, V>>,
+    mailbox: mpsc::Receiver<Message<H>>,
+
+    _phantom: PhantomData<(C, V)>,
 }
 
 impl<E, H, C, V> Actor<E, H, C, V>
@@ -37,13 +39,14 @@ where
     V: Variant,
 {
     /// Create a new application [Actor] and its associated [Mailbox].
-    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H, C, V>) {
+    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H>) {
         let (sender, mailbox) = mpsc::channel(mailbox_size);
 
         (
             Self {
                 context: ContextCell::new(context),
                 mailbox,
+                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -220,13 +223,6 @@ where
                     }
 
                     marshal.broadcast(block).await;
-                }
-                Message::Finalized { block } => {
-                    info!(
-                        height = block.height,
-                        epoch = block.height / BLOCKS_PER_EPOCH,
-                        "finalized block"
-                    );
                 }
             }
         }

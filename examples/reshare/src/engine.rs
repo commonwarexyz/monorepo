@@ -5,10 +5,7 @@ use crate::{
     dkg, orchestrator,
 };
 use commonware_broadcast::buffered;
-use commonware_consensus::{
-    marshal::{self, ingress::handler},
-    Reporters,
-};
+use commonware_consensus::marshal::{self, ingress::handler};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -78,12 +75,11 @@ where
     dkg: dkg::Actor<E, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     application: application::Actor<E, H, C, V>,
-    application_mailbox: application::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     marshal: marshal::Actor<Block<H, C, V>, E, V>,
     marshal_mailbox: marshal::Mailbox<V, Block<H, C, V>>,
-    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C, V>>,
+    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H>>,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
@@ -175,7 +171,6 @@ where
             dkg,
             dkg_mailbox,
             application,
-            application_mailbox,
             buffer,
             buffered_mailbox,
             marshal,
@@ -256,9 +251,6 @@ where
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
     ) {
-        let finalized_reporter =
-            Reporters::from((self.application_mailbox, self.dkg_mailbox.clone()));
-
         let dkg_handle = self.dkg.start(
             self.config.polynomial.clone(),
             self.config.share.clone(),
@@ -269,11 +261,11 @@ where
         );
         let application_handle = self
             .application
-            .start(self.marshal_mailbox, self.dkg_mailbox);
+            .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle =
             self.marshal
-                .start(finalized_reporter, self.buffered_mailbox, backfill_network);
+                .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
         let orchestrator_handle = self.orchestrator.start(
             pending,
             recovered,

@@ -221,7 +221,7 @@ where
 
                     let _ = response.send(outcome);
                 }
-                Message::Finalized { block } => {
+                Message::Finalized { block, response } => {
                     let epoch = block.height / BLOCKS_PER_EPOCH;
                     let relative_height = block.height % BLOCKS_PER_EPOCH;
 
@@ -347,6 +347,9 @@ where
                             manager.process_block(epoch, block).await;
                         }
                     }
+
+                    // Wait to acknowledge until the block has been processed by the application.
+                    response.send(()).expect("response channel closed");
                 }
             }
         }
