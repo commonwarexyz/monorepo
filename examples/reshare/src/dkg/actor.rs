@@ -154,8 +154,8 @@ where
         mut self,
         initial_public: Public<V>,
         initial_share: Option<Share>,
-        mut active_participants: Vec<C::PublicKey>,
-        mut inactive_participants: Vec<C::PublicKey>,
+        active_participants: Vec<C::PublicKey>,
+        inactive_participants: Vec<C::PublicKey>,
         mut orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
@@ -180,59 +180,13 @@ where
             } else {
                 (0, initial_public, initial_share)
             };
-
-        let all_participants = active_participants
-            .iter()
-            .chain(inactive_participants.iter())
-            .cloned()
-            .collect::<Set<_>>();
-
-        let mut rng = StdRng::seed_from_u64(current_epoch);
-
-        if current_epoch <= 1 {
-            // Ensure the number of inactive participants is equal to the number of players per epoch.
-            //
-            // If there are too few, randomly select some from the active set to participate next epoch
-            // as well.
-            //
-            // If there are too many, truncate the list.
-            if inactive_participants.len() < self.num_participants_per_epoch {
-                let dealer_players = active_participants
-                    .choose_multiple(
-                        &mut rng,
-                        self.num_participants_per_epoch - inactive_participants.len(),
-                    )
-                    .cloned()
-                    .collect::<Vec<_>>();
-                inactive_participants.extend_from_slice(dealer_players.as_slice());
-            } else if inactive_participants.len() > self.num_participants_per_epoch {
-                // Truncate the number of players if there are too many.
-                inactive_participants.truncate(self.num_participants_per_epoch);
-            }
-
-            // special case: If the starting epoch has already passed, we set the dealers for the current epoch
-            // as the first epoch's players, and randomly select a new set of players for the next epoch as
-            // usual.
-            if current_epoch == 1 {
-                active_participants = inactive_participants.clone();
-                inactive_participants = all_participants
-                    .iter()
-                    .cloned()
-                    .choose_multiple(&mut rng, self.num_participants_per_epoch);
-            }
-        } else {
-            // If we're starting from a later epoch, we need to pseudorandomly select both the dealers
-            // and players for the current epoch, based on the epoch number as a seed.
-            let mut last_epoch_rng = StdRng::seed_from_u64(current_epoch - 1);
-            active_participants = all_participants
-                .iter()
-                .cloned()
-                .choose_multiple(&mut last_epoch_rng, self.num_participants_per_epoch);
-            inactive_participants = all_participants
-                .iter()
-                .cloned()
-                .choose_multiple(&mut rng, self.num_participants_per_epoch);
-        }
+        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
+        let (active_participants, inactive_participants) = Self::select_participants(
+            current_epoch,
+            self.num_participants_per_epoch,
+            active_participants,
+            inactive_participants,
+        );
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -319,13 +273,14 @@ where
                             .expect("epoch metadata must update");
 
                         // Pseudorandomly select some random players to receive shares for the next epoch.
-                        let mut rng = StdRng::seed_from_u64(next_epoch);
-                        let next_players = all_participants
-                            .iter()
-                            .cloned()
-                            .choose_multiple(&mut rng, self.num_participants_per_epoch)
-                            .into_iter()
-                            .collect::<Set<_>>();
+                        let next_players = Set::from_iter(
+                            Self::choose_from_all(
+                                &all_participants,
+                                self.num_participants_per_epoch,
+                                next_epoch,
+                            )
+                            .into_iter(),
+                        );
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
@@ -395,6 +350,95 @@ where
         }
 
         info!("mailbox closed, exiting.");
+    }
+
+    fn select_participants(
+        current_epoch: u64,
+        num_participants: usize,
+        active_participants: Vec<C::PublicKey>,
+        mut inactive_participants: Vec<C::PublicKey>,
+    ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
+        let mut rng = StdRng::seed_from_u64(current_epoch);
+        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
+
+        match current_epoch {
+            0 => {
+                Self::normalize_inactive(
+                    &mut inactive_participants,
+                    &active_participants,
+                    num_participants,
+                    &mut rng,
+                );
+                (active_participants, inactive_participants)
+            }
+            1 => {
+                Self::normalize_inactive(
+                    &mut inactive_participants,
+                    &active_participants,
+                    num_participants,
+                    &mut rng,
+                );
+                let current_dealers = inactive_participants.clone();
+                let next_players =
+                    Self::choose_from_all(&all_participants, num_participants, current_epoch);
+                (current_dealers, next_players)
+            }
+            _ => {
+                let current_dealers =
+                    Self::choose_from_all(&all_participants, num_participants, current_epoch - 1);
+                let next_players =
+                    Self::choose_from_all(&all_participants, num_participants, current_epoch);
+                (current_dealers, next_players)
+            }
+        }
+    }
+
+    fn normalize_inactive(
+        inactive_participants: &mut Vec<C::PublicKey>,
+        active_participants: &[C::PublicKey],
+        num_participants: usize,
+        rng: &mut StdRng,
+    ) {
+        match inactive_participants.len().cmp(&num_participants) {
+            Ordering::Less => {
+                let additions = active_participants
+                    .choose_multiple(rng, num_participants - inactive_participants.len())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                inactive_participants.extend_from_slice(additions.as_slice());
+            }
+            Ordering::Greater => {
+                inactive_participants.truncate(num_participants);
+            }
+            Ordering::Equal => {}
+        }
+    }
+
+    fn choose_from_all(
+        participants: &[C::PublicKey],
+        num_participants: usize,
+        seed: u64,
+    ) -> Vec<C::PublicKey> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        participants
+            .iter()
+            .cloned()
+            .choose_multiple(&mut rng, num_participants)
+    }
+
+    fn collect_all(
+        active_participants: &[C::PublicKey],
+        inactive_participants: &[C::PublicKey],
+    ) -> Vec<C::PublicKey> {
+        Set::from_iter(
+            active_participants
+                .iter()
+                .chain(inactive_participants.iter())
+                .cloned(),
+        )
+        .iter()
+        .cloned()
+        .collect()
     }
 }
 
