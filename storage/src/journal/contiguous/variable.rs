@@ -525,9 +525,11 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // === Step 1: Scan data journal to determine expected state ===
 
         let (expected_locations_size, expected_locations_oldest_pos) = if data.blobs.is_empty() {
-            // No data blobs → journal is empty or fully pruned
-            // Size comes from locations journal.
-            (locations.size().await?, locations.size().await?)
+            // No data blobs → journal is empty or fully pruned.
+            // The locations journal is the only source of truth for the size.
+            // When fully pruned: oldest_retained_pos == size (no items remain).
+            let size = locations.size().await?;
+            (size, size)
         } else {
             // Data exists → count items
             let first_section = *data.blobs.first_key_value().unwrap().0;
