@@ -151,11 +151,13 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// the context becomes a child of the context it came from. A task spawned from a context will abort all
     /// descendants when it finishes or is aborted.
     ///
-    /// # Spawn Configuration Reset
+    /// # Spawn Configuration
     ///
-    /// When context passes through [`Spawner::spawn`], its configuration resets to the default
-    /// (shared executor, `blocking == false`). Child tasks can therefore assume they start from a
-    /// clean configuration without needing to inspect how they were spawned.
+    /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
+    /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
+    ///
+    /// Child tasks should assume they start from a clean configuration without needing to inspect how their
+    /// parent was configured.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
