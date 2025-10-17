@@ -13,6 +13,7 @@
 //!   off certificate succinctness and randomness for operational familiarity - standard key
 //!   material with mature tooling.
 
+pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 
