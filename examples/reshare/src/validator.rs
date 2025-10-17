@@ -674,8 +674,8 @@ mod test {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let initial_container_required = 10;
-        let final_container_required = 20;
+        let initial_container_required = BLOCKS_PER_EPOCH / 2 + 1;
+        let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let executor = Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -883,7 +883,7 @@ mod test {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let required_container = BLOCKS_PER_EPOCH + 1;
+        let required_container = 2 * BLOCKS_PER_EPOCH + 1;
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);

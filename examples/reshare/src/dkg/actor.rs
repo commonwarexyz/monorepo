@@ -4,7 +4,7 @@ use crate::{
     orchestrator::EpochTransition,
     utils::{is_last_block_in_epoch, BLOCKS_PER_EPOCH},
 };
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{varint::UInt, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::Reporter;
 use commonware_cryptography::{
     bls12381::{
@@ -59,7 +59,7 @@ where
     num_participants_per_epoch: usize,
     rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
-    epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
+    epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, EpochState<V>>,
     failed_rounds: Counter,
 }
 
@@ -89,7 +89,7 @@ where
             context.with_label("metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", config.partition_prefix),
-                codec_config: (),
+                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
             },
         )
         .await
@@ -173,18 +173,22 @@ where
         //
         // For the sake of the example, we assume a fixed set of contributors that can be selected
         // from.
+        let (initial_epoch, current_public, current_share) = if let Some(state) =
+            self.epoch_metadata
+                .get(&EPOCH_METADATA_KEY)
+                .cloned()
+        {
+            (state.epoch, state.public, state.share)
+        } else {
+            (0, initial_public, initial_share)
+        };
+
         let all_participants = active_participants
             .iter()
             .chain(inactive_participants.iter())
             .cloned()
             .collect::<Set<_>>();
 
-        // Fetch the initial epoch from metadata, defaulting to 0 if not present.
-        let initial_epoch = self
-            .epoch_metadata
-            .get(&EPOCH_METADATA_KEY)
-            .cloned()
-            .unwrap_or(0);
         let mut rng = StdRng::seed_from_u64(initial_epoch);
 
         if initial_epoch <= 1 {
@@ -237,8 +241,8 @@ where
             &mut self.context,
             self.namespace.clone(),
             initial_epoch,
-            initial_public,
-            initial_share,
+            current_public.clone(),
+            current_share.clone(),
             &mut self.signer,
             Set::from_iter(active_participants),
             Set::from_iter(inactive_participants),
@@ -322,6 +326,14 @@ where
                         };
                         orchestrator.report(transition).await;
 
+                        let next_public = public.clone();
+                        let next_share = share.clone();
+                        let epoch_state = EpochState {
+                            epoch: next_epoch,
+                            public: next_public.clone(),
+                            share: next_share.clone(),
+                        };
+
                         // Prune the round metadata for the previous epoch.
                         self.round_metadata.remove(&epoch.into());
                         self.round_metadata
@@ -329,13 +341,18 @@ where
                             .await
                             .expect("metadata must sync");
 
+                        self.epoch_metadata
+                            .put_sync(EPOCH_METADATA_KEY, epoch_state)
+                            .await
+                            .expect("epoch metadata must update");
+
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
                             &mut self.context,
                             self.namespace.clone(),
                             next_epoch,
-                            public,
-                            share,
+                            next_public,
+                            next_share,
                             &mut self.signer,
                             next_participants,
                             next_players,
@@ -344,11 +361,6 @@ where
                             &mut self.round_metadata,
                         )
                         .await;
-
-                        self.epoch_metadata
-                            .put_sync(EPOCH_METADATA_KEY, next_epoch)
-                            .await
-                            .expect("epoch metadata must update");
                     };
 
                     // Split the epoch into a "send" and "post" phase.
@@ -397,6 +409,13 @@ pub(crate) struct RoundInfo<V: Variant, C: Signer> {
     pub outcomes: Vec<DealOutcome<C, V>>,
 }
 
+#[derive(Clone)]
+struct EpochState<V: Variant> {
+    epoch: u64,
+    public: Public<V>,
+    share: Option<Share>,
+}
+
 impl<V: Variant, C: Signer> Default for RoundInfo<V, C> {
     fn default() -> Self {
         Self {
@@ -405,6 +424,37 @@ impl<V: Variant, C: Signer> Default for RoundInfo<V, C> {
             local_outcome: None,
             outcomes: Vec::new(),
         }
+    }
+}
+
+impl<V: Variant> Write for EpochState<V> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        UInt(self.epoch).write(buf);
+        self.public.write(buf);
+        self.share.write(buf);
+    }
+}
+
+impl<V: Variant> EncodeSize for EpochState<V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.epoch).encode_size()
+            + self.public.encode_size()
+            + self.share.encode_size()
+    }
+}
+
+impl<V: Variant> Read for EpochState<V> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            epoch: UInt::read(buf)?.into(),
+            public: Public::<V>::read_cfg(buf, cfg)?,
+            share: Option::<Share>::read_cfg(buf, &())?,
+        })
     }
 }
 
