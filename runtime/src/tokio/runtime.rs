@@ -423,17 +423,21 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         self.execution = Execution::default();
-        let (tree, aborted) = SupervisionTree::child(&parent);
+        let (child, aborted) = SupervisionTree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
-        self.tree = Arc::clone(&tree);
+        self.tree = child;
 
         // Spawn the task
         let executor = self.executor.clone();
         let future = f(self);
-        let (f, handle) =
-            Handle::init(future, metric, executor.panicker.clone(), Arc::clone(&tree));
+        let (f, handle) = Handle::init(
+            future,
+            metric,
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
 
         if matches!(past, Execution::Dedicated) {
             thread::spawn({
@@ -455,9 +459,9 @@ impl crate::Spawner for Context {
             executor.runtime.spawn(f);
         }
 
-        // Register the task with the tree
+        // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
-            tree.register(aborter);
+            parent.register(aborter);
         }
 
         handle
