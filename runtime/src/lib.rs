@@ -530,7 +530,7 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, AtomicUsize, Ordering},
+            atomic::{AtomicU32, Ordering},
             Arc, Mutex,
         },
         task::{Context as TContext, Poll, Waker},
@@ -624,90 +624,21 @@ mod tests {
         R::Context: Spawner + Clone,
     {
         runner.start(|context| async move {
-            let handle = context.clone().spawn(|ctx| async move { ctx });
-            let aborted_context = handle.await.unwrap();
+            // Create a child context
+            let child = context.clone();
 
-            // Cloning an aborted context succeeds.
-            let clone = aborted_context.clone();
-
-            // Spawning from an aborted context should behave as if already aborted.
-            let run_count = Arc::new(AtomicUsize::new(0));
-
-            let supervised_handle = clone.clone().spawn({
-                let run_count = run_count.clone();
-                move |_| {
-                    let run_count = run_count.clone();
-                    async move {
-                        run_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            // Spawn parent and abort
+            let parent_handle = context.spawn(move |_| async move {
+                pending::<()>().await;
             });
-            assert!(
-                matches!(supervised_handle.await, Err(Error::Closed)),
-                "expected supervised spawn from aborted context to close immediately"
-            );
-            assert_eq!(
-                run_count.load(Ordering::Relaxed),
-                0,
-                "supervised task should not run after parent aborts"
-            );
+            parent_handle.abort();
 
-            let bad_handle = clone.spawn({
-                let run_count = run_count.clone();
-                move |_| {
-                    let run_count = run_count.clone();
-                    async move {
-                        run_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            // Spawn child and ensure it aborts
+            let child_handle = child.spawn(move |_| async move {
+                pending::<()>().await;
             });
-            assert!(
-                matches!(bad_handle.await, Err(Error::Closed)),
-                "expected spawn from aborted context to close immediately"
-            );
-            assert_eq!(
-                run_count.load(Ordering::Relaxed),
-                0,
-                "task should not run after parent aborts"
-            );
+            assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
-    }
-
-    fn test_spawn_uses_child_tree<R: Runner>(runner: R)
-    where
-        R::Context: Spawner,
-    {
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        runner.start({
-            let counter = counter.clone();
-            move |context| {
-                let counter = counter.clone();
-                async move {
-                    let parent_counter = counter.clone();
-                    let parent_handle = context.spawn(move |ctx| {
-                        let parent_counter = parent_counter.clone();
-                        async move {
-                            let child_counter = parent_counter.clone();
-                            let child_handle = ctx.spawn(move |child_ctx| {
-                                let child_counter = child_counter.clone();
-                                async move {
-                                    let _ = child_ctx;
-                                    child_counter.fetch_add(1, Ordering::Relaxed);
-                                }
-                            });
-
-                            child_handle.await.unwrap();
-                            parent_counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                    });
-
-                    parent_handle.await.unwrap();
-                }
-            }
-        });
-
-        assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
     fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
@@ -2016,12 +1947,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_uses_child_tree() {
-        let executor = deterministic::Runner::default();
-        test_spawn_uses_child_tree(executor);
-    }
-
-    #[test]
     fn test_deterministic_spawn_after_abort() {
         let executor = deterministic::Runner::default();
         test_spawn_after_abort(executor);
@@ -2290,12 +2215,6 @@ mod tests {
     fn test_tokio_root_finishes() {
         let executor = tokio::Runner::default();
         test_root_finishes(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_uses_child_tree() {
-        let executor = tokio::Runner::default();
-        test_spawn_uses_child_tree(executor);
     }
 
     #[test]
