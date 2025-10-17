@@ -23,7 +23,8 @@ pub struct Config<
     /// Cryptographic primitives.
     pub crypto: C,
 
-    /// List of validators for the consensus engine.
+    /// List of validators for the consensus engine, this is static for the
+    /// lifetime of the engine (i.e. the epoch).
     pub participants: Vec<C::PublicKey>,
 
     /// Signing scheme for the consensus engine.
