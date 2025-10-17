@@ -157,7 +157,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader_index = select_leader::<S, _>(&self.participants, self.round.view(), seed);
+        let leader_index = select_leader::<S, _>(&self.participants, self.round, seed);
         let leader = self.participants[leader_index as usize].clone();
         self.leader = Some((leader, leader_index));
     }

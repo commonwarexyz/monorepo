@@ -167,12 +167,8 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use crate::types::View;
-
 pub mod signing_scheme;
 pub mod types;
-
-use signing_scheme::Scheme;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -187,6 +183,10 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 pub mod mocks;
+
+use crate::types::{Round, View};
+use commonware_codec::Encode;
+use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
 pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
@@ -212,21 +212,19 @@ pub(crate) fn interesting(
     true
 }
 
-/// Selects the leader for a given view using scheme-provided randomness seed when available.
+/// Selects the leader for a given round using scheme-provided randomness seed when available.
 ///
 /// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
-pub fn select_leader<S, P>(participants: &[P], view: View, seed: Option<S::Seed>) -> u32
+pub fn select_leader<S, P>(participants: &[P], round: Round, seed: Option<S::Seed>) -> u32
 where
     S: Scheme,
 {
-    use commonware_codec::Encode;
-
     let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
-        (view as usize) % participants.len()
+        (round.epoch() + round.view()) as usize % participants.len()
     };
 
     idx as u32

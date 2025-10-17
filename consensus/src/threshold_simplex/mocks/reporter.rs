@@ -10,7 +10,7 @@ use crate::{
             Participants, VoteContext,
         },
     },
-    types::View,
+    types::{Round, View},
     Monitor, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
@@ -86,10 +86,12 @@ where
         }
     }
 
-    fn record_leader(&self, view: View, seed: Option<S::Seed>) {
+    fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
+        // we use the seed from view N to select the leader for view N+1
+        let next_round = Round::new(round.epoch(), round.view() + 1);
         let mut leaders = self.leaders.lock().unwrap();
-        leaders.entry(view).or_insert_with(|| {
-            let leader_index = select_leader::<S, _>(&self.participants, view, seed);
+        leaders.entry(next_round.view()).or_insert_with(|| {
+            let leader_index = select_leader::<S, _>(&self.participants, next_round, seed);
             self.participants[leader_index as usize].clone()
         });
     }
@@ -154,7 +156,7 @@ where
                     .signing
                     .seed(notarization.round(), &notarization.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(view + 1, seed);
+                self.record_leader(notarization.round(), seed);
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify::<D>(&self.signing, &self.namespace) {
@@ -198,7 +200,7 @@ where
                     .signing
                     .seed(nullification.round, &nullification.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(view + 1, seed);
+                self.record_leader(nullification.round, seed);
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&self.signing, &self.namespace) {
@@ -244,7 +246,7 @@ where
                     .signing
                     .seed(finalization.round(), &finalization.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(view + 1, seed);
+                self.record_leader(finalization.round(), seed);
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();
