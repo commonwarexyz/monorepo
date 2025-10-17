@@ -154,7 +154,7 @@ fn generate_configs(
 
     let mut configs = Vec::with_capacity(identities.len());
     for (index, (signer, share)) in identities.iter().enumerate() {
-        let config_path = args.datadir.join(format!("participant-{}.json", index));
+        let config_path = args.datadir.join(format!("participant-{index}.json"));
         let participant_config = ParticipantConfig {
             port: args.base_port + index as u16,
             bootstrappers: bootstrappers.clone(),
