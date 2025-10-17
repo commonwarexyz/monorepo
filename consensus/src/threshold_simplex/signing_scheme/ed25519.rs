@@ -91,7 +91,7 @@ impl Read for Certificate {
 
         if signers.is_empty() {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::signing_scheme::bls12381_multisig::Certificate",
+                "consensus::threshold_simplex::signing_scheme::ed25519::Certificate",
                 "Certificate contains no signers",
             ));
         }
