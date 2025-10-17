@@ -8,24 +8,16 @@ use std::{
 ///
 /// Each [`Tree`] node corresponds to a single context instance. Cloning a context
 /// registers a new child node beneath the current node. When the task spawned from
-/// a context finishes or is aborted, the runtime drains the node and aborts all descendant tasks.
-///
-/// ```text
-/// parent (task)
-/// |- clone()  -> sibling (idle)
-/// `- spawn()  -> child (task)
-///     `- clone() -> grandchild (idle)
-/// ```
-///
-/// Aborting the parent walks both branches. When the child task finishes it aborts only its own
-/// subtree, so the sibling hanging off the parent remains alive.
+/// a context finishes or is aborted, the runtime drains the node and aborts all descendant
+/// tasks (leaving siblings intact).
 pub(crate) struct Tree {
     inner: Mutex<TreeInner>,
 }
 
 struct TreeInner {
-    // Hold a strong link back to the parent so pure clone chains keep their ancestry alive.
-    // Without this, the parent node could drop immediately, leaving only weak pointers that
+    // Hold a strong reference to the parent to keep an ancestry of unspawned contexts alive.
+    //
+    // Without this, the parent could drop immediately, leaving only weak pointers that
     // cannot be upgraded during abort cascades.
     _parent: Option<Arc<Tree>>,
     children: Vec<Weak<Tree>>,
@@ -53,7 +45,8 @@ impl TreeInner {
         if self.aborted {
             return Err(aborter);
         }
-        assert!(self.task.is_none(), "task aborter already registered");
+
+        assert!(self.task.is_none(), "task already registered");
         self.task = Some(aborter);
         Ok(())
     }
@@ -85,7 +78,6 @@ impl Tree {
         let child = Arc::new(Self {
             inner: Mutex::new(TreeInner::new(Some(parent.clone()), aborted)),
         });
-
         if !aborted {
             parent_inner.child(&child);
         }
@@ -101,12 +93,13 @@ impl Tree {
             inner.register(aborter)
         };
 
+        // If context was aborted before a task was registered, abort the task.
         if let Err(aborter) = result {
             aborter.abort();
         }
     }
 
-    /// Aborts all descendants (tasks and nested contexts) rooted at this node.
+    /// Aborts the task and all descendants rooted at this node.
     pub(crate) fn abort(self: &Arc<Self>) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
@@ -116,6 +109,7 @@ impl Tree {
             return;
         };
 
+        // Abort the task
         if let Some(aborter) = task {
             aborter.abort();
         }
@@ -141,9 +135,9 @@ mod tests {
     use prometheus_client::metrics::gauge::Gauge;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
-        let (handle, registration) = AbortHandle::new_pair();
         let gauge = Gauge::default();
         let metric = MetricHandle::new(gauge);
+        let (handle, registration) = AbortHandle::new_pair();
         let aborter = Aborter::new(handle, metric);
         (aborter, Abortable::new(pending::<()>(), registration))
     }
@@ -154,16 +148,22 @@ mod tests {
         let (parent, aborted) = Tree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
+        // Register the parent task
         let (parent_aborter, parent_future) = aborter();
         parent.register(parent_aborter);
 
+        // Create a child node
         let (child, aborted) = Tree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
+        // Register the child task
         let (child_aborter, child_future) = aborter();
         child.register(child_aborter);
+
+        // Abort the parent task
         parent.abort();
 
+        // The parent and child tasks should abort
         assert!(matches!(block_on(parent_future), Err(Aborted)));
         assert!(matches!(block_on(child_future), Err(Aborted)));
     }
@@ -174,30 +174,32 @@ mod tests {
         let (parent, aborted) = Tree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
-        // Parent creates an idle clone that it intends to use later.
+        // Create a child node
         let (child1, aborted) = Tree::child(&parent);
         assert!(!aborted, "child1 node unexpectedly aborted");
 
-        // Parent spawns a new task; the idle helper remains attached to the parent.
+        // Create a child node (sibling)
         let (child2, aborted) = Tree::child(&parent);
         assert!(!aborted, "child2 node unexpectedly aborted");
 
-        // Parent starts using the helper after the new task was created.
+        // Register the child task
         let (child1_aborter, child1_future) = aborter();
         child1.register(child1_aborter);
 
-        // Simulate the spawned task finishing, which aborts its subtree.
+        // Register the child task (sibling)
         let (child2_aborter, child2_future) = aborter();
         child2.register(child2_aborter);
+
+        // Abort the child task (sibling)
         child2.abort();
 
-        // The spawned task should abort.
+        // The child task (sibling) should abort.
         assert!(
-            matches!(child2_future.now_or_never(), Some(Err(Aborted))),
+            matches!(block_on(child2_future), Err(Aborted)),
             "child2 future did not abort as expected"
         );
 
-        // The helper belongs to the parent and should remain pending.
+        // The child task should remain pending.
         assert!(
             child1_future.now_or_never().is_none(),
             "child1 was aborted by descendant task"
