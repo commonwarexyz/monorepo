@@ -1428,11 +1428,11 @@ mod tests {
 
             // Abort parent task
             parent_handle.abort();
-            assert!(parent_handle.await.is_err());
+            assert!(matches!(parent_handle.await, Err(Error::Closed)));
 
             // Child task should also resolve with error since its parent aborted
             let child_handle = child_handle.lock().unwrap().take().unwrap();
-            assert!(child_handle.await.is_err());
+            assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
 
@@ -1495,24 +1495,25 @@ mod tests {
             //   c0      c1      c2
             //  /  \    /  \    /  \
             // g0  g1  g2  g3  g4  g5
-
             let handles = Arc::new(Mutex::new(Vec::new()));
             let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
-            let root_task = {
+            let root_task = context.spawn({
                 let handles = handles.clone();
-                context.spawn(move |context| async move {
+                move |context| async move {
                     for _ in 0..3 {
-                        let handles2 = handles.clone();
-                        let mut initialized_tx2 = initialized_tx.clone();
-                        let handle = context.clone().spawn(move |context| async move {
-                            for _ in 0..2 {
-                                let handle = context.clone().spawn(|_| async {
-                                    pending::<()>().await;
-                                });
-                                handles2.lock().unwrap().push(handle);
-                                initialized_tx2.send(()).await.unwrap();
+                        let handle = context.clone().spawn({
+                            let handles = handles.clone();
+                            let mut initialized_tx = initialized_tx.clone();
+                            move |context| async move {
+                                for _ in 0..2 {
+                                    let handle = context.clone().spawn(|_| async {
+                                        pending::<()>().await;
+                                    });
+                                    handles.lock().unwrap().push(handle);
+                                    initialized_tx.send(()).await.unwrap();
+                                }
+                                pending::<()>().await;
                             }
-                            pending::<()>().await;
                         });
 
                         handles.lock().unwrap().push(handle);
@@ -1520,8 +1521,8 @@ mod tests {
                     }
 
                     pending::<()>().await;
-                })
-            };
+                }
+            });
 
             // Wait for tasks to initialize
             for _ in 0..9 {
@@ -1529,11 +1530,11 @@ mod tests {
             }
 
             // Verify we have all 9 handles (3 children + 6 grandchildren)
-            assert_eq!(handles.lock().unwrap().len(), 9,);
+            assert_eq!(handles.lock().unwrap().len(), 9);
 
             // Abort root task
             root_task.abort();
-            assert!(root_task.await.is_err());
+            assert!(matches!(root_task.await, Err(Error::Closed)));
 
             // All handles should resolve with error due to cascading abort
             let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
