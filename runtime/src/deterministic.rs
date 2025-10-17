@@ -34,7 +34,8 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Panicker, SupervisionTree,
+        supervision::Tree,
+        Panicker,
     },
     Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
@@ -701,13 +702,13 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    tree: Arc<SupervisionTree>,
+    tree: Arc<Tree>,
     execution: Execution,
 }
 
 impl Clone for Context {
     fn clone(&self) -> Self {
-        let (tree, _) = SupervisionTree::child(&self.tree);
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
             executor: self.executor.clone(),
@@ -762,7 +763,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                tree: SupervisionTree::root(),
+                tree: Tree::root(),
                 execution: Execution::default(),
             },
             executor,
@@ -817,7 +818,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                tree: SupervisionTree::root(),
+                tree: Tree::root(),
                 execution: Execution::default(),
             },
             executor,
@@ -864,7 +865,7 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         self.execution = Execution::default();
-        let (child, aborted) = SupervisionTree::child(&parent);
+        let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }

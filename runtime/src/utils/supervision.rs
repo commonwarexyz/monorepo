@@ -6,7 +6,7 @@ use std::{
 
 /// Tracks the supervision relationships between runtime contexts.
 ///
-/// Each [`SupervisionTree`] node corresponds to a single context instance. Cloning a context
+/// Each [`Tree`] node corresponds to a single context instance. Cloning a context
 /// registers a new child node beneath the current node, while spawning a task registers the
 /// spawned context beneath its parent. When a context finishes or is aborted, the runtime drains
 /// the node and aborts all descendant tasks.
@@ -19,22 +19,22 @@ use std::{
 ///
 /// Aborting the parent walks both branches. When the child task finishes it aborts only its own
 /// subtree, so the helper hanging off the parent remains alive.
-pub(crate) struct SupervisionTree {
-    inner: Mutex<SupervisionTreeInner>,
+pub(crate) struct Tree {
+    inner: Mutex<TreeInner>,
 }
 
-struct SupervisionTreeInner {
+struct TreeInner {
     // Hold a strong link back to the parent so pure clone chains keep their ancestry alive.
     // Without this, the parent node could drop immediately, leaving only weak pointers that
     // cannot be upgraded during abort cascades.
-    _parent: Option<Arc<SupervisionTree>>,
-    children: Vec<Weak<SupervisionTree>>,
+    _parent: Option<Arc<Tree>>,
+    children: Vec<Weak<Tree>>,
     task: Option<Aborter>,
     aborted: bool,
 }
 
-impl SupervisionTreeInner {
-    fn new(parent: Option<Arc<SupervisionTree>>, aborted: bool) -> Self {
+impl TreeInner {
+    fn new(parent: Option<Arc<Tree>>, aborted: bool) -> Self {
         Self {
             _parent: parent,
             children: Vec::new(),
@@ -43,7 +43,7 @@ impl SupervisionTreeInner {
         }
     }
 
-    fn child(&mut self, child: &Arc<SupervisionTree>) {
+    fn child(&mut self, child: &Arc<Tree>) {
         // To avoid unbounded growth of children for clone-heavy loops, we reap dropped children here.
         self.children.retain(|weak| weak.strong_count() > 0);
         self.children.push(Arc::downgrade(child));
@@ -58,7 +58,7 @@ impl SupervisionTreeInner {
         Ok(())
     }
 
-    fn abort(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>)> {
+    fn abort(&mut self) -> Option<(Option<Aborter>, Vec<Weak<Tree>>)> {
         if self.aborted {
             return None;
         }
@@ -70,11 +70,11 @@ impl SupervisionTreeInner {
     }
 }
 
-impl SupervisionTree {
+impl Tree {
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(SupervisionTreeInner::new(None, false)),
+            inner: Mutex::new(TreeInner::new(None, false)),
         })
     }
 
@@ -83,7 +83,7 @@ impl SupervisionTree {
         let mut parent_inner = parent.inner.lock().unwrap();
         let aborted = parent_inner.aborted;
         let child = Arc::new(Self {
-            inner: Mutex::new(SupervisionTreeInner::new(Some(parent.clone()), aborted)),
+            inner: Mutex::new(TreeInner::new(Some(parent.clone()), aborted)),
         });
 
         if !aborted {
@@ -150,14 +150,14 @@ mod tests {
 
     #[test]
     fn abort_cascades_to_children() {
-        let root = SupervisionTree::root();
-        let (parent, aborted) = SupervisionTree::child(&root);
+        let root = Tree::root();
+        let (parent, aborted) = Tree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
         let (parent_aborter, parent_future) = aborter();
         parent.register(parent_aborter);
 
-        let (child, aborted) = SupervisionTree::child(&parent);
+        let (child, aborted) = Tree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
         let (child_aborter, child_future) = aborter();
@@ -170,16 +170,16 @@ mod tests {
 
     #[test]
     fn idle_child_survives_descendant_abort() {
-        let root = SupervisionTree::root();
-        let (parent, aborted) = SupervisionTree::child(&root);
+        let root = Tree::root();
+        let (parent, aborted) = Tree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
         // Parent creates an idle clone that it intends to use later.
-        let (child1, aborted) = SupervisionTree::child(&parent);
+        let (child1, aborted) = Tree::child(&parent);
         assert!(!aborted, "child1 node unexpectedly aborted");
 
         // Parent spawns a new task; the idle helper remains attached to the parent.
-        let (child2, aborted) = SupervisionTree::child(&parent);
+        let (child2, aborted) = Tree::child(&parent);
         assert!(!aborted, "child2 node unexpectedly aborted");
 
         // Parent starts using the helper after the new task was created.

@@ -1,7 +1,4 @@
-use crate::{
-    utils::{extract_panic_message, SupervisionTree},
-    Error,
-};
+use crate::{supervision::Tree, utils::extract_panic_message, Error};
 use futures::{
     channel::oneshot,
     future::{select, Either},
@@ -38,7 +35,7 @@ where
         f: F,
         metric: MetricHandle,
         panicker: Panicker,
-        tree: Arc<SupervisionTree>,
+        tree: Arc<Tree>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,

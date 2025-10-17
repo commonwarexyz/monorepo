@@ -24,8 +24,7 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
-mod supervision;
-pub(crate) use supervision::SupervisionTree;
+pub(crate) mod supervision;
 
 /// The execution mode of a task.
 #[derive(Copy, Clone, Debug)]

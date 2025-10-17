@@ -15,7 +15,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Panicker, SupervisionTree},
+    utils::{signal::Stopper, supervision::Tree, Panicker},
     Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -340,7 +340,7 @@ impl crate::Runner for Runner {
             name: label.name(),
             executor: executor.clone(),
             network,
-            tree: SupervisionTree::root(),
+            tree: Tree::root(),
             execution: Execution::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
@@ -374,13 +374,13 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    tree: Arc<SupervisionTree>,
+    tree: Arc<Tree>,
     execution: Execution,
 }
 
 impl Clone for Context {
     fn clone(&self) -> Self {
-        let (tree, _) = SupervisionTree::child(&self.tree);
+        let (tree, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
             executor: self.executor.clone(),
@@ -423,7 +423,7 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         self.execution = Execution::default();
-        let (child, aborted) = SupervisionTree::child(&parent);
+        let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
