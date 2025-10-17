@@ -133,10 +133,11 @@ pub struct Config<C> {
 ///
 /// ## 2. Data Journal is Source of Truth
 ///
-/// The data journal is always written before the locations journal. This means:
-/// - `locations.size()` must NEVER exceed the number of items in the data journal
-/// - On crash recovery, locations may be behind data (expected), but never ahead
-/// - If locations are ahead, this indicates a critical bug and will return [Error::Corruption]
+/// The locations journal may be behind the data journal, but never ahead:
+/// * locations.size() <= data.size() always holds.
+/// * locations.oldest_retained_pos() <= data.oldest_retained_pos() always holds.
+/// The order in which we manipulate the journals is important to maintaining these invariants
+/// during crash recovery.
 pub struct Variable<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
