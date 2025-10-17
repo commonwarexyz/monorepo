@@ -89,7 +89,12 @@
     <div class="content">
         <h1>$title$</h1>
         <div class="meta">
-            <div class="author">By <a href="https://x.com/vex_0x">$author$</a></div>
+
+            $if(author_twitter)$
+            <div class="author">By <a href="$author_twitter$">$author$</a></div>
+            $else$
+            <div class="author">By <a href="$author_twitter$">$author$</a></div>
+            $endif$
             <div class="date">$date$</div>
         </div>
         $body$

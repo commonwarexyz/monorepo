@@ -3,6 +3,7 @@ title: "Optimizing Block Dispersal with Coding"
 description: "In which we describe how we use coding schemes, and ZODA to distribute blocks efficiently"
 date: "October 15th, 2025"
 author: "Lucas Meier"
+author_twitter: "https://x.com/cronokirby"
 katex: true
 ---
 
@@ -14,11 +15,12 @@ the data.
 We've invested some effort in this part of the Commonware stack recently, and I'd
 like to share some fruits of that effort in this post.
 As an outline, we'll cover:
+
 - data dissemination, naively,
 - how to increase efficiency with coding,
 - and, finally, how to get quicker guarantees about the data with [ZODA](https://eprint.iacr.org/2025/034).
 
-In a future post we could cover lower-level details of our implementation, like
+In a future post we could cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
 
@@ -35,6 +37,13 @@ is $0$ bytes, since they send nothing.
 Networked protocols are often bottlenecked by sending data, since moving
 bits around the planet, a country, or a building is hopelessly slow compared
 to moving it within an integrated circuit.
+
+Some back-of-the-napkin math:
+if our leader has a 1 Gb / s link, and needs to send a 1 MB block to 50 followers,
+we would expect this to take at least 400 ms, assuming no overhead at all
+in transmitting.
+Our [estimator crate](https://docs.rs/commonware-estimator/latest/estimator/)
+
 This protocol is bottlenecked more so, with all of its communication going through
 the single leader node.
 While the leader sends the entire data $m$ times, the followers sit idle,
@@ -106,6 +115,8 @@ as forming our encoded message.
 With some algebra, any $n$ of these evaluations can be interpolated back into
 the original polynomial $d(X)$, whose coefficients spell out our message.
 
+We have an implementation of this scheme [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon/mod.rs).
+
 These details are not essential: what matters is that we take $n$ symbols,
 encode them into $m$, such that any $n$ of the encoded symbols are good enough
 to recover the originals.
@@ -134,6 +145,10 @@ We want some redundancy though, with $m \gg n$, so the total cost
 will be _higher_ than before.
 Nevertheless, it is distributed far more fairly than the naive case, so
 we should expect it to perform better.
+
+We had [a podcast episode](https://www.youtube.com/watch?v=0m2DgfyCi0w) with
+the folks from [Category Labs](https://www.category.xyz/) about using
+Raptor Codes for this problem.
 
 ## Integrity
 
@@ -304,7 +319,6 @@ is exactly that solved by a PCS.
 Such a scheme produces a succinct commitment to $d(X)$, such that we can also prove
 that some data is the result of evaluating $d(X)$ at a given point, which is what we need.
 
-
 The [ZODA paper](https://eprint.iacr.org/2025/034) has some comparison numbers with such a scheme,
 using KZG commitments,
 but they should be taken with a fairly large grain of salt, since they analyze things from a data availability
@@ -326,6 +340,13 @@ The inefficiency---how much data is needed compared to just sending all of the d
 In any case, we can see a claimed improvement in the context of Data Availability,
 and we should expect this to extend to our slightly different use-case of
 data dissemination.
+
+Another factor in the cost of KZG is that requires many operations over a _group_
+(in this case, an elliptic curve) which is at least an order of magnitude
+more expensive than a field operation.
+ZODA, on the other hand, performs only field operations, and inexpensive hashing.
+We should also expect the _latency_ to be improved as well, requiring less time
+to compute the checking data for the shards.
 
 ## Summary
 
