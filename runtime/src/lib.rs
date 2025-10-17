@@ -1552,24 +1552,34 @@ mod tests {
         runner.start(|context| async move {
             let (child_started_tx, child_started_rx) = oneshot::channel();
             let (child_complete_tx, child_complete_rx) = oneshot::channel();
+            let (child_handle_tx, child_handle_rx) = oneshot::channel();
             let (sibling_started_tx, sibling_started_rx) = oneshot::channel();
             let (sibling_complete_tx, sibling_complete_rx) = oneshot::channel();
+            let (sibling_handle_tx, sibling_handle_rx) = oneshot::channel();
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
 
             let parent = context.spawn(move |context| async move {
                 // Spawn a child task
-                context.clone().spawn(|_| async move {
+                let child_handle = context.clone().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
                 });
+                assert!(
+                    child_handle_tx.send(child_handle).is_ok(),
+                    "child handle receiver dropped"
+                );
 
                 // Spawn an independent sibling task
-                context.clone().spawn(move |_| async move {
+                let sibling_handle = context.clone().spawn(move |_| async move {
                     sibling_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     sibling_complete_rx.await.unwrap();
                 });
+                assert!(
+                    sibling_handle_tx.send(sibling_handle).is_ok(),
+                    "sibling handle receiver dropped"
+                );
 
                 // Wait for signal to complete
                 parent_complete_rx.await.unwrap();
@@ -1581,13 +1591,14 @@ mod tests {
 
             // Kill the sibling
             sibling_complete_tx.send(()).unwrap();
+            assert!(sibling_handle_rx.await.is_ok());
 
             // The child task should still be alive
             child_complete_tx.send(()).unwrap();
+            assert!(child_handle_rx.await.is_ok());
 
             // As well as the parent
             parent_complete_tx.send(()).unwrap();
-
             assert!(parent.await.is_ok());
         });
     }
