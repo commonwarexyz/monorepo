@@ -471,7 +471,7 @@ mod tests {
 
     fn test_clock_sleep<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock + Metrics,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // Capture initial time
@@ -487,7 +487,7 @@ mod tests {
 
     fn test_clock_sleep_until<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock + Metrics,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // Trigger sleep
