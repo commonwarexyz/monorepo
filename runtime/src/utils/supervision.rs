@@ -127,11 +127,7 @@ impl Tree {
 mod tests {
     use super::*;
     use crate::utils::MetricHandle;
-    use futures::{
-        executor::block_on,
-        future::{pending, AbortHandle, Abortable, Aborted},
-        FutureExt,
-    };
+    use futures::future::{pending, AbortHandle, Abortable};
     use prometheus_client::metrics::gauge::Gauge;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
@@ -164,8 +160,8 @@ mod tests {
         parent.abort();
 
         // The parent and child tasks should abort
-        assert!(matches!(block_on(parent_future), Err(Aborted)));
-        assert!(matches!(block_on(child_future), Err(Aborted)));
+        assert!(parent_future.is_aborted(), "parent was not aborted");
+        assert!(child_future.is_aborted(), "child was not aborted");
     }
 
     #[test]
@@ -194,14 +190,11 @@ mod tests {
         child2.abort();
 
         // The child task (sibling) should abort.
-        assert!(
-            matches!(block_on(child2_future), Err(Aborted)),
-            "child2 future did not abort as expected"
-        );
+        assert!(child2_future.is_aborted(), "child2 was not aborted");
 
         // The child task should remain pending.
         assert!(
-            child1_future.now_or_never().is_none(),
+            !child1_future.is_aborted(),
             "child1 was aborted by descendant task"
         );
     }
