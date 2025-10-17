@@ -15,9 +15,7 @@ macro_rules! spawn_metrics {
         $crate::spawn_metrics!(
             $crate::telemetry::metrics::task::Label::task(
                 $ctx.name.clone(),
-                $ctx.model.is_supervised(),
-                $ctx.model.is_dedicated(),
-                $ctx.model.is_blocking(),
+                $ctx.execution,
             ),
             @make $ctx
         )
