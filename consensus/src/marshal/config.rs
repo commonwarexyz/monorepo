@@ -14,7 +14,7 @@ where
     S: Scheme,
 {
     /// Provider for epoch-specific signing schemes.
-    pub signing_provider: P,
+    pub scheme_provider: P,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

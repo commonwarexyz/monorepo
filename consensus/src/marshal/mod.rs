@@ -161,13 +161,13 @@ mod tests {
         oracle: &mut Oracle<K>,
         coordinator: p2p::mocks::Coordinator<K>,
         secret: E,
-        signing_provider: P,
+        scheme_provider: P,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
-            signing_provider,
+            scheme_provider,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,

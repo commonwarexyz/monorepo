@@ -131,7 +131,7 @@ impl<
             context.with_label("cache"),
             prunable_config,
             config.block_codec_config.clone(),
-            config.signing_provider,
+            config.scheme_provider,
         )
         .await;
 
@@ -606,7 +606,7 @@ impl<
                                     };
 
                                     // Get signing scheme for epoch
-                                    let Some(signing) = self.cache.get_signing_scheme(proposal.epoch()) else {
+                                    let Some(signing) = self.cache.get_scheme(proposal.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -649,7 +649,7 @@ impl<
                                     self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
                                 Request::Notarized { round } => {
-                                    let Some(signing) = self.cache.get_signing_scheme(round.epoch()) else {
+                                    let Some(signing) = self.cache.get_scheme(round.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };

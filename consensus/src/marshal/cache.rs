@@ -75,7 +75,7 @@ pub(crate) struct Manager<
     context: R,
 
     /// Provider for epoch-specific signing schemes.
-    signing_provider: P,
+    scheme_provider: P,
 
     /// Configuration for underlying prunable archives
     cfg: Config,
@@ -103,7 +103,7 @@ impl<
         context: R,
         cfg: Config,
         block_codec_config: B::Cfg,
-        signing_provider: P,
+        scheme_provider: P,
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
@@ -119,7 +119,7 @@ impl<
         // Restore cache from metadata
         let mut cache = Self {
             context,
-            signing_provider,
+            scheme_provider,
             cfg,
             block_codec_config,
             metadata,
@@ -179,7 +179,7 @@ impl<
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
         let signing = self
-            .signing_provider
+            .scheme_provider
             .scheme(epoch)
             .expect("failed to get signing scheme for epoch");
 
@@ -232,8 +232,8 @@ impl<
         archive
     }
 
-    pub(crate) fn get_signing_scheme(&mut self, epoch: Epoch) -> Option<S> {
-        self.signing_provider.scheme(epoch)
+    pub(crate) fn get_scheme(&mut self, epoch: Epoch) -> Option<S> {
+        self.scheme_provider.scheme(epoch)
     }
 
     /// Add a verified block to the prunable archive.
