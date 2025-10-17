@@ -1591,8 +1591,6 @@ mod tests {
     where
         R::Context: Spawner + Clock,
     {
-        use futures::future::pending;
-
         runner.start(|context| async move {
             let (parent_started_tx, parent_started_rx) = oneshot::channel();
             let (child_started_tx, child_started_rx) = oneshot::channel();
@@ -1646,8 +1644,6 @@ mod tests {
     where
         R::Context: Spawner + Clock,
     {
-        use futures::future::pending;
-
         runner.start(|context| async move {
             let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
             let (leaf_handle_tx, leaf_handle_rx) = oneshot::channel();
