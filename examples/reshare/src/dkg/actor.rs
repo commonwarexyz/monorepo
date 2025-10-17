@@ -354,6 +354,7 @@ where
                     // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                     // and not willing to enter the next epoch).
                     response.send(()).expect("response channel closed");
+                    info!(epoch, relative_height, "finalized block")
                 }
             }
         }
