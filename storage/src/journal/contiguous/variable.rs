@@ -254,6 +254,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             std::cmp::Ordering::Less => {}
         }
 
+        // Rewind never updates oldest_retained_pos.
         if size < self.oldest_retained_pos {
             return Err(Error::InvalidRewind(size));
         }
@@ -265,7 +266,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             let first_section = self.oldest_retained_pos / self.items_per_section;
             self.data.rewind(first_section, 0).await?;
             self.size = 0;
-            self.oldest_retained_pos = 0;
             return Ok(());
         }
 
