@@ -468,11 +468,8 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
         // be ahead (unrecoverable corruption).
         self.locations.rewind(size).await?;
 
-        // Convert aligned offset index to byte offset.
-        // The variable journal aligns items to 16 bytes, so e.g. offset 5 means byte 80.
-        let byte_offset = discard_location.offset as u64 * variable::ITEM_ALIGNMENT;
         self.data
-            .rewind(discard_location.section, byte_offset)
+            .rewind_to_offset(discard_location.section, discard_location.offset)
             .await?;
 
         // Update our size
@@ -665,8 +662,8 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
     ///
     /// This destroys both the data journal and the locations journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.data.destroy().await?;
-        self.locations.destroy().await
+        self.locations.destroy().await?;
+        self.data.destroy().await
     }
 }
 
