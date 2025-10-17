@@ -160,6 +160,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 // Handle shutdown signal
                 _ = &mut shutdown => {
                     debug!("shutdown");
+                    break;
                 },
 
                 // Handle mailbox messages
