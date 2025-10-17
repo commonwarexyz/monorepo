@@ -277,11 +277,8 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
         Ok((expected_locations_size, expected_locations_oldest_pos))
     }
 
-    /// Rebuild missing location entries by replaying the data journal.
-    ///
-    /// Locations journal is behind data journal, so we need to append missing entries.
-    /// This may require replaying multiple sections if the divergence is large (e.g. crash during
-    /// rewind).
+    /// Rebuild missing location entries by replaying the data journal and
+    /// appending the missing entries to the locations journal.
     async fn rebuild_locations(
         data: &variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
@@ -454,6 +451,7 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
             let first_section = self.oldest_retained_pos / self.items_per_section;
             self.data.rewind(first_section, 0).await?;
             self.size = 0;
+            self.oldest_retained_pos = 0;
             return Ok(());
         }
 

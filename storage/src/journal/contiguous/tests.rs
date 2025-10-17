@@ -48,6 +48,7 @@ where
     test_rewind_invalid_forward(&factory).await;
     test_rewind_invalid_pruned(&factory).await;
     test_rewind_then_append(&factory).await;
+    test_rewind_zero_then_append(&factory).await;
 }
 
 /// Test that an empty journal has size 0.
@@ -849,6 +850,37 @@ where
     assert_eq!(pos2, 9);
     assert_eq!(journal.read(8).await.unwrap(), 888);
     assert_eq!(journal.read(9).await.unwrap(), 999);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test that rewinding to zero and then appending works (regression test for oldest_retained_pos bug)
+async fn test_rewind_zero_then_append<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_zero_then_append".to_string())
+        .await
+        .unwrap();
+
+    // Append some items
+    for i in 0..10u64 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Rewind to 0 (empty journal)
+    journal.rewind(0).await.unwrap();
+
+    // Verify journal is empty
+    assert_eq!(journal.size().await.unwrap(), 0);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+    // Append should work without error (regression: previously could underflow in Variable)
+    let pos = journal.append(42).await.unwrap();
+    assert_eq!(pos, 0);
+    assert_eq!(journal.size().await.unwrap(), 1);
+    assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
 }
