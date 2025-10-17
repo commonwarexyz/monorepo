@@ -74,6 +74,17 @@ where
     pub async fn init(context: E, config: Config<C>) -> (Self, Mailbox<H, C, V>) {
         let context = ContextCell::new(context);
 
+        // Initialize a metadata store for current epoch information.
+        let epoch_metadata = Metadata::init(
+            context.with_label("epoch_metadata"),
+            commonware_storage::metadata::Config {
+                partition: format!("{}_current_epoch", config.partition_prefix),
+                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
+            },
+        )
+        .await
+        .expect("failed to initialize epoch metadata");
+
         // Initialize a metadata store for the round information.
         let round_metadata = Metadata::init(
             context.with_label("round_metadata"),
@@ -84,16 +95,6 @@ where
         )
         .await
         .expect("failed to initialize dkg round metadata");
-
-        let epoch_metadata = Metadata::init(
-            context.with_label("metadata"),
-            commonware_storage::metadata::Config {
-                partition: format!("{}_current_epoch", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
-            },
-        )
-        .await
-        .expect("failed to initialize epoch metadata");
 
         let failed_rounds = Counter::default();
         context.register(
@@ -397,30 +398,11 @@ where
     }
 }
 
-#[allow(clippy::type_complexity)]
-pub(crate) struct RoundInfo<V: Variant, C: Signer> {
-    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
-    pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
-    pub local_outcome: Option<DealOutcome<C, V>>,
-    pub outcomes: Vec<DealOutcome<C, V>>,
-}
-
 #[derive(Clone)]
 struct EpochState<V: Variant> {
     epoch: u64,
     public: Public<V>,
     share: Option<Share>,
-}
-
-impl<V: Variant, C: Signer> Default for RoundInfo<V, C> {
-    fn default() -> Self {
-        Self {
-            deal: None,
-            received_shares: Vec::new(),
-            local_outcome: None,
-            outcomes: Vec::new(),
-        }
-    }
 }
 
 impl<V: Variant> Write for EpochState<V> {
@@ -449,6 +431,25 @@ impl<V: Variant> Read for EpochState<V> {
             public: Public::<V>::read_cfg(buf, cfg)?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) struct RoundInfo<V: Variant, C: Signer> {
+    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
+    pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
+    pub local_outcome: Option<DealOutcome<C, V>>,
+    pub outcomes: Vec<DealOutcome<C, V>>,
+}
+
+impl<V: Variant, C: Signer> Default for RoundInfo<V, C> {
+    fn default() -> Self {
+        Self {
+            deal: None,
+            received_shares: Vec::new(),
+            local_outcome: None,
+            outcomes: Vec::new(),
+        }
     }
 }
 
