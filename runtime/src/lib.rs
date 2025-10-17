@@ -1360,7 +1360,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_supervised<R: Runner>(runner: R)
+    fn test_spawn<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1398,7 +1398,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_supervised_abort_on_parent_abort<R: Runner>(runner: R)
+    fn test_spawn_abort_on_parent_abort<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1433,7 +1433,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_supervised_abort_on_parent_completion<R: Runner>(runner: R)
+    fn test_spawn_abort_on_parent_completion<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1459,13 +1459,26 @@ mod tests {
             // Wait for parent task to complete
             assert!(parent_handle.await.is_ok());
 
-            // Child task should also resolve with error since its parent has completed
+            // Child task should resolve with error since its parent has completed
             let child_handle = child_handle.lock().unwrap().take().unwrap();
-            assert!(child_handle.await.is_err());
+            assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
 
-    fn test_spawn_supervised_cascading_abort<R: Runner>(runner: R)
+    fn test_spawn_robust_on_child_completion<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let handle = context.spawn(move |context| async move {
+                context.spawn(|_| async move { 42 }).await.unwrap();
+                43
+            });
+            assert_eq!(handle.await.unwrap(), 43);
+        });
+    }
+
+    fn test_spawn_cascading_abort<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1522,7 +1535,7 @@ mod tests {
             // All handles should resolve with error due to cascading abort
             let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
             for handle in handles {
-                assert!(handle.await.is_err());
+                assert!(matches!(handle.await, Err(Error::Closed)));
             }
         });
     }
@@ -1565,55 +1578,6 @@ mod tests {
             sibling_complete_tx.send(()).unwrap();
 
             // The child task should still be alive
-            child_complete_tx.send(()).unwrap();
-
-            // As well as the parent
-            parent_complete_tx.send(()).unwrap();
-
-            assert!(parent.await.is_ok());
-        });
-    }
-
-    fn test_clone_context_no_child_inheritance<R: Runner>(runner: R)
-    where
-        R::Context: Spawner + Clock,
-    {
-        runner.start(|context| async move {
-            let (child_started_tx, child_started_rx) = oneshot::channel();
-            let (child_complete_tx, child_complete_rx) = oneshot::channel();
-            let (cloned_task_started_tx, cloned_task_started_rx) = oneshot::channel();
-            let (cloned_task_complete_tx, cloned_task_complete_rx) = oneshot::channel();
-            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
-
-            // Parent task that spawns a child using a cloned context
-            let cloned_context = context.clone();
-            let parent = cloned_context.spawn(move |context| async move {
-                // Spawn a child task
-                context.spawn(|_| async move {
-                    child_started_tx.send(()).unwrap();
-                    child_complete_rx.await.unwrap();
-                });
-
-                // Wait for parent to complete
-                parent_complete_rx.await.unwrap();
-            });
-
-            // Use the original context that was previously cloned and spawn a
-            // task. This task should NOT inherit the child relationship
-            context.spawn(move |_| async move {
-                cloned_task_started_tx.send(()).unwrap();
-                cloned_task_complete_rx.await.unwrap();
-            });
-
-            // Wait for both tasks to start
-            child_started_rx.await.unwrap();
-            cloned_task_started_rx.await.unwrap();
-
-            // Complete the cloned task, this should NOT affect the child in the
-            // other context
-            cloned_task_complete_tx.send(()).unwrap();
-
-            // The child should still be alive
             child_complete_tx.send(()).unwrap();
 
             // As well as the parent
@@ -2124,39 +2088,39 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_supervised() {
+    fn test_deterministic_spawn() {
         let runner = deterministic::Runner::default();
-        test_spawn_supervised(runner);
+        test_spawn(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_supervised_abort_on_parent_abort() {
+    fn test_deterministic_spawn_abort_on_parent_abort() {
         let runner = deterministic::Runner::default();
-        test_spawn_supervised_abort_on_parent_abort(runner);
+        test_spawn_abort_on_parent_abort(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_supervised_abort_on_parent_completion() {
+    fn test_deterministic_spawn_abort_on_parent_completion() {
         let runner = deterministic::Runner::default();
-        test_spawn_supervised_abort_on_parent_completion(runner);
+        test_spawn_abort_on_parent_completion(runner);
     }
 
     #[test]
-    fn test_deterministic_spawn_supervised_cascading_abort() {
+    fn test_deterministic_spawn_robust_on_child_completion() {
         let runner = deterministic::Runner::default();
-        test_spawn_supervised_cascading_abort(runner);
+        test_spawn_robust_on_child_completion(runner);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_cascading_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_cascading_abort(runner);
     }
 
     #[test]
     fn test_deterministic_child_survives_sibling_completion() {
         let runner = deterministic::Runner::default();
         test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_deterministic_clone_context_no_child_inheritance() {
-        let runner = deterministic::Runner::default();
-        test_clone_context_no_child_inheritance(runner);
     }
 
     #[test]
@@ -2413,39 +2377,39 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_supervised() {
+    fn test_tokio_spawn() {
         let runner = tokio::Runner::default();
-        test_spawn_supervised(runner);
+        test_spawn(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_supervised_abort_on_parent_abort() {
+    fn test_tokio_spawn_abort_on_parent_abort() {
         let runner = tokio::Runner::default();
-        test_spawn_supervised_abort_on_parent_abort(runner);
+        test_spawn_abort_on_parent_abort(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_supervised_abort_on_parent_completion() {
+    fn test_tokio_spawn_abort_on_parent_completion() {
         let runner = tokio::Runner::default();
-        test_spawn_supervised_abort_on_parent_completion(runner);
+        test_spawn_abort_on_parent_completion(runner);
     }
 
     #[test]
-    fn test_tokio_spawn_supervised_cascading_abort() {
+    fn test_tokio_spawn_robust_on_child_completion() {
         let runner = tokio::Runner::default();
-        test_spawn_supervised_cascading_abort(runner);
+        test_spawn_robust_on_child_completion(runner);
+    }
+
+    #[test]
+    fn test_tokio_spawn_cascading_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_cascading_abort(runner);
     }
 
     #[test]
     fn test_tokio_child_survives_sibling_completion() {
         let runner = tokio::Runner::default();
         test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_clone_context_no_child_inheritance() {
-        let runner = tokio::Runner::default();
-        test_clone_context_no_child_inheritance(runner);
     }
 
     #[test]

@@ -7,21 +7,29 @@ use std::{
 /// Tracks the supervision relationships between runtime contexts.
 ///
 /// Each [`SupervisionTree`] node corresponds to a single context instance. Cloning a context
-/// registers a new child node beneath the current node, while spawning a task transfers ownership
-/// of that node to the spawned task. When a context finishes or is aborted, the runtime drains the
-/// node and aborts all descendant tasks.
+/// registers a new child node beneath the current node, while spawning a task registers the
+/// spawned context beneath its parent. When a context finishes or is aborted, the runtime drains
+/// the node and aborts all descendant tasks.
+///
+/// Simple layout:
+/// parent (task)
+/// |- clone()  -> sibling (idle)
+/// `- spawn()  -> child (task)
+///     `- clone() -> grandchild (idle)
+///
+/// Aborting the parent walks both branches. When the child task finishes it aborts only its own
+/// subtree, so the helper hanging off the parent remains alive.
 pub(crate) struct SupervisionTree {
     inner: Mutex<SupervisionTreeInner>,
 }
 
 struct SupervisionTreeInner {
-    // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
-    // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
-    // pointers that cannot be upgraded during abort cascades.
+    // Hold a strong link back to the parent so pure clone chains keep their ancestry alive.
+    // Without this, the parent node could drop immediately, leaving only weak pointers that
+    // cannot be upgraded during abort cascades.
     _parent: Option<Arc<SupervisionTree>>,
     children: Vec<Weak<SupervisionTree>>,
     task: Option<Aborter>,
-    active_children: usize,
     aborted: bool,
 }
 
@@ -31,46 +39,34 @@ impl SupervisionTreeInner {
             _parent: parent,
             children: Vec::new(),
             task: None,
-            active_children: 0,
             aborted,
         }
     }
 
-    fn is_active(&self) -> bool {
-        self.task.is_some() || self.active_children > 0
-    }
-
-    fn register_child(&mut self, child: &Arc<SupervisionTree>) -> bool {
+    fn child(&mut self, child: &Arc<SupervisionTree>) {
         // To avoid unbounded growth of children for clone-heavy loops, we reap dropped children here.
         self.children.retain(|weak| weak.strong_count() > 0);
-        let was_active = self.is_active();
-        if SupervisionTree::is_active(child) {
-            self.active_children += 1;
-        }
         self.children.push(Arc::downgrade(child));
-        !was_active && self.is_active()
     }
 
-    fn set_task(&mut self, aborter: Aborter) -> Result<bool, Aborter> {
+    fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
         if self.aborted {
             return Err(aborter);
         }
-        let was_active = self.is_active();
         assert!(self.task.is_none(), "task aborter already registered");
         self.task = Some(aborter);
-        Ok(!was_active)
+        Ok(())
     }
 
-    fn capture(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>, bool)> {
+    fn abort(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>)> {
         if self.aborted {
             return None;
         }
 
         self.aborted = true;
-        let was_active = self.is_active();
         let task = self.task.take();
         let children = mem::take(&mut self.children);
-        Some((task, children, was_active))
+        Some((task, children))
     }
 }
 
@@ -90,142 +86,35 @@ impl SupervisionTree {
             inner: Mutex::new(SupervisionTreeInner::new(Some(parent.clone()), aborted)),
         });
 
-        let activated = if !aborted {
-            parent_inner.register_child(&child)
-        } else {
-            false
-        };
-        drop(parent_inner);
-
-        if activated {
-            Self::on_activation(parent);
+        if !aborted {
+            parent_inner.child(&child);
         }
+        drop(parent_inner);
 
         (child, aborted)
     }
 
-    /// Creates a new child node for a spawned task and reattaches idle descendants.
-    pub(crate) fn spawn_child(parent: &Arc<Self>) -> (Arc<Self>, bool) {
-        let mut parent_inner = parent.inner.lock().unwrap();
-        let aborted = parent_inner.aborted;
-        let child = Arc::new(Self {
-            inner: Mutex::new(SupervisionTreeInner::new(Some(parent.clone()), aborted)),
-        });
-
-        if aborted {
-            return (child, true);
-        }
-
-        let mut adopted = Vec::new();
-        parent_inner.children.retain(|weak| {
-            let Some(existing_child) = weak.upgrade() else {
-                return false;
-            };
-            if Self::is_active(&existing_child) {
-                return true;
-            }
-
-            {
-                let mut existing_inner = existing_child.inner.lock().unwrap();
-                existing_inner._parent = Some(Arc::clone(&child));
-            }
-            adopted.push(Arc::downgrade(&existing_child));
-            false
-        });
-
-        let activated = parent_inner.register_child(&child);
-        drop(parent_inner);
-
-        if activated {
-            Self::on_activation(parent);
-        }
-
-        if !adopted.is_empty() {
-            let mut child_inner = child.inner.lock().unwrap();
-            child_inner.children = adopted;
-        }
-
-        (child, false)
-    }
-
-    fn parent(node: &Arc<Self>) -> Option<Arc<Self>> {
-        let inner = node.inner.lock().unwrap();
-        inner._parent.as_ref().map(Arc::clone)
-    }
-
-    fn is_active(node: &Arc<Self>) -> bool {
-        let inner = node.inner.lock().unwrap();
-        inner.is_active()
-    }
-
-    fn on_activation(node: &Arc<Self>) {
-        let mut current = Arc::clone(node);
-        while let Some(parent) = Self::parent(&current) {
-            let propagate = {
-                let mut parent_inner = parent.inner.lock().unwrap();
-                let was_active = parent_inner.is_active();
-                parent_inner.active_children += 1;
-                !was_active && parent_inner.is_active()
-            };
-            if propagate {
-                current = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn on_deactivation(node: &Arc<Self>) {
-        let mut current = Arc::clone(node);
-        while let Some(parent) = Self::parent(&current) {
-            let propagate = {
-                let mut parent_inner = parent.inner.lock().unwrap();
-                let was_active = parent_inner.is_active();
-                assert!(
-                    parent_inner.active_children > 0,
-                    "active child tracking underflow"
-                );
-                parent_inner.active_children -= 1;
-                !parent_inner.aborted && was_active && !parent_inner.is_active()
-            };
-            if propagate {
-                current = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
     /// Records a supervised task so it can be aborted alongside the current context.
-    pub(crate) fn register_task(self: &Arc<Self>, aborter: Aborter) {
+    pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
-            inner.set_task(aborter)
+            inner.register(aborter)
         };
 
-        match result {
-            Ok(activated) => {
-                if activated {
-                    Self::on_activation(self);
-                }
-            }
-            Err(aborter) => aborter.abort(),
+        if let Err(aborter) = result {
+            aborter.abort();
         }
     }
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
-    pub(crate) fn abort_descendants(self: &Arc<Self>) {
+    pub(crate) fn abort(self: &Arc<Self>) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
-            inner.capture()
+            inner.abort()
         };
-        let Some((task, children, was_active)) = result else {
+        let Some((task, children)) = result else {
             return;
         };
-
-        if was_active {
-            Self::on_deactivation(self);
-        }
 
         if let Some(aborter) = task {
             aborter.abort();
@@ -234,7 +123,7 @@ impl SupervisionTree {
         // Drain children so the subtree cannot be aborted twice.
         for child in children {
             if let Some(child) = child.upgrade() {
-                child.abort_descendants();
+                child.abort();
             }
         }
     }
@@ -247,10 +136,11 @@ mod tests {
     use futures::{
         executor::block_on,
         future::{pending, AbortHandle, Abortable, Aborted},
+        FutureExt,
     };
     use prometheus_client::metrics::gauge::Gauge;
 
-    fn pending_aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
+    fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let (handle, registration) = AbortHandle::new_pair();
         let gauge = Gauge::default();
         let metric = MetricHandle::new(gauge);
@@ -261,21 +151,56 @@ mod tests {
     #[test]
     fn abort_cascades_to_children() {
         let root = SupervisionTree::root();
-        let (parent, aborted) = SupervisionTree::spawn_child(&root);
+        let (parent, aborted) = SupervisionTree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
-        let (parent_aborter, parent_future) = pending_aborter();
-        parent.register_task(parent_aborter);
+        let (parent_aborter, parent_future) = aborter();
+        parent.register(parent_aborter);
 
-        let (child, aborted) = SupervisionTree::spawn_child(&parent);
+        let (child, aborted) = SupervisionTree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
-        let (child_aborter, child_future) = pending_aborter();
-        child.register_task(child_aborter);
-
-        parent.abort_descendants();
+        let (child_aborter, child_future) = aborter();
+        child.register(child_aborter);
+        parent.abort();
 
         assert!(matches!(block_on(parent_future), Err(Aborted)));
         assert!(matches!(block_on(child_future), Err(Aborted)));
+    }
+
+    #[test]
+    fn idle_child_survives_descendant_abort() {
+        let root = SupervisionTree::root();
+        let (parent, aborted) = SupervisionTree::child(&root);
+        assert!(!aborted, "parent node unexpectedly aborted");
+
+        // Parent creates an idle clone that it intends to use later.
+        let (child1, aborted) = SupervisionTree::child(&parent);
+        assert!(!aborted, "child1 node unexpectedly aborted");
+
+        // Parent spawns a new task; the idle helper remains attached to the parent.
+        let (child2, aborted) = SupervisionTree::child(&parent);
+        assert!(!aborted, "child2 node unexpectedly aborted");
+
+        // Parent starts using the helper after the new task was created.
+        let (child1_aborter, child1_future) = aborter();
+        child1.register(child1_aborter);
+
+        // Simulate the spawned task finishing, which aborts its subtree.
+        let (child2_aborter, child2_future) = aborter();
+        child2.register(child2_aborter);
+        child2.abort();
+
+        // The spawned task should abort.
+        assert!(
+            matches!(child2_future.now_or_never(), Some(Err(Aborted))),
+            "child2 future did not abort as expected"
+        );
+
+        // The helper belongs to the parent and should remain pending.
+        assert!(
+            child1_future.now_or_never().is_none(),
+            "child1 was aborted by descendant task"
+        );
     }
 }
