@@ -53,7 +53,7 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
-            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
+            mocks::fixtures::{bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -374,6 +374,8 @@ mod tests {
     fn test_stale_backfill() {
         stale_backfill(bls_threshold_fixture::<MinPk, _>);
         stale_backfill(bls_threshold_fixture::<MinSig, _>);
+        stale_backfill(bls_multisig_fixture::<MinPk, _>);
+        stale_backfill(bls_multisig_fixture::<MinSig, _>);
         stale_backfill(ed25519_fixture);
     }
 
@@ -690,6 +692,8 @@ mod tests {
     fn test_append_old_interesting_view() {
         append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
         append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
+        append_old_interesting_view(bls_multisig_fixture::<MinPk, _>);
+        append_old_interesting_view(bls_multisig_fixture::<MinSig, _>);
         append_old_interesting_view(ed25519_fixture);
     }
 
@@ -841,6 +845,8 @@ mod tests {
     fn test_finalization_without_notarization_certificate() {
         finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
         finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
+        finalization_without_notarization_certificate(bls_multisig_fixture::<MinPk, _>);
+        finalization_without_notarization_certificate(bls_multisig_fixture::<MinSig, _>);
         finalization_without_notarization_certificate(ed25519_fixture);
     }
 }
