@@ -85,11 +85,6 @@ impl SupervisionTree {
         (child, aborted)
     }
 
-    /// Creates a new child node for a spawned task.
-    pub(crate) fn spawn_child(parent: &Arc<Self>) -> (Arc<Self>, bool) {
-        Self::child(parent)
-    }
-
     /// Records a supervised task so it can be aborted alongside the current context.
     pub(crate) fn register_task(self: &Arc<Self>, aborter: Aborter) {
         let result = {
@@ -147,13 +142,13 @@ mod tests {
     #[test]
     fn abort_cascades_to_children() {
         let root = SupervisionTree::root();
-        let (parent, aborted) = SupervisionTree::spawn_child(&root);
+        let (parent, aborted) = SupervisionTree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
         let (parent_aborter, parent_future) = pending_aborter();
         parent.register_task(parent_aborter);
 
-        let (child, aborted) = SupervisionTree::spawn_child(&parent);
+        let (child, aborted) = SupervisionTree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
         let (child_aborter, child_future) = pending_aborter();
@@ -168,7 +163,7 @@ mod tests {
     #[test]
     fn idle_child_survives_descendant_abort() {
         let root = SupervisionTree::root();
-        let (parent, aborted) = SupervisionTree::spawn_child(&root);
+        let (parent, aborted) = SupervisionTree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
         // Parent creates an idle clone that it intends to use later.
@@ -176,7 +171,7 @@ mod tests {
         assert!(!aborted, "helper node unexpectedly aborted");
 
         // Parent spawns a new task; the idle helper remains attached to the parent.
-        let (child, aborted) = SupervisionTree::spawn_child(&parent);
+        let (child, aborted) = SupervisionTree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
         // Parent starts using the helper after the new task was created.

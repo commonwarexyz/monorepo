@@ -423,7 +423,7 @@ impl crate::Spawner for Context {
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
         self.execution = Execution::default();
-        let (tree, aborted) = SupervisionTree::spawn_child(&parent);
+        let (tree, aborted) = SupervisionTree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
