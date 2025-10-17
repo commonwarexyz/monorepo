@@ -358,61 +358,49 @@ where
         current_epoch: u64,
         num_participants: usize,
         active_participants: Vec<C::PublicKey>,
-        mut inactive_participants: Vec<C::PublicKey>,
+        inactive_participants: Vec<C::PublicKey>,
     ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
-        let mut rng = StdRng::seed_from_u64(current_epoch);
-        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
+        let epoch0_players = Self::players_for_initial_epoch(
+            inactive_participants,
+            &active_participants,
+            num_participants,
+        );
 
-        match current_epoch {
-            0 => {
-                Self::normalize_inactive(
-                    &mut inactive_participants,
-                    &active_participants,
-                    num_participants,
-                    &mut rng,
-                );
-                (active_participants, inactive_participants)
-            }
-            1 => {
-                Self::normalize_inactive(
-                    &mut inactive_participants,
-                    &active_participants,
-                    num_participants,
-                    &mut rng,
-                );
-                let current_dealers = inactive_participants.clone();
-                let next_players =
-                    Self::choose_from_all(&all_participants, num_participants, current_epoch);
-                (current_dealers, next_players)
-            }
-            _ => {
-                let current_dealers =
-                    Self::choose_from_all(&all_participants, num_participants, current_epoch - 1);
-                let next_players =
-                    Self::choose_from_all(&all_participants, num_participants, current_epoch);
-                (current_dealers, next_players)
-            }
+        if current_epoch == 0 {
+            return (active_participants, epoch0_players);
         }
+
+        let all_participants = Self::collect_all(&active_participants, &epoch0_players);
+        let dealers = if current_epoch == 1 {
+            epoch0_players.clone()
+        } else {
+            Self::choose_from_all(&all_participants, num_participants, current_epoch - 1)
+        };
+        let players = Self::choose_from_all(&all_participants, num_participants, current_epoch);
+
+        (dealers, players)
     }
 
-    fn normalize_inactive(
-        inactive_participants: &mut Vec<C::PublicKey>,
-        active_participants: &[C::PublicKey],
-        num_participants: usize,
-        rng: &mut StdRng,
-    ) {
-        match inactive_participants.len().cmp(&num_participants) {
+    fn players_for_initial_epoch(
+        mut candidates: Vec<C::PublicKey>,
+        fallback: &[C::PublicKey],
+        target: usize,
+    ) -> Vec<C::PublicKey> {
+        match candidates.len().cmp(&target) {
             Ordering::Less => {
-                let additions = active_participants
-                    .choose_multiple(rng, num_participants - inactive_participants.len())
+                let mut rng = StdRng::seed_from_u64(0);
+                let additions = fallback
+                    .choose_multiple(&mut rng, target - candidates.len())
                     .cloned()
                     .collect::<Vec<_>>();
-                inactive_participants.extend_from_slice(additions.as_slice());
+                candidates.extend(additions);
+                candidates
             }
             Ordering::Greater => {
-                inactive_participants.truncate(num_participants);
+                candidates.truncate(target);
+                candidates
             }
-            Ordering::Equal => {}
+            Ordering::Equal => candidates,
         }
     }
 
