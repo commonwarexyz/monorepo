@@ -279,11 +279,20 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
 
     /// Rebuild missing location entries by replaying the data journal and
     /// appending the missing entries to the locations journal.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if `data.blobs` is empty.
     async fn rebuild_locations(
         data: &variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
         expected_size: u64,
     ) -> Result<(), Error> {
+        assert!(
+            !data.blobs.is_empty(),
+            "rebuild_locations called with empty data journal"
+        );
+
         let locations_size = locations.size().await?;
         let missing_count = expected_size - locations_size;
 
@@ -296,16 +305,19 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
                     (last_loc.section, last_loc.offset, true)
                 } else {
                     // Locations fully pruned but data has items → start from first data section
+                    // SAFETY: data.blobs is non-empty (checked above)
                     let first_section = *data.blobs.first_key_value().unwrap().0;
                     (first_section, 0, false)
                 }
             } else {
                 // Locations empty → start from first data section
+                // SAFETY: data.blobs is non-empty (checked above)
                 let first_section = *data.blobs.first_key_value().unwrap().0;
                 (first_section, 0, false)
             };
 
         // Find last section
+        // SAFETY: data.blobs is non-empty (checked above)
         let last_section = *data.blobs.last_key_value().unwrap().0;
 
         // Replay sections and append locations
