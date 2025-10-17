@@ -1,4 +1,4 @@
-use super::SigningSchemeProvider;
+use super::SchemeProvider;
 use crate::{threshold_simplex::signing_scheme::SigningScheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::{
@@ -10,7 +10,7 @@ use std::{
 pub struct Config<B, P, S>
 where
     B: Block,
-    P: SigningSchemeProvider<S>,
+    P: SchemeProvider<S>,
     S: SigningScheme,
 {
     /// Provider for epoch-specific signing schemes.

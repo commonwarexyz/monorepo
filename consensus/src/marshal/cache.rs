@@ -1,4 +1,4 @@
-use super::SigningSchemeProvider;
+use super::SchemeProvider;
 use crate::{
     threshold_simplex::{
         signing_scheme::SigningScheme,
@@ -70,7 +70,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Signing
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SigningSchemeProvider<S>,
+    P: SchemeProvider<S>,
     S: SigningScheme,
 > {
     /// Context
@@ -96,7 +96,7 @@ pub(crate) struct Manager<
 impl<
         R: Rng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        P: SigningSchemeProvider<S>,
+        P: SchemeProvider<S>,
         S: SigningScheme,
     > Manager<R, B, P, S>
 {
@@ -182,7 +182,7 @@ impl<
     async fn init_epoch(&mut self, epoch: Epoch) {
         let signing = self
             .signing_provider
-            .for_epoch(epoch)
+            .scheme(epoch)
             .expect("failed to get signing scheme for epoch");
 
         let verified_blocks = self
@@ -235,7 +235,7 @@ impl<
     }
 
     pub(crate) fn get_signing_scheme(&mut self, epoch: Epoch) -> Option<S> {
-        self.signing_provider.for_epoch(epoch)
+        self.signing_provider.scheme(epoch)
     }
 
     /// Add a verified block to the prunable archive.

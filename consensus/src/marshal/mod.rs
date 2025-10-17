@@ -67,9 +67,9 @@ pub mod resolver;
 use crate::{threshold_simplex::signing_scheme::SigningScheme, types::Epoch};
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SigningSchemeProvider<S: SigningScheme>: Send + Sync + 'static {
+pub trait SchemeProvider<S: SigningScheme>: Send + Sync + 'static {
     /// Return the signing scheme that corresponds to `epoch`.
-    fn for_epoch(&self, epoch: Epoch) -> Option<S>;
+    fn scheme(&self, epoch: Epoch) -> Option<S>;
 }
 
 #[cfg(test)]
@@ -82,7 +82,7 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
-        SigningSchemeProvider,
+        SchemeProvider,
     };
     use crate::{
         marshal::ingress::mailbox::Identifier,
@@ -124,15 +124,15 @@ mod tests {
     type V = MinPk;
     type E = PrivateKey;
     type S = bls12381_threshold::Scheme<V>;
-    type P = ConstantSigningSchemeProvider;
+    type P = ConstantSchemeProvider;
 
-    struct ConstantSigningSchemeProvider(S);
-    impl SigningSchemeProvider<S> for ConstantSigningSchemeProvider {
-        fn for_epoch(&self, _: Epoch) -> Option<S> {
+    struct ConstantSchemeProvider(S);
+    impl SchemeProvider<S> for ConstantSchemeProvider {
+        fn scheme(&self, _: Epoch) -> Option<S> {
             Some(self.0.clone())
         }
     }
-    impl From<S> for ConstantSigningSchemeProvider {
+    impl From<S> for ConstantSchemeProvider {
         fn from(scheme: S) -> Self {
             Self(scheme)
         }

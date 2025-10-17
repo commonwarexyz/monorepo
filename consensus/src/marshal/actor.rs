@@ -7,7 +7,7 @@ use super::{
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
-    SigningSchemeProvider,
+    SchemeProvider,
 };
 use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
@@ -65,7 +65,7 @@ struct BlockSubscription<B: Block> {
 pub struct Actor<
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SigningSchemeProvider<S>,
+    P: SchemeProvider<S>,
     S: SigningScheme,
 > {
     // ---------- Context ----------
@@ -113,7 +113,7 @@ pub struct Actor<
 impl<
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        P: SigningSchemeProvider<S>,
+        P: SchemeProvider<S>,
         S: SigningScheme,
     > Actor<E, B, P, S>
 {
