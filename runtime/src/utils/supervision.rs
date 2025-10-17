@@ -162,7 +162,6 @@ mod tests {
 
         let (child_aborter, child_future) = aborter();
         child.register(child_aborter);
-
         parent.abort();
 
         assert!(matches!(block_on(parent_future), Err(Aborted)));
@@ -176,32 +175,32 @@ mod tests {
         assert!(!aborted, "parent node unexpectedly aborted");
 
         // Parent creates an idle clone that it intends to use later.
-        let (helper, aborted) = SupervisionTree::child(&parent);
-        assert!(!aborted, "helper node unexpectedly aborted");
+        let (child1, aborted) = SupervisionTree::child(&parent);
+        assert!(!aborted, "child1 node unexpectedly aborted");
 
         // Parent spawns a new task; the idle helper remains attached to the parent.
-        let (child, aborted) = SupervisionTree::child(&parent);
-        assert!(!aborted, "child node unexpectedly aborted");
+        let (child2, aborted) = SupervisionTree::child(&parent);
+        assert!(!aborted, "child2 node unexpectedly aborted");
 
         // Parent starts using the helper after the new task was created.
-        let (helper_aborter, helper_future) = aborter();
-        helper.register(helper_aborter);
+        let (child1_aborter, child1_future) = aborter();
+        child1.register(child1_aborter);
 
         // Simulate the spawned task finishing, which aborts its subtree.
-        let (child_aborter, child_future) = aborter();
-        child.register(child_aborter);
-        child.abort();
+        let (child2_aborter, child2_future) = aborter();
+        child2.register(child2_aborter);
+        child2.abort();
 
         // The spawned task should abort.
         assert!(
-            matches!(child_future.now_or_never(), Some(Err(Aborted))),
-            "child future did not abort as expected"
+            matches!(child2_future.now_or_never(), Some(Err(Aborted))),
+            "child2 future did not abort as expected"
         );
 
         // The helper belongs to the parent and should remain pending.
         assert!(
-            helper_future.now_or_never().is_none(),
-            "helper was aborted by descendant task"
+            child1_future.now_or_never().is_none(),
+            "child1 was aborted by descendant task"
         );
     }
 }
