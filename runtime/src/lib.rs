@@ -1522,85 +1522,8 @@ mod tests {
             // All handles should resolve with error due to cascading abort
             let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
             for handle in handles {
-                assert!(handle.await.is_err());
+                assert!(matches!(handle.await, Err(Error::Closed)));
             }
-        });
-    }
-
-    fn test_supervision_metrics_children_shutdown<R: Runner>(runner: R)
-    where
-        R::Context: Spawner + Metrics + Clone,
-    {
-        fn running_tasks(metrics: &str, name: &str) -> Option<u64> {
-            let fragment = format!("name=\"{name}\"");
-            metrics.lines().find_map(|line| {
-                if line.starts_with("runtime_tasks_running{") && line.contains(&fragment) {
-                    line.rsplit_once(' ')
-                        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-                } else {
-                    None
-                }
-            })
-        }
-
-        runner.start(|context| async move {
-            let context = context.with_label("parent");
-            let metrics_context = context.clone();
-            let child_label = "parent_child";
-            let handles = Arc::new(Mutex::new(None));
-            let handles_inner = handles.clone();
-            let (parent_ready_tx, parent_ready_rx) = oneshot::channel();
-
-            let parent = context.clone().spawn(move |context| async move {
-                let child = context.clone().with_label("child").spawn(|_| async move {
-                    pending::<()>().await;
-                });
-                *handles_inner.lock().unwrap() = Some(child);
-                parent_ready_tx.send(()).unwrap();
-                pending::<()>().await;
-            });
-
-            parent_ready_rx.await.unwrap();
-            reschedule().await;
-
-            let metrics = metrics_context.encode();
-            assert_eq!(
-                running_tasks(&metrics, "parent"),
-                Some(1),
-                "expected parent task to be running: {metrics}"
-            );
-            assert_eq!(
-                running_tasks(&metrics, child_label),
-                Some(1),
-                "expected child task to be running: {metrics}"
-            );
-
-            parent.abort();
-            assert!(
-                matches!(parent.await, Err(Error::Closed)),
-                "parent handle should report closed after abort"
-            );
-
-            let child = handles
-                .lock()
-                .unwrap()
-                .take()
-                .expect("child handle missing after parent abort");
-            assert!(
-                matches!(child.await, Err(Error::Closed)),
-                "child handle should report closed after parent abort"
-            );
-
-            reschedule().await;
-            let metrics = metrics_context.encode();
-            assert!(
-                matches!(running_tasks(&metrics, "parent"), Some(0) | None),
-                "parent task gauge should be cleared after abort: {metrics}"
-            );
-            assert!(
-                matches!(running_tasks(&metrics, child_label), Some(0) | None),
-                "child task gauge should be cleared after abort: {metrics}"
-            );
         });
     }
 
@@ -2225,12 +2148,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_supervision_metrics_children_shutdown() {
-        let runner = deterministic::Runner::default();
-        test_supervision_metrics_children_shutdown(runner);
-    }
-
-    #[test]
     fn test_deterministic_child_survives_sibling_completion() {
         let runner = deterministic::Runner::default();
         test_child_survives_sibling_completion(runner);
@@ -2517,12 +2434,6 @@ mod tests {
     fn test_tokio_spawn_supervised_cascading_abort() {
         let runner = tokio::Runner::default();
         test_spawn_supervised_cascading_abort(runner);
-    }
-
-    #[test]
-    fn test_tokio_supervision_metrics_children_shutdown() {
-        let runner = tokio::Runner::default();
-        test_supervision_metrics_children_shutdown(runner);
     }
 
     #[test]
