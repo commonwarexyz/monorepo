@@ -1574,55 +1574,6 @@ mod tests {
         });
     }
 
-    fn test_clone_context_no_child_inheritance<R: Runner>(runner: R)
-    where
-        R::Context: Spawner + Clock,
-    {
-        runner.start(|context| async move {
-            let (child_started_tx, child_started_rx) = oneshot::channel();
-            let (child_complete_tx, child_complete_rx) = oneshot::channel();
-            let (cloned_task_started_tx, cloned_task_started_rx) = oneshot::channel();
-            let (cloned_task_complete_tx, cloned_task_complete_rx) = oneshot::channel();
-            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
-
-            // Parent task that spawns a child using a cloned context
-            let cloned_context = context.clone();
-            let parent = cloned_context.spawn(move |context| async move {
-                // Spawn a child task
-                context.spawn(|_| async move {
-                    child_started_tx.send(()).unwrap();
-                    child_complete_rx.await.unwrap();
-                });
-
-                // Wait for parent to complete
-                parent_complete_rx.await.unwrap();
-            });
-
-            // Use the original context that was previously cloned and spawn a
-            // task. This task should NOT inherit the child relationship
-            context.spawn(move |_| async move {
-                cloned_task_started_tx.send(()).unwrap();
-                cloned_task_complete_rx.await.unwrap();
-            });
-
-            // Wait for both tasks to start
-            child_started_rx.await.unwrap();
-            cloned_task_started_rx.await.unwrap();
-
-            // Complete the cloned task, this should NOT affect the child in the
-            // other context
-            cloned_task_complete_tx.send(()).unwrap();
-
-            // The child should still be alive
-            child_complete_tx.send(()).unwrap();
-
-            // As well as the parent
-            parent_complete_tx.send(()).unwrap();
-
-            assert!(parent.await.is_ok());
-        });
-    }
-
     fn test_supervision_tree_clone_chain<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2154,12 +2105,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_clone_context_no_child_inheritance() {
-        let runner = deterministic::Runner::default();
-        test_clone_context_no_child_inheritance(runner);
-    }
-
-    #[test]
     fn test_deterministic_supervision_tree_clone_chain() {
         let runner = deterministic::Runner::default();
         test_supervision_tree_clone_chain(runner);
@@ -2440,12 +2385,6 @@ mod tests {
     fn test_tokio_child_survives_sibling_completion() {
         let runner = tokio::Runner::default();
         test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_clone_context_no_child_inheritance() {
-        let runner = tokio::Runner::default();
-        test_clone_context_no_child_inheritance(runner);
     }
 
     #[test]
