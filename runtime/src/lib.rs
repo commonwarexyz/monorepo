@@ -155,7 +155,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// ```
     /// ctx_a
     ///   |
-    ///   +-- spawn(ctx_b) ---> Task A
+    ///   +-- spawn() ---> Task A (ctx_b)
     ///   |
     ///   +-- clone() ---> ctx_c
     ///
