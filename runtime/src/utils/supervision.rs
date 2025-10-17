@@ -10,14 +10,23 @@ use std::{
 /// registers a new child node beneath the current node, while spawning a task registers the
 /// spawned context beneath its parent. When a context finishes or is aborted, the runtime drains
 /// the node and aborts all descendant tasks.
+///
+/// Simple layout:
+/// parent (task)
+/// |- clone()  -> sibling (idle)
+/// `- spawn()  -> child (task)
+///     `- clone() -> grandchild (idle)
+///
+/// Aborting the parent walks both branches. When the child task finishes it aborts only its own
+/// subtree, so the helper hanging off the parent remains alive.
 pub(crate) struct SupervisionTree {
     inner: Mutex<SupervisionTreeInner>,
 }
 
 struct SupervisionTreeInner {
-    // Retain a strong reference to the parent so clone-only hops (no spawn) keep the ancestry
-    // alive. Otherwise the parent node would drop immediately, leaving descendants with only weak
-    // pointers that cannot be upgraded during abort cascades.
+    // Hold a strong link back to the parent so pure clone chains keep their ancestry alive.
+    // Without this, the parent node could drop immediately, leaving only weak pointers that
+    // cannot be upgraded during abort cascades.
     _parent: Option<Arc<SupervisionTree>>,
     children: Vec<Weak<SupervisionTree>>,
     task: Option<Aborter>,
