@@ -152,14 +152,18 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Spawn consumes the current task and provides a new child context to the spawned task. Likewise, cloning
     /// a context (either via [`Clone::clone`] or [`Metrics::with_label`]) returns a child context.
     ///
-    /// ```
+    /// ```txt
     /// ctx_a
     ///   |
-    ///   +-- spawn() ---> Task A (ctx_b)
-    ///   |
     ///   +-- clone() ---> ctx_c
+    ///   |                  |
+    ///   |                  +-- spawn() ---> Task C (ctx_d)
+    ///   |
+    ///   +-- spawn() ---> Task A (ctx_b)
+    ///                              |
+    ///                              +-- spawn() ---> Task B (ctx_e)
     ///
-    /// Task A finishes or aborts --> ctx_b and ctx_c are aborted
+    /// Task A finishes or aborts --> Task B and Task C are aborted
     /// ```
     ///
     /// # Spawn Configuration
