@@ -36,12 +36,12 @@ where
     pub const fn new(
         parent: H::Digest,
         height: u64,
-        reshare_outcome: Option<DealOutcome<C, V>>,
+        deal_outcome: Option<DealOutcome<C, V>>,
     ) -> Self {
         Self {
             parent,
             height,
-            deal_outcome: reshare_outcome,
+            deal_outcome,
         }
     }
 }

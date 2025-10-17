@@ -17,9 +17,7 @@ use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    quorum,
-    sequence::{FixedBytes, U64},
-    set::Set,
+    quorum, sequence::{FixedBytes, U64}, set::Set
 };
 use futures::{channel::mpsc, StreamExt};
 use rand::{
@@ -110,11 +108,14 @@ where
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
         orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
-        (sender, receiver): (
+        dkg_chan: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
+        // NOTE: In a production setting with a large validator set, the implementor may want
+        // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
+        // cryptographic operations.
         spawn_cell!(
             self.context,
             self.run(
@@ -123,7 +124,7 @@ where
                 active_participants,
                 inactive_participants,
                 orchestrator,
-                (sender, receiver)
+                dkg_chan
             )
             .await
         )
@@ -147,6 +148,12 @@ where
         mux.start();
 
         // Collect all contributors (active + inactive.)
+        //
+        // In a practical application, all possible participants would not be known ahead of time,
+        // and pulled from a registry (e.g. an on-chain stake registry for a PoS chain.)
+        //
+        // For the sake of the example, we assume a fixed set of contributors that can be selected
+        // from.
         let all_participants = active_participants
             .iter()
             .chain(inactive_participants.iter())
@@ -239,6 +246,20 @@ where
                     let epoch = block.height / BLOCKS_PER_EPOCH;
                     let relative_height = block.height % BLOCKS_PER_EPOCH;
 
+                    // While not done in the example, an implementor could choose to mark a deal outcome as
+                    // "sent" as to not re-include it in future blocks in the event of a dealer node's
+                    // shutdown.
+                    //
+                    // if let Some(deal_outcome) = &block.deal_outcome {
+                    //     info!(
+                    //         epoch,
+                    //         n_acks = deal_outcome.acks.len(),
+                    //         n_reveals = deal_outcome.reveals.len(),
+                    //         "recording included deal outcome from block"
+                    //     );
+                    //     ...
+                    // }
+
                     // Attempt to transition epochs.
                     if let Some(epoch) = is_last_block_in_epoch(block.height) {
                         let (next_participants, public, share) = match manager.finalize(epoch).await
@@ -301,6 +322,15 @@ where
                             .expect("epoch metadata must update");
                     };
 
+                    // Split the epoch into a "send" and "post" phase.
+                    //
+                    // In the first half of the epoch, dealers continuously distribute shares and process
+                    // acknowledgements from players.
+                    //
+                    // In the second half of the epoch, dealers include their commitment, acknowledgements,
+                    // and any share reveals in blocks. Players process these deal outcomes to gather
+                    // all of the information needed to reconstruct their new shares and the new group
+                    // polynomial.
                     match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
                         Ordering::Less => {
                             // Continuously distribute shares to any players who haven't acknowledged
@@ -368,6 +398,7 @@ impl<V: Variant, C: Signer> EncodeSize for RoundInfo<V, C> {
 }
 
 impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
+    // The consensus quorum
     type Cfg = usize;
 
     fn read_cfg(

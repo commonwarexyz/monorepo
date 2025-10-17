@@ -221,7 +221,7 @@ where
         }
     }
 
-    /// Distribute the [Dealer]'s 'shares to all contributors that have not yet acknowledged receipt of their share.
+    /// Distribute the [Dealer]'s shares to all contributors that have not yet acknowledged receipt of their share.
     pub async fn distribute(&mut self, round: u64) {
         // Only attempt distribution if the manager is also a dealer.
         let Some(DealerMetadata {

@@ -268,7 +268,7 @@ where
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
                 supervisor,
-                partition: format!("consensus_{}_{}", self.signer.public_key(), epoch),
+                partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: 1024,
                 epoch,
                 namespace: self.namespace.clone(),

@@ -1,6 +1,9 @@
 //! Utility functions for the reshare example.
 
 /// The number of blocks in an epoch.
+///
+/// Production systems should use a much larger value, as safety in the DKG/reshare depends on syncrhony.
+/// All players must be online for a small duration during this window.
 pub const BLOCKS_PER_EPOCH: u64 = 100;
 
 /// Returns `Some(epoch)` if the height is the last block in the epoch, `None` otherwise.
