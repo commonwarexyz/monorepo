@@ -1459,9 +1459,9 @@ mod tests {
             // Wait for parent task to complete
             assert!(parent_handle.await.is_ok());
 
-            // Child task should also resolve with error since its parent has completed
+            // Child task should resolve with error since its parent has completed
             let child_handle = child_handle.lock().unwrap().take().unwrap();
-            assert!(child_handle.await.is_err());
+            assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
 
