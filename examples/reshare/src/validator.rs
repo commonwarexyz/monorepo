@@ -9,7 +9,7 @@ use commonware_consensus::marshal::resolver::p2p as p2p_resolver;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, Sha256, Signer};
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
-use commonware_utils::union_unique;
+use commonware_utils::{union, union_unique};
 use futures::future::try_join_all;
 use governor::Quota;
 use std::{
@@ -19,7 +19,7 @@ use std::{
 };
 use tracing::{error, info};
 
-const NAMESPACE: &[u8] = b"RESHARE_EXAMPLE";
+pub const APP_NAMESPACE: &[u8] = b"RESHARE_EXAMPLE";
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -56,7 +56,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         "Loaded participant configuration"
     );
 
-    let p2p_namespace = union_unique(NAMESPACE, b"_P2P");
+    let p2p_namespace = union_unique(APP_NAMESPACE, b"_P2P");
     let mut p2p_cfg = discovery::Config::local(
         config.p2p_key.clone(),
         &p2p_namespace,
@@ -113,7 +113,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         engine::Config {
             signer: config.p2p_key,
             blocker: oracle,
-            namespace: NAMESPACE.to_vec(),
+            namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
             polynomial,
             share: config.share,
             active_participants: peer_config.active,
@@ -157,7 +157,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
-    use commonware_utils::{quorum, sequence::U64};
+    use commonware_utils::{quorum, sequence::U64, union};
     use futures::channel::mpsc;
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -324,7 +324,7 @@ mod test {
                     engine::Config {
                         signer,
                         blocker: oracle.control(public_key),
-                        namespace: NAMESPACE.to_vec(),
+                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -476,7 +476,7 @@ mod test {
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: NAMESPACE.to_vec(),
+                        namespace: APP_NAMESPACE.to_vec(),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -586,7 +586,7 @@ mod test {
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: NAMESPACE.to_vec(),
+                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -727,7 +727,7 @@ mod test {
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: NAMESPACE.to_vec(),
+                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -807,7 +807,7 @@ mod test {
                 engine::Config {
                     signer: signer.clone(),
                     blocker: oracle.control(public_key.clone()),
-                    namespace: NAMESPACE.to_vec(),
+                    namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
                     polynomial: polynomial.clone(),
                     share: Some(share),
                     active_participants: validators.clone(),
@@ -936,7 +936,7 @@ mod test {
                         engine::Config {
                             signer: signer.clone(),
                             blocker: oracle.control(public_key.clone()),
-                            namespace: NAMESPACE.to_vec(),
+                            namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
                             polynomial: polynomial.clone(),
                             share: Some(shares[idx].clone()),
                             active_participants: validators.clone(),

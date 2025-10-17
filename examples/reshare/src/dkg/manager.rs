@@ -3,6 +3,7 @@
 use crate::{
     application::Block,
     dkg::{actor::RoundInfo, DealOutcome, Dkg, Payload, OUTCOME_NAMESPACE},
+    validator::APP_NAMESPACE,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::types::Epoch;
@@ -23,7 +24,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{sequence::U64, set::Set};
+use commonware_utils::{sequence::U64, set::Set, union};
 use futures::FutureExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -34,7 +35,7 @@ use std::{collections::BTreeMap, ops::Deref};
 use tracing::{debug, error, info, warn};
 
 /// The signature namespace for DKG acknowledgment messages.
-const ACK_NAMESPACE: &[u8] = b"COMMONWARE_DKG_ACK";
+const ACK_NAMESPACE: &[u8] = b"_DKG_ACK";
 
 /// The concurrency level for DKG/reshare operations.
 const CONCURRENCY: usize = 1;
@@ -277,7 +278,7 @@ where
                     dealer.ack(self.signer.public_key()).unwrap();
 
                     let ack = Ack::new::<_, V>(
-                        ACK_NAMESPACE,
+                        &union(APP_NAMESPACE, ACK_NAMESPACE),
                         self.signer,
                         signer_index,
                         round,
@@ -378,7 +379,7 @@ where
 
                     // Verify signature on incoming ack
                     if !ack.verify::<V, _>(
-                        ACK_NAMESPACE,
+                        &union(APP_NAMESPACE, ACK_NAMESPACE),
                         &peer,
                         round,
                         &self.signer.public_key(),
@@ -436,7 +437,7 @@ where
 
                     // Send ack
                     let payload = Payload::<V, C::Signature>::Ack(Ack::new::<_, V>(
-                        ACK_NAMESPACE,
+                        &union(APP_NAMESPACE, ACK_NAMESPACE),
                         self.signer,
                         signer_index,
                         round,
@@ -484,6 +485,7 @@ where
             &outcome.dealer_signature,
         ) {
             warn!(round, "invalid dealer signature; ignoring deal outcome");
+            return;
         }
 
         // Verify all ack signatures
@@ -519,6 +521,7 @@ where
             outcome.reveals.clone(),
         ) {
             warn!(round, error = ?e, "failed to track dealer outcome in arbiter");
+            return;
         }
 
         // Persist deal outcome to storage.
@@ -529,7 +532,7 @@ where
                     .iter()
                     .position(|i| i.dealer == outcome.dealer)
                 {
-                    meta.outcomes.insert(pos, outcome);
+                    meta.outcomes[pos] = outcome;
                 } else {
                     meta.outcomes.push(outcome);
                 }
