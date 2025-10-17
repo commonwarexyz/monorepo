@@ -274,9 +274,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         }
 
         // Read the location of the first item to discard (at position 'size').
-        // Location contains:
-        //   - section: which blob the item is in
-        //   - offset: index within that blob (NOT byte offset)
         let discard_location = self.locations.read(size).await?;
 
         // Rewind locations journal FIRST (opposite order from append!)
@@ -522,15 +519,26 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         locations: &mut fixed::Journal<E, Location>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
-        // === Step 1: Scan data journal to determine expected state ===
-
-        let (expected_locations_size, expected_locations_oldest_pos) = if data.blobs.is_empty() {
+        // === Handle empty data journal case ===
+        if data.blobs.is_empty() {
             // No data blobs → journal is empty or fully pruned.
-            // The locations journal is the only source of truth for the size.
-            // When fully pruned: oldest_retained_pos == size (no items remain).
+            // The locations journal is the only source of truth.
             let size = locations.size().await?;
-            (size, size)
-        } else {
+
+            // Ensure locations journal is also fully pruned to match empty data
+            if let Some(locations_oldest) = locations.oldest_retained_pos().await? {
+                if locations_oldest < size {
+                    // Locations has unpruned entries but data is gone - repair by pruning
+                    locations.prune(size).await?;
+                    locations.sync().await?;
+                }
+            }
+
+            return Ok((size, size));
+        }
+
+        // === Handle non-empty data journal case ===
+        let (data_oldest_pos, data_size) = {
             // Data exists → count items
             let first_section = *data.blobs.first_key_value().unwrap().0;
             let last_section = *data.blobs.last_key_value().unwrap().0;
@@ -549,47 +557,39 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             };
 
             let size = (last_section * items_per_section) + items_in_last_section;
-            (size, oldest_pos)
+            (oldest_pos, size)
         };
 
-        // === Step 2: Check current locations state ===
-
         let locations_size = locations.size().await?;
-
-        // === Step 3: Fix size mismatch ===
-
-        if locations_size > expected_locations_size {
+        if locations_size > data_size {
             // Locations ahead of data → should never happen (violates write ordering)
             return Err(Error::Corruption(format!(
-                "locations ahead of data: locations_size={locations_size} > data_size={expected_locations_size}"
+                "locations ahead of data: locations_size={locations_size} > data_size={data_size}"
             )));
         }
-
-        if locations_size < expected_locations_size {
-            // Locations behind data → rebuild missing entries
-            Self::rebuild_locations(data, locations, locations_size, expected_locations_size)
-                .await?;
+        // Apply any operations that are missing from the locations journal.
+        if locations_size < data_size {
+            Self::rebuild_locations(data, locations, locations_size, data_size).await?;
         }
 
-        // === Step 4: Fix pruning mismatch ===
-
+        // Prune the locations journal to match the data journal if necessary.
+        // We prune data before locations so we should never need to catch data up to locations.
         match locations.oldest_retained_pos().await? {
-            Some(oldest_retained_pos) if oldest_retained_pos > expected_locations_oldest_pos => {
+            Some(oldest_retained_pos) if oldest_retained_pos > data_oldest_pos => {
                 // Locations pruned ahead of data → should never happen (violates write ordering)
                 return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations_oldest={oldest_retained_pos} > data_oldest={expected_locations_oldest_pos}"
+                    "locations pruned ahead of data: locations_oldest={oldest_retained_pos} > data_oldest={data_oldest_pos}"
                 )));
             }
-            Some(oldest_retained_pos) if oldest_retained_pos < expected_locations_oldest_pos => {
+            Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
                 // Locations behind on pruning → prune to catch up
-                locations.prune(expected_locations_oldest_pos).await?;
+                locations.prune(data_oldest_pos).await?;
             }
-            None if expected_locations_oldest_pos < expected_locations_size => {
+            None if data_oldest_pos < data_size => {
                 // The locations journal returned `None` from oldest_retained_pos(), which means
                 // it's fully pruned (all items have been pruned, so oldest_retained_pos == size).
                 //
-                // However, the data journal still has un-pruned items from position
-                // expected_locations_oldest_pos onwards.
+                // However, the data journal still has un-pruned items.
                 //
                 // Example:
                 //   - Size: 100 (both journals agree we have 100 total items)
@@ -599,7 +599,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 // This violates our invariant: data is always pruned BEFORE locations.
                 // If the data journal has items 20-99, the locations journal should too.
                 return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations fully pruned (oldest_retained_pos={expected_locations_size}) but data_oldest={expected_locations_oldest_pos}"
+                    "locations pruned ahead of data: locations fully pruned (oldest_retained_pos={data_size}) but data_oldest={data_oldest_pos}"
                 )));
             }
             _ => {
@@ -607,12 +607,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             }
         }
 
-        // === Step 5: Verify and return ===
-
         locations.sync().await?;
-        assert_eq!(locations.size().await?, expected_locations_size);
+        assert_eq!(locations.size().await?, data_size);
 
-        Ok((expected_locations_size, expected_locations_oldest_pos))
+        Ok((data_size, data_oldest_pos))
     }
 
     /// Rebuild missing location entries by replaying the data journal and
@@ -624,8 +622,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// # Invariants
     ///
     /// - `data.blobs` must not be empty (data journal has at least one section)
-    /// - `locations_size < expected_size` (locations is behind, not ahead)
-    /// - `expected_size` is the true size derived from scanning the data journal
+    /// - `locations_size < data_size` (locations is behind, not ahead)
+    /// - `data_size` is the true size derived from scanning the data journal
     /// - Write ordering: data is always written/synced before locations, so locations
     ///   can be behind but never ahead of data
     ///
@@ -636,18 +634,18 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         data: &variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
         locations_size: u64,
-        expected_size: u64,
+        data_size: u64,
     ) -> Result<(), Error> {
         assert!(
             !data.blobs.is_empty(),
             "rebuild_locations called with empty data journal"
         );
         assert!(
-            locations_size < expected_size,
-            "rebuild_locations requires locations_size < expected_size, got {locations_size} >= {expected_size}"
+            locations_size < data_size,
+            "rebuild_locations requires locations_size < data_size, got {locations_size} >= {data_size}"
         );
 
-        let missing_count = expected_size - locations_size;
+        let missing_count = data_size - locations_size;
 
         // Find where to start replaying
         let (start_section, resume_offset, skip_first) =
