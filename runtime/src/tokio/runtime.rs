@@ -380,13 +380,13 @@ pub struct Context {
 
 impl Clone for Context {
     fn clone(&self) -> Self {
-        let (tree, _) = Tree::child(&self.tree);
+        let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            tree,
+            tree: child,
             execution: self.execution,
         }
     }
