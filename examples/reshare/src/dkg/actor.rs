@@ -74,7 +74,11 @@ where
     pub async fn init(context: E, config: Config<C>) -> (Self, Mailbox<H, C, V>) {
         let context = ContextCell::new(context);
 
-        // Initialize a metadata store for current epoch information.
+        // Initialize a metadata store for epoch and round information.
+        //
+        // **Both of these metadata stores persist private key material to disk. In a production
+        // environment, this key material should both be stored securely and deleted permanently
+        // after use.**
         let epoch_metadata = Metadata::init(
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
@@ -84,8 +88,6 @@ where
         )
         .await
         .expect("failed to initialize epoch metadata");
-
-        // Initialize a metadata store for the round information.
         let round_metadata = Metadata::init(
             context.with_label("round_metadata"),
             commonware_storage::metadata::Config {
