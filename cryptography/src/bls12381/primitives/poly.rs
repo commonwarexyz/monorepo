@@ -17,7 +17,7 @@ use alloc::collections::BTreeMap;
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use core::hash::Hash;
+use core::{hash::Hash, iter};
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
 use rand_core::CryptoRngCore;
@@ -92,10 +92,22 @@ pub fn new(degree: u32) -> Poly<Scalar> {
 /// In the context of secret sharing, the threshold is the degree + 1.
 pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
-    let coeffs = (0..=degree)
-        .map(|_| Scalar::from_rand(rng))
-        .collect::<Vec<_>>();
-    Poly::<Scalar>(coeffs)
+    let coeffs = (0..=degree).map(|_| Scalar::from_rand(rng));
+    Poly::from_iter(coeffs)
+}
+
+/// Returns a new scalar polynomial with a particular value for the constant coefficient.
+///
+/// This does the same thing as [new_from] otherwise.
+pub fn new_with_constant(
+    degree: u32,
+    mut rng: impl CryptoRngCore,
+    constant: Scalar,
+) -> Poly<Scalar> {
+    // (Use skip to avoid an empty range complaint)
+    Poly::from_iter(
+        iter::once(constant).chain((0..=degree).skip(1).map(|_| Scalar::from_rand(&mut rng))),
+    )
 }
 
 /// A Barycentric Weight for interpolation at x=0.
@@ -175,6 +187,12 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
         weights.insert(*i, Weight(num));
     }
     Ok(weights)
+}
+
+impl<C> FromIterator<C> for Poly<C> {
+    fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
 }
 
 impl<C> Poly<C> {
@@ -390,6 +408,8 @@ pub mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
     use commonware_codec::{Decode, Encode};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     #[test]
     fn poly_degree() {
@@ -544,5 +564,13 @@ pub mod tests {
         let encoded = original.encode();
         let decoded = Poly::<Scalar>::decode_cfg(encoded, &(original.required() as usize)).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_new_with_constant() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let constant = Scalar::from_rand(&mut rng);
+        let poly = new_with_constant(5, &mut rng, constant.clone());
+        assert_eq!(poly.constant(), &constant);
     }
 }
