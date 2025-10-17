@@ -487,7 +487,7 @@ mod tests {
 
     fn test_clock_sleep_until<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Clock + Metrics,
     {
         runner.start(|context| async move {
             // Trigger sleep
@@ -1587,7 +1587,7 @@ mod tests {
         });
     }
 
-    fn test_supervision_tree_clone_chain<R: Runner>(runner: R)
+    fn test_spawn_clone_chain<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1642,7 +1642,7 @@ mod tests {
         });
     }
 
-    fn test_supervision_tree_sparse_clone_chain<R: Runner>(runner: R)
+    fn test_spawn_sparse_clone_chain<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -2124,15 +2124,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_supervision_tree_clone_chain() {
+    fn test_deterministic_spawn_clone_chain() {
         let runner = deterministic::Runner::default();
-        test_supervision_tree_clone_chain(runner);
+        test_spawn_clone_chain(runner);
     }
 
     #[test]
-    fn test_deterministic_supervision_tree_sparse_clone_chain() {
+    fn test_deterministic_spawn_sparse_clone_chain() {
         let runner = deterministic::Runner::default();
-        test_supervision_tree_sparse_clone_chain(runner);
+        test_spawn_sparse_clone_chain(runner);
     }
 
     #[test]
@@ -2413,15 +2413,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_supervision_tree_clone_chain() {
+    fn test_tokio_spawn_clone_chain() {
         let runner = tokio::Runner::default();
-        test_supervision_tree_clone_chain(runner);
+        test_spawn_clone_chain(runner);
     }
 
     #[test]
-    fn test_tokio_supervision_tree_sparse_clone_chain() {
+    fn test_tokio_spawn_sparse_clone_chain() {
         let runner = tokio::Runner::default();
-        test_supervision_tree_sparse_clone_chain(runner);
+        test_spawn_sparse_clone_chain(runner);
     }
 
     #[test]
