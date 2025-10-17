@@ -4,21 +4,21 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-/// Tracks the supervision relationships between runtime contexts.
+/// Tracks the relationship between runtime contexts.
 ///
 /// Each [`Tree`] node corresponds to a single context instance. Cloning a context
-/// registers a new child node beneath the current node, while spawning a task registers the
-/// spawned context beneath its parent. When a context finishes or is aborted, the runtime drains
-/// the node and aborts all descendant tasks.
+/// registers a new child node beneath the current node. When the task spawned from
+/// a context finishes or is aborted, the runtime drains the node and aborts all descendant tasks.
 ///
-/// Simple layout:
+/// ```text
 /// parent (task)
 /// |- clone()  -> sibling (idle)
 /// `- spawn()  -> child (task)
 ///     `- clone() -> grandchild (idle)
+/// ```
 ///
 /// Aborting the parent walks both branches. When the child task finishes it aborts only its own
-/// subtree, so the helper hanging off the parent remains alive.
+/// subtree, so the sibling hanging off the parent remains alive.
 pub(crate) struct Tree {
     inner: Mutex<TreeInner>,
 }
@@ -94,7 +94,7 @@ impl Tree {
         (child, aborted)
     }
 
-    /// Records a supervised task so it can be aborted alongside the current context.
+    /// Records an [Aborter] on the current context.
     pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
