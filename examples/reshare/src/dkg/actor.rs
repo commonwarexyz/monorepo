@@ -23,6 +23,7 @@ use commonware_utils::{
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
+use prometheus_client::metrics::counter::Counter;
 use rand::{
     rngs::StdRng,
     seq::{IteratorRandom, SliceRandom},
@@ -57,6 +58,7 @@ where
     rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
     epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
+    failed_rounds: Counter,
 }
 
 impl<E, H, C, V> Actor<E, H, C, V>
@@ -91,6 +93,13 @@ where
         .await
         .expect("failed to initialize epoch metadata");
 
+        let failed_rounds = Counter::default();
+        context.register(
+            "failed_rounds",
+            "Number of failed DKG/reshare rounds",
+            failed_rounds.clone(),
+        );
+
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -101,6 +110,7 @@ where
                 rate_limit: config.rate_limit,
                 round_metadata,
                 epoch_metadata,
+                failed_rounds,
             },
             Mailbox::new(sender),
         )
@@ -269,15 +279,21 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = is_last_block_in_epoch(block.height) {
-                        let (next_participants, public, share) = match manager.finalize(epoch).await
-                        {
-                            (next_participants, RoundResult::Output(Output { public, share })) => {
-                                (next_participants, public, Some(share))
-                            }
-                            (next_participants, RoundResult::Polynomial(public)) => {
-                                (next_participants, public, None)
-                            }
-                        };
+                        let (next_participants, public, share, success) =
+                            match manager.finalize(epoch).await {
+                                (
+                                    next_participants,
+                                    RoundResult::Output(Output { public, share }),
+                                    success,
+                                ) => (next_participants, public, Some(share), success),
+                                (next_participants, RoundResult::Polynomial(public), success) => {
+                                    (next_participants, public, None, success)
+                                }
+                            };
+
+                        if !success {
+                            self.failed_rounds.inc();
+                        }
 
                         info!(
                             epoch,

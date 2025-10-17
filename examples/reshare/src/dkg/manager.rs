@@ -545,13 +545,13 @@ where
     }
 
     /// Finalize the DKG/reshare round, returning the [Output].
-    pub async fn finalize(self, round: u64) -> (Set<C::PublicKey>, RoundResult<V>) {
+    pub async fn finalize(self, round: u64) -> (Set<C::PublicKey>, RoundResult<V>, bool) {
         let (result, disqualified) = self.arbiter.finalize();
         let result = match result {
             Ok(output) => output,
             Err(e) => {
                 error!(error = ?e, "failed to finalize arbiter; aborting round");
-                return (self.players, self.previous);
+                return (self.players, self.previous, false);
             }
         };
 
@@ -577,7 +577,7 @@ where
                     Ok(output) => output,
                     Err(e) => {
                         error!(error = ?e, "failed to finalize player; aborting round");
-                        return (self.players, self.previous);
+                        return (self.players, self.previous, false);
                     }
                 };
 
@@ -589,9 +589,9 @@ where
                     "finalized DKG/reshare round"
                 );
 
-                (self.players, RoundResult::Output(output))
+                (self.players, RoundResult::Output(output), true)
             }
-            None => (self.players, RoundResult::Polynomial(result.public)),
+            None => (self.players, RoundResult::Polynomial(result.public), true),
         }
     }
 
