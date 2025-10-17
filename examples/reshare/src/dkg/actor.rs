@@ -17,9 +17,12 @@ use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    quorum, sequence::{FixedBytes, U64}, set::Set
+    quorum,
+    sequence::{FixedBytes, U64},
+    set::Set,
 };
 use futures::{channel::mpsc, StreamExt};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{
     rngs::StdRng,
     seq::{IteratorRandom, SliceRandom},
@@ -35,13 +38,14 @@ pub struct Config<C> {
     pub signer: C,
     pub num_participants_per_epoch: usize,
     pub mailbox_size: usize,
+    pub rate_limit: Quota,
 
     pub partition_prefix: String,
 }
 
 pub struct Actor<E, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -50,13 +54,14 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     num_participants_per_epoch: usize,
+    rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
     epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
 }
 
 impl<E, H, C, V> Actor<E, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -93,6 +98,7 @@ where
                 mailbox,
                 signer: config.signer,
                 num_participants_per_epoch: config.num_participants_per_epoch,
+                rate_limit: config.rate_limit,
                 round_metadata,
                 epoch_metadata,
             },
@@ -223,6 +229,7 @@ where
             Set::from_iter(active_participants),
             Set::from_iter(inactive_participants),
             &mut dkg_mux,
+            self.rate_limit,
             &mut self.round_metadata,
         )
         .await;
@@ -312,6 +319,7 @@ where
                             next_participants,
                             next_players,
                             &mut dkg_mux,
+                            self.rate_limit,
                             &mut self.round_metadata,
                         )
                         .await;

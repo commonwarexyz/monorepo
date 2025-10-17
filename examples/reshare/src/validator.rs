@@ -119,6 +119,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch as usize,
+            dkg_rate_limit: dkg_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
         },
@@ -329,6 +330,7 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
+                        dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -490,6 +492,7 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
+                        dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -569,6 +572,7 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
+                    dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -697,6 +701,7 @@ mod test {
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len(),
+                            dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },

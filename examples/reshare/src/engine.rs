@@ -59,6 +59,7 @@ where
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
+    pub dkg_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
@@ -106,6 +107,7 @@ where
                 signer: config.signer.clone(),
                 num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
+                rate_limit: config.dkg_rate_limit,
                 partition_prefix: config.partition_prefix.clone(),
             },
         )
