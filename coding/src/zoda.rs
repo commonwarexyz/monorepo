@@ -113,7 +113,6 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
-//!
 use crate::{
     field::F,
     poly::{EvaluationVector, Matrix},
@@ -131,6 +130,8 @@ use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
+
+const SECURITY_BITS: usize = 126;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
@@ -181,20 +182,20 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
-fn required_samples_impl(n: usize, m: usize, skew: usize) -> usize {
+fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
     assert!(m >= n);
     let k = BigRational::from_usize(m - n);
     let m = BigRational::from_usize(m);
-    let skew = BigRational::from_usize(skew);
+    let skew = BigRational::from_u64(if upper_bound { 0u64 } else { 1u64 });
     let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
     let log_term = (BigRational::from_usize(1) - fraction).log2_ceil(7);
-    let required = BigRational::from_usize(128) / -log_term;
+    let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
 }
 
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
     let k = encoded_rows - min_rows;
-    required_samples_impl(min_rows, k, 1)
+    required_samples_impl(min_rows, k, false)
 }
 
 /// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
@@ -202,7 +203,7 @@ fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
 /// The actual number of required samples for a given n * samples and m * samples
 /// will be less.
 fn required_samples_upper_bound(n: usize, m: usize) -> usize {
-    required_samples_impl(n, m, 0)
+    required_samples_impl(n, m, true)
 }
 
 fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
@@ -212,6 +213,7 @@ fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
     samples >= required
 }
 
+/// Contains the sizes of various objects in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Topology {
     /// How many bytes the data has.
@@ -233,6 +235,7 @@ struct Topology {
 }
 
 impl Topology {
+    /// Figure out what size different values will have, based on the config and the data.
     fn reckon(config: &Config, data_bytes: usize) -> Self {
         let data_bits = 8 * data_bytes;
         let data_els = F::bits_to_elements(data_bits);
@@ -253,8 +256,8 @@ impl Topology {
         // than 128 bits, we would need to add another column per column_sample.
         // We also have less than 128 bits in other places because of the bounds
         // on the messages encoded size.
-        let column_samples =
-            F::bits_to_elements(126) * required_samples(data_rows, encoded_rows).div_ceil(samples);
+        let column_samples = F::bits_to_elements(SECURITY_BITS)
+            * required_samples(data_rows, encoded_rows).div_ceil(samples);
         Self {
             data_bytes,
             data_cols,
@@ -267,14 +270,15 @@ impl Topology {
         }
     }
 
-    fn check_index(&self, i: u16) -> Result<(), ZodaError> {
+    fn check_index(&self, i: u16) -> Result<(), Error> {
         if (0..self.total_shards).contains(&(i as usize)) {
             return Ok(());
         }
-        Err(ZodaError::InvalidIndex(i))
+        Err(Error::InvalidIndex(i))
     }
 }
 
+/// A shard of data produced by the encoding scheme.
 #[derive(Clone)]
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
@@ -407,6 +411,7 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
     )
 }
 
+/// Data used to check [ReShard]s.
 #[derive(Clone)]
 pub struct CheckingData<H: Hasher> {
     topology: Topology,
@@ -417,28 +422,37 @@ pub struct CheckingData<H: Hasher> {
 }
 
 impl<H: Hasher> CheckingData<H> {
+    /// Calculate the values of this struct, based on information received.
+    ///
+    /// We control `config`.
+    ///
+    /// We're provided with `commitment`, which should hash over `root`,
+    /// and `data_bytes`.
+    ///
+    /// We're also give a `checksum` matrix used to check the shards we receive.
     fn reckon(
         config: &Config,
         commitment: &Summary,
         data_bytes: usize,
         root: H::Digest,
         checksum: &Matrix,
-    ) -> Result<Self, ZodaError> {
+    ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let expected_commitment = transcript.summarize();
         if *commitment != expected_commitment {
-            return Err(ZodaError::InvalidShard);
+            return Err(Error::InvalidShard);
         }
         let transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
-            return Err(ZodaError::InvalidShard);
+            return Err(Error::InvalidShard);
         }
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
+            .expect("checksum has too many rows")
             .evaluate()
             .data();
         let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
@@ -452,13 +466,13 @@ impl<H: Hasher> CheckingData<H> {
         })
     }
 
-    fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, ZodaError> {
+    fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, Error> {
         self.topology.check_index(index)?;
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
             || reshard.inclusion_proofs.len() != reshard.shard.rows()
         {
-            return Err(ZodaError::InvalidReShard);
+            return Err(Error::InvalidReShard);
         }
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
@@ -476,13 +490,13 @@ impl<H: Hasher> CheckingData<H> {
                     i as u32,
                     &self.root,
                 )
-                .map_err(|_| ZodaError::InvalidReShard)?;
+                .map_err(|_| Error::InvalidReShard)?;
         }
         let shard_checksum = reshard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
             if row != &self.encoded_checksum[i] {
-                return Err(ZodaError::InvalidReShard);
+                return Err(Error::InvalidReShard);
             }
         }
         Ok(CheckedShard {
@@ -493,7 +507,7 @@ impl<H: Hasher> CheckingData<H> {
 }
 
 #[derive(Debug, Error)]
-pub enum ZodaError {
+pub enum Error {
     #[error("invalid shard")]
     InvalidShard,
     #[error("invalid reshard")]
@@ -528,12 +542,13 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
     type CheckedShard = CheckedShard;
 
-    type Error = ZodaError;
+    type Error = Error;
 
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+        // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
         let topology = Topology::reckon(config, data_bytes);
         let data = Matrix::init(
@@ -541,23 +556,34 @@ impl<H: Hasher> Scheme for Zoda<H> {
             topology.data_cols,
             F::stream_from_u64s(iter_u64_le(data)),
         );
-        let encoded_data = data.as_polynomials(topology.encoded_rows).evaluate().data();
+        // Step 2: Encode the data.
+        let encoded_data = data
+            .as_polynomials(topology.encoded_rows)
+            .expect("data has too many rows")
+            .evaluate()
+            .data();
+        // Step 3: Commit to the rows of the data.
         let mut builder = Builder::<H>::new(encoded_data.rows());
         for row in encoded_data.iter() {
             builder.add(&F::slice_digest::<H>(row));
         }
         let tree = builder.build();
         let root = tree.root();
+        // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
-        let transcript = Transcript::resume(commitment);
 
+        // Step 5: Generate a checking matrix, and a shuffling with the commitment.
+        let transcript = Transcript::resume(commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
+        let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
+
+        // Step 6: Multiply the data with the checking matrix.
         let checksum = Arc::new(data.mul(&checking_matrix));
 
-        let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
+        // Step 7: Produce the shards.
         let shards = shuffled_indices
             .chunks_exact(topology.samples)
             .take(topology.total_shards)
@@ -635,7 +661,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             ..
         } = checking_data.topology;
         if shards.len() < min_shards {
-            return Err(ZodaError::InsufficientShards(shards.len(), min_shards));
+            return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
         let mut evaluation = EvaluationVector::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
