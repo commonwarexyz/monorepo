@@ -284,7 +284,7 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = is_last_block_in_epoch(block.height) {
-                        let (next_participants, public, share, success) =
+                        let (next_participants, next_public, next_share, success) =
                             match manager.finalize(epoch).await {
                                 (
                                     next_participants,
@@ -304,11 +304,9 @@ where
                             epoch,
                             "finalized epoch's reshare; instructing reconfiguration after reshare."
                         );
+                        let next_epoch = epoch + 1;
 
                         // Persist the next epoch information
-                        let next_epoch = epoch + 1;
-                        let next_public = public.clone();
-                        let next_share = share.clone();
                         let epoch_state = EpochState {
                             epoch: next_epoch,
                             public: next_public.clone(),
@@ -331,8 +329,8 @@ where
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                             epoch: next_epoch,
-                            poly: public.clone(),
-                            share: share.clone(),
+                            poly: next_public.clone(),
+                            share: next_share.clone(),
                             participants: next_participants.clone(),
                         };
                         orchestrator.report(transition).await;
