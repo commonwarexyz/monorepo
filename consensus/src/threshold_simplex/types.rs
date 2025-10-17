@@ -164,7 +164,7 @@ impl<P: PublicKey> Participants<P> {
     }
 
     /// Returns the signer index for the given key, if present.
-    pub fn signer_index(&self, key: &P) -> Option<u32> {
+    pub fn index(&self, key: &P) -> Option<u32> {
         self.keys.position(key).map(|index| index as u32)
     }
 

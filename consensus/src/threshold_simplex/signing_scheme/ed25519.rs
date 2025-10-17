@@ -40,7 +40,7 @@ impl Scheme {
         let participants = participants.into();
 
         let signer = participants
-            .signer_index(&private_key.public_key())
+            .index(&private_key.public_key())
             .map(|index| (index, private_key));
 
         Self {

@@ -91,7 +91,7 @@ impl<
 
     async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
         // Check if sender is a participant
-        let Some(index) = self.participants.signer_index(&sender) else {
+        let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
             return false;
@@ -304,7 +304,7 @@ impl<
     }
 
     fn is_active(&self, leader: &P) -> Option<bool> {
-        let leader_index = self.participants.signer_index(leader)? as usize;
+        let leader_index = self.participants.index(leader)? as usize;
         Some(self.notarizes[leader_index].is_some() || self.nullifies[leader_index].is_some())
     }
 }
@@ -454,7 +454,7 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            let leader_index = self.participants.signer_index(&leader).unwrap();
+                            let leader_index = self.participants.index(&leader).unwrap();
                             work.entry(current)
                                 .or_insert(self.new_round(initialized))
                                 .set_leader(leader_index);
