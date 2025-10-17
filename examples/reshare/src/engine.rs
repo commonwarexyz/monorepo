@@ -21,7 +21,7 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{quorum, NZUsize, NZU64};
+use commonware_utils::{quorum, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -98,12 +98,15 @@ where
 {
     pub async fn new(context: E, config: Config<C, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+        let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
+        let dkg_namespace = union(&config.namespace, b"_DKG");
         let identity = *public::<V>(&config.polynomial);
         let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
+                namespace: dkg_namespace,
                 signer: config.signer.clone(),
                 num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
@@ -135,7 +138,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ACTIVITY_TIMEOUT
                     .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
-                namespace: config.namespace.clone(),
+                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 freezer_table_initial_size: config.freezer_table_initial_size,
@@ -159,7 +162,7 @@ where
                 signer: config.signer.clone(),
                 application: application_mailbox.clone(),
                 marshal: marshal_mailbox.clone(),
-                namespace: config.namespace.clone(),
+                namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

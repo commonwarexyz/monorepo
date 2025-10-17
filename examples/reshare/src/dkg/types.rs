@@ -7,11 +7,8 @@ use commonware_cryptography::{
         dkg::types::{Ack, Share},
         primitives::{group, poly::Public, variant::Variant},
     },
-    Signature, Signer,
+    Signature, Signer, Verifier,
 };
-
-/// The namespace used when signing [DealOutcome]s.
-pub const OUTCOME_NAMESPACE: &[u8] = b"RESHARE_OUTCOME";
 
 /// The result of a resharing operation from the local [Dealer].
 ///
@@ -39,10 +36,9 @@ pub struct DealOutcome<C: Signer, V: Variant> {
 
 impl<C: Signer, V: Variant> DealOutcome<C, V> {
     /// Creates a new [DealOutcome], signing its inner payload with the [Dealer]'s [Signer].
-    ///
-    /// [Dealer]: commonware_cryptography::bls12381::dkg::Dealer
     pub fn new(
         dealer_signer: &C,
+        namespace: &[u8],
         round: u64,
         commitment: Public<V>,
         acks: Vec<Ack<C::Signature>>,
@@ -50,7 +46,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
     ) -> Self {
         // Sign the resharing outcome
         let payload = Self::signature_payload_from_parts(round, &commitment, &acks, &reveals);
-        let dealer_signature = dealer_signer.sign(Some(OUTCOME_NAMESPACE), payload.as_ref());
+        let dealer_signature = dealer_signer.sign(Some(namespace), payload.as_ref());
 
         Self {
             dealer: dealer_signer.public_key(),
@@ -62,9 +58,16 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
         }
     }
 
-    /// Returns the payload that was signed by the dealer.
-    pub fn signature_payload(&self) -> Vec<u8> {
-        Self::signature_payload_from_parts(self.round, &self.commitment, &self.acks, &self.reveals)
+    /// Verifies the [DealOutcome]'s signature.
+    pub fn verify(&self, namespace: &[u8]) -> bool {
+        let payload = Self::signature_payload_from_parts(
+            self.round,
+            &self.commitment,
+            &self.acks,
+            &self.reveals,
+        );
+        self.dealer
+            .verify(Some(namespace), &payload, &self.dealer_signature)
     }
 
     /// Returns the payload that was signed by the dealer, formed from raw parts.

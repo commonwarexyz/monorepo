@@ -36,6 +36,7 @@ use tracing::info;
 const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
 
 pub struct Config<C> {
+    pub namespace: Vec<u8>,
     pub signer: C,
     pub num_participants_per_epoch: usize,
     pub mailbox_size: usize,
@@ -52,6 +53,7 @@ where
     V: Variant,
 {
     context: ContextCell<E>,
+    namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     num_participants_per_epoch: usize,
@@ -104,6 +106,7 @@ where
         (
             Self {
                 context,
+                namespace: config.namespace,
                 mailbox,
                 signer: config.signer,
                 num_participants_per_epoch: config.num_participants_per_epoch,
@@ -232,6 +235,7 @@ where
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
             &mut self.context,
+            self.namespace.clone(),
             initial_epoch,
             initial_public,
             initial_share,
@@ -328,6 +332,7 @@ where
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
                             &mut self.context,
+                            self.namespace.clone(),
                             next_epoch,
                             public,
                             share,
