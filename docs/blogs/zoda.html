@@ -29,6 +29,7 @@ with Coding" />
     <meta property="twitter:description" content="In which we describe
 how we use coding schemes, and ZODA to distribute blocks efficiently" />
     <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/cronokirby" />
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 
@@ -79,9 +80,10 @@ how we use coding schemes, and ZODA to distribute blocks efficiently" />
     <div class="content">
         <h1>Optimizing Block Dispersal with Coding</h1>
         <div class="meta">
-            <div class="author">By <a href="https://x.com/vex_0x">Lucas
+
+                        <div class="author">By <a href="https://x.com/cronokirby">Lucas
 Meier</a></div>
-            <div class="date">October 15th, 2025</div>
+                        <div class="date">October 15th, 2025</div>
         </div>
         <p>A crucial part of blockchain consensus is distributing the
         block among participants. You can come to consensus over a mere
@@ -90,14 +92,18 @@ Meier</a></div>
         requires the data.</p>
         <p>We’ve invested some effort in this part of the Commonware
         stack recently, and I’d like to share some fruits of that effort
-        in this post. As an outline, we’ll cover: - data dissemination,
-        naively, - how to increase efficiency with coding, - and,
-        finally, how to get quicker guarantees about the data with <a
-        href="https://eprint.iacr.org/2025/034">ZODA</a>.</p>
-        <p>In a future post we could cover lower-level details of our
-        implementation, like the field we use for Reed-Solomon coding,
-        and the optimizations needed for fast fourier transforms, but
-        this one will stick to an overview.</p>
+        in this post. As an outline, we’ll cover:</p>
+        <ul>
+        <li>data dissemination, naively,</li>
+        <li>how to increase efficiency with coding,</li>
+        <li>and, finally, how to get quicker guarantees about the data
+        with <a href="https://eprint.iacr.org/2025/034">ZODA</a>.</li>
+        </ul>
+        <p>In a future post we could cover lower-level details of <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">our
+        implementation</a>, like the field we use for Reed-Solomon
+        coding, and the optimizations needed for fast fourier
+        transforms, but this one will stick to an overview.</p>
         <h2 id="naive-dissemination">Naive Dissemination</h2>
         <p>We assume a <em>leader</em> has some data, <span
         class="math inline">\(D\)</span> bytes worth, to be
@@ -112,7 +118,14 @@ Meier</a></div>
         <p>Networked protocols are often bottlenecked by sending data,
         since moving bits around the planet, a country, or a building is
         hopelessly slow compared to moving it within an integrated
-        circuit. This protocol is bottlenecked more so, with all of its
+        circuit.</p>
+        <p>Some back-of-the-napkin math: if our leader has a 1 Gb / s
+        link, and needs to send a 1 MB block to 50 followers, we would
+        expect this to take at least 400 ms, assuming no overhead at all
+        in transmitting. Our <a
+        href="https://docs.rs/commonware-estimator/latest/estimator/">estimator
+        crate</a></p>
+        <p>This protocol is bottlenecked more so, with all of its
         communication going through the single leader node. While the
         leader sends the entire data <span
         class="math inline">\(m\)</span> times, the followers sit idle,
@@ -184,6 +197,8 @@ Meier</a></div>
         interpolated back into the original polynomial <span
         class="math inline">\(d(X)\)</span>, whose coefficients spell
         out our message.</p>
+        <p>We have an implementation of this scheme <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon/mod.rs">here</a>.</p>
         <p>These details are not essential: what matters is that we take
         <span class="math inline">\(n\)</span> symbols, encode them into
         <span class="math inline">\(m\)</span>, such that any <span
@@ -216,6 +231,11 @@ Meier</a></div>
         be <em>higher</em> than before. Nevertheless, it is distributed
         far more fairly than the naive case, so we should expect it to
         perform better.</p>
+        <p>We had <a
+        href="https://www.youtube.com/watch?v=0m2DgfyCi0w">a podcast
+        episode</a> with the folks from <a
+        href="https://www.category.xyz/">Category Labs</a> about using
+        Raptor Codes for this problem.</p>
         <h2 id="integrity">Integrity</h2>
         <p>We’ve described coding schemes as being able to tolerate
         erasure: missing pieces of data. This fits naturally in the
@@ -375,7 +395,36 @@ Meier</a></div>
         \]</span></p>
         <p>as for our own shard.</p>
         <h2 id="comparisons-with-kzg">Comparisons with KZG</h2>
-        <p>Another</p>
+        <p>Another approach to verifiable dissemination is to lean into
+        Polynomial Commitment Schemes. This is, in essence, how <a
+        href="https://ethereum.org/roadmap/danksharding/">Danksharding</a>
+        works.</p>
+        <p>In the case of Reed-Solomon coding, each shard is the
+        evaluation of some polynomial <span
+        class="math inline">\(d(X)\)</span> at a given point. The
+        problem of checking that our shard is an evaluation of a claimed
+        polynomial is exactly that solved by a PCS. Such a scheme
+        produces a succinct commitment to <span
+        class="math inline">\(d(X)\)</span>, such that we can also prove
+        that some data is the result of evaluating <span
+        class="math inline">\(d(X)\)</span> at a given point, which is
+        what we need.</p>
+        <p>The <a href="https://eprint.iacr.org/2025/034">ZODA paper</a>
+        has some comparison numbers with such a scheme, using KZG
+        commitments, but they should be taken with a fairly large grain
+        of salt, since they analyze things from a data availability
+        stand point, where you have a large number of samplers (around
+        1000), with a rate (i.e. <span class="math inline">\(n /
+        m\)</span>) of <span class="math inline">\(1/2\)</span>. For the
+        use-case of data dissemination, you’d likely have fewer nodes
+        (around 100, or however many validators you have), with a higher
+        rate (something like <span class="math inline">\(2/3\)</span>,
+        allowing you to recover if byzantine validators omit their
+        shards). Nonetheless, you can compare the claimed performance
+        for different data sizes. For each scheme, the original block
+        size, the size of each shard, and the total size of all shards
+        is reported. The inefficiency—how much data is needed compared
+        to just sending all of the data naively–is also reported.</p>
         <table>
         <colgroup>
         <col style="width: 12%" />
@@ -445,6 +494,16 @@ Meier</a></div>
         </tr>
         </tbody>
         </table>
+        <p>In any case, we can see a claimed improvement in the context
+        of Data Availability, and we should expect this to extend to our
+        slightly different use-case of data dissemination.</p>
+        <p>Another factor in the cost of KZG is that requires many
+        operations over a <em>group</em> (in this case, an elliptic
+        curve) which is at least an order of magnitude more expensive
+        than a field operation. ZODA, on the other hand, performs only
+        field operations, and inexpensive hashing. We should also expect
+        the <em>latency</em> to be improved as well, requiring less time
+        to compute the checking data for the shards.</p>
         <h2 id="summary">Summary</h2>
         <p>A leader wants to send some data to followers.</p>
         <p>In the naive case, the leader simply sends all of the data to
