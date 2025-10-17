@@ -35,7 +35,7 @@ pub struct DealOutcome<C: Signer, V: Variant> {
 }
 
 impl<C: Signer, V: Variant> DealOutcome<C, V> {
-    /// Creates a new [DealOutcome], signing its inner payload with the [Dealer]'s [Signer].
+    /// Creates a new [DealOutcome], signing its inner payload with the [commonware_cryptography::bls12381::dkg::Dealer]'s [Signer].
     pub fn new(
         dealer_signer: &C,
         namespace: &[u8],
