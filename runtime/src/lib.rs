@@ -1465,6 +1465,19 @@ mod tests {
         });
     }
 
+    fn test_spawn_robust_on_child_completion<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let handle = context.spawn(move |context| async move {
+                context.spawn(|_| async move { 42 }).await.unwrap();
+                43
+            });
+            assert_eq!(handle.await.unwrap(), 43);
+        });
+    }
+
     fn test_spawn_cascading_abort<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2093,6 +2106,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_robust_on_child_completion() {
+        let runner = deterministic::Runner::default();
+        test_spawn_robust_on_child_completion(runner);
+    }
+
+    #[test]
     fn test_deterministic_spawn_cascading_abort() {
         let runner = deterministic::Runner::default();
         test_spawn_cascading_abort(runner);
@@ -2373,6 +2392,12 @@ mod tests {
     fn test_tokio_spawn_abort_on_parent_completion() {
         let runner = tokio::Runner::default();
         test_spawn_abort_on_parent_completion(runner);
+    }
+
+    #[test]
+    fn test_tokio_spawn_robust_on_child_completion() {
+        let runner = tokio::Runner::default();
+        test_spawn_robust_on_child_completion(runner);
     }
 
     #[test]
