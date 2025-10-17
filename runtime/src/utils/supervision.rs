@@ -86,7 +86,7 @@ impl Tree {
         (child, aborted)
     }
 
-    /// Records an [Aborter] on the current context.
+    /// Records an [Aborter] on the node.
     pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
