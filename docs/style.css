@@ -110,7 +110,7 @@ img {
     margin: 20px 0;
 }
 
-.image-caption {
+figcaption, .image-caption {
     font-size: 0.8em;
     color: gray;
     margin-top: 5px;

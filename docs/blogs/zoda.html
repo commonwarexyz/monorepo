@@ -91,15 +91,15 @@ Meier</a></div>
         interesting with the block, like processing transactions,
         requires the data.</p>
         <p>We’ve invested some effort in this part of the Commonware
-        stack recently, and I’d like to share some fruits of that effort
-        in this post. As an outline, we’ll cover:</p>
+        Library recently, and I’d like to share some fruits of that
+        effort in this post. As an outline, we’ll cover:</p>
         <ul>
         <li>data dissemination, naively,</li>
         <li>how to increase efficiency with coding,</li>
         <li>and, finally, how to get quicker guarantees about the data
         with <a href="https://eprint.iacr.org/2025/034">ZODA</a>.</li>
         </ul>
-        <p>In a future post we could cover lower-level details of <a
+        <p>In a future post we will cover lower-level details of <a
         href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">our
         implementation</a>, like the field we use for Reed-Solomon
         coding, and the optimizations needed for fast fourier
@@ -114,7 +114,12 @@ Meier</a></div>
         D\)</span> bytes, and the followers’ cost is <span
         class="math inline">\(0\)</span> bytes, since they send
         nothing.</p>
-        <p><img src="/blogs/zoda/img-000.png" /></p>
+        <figure>
+        <img src="/blogs/zoda/img-000.png"
+        alt="Figure 1: A leader transmits a block of data to 4 followers" />
+        <figcaption aria-hidden="true">Figure 1: A leader transmits a
+        block of data to 4 followers</figcaption>
+        </figure>
         <p>Networked protocols are often bottlenecked by sending data,
         since moving bits around the planet, a country, or a building is
         hopelessly slow compared to moving it within an integrated
@@ -124,7 +129,8 @@ Meier</a></div>
         expect this to take at least 400 ms, assuming no overhead at all
         in transmitting. Our <a
         href="https://docs.rs/commonware-estimator/latest/estimator/">estimator
-        crate</a></p>
+        crate</a> can be used to test out this example, as well as <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy">others</a>.</p>
         <p>This protocol is bottlenecked more so, with all of its
         communication going through the single leader node. While the
         leader sends the entire data <span
@@ -146,7 +152,12 @@ Meier</a></div>
         together, the participants hold it all, distributed as thinly as
         possible. (They do still need to communicate to recover the
         data, of course, but it is recoverable).</p>
-        <p><img src="/blogs/zoda/img-001.png" /></p>
+        <figure>
+        <img src="/blogs/zoda/img-001.png"
+        alt="Figure 2: A leader splits data into 4 chunks, each sent to 1 follower" />
+        <figcaption aria-hidden="true">Figure 2: A leader splits data
+        into 4 chunks, each sent to 1 follower</figcaption>
+        </figure>
         <p>In this case, the leader’s transmission cost is now just
         <span class="math inline">\(m \cdot \frac{D}{m} = D\)</span>,
         quite the improvement. If the participants want to recover the
@@ -217,7 +228,13 @@ Meier</a></div>
         Each shard can be a row of this matrix. Given <span
         class="math inline">\(n\)</span> shards, the original matrix can
         be recovered, proceeding columnwise once more.</p>
-        <p><img src="/blogs/zoda/img-002.png" /></p>
+        <figure>
+        <img src="/blogs/zoda/img-002.png"
+        alt="Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers" />
+        <figcaption aria-hidden="true">Figure 3: Data is encoded,
+        growing from 2 pieces into 4, and split across the
+        followers</figcaption>
+        </figure>
         <p>The cost of this scheme is now: - <span
         class="math inline">\(m \cdot \frac{D}{n}\)</span> for the
         leader, - <span class="math inline">\((m - 1) \cdot
@@ -267,7 +284,12 @@ Meier</a></div>
         that of the shard. A binary Merkle Tree is an example of such a
         scheme (but others might work better, e.g. playing with arity,
         or using a Polynomial Commitment Scheme).</p>
-        <p><img src="/blogs/zoda/img-003.png" /></p>
+        <figure>
+        <img src="/blogs/zoda/img-003.png"
+        alt="Figure 4: The encoded rows are hashed into a tree" />
+        <figcaption aria-hidden="true">Figure 4: The encoded rows are
+        hashed into a tree</figcaption>
+        </figure>
         <p>As a side-effect, our scheme now produces a fingerprint,
         attesting uniquely to the encoded data. This could be used for
         consensus, like the hash of the data itself often is.</p>
@@ -517,8 +539,11 @@ Meier</a></div>
         it matches our commitment.</p>
         <p><a href="https://eprint.iacr.org/2025/034">ZODA</a>
         alleviates this by guaranteeing that a shard originates from a
-        valid encoding, by adding additional check data to each
-        shard.</p>
+        valid encoding of the data, by adding additional checksums to
+        each shard. Some more advanced schemes, like <a
+        href="https://eprint.iacr.org/2025/1187">Ligerito</a> can
+        potentially allow for verifying arbitrary properties of the
+        data, which we’re excited about.</p>
         <p>Our work-in-progress implementation of this scheme can be
         found here: <a
         href="https://github.com/commonwarexyz/monorepo/blob/cronokirby/ZODA/coding/src/zoda.rs"></a>.</p>
