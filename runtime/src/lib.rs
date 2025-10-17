@@ -145,10 +145,11 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Unlike directly awaiting a future, the task starts running immediately even if the caller
     /// never awaits the returned [`Handle`].
     ///
-    /// # Supervision
+    /// # Mandatory Supervision
     ///
-    /// All tasks are supervised. When cloning a context, the context becomes a child of the context
-    /// it came from. A task spawned from a context will abort all descendants when it finishes or is aborted.
+    /// All tasks are supervised. When cloning a context (either via [`Clone::clone`] or [`Metrics::with_label`]),
+    /// the context becomes a child of the context it came from. A task spawned from a context will abort all
+    /// descendants when it finishes or is aborted.
     ///
     /// # Spawn Configuration Reset
     ///
