@@ -247,6 +247,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
+    ///
+    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
+    /// reopened to trigger repair in [Variable::init].
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {
@@ -306,6 +309,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails or if the item cannot
     /// be encoded.
+    ///
+    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
+    /// reopened to trigger repair in [Variable::init].
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         // Calculate which section this position belongs to
         let section = self.current_section();
@@ -358,6 +364,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
+    ///
+    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
+    /// reopened to trigger repair in [Variable::init].
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         if min_position <= self.oldest_retained_pos {
             return Ok(false);
@@ -369,6 +378,17 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Calculate section number
         let min_section = min_position / self.items_per_section;
 
+        // Prune data journal FIRST, then locations journal.
+        //
+        // This maintains crash-safety: if we crash after pruning data but before pruning
+        // the locations index, init() will detect that locations has index entries for
+        // data that no longer exists and prune the locations journal to catch up.
+        //
+        // Note: This has the same order as append (data first, then locations), but is the
+        // opposite order of rewind (which writes locations first, then data). Despite the
+        // different orderings, all operations maintain the same invariant: locations can
+        // lag behind data's actual state, but never be ahead in a way that references
+        // non-existent data.
         let pruned = self.data.prune(min_section).await?;
         if pruned {
             // Update to the actual pruned position (section-aligned)
@@ -477,6 +497,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ///
     /// This destroys both the data journal and the locations journal.
     pub async fn destroy(self) -> Result<(), Error> {
+        // The locations journal is destroyed first to maintain consistency with the
+        // write-ordering invariant: if interrupted, the data journal will remain with
+        // no locations index, which is automatically repaired by [Variable::init].
         self.locations.destroy().await?;
         self.data.destroy().await
     }
