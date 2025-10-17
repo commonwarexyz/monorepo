@@ -66,7 +66,7 @@ where
         // Make the future abortable
         let metric_handle = metric.clone();
         let abortable = Abortable::new(wrapped, abort_registration).map(move |_| {
-            tree.abort_descendants();
+            tree.abort();
             metric_handle.finish();
         });
 

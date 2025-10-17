@@ -43,13 +43,13 @@ impl SupervisionTreeInner {
         }
     }
 
-    fn register_child(&mut self, child: &Arc<SupervisionTree>) {
+    fn child(&mut self, child: &Arc<SupervisionTree>) {
         // To avoid unbounded growth of children for clone-heavy loops, we reap dropped children here.
         self.children.retain(|weak| weak.strong_count() > 0);
         self.children.push(Arc::downgrade(child));
     }
 
-    fn set_task(&mut self, aborter: Aborter) -> Result<(), Aborter> {
+    fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
         if self.aborted {
             return Err(aborter);
         }
@@ -58,7 +58,7 @@ impl SupervisionTreeInner {
         Ok(())
     }
 
-    fn capture(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>)> {
+    fn abort(&mut self) -> Option<(Option<Aborter>, Vec<Weak<SupervisionTree>>)> {
         if self.aborted {
             return None;
         }
@@ -87,7 +87,7 @@ impl SupervisionTree {
         });
 
         if !aborted {
-            parent_inner.register_child(&child);
+            parent_inner.child(&child);
         }
         drop(parent_inner);
 
@@ -95,10 +95,10 @@ impl SupervisionTree {
     }
 
     /// Records a supervised task so it can be aborted alongside the current context.
-    pub(crate) fn register_task(self: &Arc<Self>, aborter: Aborter) {
+    pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
-            inner.set_task(aborter)
+            inner.register(aborter)
         };
 
         if let Err(aborter) = result {
@@ -107,10 +107,10 @@ impl SupervisionTree {
     }
 
     /// Aborts all descendants (tasks and nested contexts) rooted at this node.
-    pub(crate) fn abort_descendants(self: &Arc<Self>) {
+    pub(crate) fn abort(self: &Arc<Self>) {
         let result = {
             let mut inner = self.inner.lock().unwrap();
-            inner.capture()
+            inner.abort()
         };
         let Some((task, children)) = result else {
             return;
@@ -123,7 +123,7 @@ impl SupervisionTree {
         // Drain children so the subtree cannot be aborted twice.
         for child in children {
             if let Some(child) = child.upgrade() {
-                child.abort_descendants();
+                child.abort();
             }
         }
     }
@@ -140,7 +140,7 @@ mod tests {
     };
     use prometheus_client::metrics::gauge::Gauge;
 
-    fn pending_aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
+    fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let (handle, registration) = AbortHandle::new_pair();
         let gauge = Gauge::default();
         let metric = MetricHandle::new(gauge);
@@ -154,16 +154,16 @@ mod tests {
         let (parent, aborted) = SupervisionTree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
-        let (parent_aborter, parent_future) = pending_aborter();
-        parent.register_task(parent_aborter);
+        let (parent_aborter, parent_future) = aborter();
+        parent.register(parent_aborter);
 
         let (child, aborted) = SupervisionTree::child(&parent);
         assert!(!aborted, "child node unexpectedly aborted");
 
-        let (child_aborter, child_future) = pending_aborter();
-        child.register_task(child_aborter);
+        let (child_aborter, child_future) = aborter();
+        child.register(child_aborter);
 
-        parent.abort_descendants();
+        parent.abort();
 
         assert!(matches!(block_on(parent_future), Err(Aborted)));
         assert!(matches!(block_on(child_future), Err(Aborted)));
@@ -184,13 +184,13 @@ mod tests {
         assert!(!aborted, "child node unexpectedly aborted");
 
         // Parent starts using the helper after the new task was created.
-        let (helper_aborter, helper_future) = pending_aborter();
-        helper.register_task(helper_aborter);
+        let (helper_aborter, helper_future) = aborter();
+        helper.register(helper_aborter);
 
-        // Simulate the spawned task finishing, which aborts its descendants.
-        let (child_aborter, child_future) = pending_aborter();
-        child.register_task(child_aborter);
-        child.abort_descendants();
+        // Simulate the spawned task finishing, which aborts its subtree.
+        let (child_aborter, child_future) = aborter();
+        child.register(child_aborter);
+        child.abort();
 
         // The spawned task should abort.
         assert!(

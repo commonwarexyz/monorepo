@@ -457,7 +457,7 @@ impl crate::Spawner for Context {
 
         // Register the task with the tree
         if let Some(aborter) = handle.aborter() {
-            tree.register_task(aborter);
+            tree.register(aborter);
         }
 
         handle

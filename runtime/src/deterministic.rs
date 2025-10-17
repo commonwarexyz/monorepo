@@ -879,7 +879,7 @@ impl crate::Spawner for Context {
 
         // Register this child with the parent if supervision is enabled.
         if let Some(aborter) = handle.aborter() {
-            tree.register_task(aborter);
+            tree.register(aborter);
         }
 
         handle
