@@ -46,6 +46,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
+
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
