@@ -1,7 +1,7 @@
 use super::{
     ingress::{Mailbox, Message},
     reporter::Reporter,
-    Config, SigningScheme,
+    Config, Scheme,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
@@ -26,7 +26,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     pub fn new(
         context: R,
         config: Config<H>,
-    ) -> (Self, SigningScheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
+    ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         (
@@ -35,7 +35,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                 hasher: config.hasher,
                 mailbox,
             },
-            SigningScheme::new(config.participants, config.private_key),
+            Scheme::new(config.participants, config.private_key),
             Reporter::new(),
             Mailbox::new(sender),
         )

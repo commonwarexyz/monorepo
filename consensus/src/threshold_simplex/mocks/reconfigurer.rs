@@ -4,7 +4,7 @@
 
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Finalize, Notarize, Nullify, Voter},
     },
     types::Epoch,
@@ -16,19 +16,19 @@ use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: SigningScheme> {
+pub struct Config<S: Scheme> {
     pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Reconfigurer<E: Spawner, S: SigningScheme, H: Hasher> {
+pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     signing: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: SigningScheme, H: Hasher> Reconfigurer<E, S, H> {
+impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

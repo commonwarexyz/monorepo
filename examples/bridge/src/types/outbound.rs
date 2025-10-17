@@ -1,5 +1,5 @@
 use super::block::BlockFormat;
-use crate::SigningScheme;
+use crate::Scheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
@@ -17,7 +17,7 @@ pub enum Outbound<D: Digest> {
     /// Contains the requested block data in response to a `GetBlock` message.
     Block(BlockFormat<D>),
     /// Contains the requested finality certificate in response to a `GetFinalization` message.
-    Finalization(Finalization<SigningScheme, D>),
+    Finalization(Finalization<Scheme, D>),
 }
 
 impl<D: Digest> Write for Outbound<D> {
@@ -97,7 +97,7 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_finalization() -> Finalization<SigningScheme, Sha256Digest> {
+    fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);

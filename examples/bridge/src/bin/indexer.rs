@@ -5,7 +5,7 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    SigningScheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{threshold_simplex::types::Finalization, Viewable};
@@ -48,7 +48,7 @@ enum Message<D: Digest> {
     },
     GetFinalization {
         incoming: inbound::GetFinalization,
-        response: oneshot::Sender<Option<Finalization<SigningScheme, D>>>,
+        response: oneshot::Sender<Option<Finalization<Scheme, D>>>,
     },
 }
 
@@ -113,9 +113,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces: HashMap<G2, (SigningScheme, Vec<u8>)> = HashMap::new();
+    let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<SigningScheme, Sha256Digest>>> =
+    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -128,10 +128,7 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(
-            public,
-            (SigningScheme::certificate_verifier(public), namespace),
-        );
+        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }

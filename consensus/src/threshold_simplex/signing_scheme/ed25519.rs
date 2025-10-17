@@ -5,9 +5,7 @@
 
 use crate::{
     threshold_simplex::{
-        signing_scheme::{
-            finalize_namespace, notarize_namespace, nullify_namespace, SigningScheme,
-        },
+        signing_scheme::{self, finalize_namespace, notarize_namespace, nullify_namespace},
         types::{Participants, Vote, VoteContext, VoteVerification},
     },
     types::Round,
@@ -21,7 +19,7 @@ use commonware_cryptography::{
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
-/// Ed25519 implementation of the [`SigningScheme`] trait.
+/// Ed25519 implementation of the [`Scheme`] trait.
 ///
 /// The scheme keeps the participant ordering plus (optionally) the local private
 /// key so it can produce votes as well as batch-verify signatures from peers.
@@ -132,7 +130,7 @@ impl Read for Certificate {
     }
 }
 
-impl SigningScheme for Scheme {
+impl signing_scheme::Scheme for Scheme {
     type Signature = Ed25519Signature;
     type Certificate = Certificate;
     type Seed = ();
@@ -389,7 +387,10 @@ impl SigningScheme for Scheme {
 mod tests {
     use super::*;
     use crate::{
-        threshold_simplex::types::{Proposal, VoteContext},
+        threshold_simplex::{
+            signing_scheme::Scheme as _,
+            types::{Proposal, VoteContext},
+        },
         types::Round,
     };
     use commonware_codec::{Decode, Encode};

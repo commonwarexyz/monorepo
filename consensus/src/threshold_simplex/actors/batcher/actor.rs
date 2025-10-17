@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
             Finalize, Notarize, Nullify, NullifyFinalize, Participants, Voter,
@@ -29,7 +29,7 @@ use tracing::{trace, warn};
 
 struct Round<
     P: PublicKey,
-    S: SigningScheme,
+    S: Scheme,
     B: Blocker<PublicKey = P>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -48,7 +48,7 @@ struct Round<
 
 impl<
         P: PublicKey,
-        S: SigningScheme,
+        S: Scheme,
         B: Blocker<PublicKey = P>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
@@ -312,7 +312,7 @@ impl<
 pub struct Actor<
     E: Spawner + Metrics + Clock + Rng + CryptoRng,
     P: PublicKey,
-    S: SigningScheme,
+    S: Scheme,
     B: Blocker<PublicKey = P>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -342,7 +342,7 @@ pub struct Actor<
 impl<
         E: Spawner + Metrics + Clock + Rng + CryptoRng,
         P: PublicKey,
-        S: SigningScheme,
+        S: Scheme,
         B: Blocker<PublicKey = P>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,

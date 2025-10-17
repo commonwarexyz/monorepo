@@ -8,7 +8,7 @@ use crate::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    SigningScheme,
+    Scheme,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
@@ -34,7 +34,7 @@ pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: St
     indexer: (Sender<Si>, Receiver<St>),
     namespace: Vec<u8>,
     public: <MinSig as Variant>::Public,
-    other_certificate_verifier: SigningScheme,
+    other_certificate_verifier: Scheme,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -44,7 +44,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
     pub fn new<P: PublicKey>(
         context: R,
         config: Config<H, Si, St, P>,
-    ) -> (Self, SigningScheme, Mailbox<H::Digest>) {
+    ) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -52,13 +52,11 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 indexer: config.indexer,
                 namespace: config.namespace,
                 public: *poly::public::<MinSig>(&config.identity),
-                other_certificate_verifier: SigningScheme::certificate_verifier(
-                    config.other_public,
-                ),
+                other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
                 hasher: config.hasher,
                 mailbox,
             },
-            SigningScheme::new(&config.participants, &config.identity, config.share),
+            Scheme::new(&config.participants, &config.identity, config.share),
             Mailbox::new(sender),
         )
     }

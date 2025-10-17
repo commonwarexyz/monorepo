@@ -1,4 +1,4 @@
-use crate::SigningScheme;
+use crate::Scheme;
 use commonware_consensus::{
     threshold_simplex::types::{Activity, Context},
     types::{Epoch, Round},
@@ -25,7 +25,7 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<bool>,
     },
     Report {
-        activity: Activity<SigningScheme, D>,
+        activity: Activity<Scheme, D>,
     },
 }
 
@@ -96,7 +96,7 @@ impl<D: Digest> Re for Mailbox<D> {
 }
 
 impl<D: Digest> Reporter for Mailbox<D> {
-    type Activity = Activity<SigningScheme, D>;
+    type Activity = Activity<Scheme, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

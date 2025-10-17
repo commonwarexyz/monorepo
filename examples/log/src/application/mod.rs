@@ -12,7 +12,7 @@ pub use actor::Application;
 mod ingress;
 mod reporter;
 
-pub type SigningScheme = commonware_consensus::threshold_simplex::signing_scheme::ed25519::Scheme;
+pub type Scheme = commonware_consensus::threshold_simplex::signing_scheme::ed25519::Scheme;
 
 /// Configuration for the application.
 pub struct Config<H: Hasher> {

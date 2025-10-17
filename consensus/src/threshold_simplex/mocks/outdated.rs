@@ -2,7 +2,7 @@
 
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Finalize, Notarize, Proposal, Voter},
     },
     Viewable,
@@ -15,13 +15,13 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
-pub struct Config<S: SigningScheme> {
+pub struct Config<S: Scheme> {
     pub signing: S,
     pub namespace: Vec<u8>,
     pub view_delta: u64,
 }
 
-pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
+pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     signing: S,
 
@@ -33,7 +33,7 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: H
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Outdated<E, S, H> {
+impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

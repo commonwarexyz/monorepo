@@ -1,4 +1,4 @@
-use crate::SigningScheme;
+use crate::Scheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
@@ -12,7 +12,7 @@ pub enum BlockFormat<D: Digest> {
     Random(u128),
 
     /// A finalization certificate of a block from a different network.
-    Bridge(Finalization<SigningScheme, D>),
+    Bridge(Finalization<Scheme, D>),
 }
 
 impl<D: Digest> Write for BlockFormat<D> {
@@ -79,7 +79,7 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_finalization() -> Finalization<SigningScheme, Sha256Digest> {
+    fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);

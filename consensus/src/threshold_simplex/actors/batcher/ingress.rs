@@ -1,5 +1,5 @@
 use crate::{
-    threshold_simplex::{signing_scheme::SigningScheme, types::Voter},
+    threshold_simplex::{signing_scheme::Scheme, types::Voter},
     types::View,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -8,7 +8,7 @@ use futures::{
     SinkExt,
 };
 
-pub enum Message<P: PublicKey, S: SigningScheme, D: Digest> {
+pub enum Message<P: PublicKey, S: Scheme, D: Digest> {
     Update {
         current: View,
         leader: P,
@@ -20,11 +20,11 @@ pub enum Message<P: PublicKey, S: SigningScheme, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: PublicKey, S: SigningScheme, D: Digest> {
+pub struct Mailbox<P: PublicKey, S: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<P, S, D>>,
 }
 
-impl<P: PublicKey, S: SigningScheme, D: Digest> Mailbox<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
     pub fn new(sender: mpsc::Sender<Message<P, S, D>>) -> Self {
         Self { sender }
     }

@@ -1,4 +1,4 @@
-use super::SigningScheme;
+use super::Scheme;
 use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
 use std::marker::PhantomData;
@@ -19,7 +19,7 @@ impl<D: Digest> Reporter<D> {
 }
 
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
-    type Activity = Activity<SigningScheme, D>;
+    type Activity = Activity<Scheme, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let view = activity.view();

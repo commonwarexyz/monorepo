@@ -1,6 +1,6 @@
 use super::types::{Activity, Context};
 use crate::{
-    threshold_simplex::signing_scheme::SigningScheme,
+    threshold_simplex::signing_scheme::Scheme,
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };
@@ -13,7 +13,7 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Signer,
-    S: SigningScheme,
+    S: Scheme,
     B: Blocker<PublicKey = C::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -105,7 +105,7 @@ pub struct Config<
 
 impl<
         C: Signer,
-        S: SigningScheme,
+        S: Scheme,
         B: Blocker<PublicKey = C::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D>>,

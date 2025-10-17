@@ -1,6 +1,6 @@
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Activity, Finalization, Notarization},
     },
     types::Round,
@@ -53,7 +53,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<S: SigningScheme, B: Block> {
+pub(crate) enum Message<S: Scheme, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -111,11 +111,11 @@ pub(crate) enum Message<S: SigningScheme, B: Block> {
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<S: SigningScheme, B: Block> {
+pub struct Mailbox<S: Scheme, B: Block> {
     sender: mpsc::Sender<Message<S, B>>,
 }
 
-impl<S: SigningScheme, B: Block> Mailbox<S, B> {
+impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
     pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
@@ -229,7 +229,7 @@ impl<S: SigningScheme, B: Block> Mailbox<S, B> {
     }
 }
 
-impl<S: SigningScheme, B: Block> Reporter for Mailbox<S, B> {
+impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
     type Activity = Activity<S, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {

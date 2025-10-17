@@ -1,7 +1,7 @@
 //! Byzantine participant that sends invalid notarize/finalize messages.
 
 use crate::threshold_simplex::{
-    signing_scheme::SigningScheme,
+    signing_scheme::Scheme,
     types::{Finalize, Notarize, Voter},
 };
 use commonware_codec::{Decode, Encode};
@@ -12,12 +12,12 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: SigningScheme> {
+pub struct Config<S: Scheme> {
     pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
+pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     signing: S,
 
@@ -26,7 +26,7 @@ pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Ha
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<E, S, H> {
+impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

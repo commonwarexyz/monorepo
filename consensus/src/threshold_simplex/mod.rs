@@ -2,9 +2,8 @@
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides simple and
 //! fast BFT agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
-//! partially synchronous setting. Cryptography is abstracted behind the [`SigningScheme`] trait, letting
-//! deployments plug in different vote/certificate schemes. The following signing schemes are currently
-//! implemented:
+//! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, letting deployments
+//! plug in different vote/certificate schemes. The following signing schemes are currently implemented:
 //!
 //! * **BLS12-381 threshold signatures** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
 //!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
@@ -173,7 +172,7 @@ use crate::types::View;
 pub mod signing_scheme;
 pub mod types;
 
-use signing_scheme::SigningScheme;
+use signing_scheme::Scheme;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -215,12 +214,12 @@ pub(crate) fn interesting(
 
 /// Selects the leader for a given view using scheme-provided randomness seed when available.
 ///
-/// If the active [`SigningScheme`] exposes a seed (e.g. BLS threshold certificates), the
-/// seed is encoded and reduced modulo the number of participants. Otherwise we fall back
-/// to simple round-robin using the view number.
+/// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
+/// encoded and reduced modulo the number of participants. Otherwise we fall back to
+/// simple round-robin using the view number.
 pub fn select_leader<S, P>(participants: &[P], view: View, seed: Option<S::Seed>) -> u32
 where
-    S: SigningScheme,
+    S: Scheme,
 {
     use commonware_codec::Encode;
 
@@ -367,7 +366,7 @@ mod tests {
 
     fn all_online<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -611,7 +610,7 @@ mod tests {
 
     fn observer<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -770,7 +769,7 @@ mod tests {
 
     fn unclean_shutdown<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
     {
         // Create context
@@ -956,7 +955,7 @@ mod tests {
 
     fn backfill<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1209,7 +1208,7 @@ mod tests {
 
     fn one_offline<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1464,7 +1463,7 @@ mod tests {
 
     fn slow_validator<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1639,7 +1638,7 @@ mod tests {
 
     fn all_recovery<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1840,7 +1839,7 @@ mod tests {
 
     fn partition<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2034,7 +2033,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2206,7 +2205,7 @@ mod tests {
 
     fn conflicter<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2386,7 +2385,7 @@ mod tests {
 
     fn invalid<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2551,7 +2550,7 @@ mod tests {
 
     fn impersonator<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2715,7 +2714,7 @@ mod tests {
 
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2878,7 +2877,7 @@ mod tests {
 
     fn nuller<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3051,7 +3050,7 @@ mod tests {
 
     fn outdated<S, F>(seed: u64, mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3207,7 +3206,7 @@ mod tests {
 
     fn run_1k<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3351,7 +3350,7 @@ mod tests {
 
     fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context

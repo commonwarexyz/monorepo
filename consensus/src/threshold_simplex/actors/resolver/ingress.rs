@@ -1,6 +1,6 @@
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Notarization, Nullification},
     },
     types::View,
@@ -8,7 +8,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<S: SigningScheme, D: Digest> {
+pub enum Message<S: Scheme, D: Digest> {
     Fetch {
         notarizations: Vec<View>,
         nullifications: Vec<View>,
@@ -26,11 +26,11 @@ pub enum Message<S: SigningScheme, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<S: SigningScheme, D: Digest> {
+pub struct Mailbox<S: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<S: SigningScheme, D: Digest> Mailbox<S, D> {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }

@@ -3,7 +3,7 @@
 use crate::{
     threshold_simplex::{
         select_leader,
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
@@ -29,14 +29,14 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<P: PublicKey, S: SigningScheme> {
+pub struct Config<P: PublicKey, S: Scheme> {
     pub namespace: Vec<u8>,
     pub participants: Vec<P>,
     pub signing: S,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: SigningScheme, D: Digest> {
+pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
     participants: Participants<P>,
     signing: S,
@@ -62,7 +62,7 @@ impl<E, P, S, D> Reporter<E, P, S, D>
 where
     E: Rng + CryptoRng,
     P: PublicKey + Eq + Hash + Clone,
-    S: SigningScheme,
+    S: Scheme,
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<P, S>) -> Self {
@@ -99,7 +99,7 @@ impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
-    S: SigningScheme,
+    S: Scheme,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -318,7 +318,7 @@ impl<E, P, S, D> Monitor for Reporter<E, P, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
-    S: SigningScheme,
+    S: Scheme,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

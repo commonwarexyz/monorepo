@@ -1,7 +1,7 @@
 use super::SchemeProvider;
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Finalization, Notarization},
     },
     types::{Epoch, Round, View},
@@ -38,7 +38,7 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: SigningScheme> {
+struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -49,9 +49,7 @@ struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S:
     finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: SigningScheme>
-    Cache<R, B, S>
-{
+impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> Cache<R, B, S> {
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
@@ -71,7 +69,7 @@ pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<S>,
-    S: SigningScheme,
+    S: Scheme,
 > {
     /// Context
     context: R,
@@ -97,7 +95,7 @@ impl<
         R: Rng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
         P: SchemeProvider<S>,
-        S: SigningScheme,
+        S: Scheme,
     > Manager<R, B, P, S>
 {
     /// Initialize the cache manager and its metadata store.

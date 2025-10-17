@@ -1,5 +1,5 @@
 use super::SchemeProvider;
-use crate::{threshold_simplex::signing_scheme::SigningScheme, Block};
+use crate::{threshold_simplex::signing_scheme::Scheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::{
     marker::PhantomData,
@@ -11,7 +11,7 @@ pub struct Config<B, P, S>
 where
     B: Block,
     P: SchemeProvider<S>,
-    S: SigningScheme,
+    S: Scheme,
 {
     /// Provider for epoch-specific signing schemes.
     pub signing_provider: P,

@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{threshold_simplex::signing_scheme::SigningScheme, types::Epoch};
+use crate::{threshold_simplex::signing_scheme::Scheme, types::Epoch};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;
@@ -11,7 +11,7 @@ pub use ingress::Mailbox;
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<P: PublicKey, S: SigningScheme, B: Blocker> {
+pub struct Config<P: PublicKey, S: Scheme, B: Blocker> {
     pub crypto: P,
     pub participants: Vec<P>,
     pub signing: S,

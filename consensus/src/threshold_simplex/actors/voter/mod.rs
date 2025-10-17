@@ -3,7 +3,7 @@ mod ingress;
 
 use crate::{
     threshold_simplex::{
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{Activity, Context},
     },
     types::{Epoch, View},
@@ -18,7 +18,7 @@ use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     C: Signer,
-    S: SigningScheme,
+    S: Scheme,
     B: Blocker,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -81,7 +81,7 @@ mod tests {
 
     type Fixture<S> = (Vec<EdPrivateKey>, Vec<EdPublicKey>, Vec<S>);
 
-    fn build_notarization<S: SigningScheme>(
+    fn build_notarization<S: Scheme>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -100,7 +100,7 @@ mod tests {
         (votes, certificate)
     }
 
-    fn build_finalization<S: SigningScheme>(
+    fn build_finalization<S: Scheme>(
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
@@ -127,7 +127,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -388,7 +388,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -695,7 +695,7 @@ mod tests {
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: SigningScheme,
+        S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;

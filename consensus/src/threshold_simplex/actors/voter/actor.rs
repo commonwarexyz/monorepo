@@ -5,7 +5,7 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active, select_leader,
-        signing_scheme::SigningScheme,
+        signing_scheme::Scheme,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Participants, Proposal, Voter,
@@ -57,7 +57,7 @@ enum Action {
     Process,
 }
 
-struct Round<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> {
+struct Round<E: Clock, P: PublicKey, S: Scheme, D: Digest> {
     start: SystemTime,
     participants: Participants<P>,
     signing: S,
@@ -106,7 +106,7 @@ struct Round<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> {
     recover_latency: histogram::Timed<E>,
 }
 
-impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
+impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
     pub fn new(
         context: &ContextCell<E>,
         participants: Participants<P>,
@@ -366,7 +366,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Signer,
-    S: SigningScheme,
+    S: Scheme,
     B: Blocker<PublicKey = C::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -417,7 +417,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Signer,
-        S: SigningScheme,
+        S: Scheme,
         B: Blocker<PublicKey = C::PublicKey>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,

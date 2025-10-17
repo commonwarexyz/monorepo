@@ -1,7 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::threshold_simplex::{
-    signing_scheme::SigningScheme,
+    signing_scheme::Scheme,
     types::{Finalize, Notarize, Proposal, Voter},
 };
 use commonware_codec::{Decode, Encode};
@@ -12,19 +12,19 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: SigningScheme> {
+pub struct Config<S: Scheme> {
     pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
+pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     signing: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflicter<E, S, H> {
+impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

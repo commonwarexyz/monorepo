@@ -8,8 +8,7 @@
 use crate::{
     threshold_simplex::{
         signing_scheme::{
-            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
-            SigningScheme,
+            self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
         },
         types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
     },
@@ -268,7 +267,7 @@ impl<V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<V>, D> {
     }
 }
 
-impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
+impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
     type Seed = Seed<V>;
@@ -876,7 +875,7 @@ mod tests {
     use super::*;
     use crate::{
         threshold_simplex::{
-            signing_scheme::{notarize_namespace, seed_namespace},
+            signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
         types::Round,

@@ -1,8 +1,8 @@
 //! Signing-scheme abstraction and implementations used by `threshold_simplex`.
 //!
-//! The [`SigningScheme`] trait defines the cryptographic surface consumed by the core consensus
-//! engine: how votes are signed and verified, how quorum certificates are assembled/checked, and
-//! whether additional randomness is exposed for leader rotation. Two concrete schemes are provided:
+//! The [`Scheme`] trait defines the cryptographic surface consumed by the core consensus engine:
+//! how votes are signed and verified, how quorum certificates are assembled/checked, and whether
+//! additional randomness is exposed for leader rotation. Two concrete schemes are provided:
 //!
 //! * [`bls12381_threshold`] – aggregated threshold signatures that also expose per-view randomness.
 //! * [`ed25519`] – quorum signatures collected into a vector.
@@ -22,11 +22,11 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
 /// Cryptographic surface required by `threshold_simplex`.
 ///
-/// A `SigningScheme` produces validator votes, validates them (individually or in
-/// batches), assembles quorum certificates, checks recovered certificates and, when
-/// available, derives a randomness seed for leader rotation. Implementations may override
-/// the provided defaults to take advantage of scheme-specific batching strategies.
-pub trait SigningScheme: Clone + Debug + Send + Sync + 'static {
+/// A `Scheme` produces validator votes, validates them (individually or in batches), assembles
+/// quorum certificates, checks recovered certificates and, when available, derives a randomness
+/// seed for leader rotation. Implementations may override the provided defaults to take advantage
+/// of scheme-specific batching strategies.
+pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Quorum certificate recovered from a set of votes.

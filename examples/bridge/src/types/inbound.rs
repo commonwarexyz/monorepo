@@ -1,5 +1,5 @@
 use super::block::BlockFormat;
-use crate::SigningScheme;
+use crate::Scheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
@@ -153,7 +153,7 @@ pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
     pub network: <MinSig as Variant>::Public,
     /// The finality certificate
-    pub finalization: Finalization<SigningScheme, D>,
+    pub finalization: Finalization<Scheme, D>,
 }
 
 impl<D: Digest> Write for PutFinalization<D> {
@@ -239,7 +239,7 @@ mod tests {
         result
     }
 
-    fn new_finalization() -> Finalization<SigningScheme, Sha256Digest> {
+    fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);

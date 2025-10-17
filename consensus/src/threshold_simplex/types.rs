@@ -1,7 +1,7 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::{
-    threshold_simplex::signing_scheme::SigningScheme,
+    threshold_simplex::signing_scheme::Scheme,
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
@@ -66,42 +66,42 @@ pub enum VoteContext<'a, D: Digest> {
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
-pub struct Vote<S: SigningScheme> {
+pub struct Vote<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
     /// Scheme-specific signature or share produced for the vote context.
     pub signature: S::Signature,
 }
 
-impl<S: SigningScheme> PartialEq for Vote<S> {
+impl<S: Scheme> PartialEq for Vote<S> {
     fn eq(&self, other: &Self) -> bool {
         self.signer == other.signer && self.signature == other.signature
     }
 }
 
-impl<S: SigningScheme> Eq for Vote<S> {}
+impl<S: Scheme> Eq for Vote<S> {}
 
-impl<S: SigningScheme> Hash for Vote<S> {
+impl<S: Scheme> Hash for Vote<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<S: SigningScheme> Write for Vote<S> {
+impl<S: Scheme> Write for Vote<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: SigningScheme> EncodeSize for Vote<S> {
+impl<S: Scheme> EncodeSize for Vote<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: SigningScheme> Read for Vote<S> {
+impl<S: Scheme> Read for Vote<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -113,14 +113,14 @@ impl<S: SigningScheme> Read for Vote<S> {
 }
 
 /// Result of verifying a batch of votes.
-pub struct VoteVerification<S: SigningScheme> {
+pub struct VoteVerification<S: Scheme> {
     /// Contains the votes accepted by the scheme.
     pub verified: Vec<Vote<S>>,
     /// Identifies the participant indices rejected during batch verification.
     pub invalid_signers: Vec<u32>,
 }
 
-impl<S: SigningScheme> VoteVerification<S> {
+impl<S: Scheme> VoteVerification<S> {
     /// Creates a new `VoteVerification` result.
     pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
@@ -202,7 +202,7 @@ impl<P: PublicKey> From<Vec<P>> for Participants<P> {
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
-pub struct BatchVerifier<S: SigningScheme, D: Digest> {
+pub struct BatchVerifier<S: Scheme, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     signing: S,
 
@@ -232,7 +232,7 @@ pub struct BatchVerifier<S: SigningScheme, D: Digest> {
     finalizes_verified: usize,
 }
 
-impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
+impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// Creates a new `BatchVerifier`.
     ///
     /// # Arguments
@@ -699,7 +699,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<S: SigningScheme, D: Digest> {
+pub enum Voter<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization (scheme-specific)
@@ -714,7 +714,7 @@ pub enum Voter<S: SigningScheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
-impl<S: SigningScheme, D: Digest> Write for Voter<S, D> {
+impl<S: Scheme, D: Digest> Write for Voter<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(v) => {
@@ -745,7 +745,7 @@ impl<S: SigningScheme, D: Digest> Write for Voter<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Voter<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Voter<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Voter::Notarize(v) => v.encode_size(),
@@ -758,7 +758,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Voter<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
+impl<S: Scheme, D: Digest> Read for Voter<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -796,7 +796,7 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Voter<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -811,7 +811,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Voter<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Voter<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Voter<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -896,36 +896,36 @@ impl<D: Digest> Viewable for Proposal<D> {
 
 /// Validator vote that endorses a proposal for notarization.
 #[derive(Clone, Debug)]
-pub struct Notarize<S: SigningScheme, D: Digest> {
+pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
-impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Returns the round associated with this notarize vote.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for Notarize<S, D> {}
+impl<S: Scheme, D: Digest> Eq for Notarize<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
         self.vote.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let vote = scheme.sign_vote(
@@ -952,20 +952,20 @@ impl<S: SigningScheme, D: Digest> Notarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Notarize<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -976,13 +976,13 @@ impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Attributable for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
         self.vote.signer
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Notarize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -990,7 +990,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Notarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Notarize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1002,16 +1002,16 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarize<S, D> {
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`SigningScheme::seed`].
+/// leader rotation), it can be accessed via [`Scheme::seed`].
 #[derive(Clone, Debug)]
-pub struct Notarization<S: SigningScheme, D: Digest> {
+pub struct Notarization<S: Scheme, D: Digest> {
     /// The proposal that has been notarized.
     pub proposal: Proposal<D>,
     /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
 }
 
-impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from matching notarize votes, if enough are present.
     pub fn from_notarizes(signing: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
         if notarizes.is_empty() {
@@ -1040,22 +1040,22 @@ impl<S: SigningScheme, D: Digest> Notarization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for Notarization<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for Notarization<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.certificate == other.certificate
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for Notarization<S, D> {}
+impl<S: Scheme, D: Digest> Eq for Notarization<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
+impl<S: Scheme, D: Digest> Hash for Notarization<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
@@ -1071,20 +1071,20 @@ impl<S: SigningScheme, D: Digest> Notarization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Notarization<S, D> {
+impl<S: Scheme, D: Digest> Write for Notarization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Notarization<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Notarization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
+impl<S: Scheme, D: Digest> Read for Notarization<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -1098,7 +1098,7 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Notarization<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Notarization<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -1106,7 +1106,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Notarization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Notarization<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Notarization<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1117,29 +1117,29 @@ impl<S: SigningScheme, D: Digest> Viewable for Notarization<S, D> {
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug)]
-pub struct Nullify<S: SigningScheme> {
+pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
-impl<S: SigningScheme> PartialEq for Nullify<S> {
+impl<S: Scheme> PartialEq for Nullify<S> {
     fn eq(&self, other: &Self) -> bool {
         self.round == other.round && self.vote == other.vote
     }
 }
 
-impl<S: SigningScheme> Eq for Nullify<S> {}
+impl<S: Scheme> Eq for Nullify<S> {}
 
-impl<S: SigningScheme> Hash for Nullify<S> {
+impl<S: Scheme> Hash for Nullify<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.round.hash(state);
         self.vote.hash(state);
     }
 }
 
-impl<S: SigningScheme> Nullify<S> {
+impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Self {
         let vote = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round });
@@ -1159,20 +1159,20 @@ impl<S: SigningScheme> Nullify<S> {
     }
 }
 
-impl<S: SigningScheme> Write for Nullify<S> {
+impl<S: Scheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S: SigningScheme> EncodeSize for Nullify<S> {
+impl<S: Scheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S: SigningScheme> Read for Nullify<S> {
+impl<S: Scheme> Read for Nullify<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1183,13 +1183,13 @@ impl<S: SigningScheme> Read for Nullify<S> {
     }
 }
 
-impl<S: SigningScheme> Attributable for Nullify<S> {
+impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
         self.vote.signer
     }
 }
 
-impl<S: SigningScheme> Epochable for Nullify<S> {
+impl<S: Scheme> Epochable for Nullify<S> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -1197,7 +1197,7 @@ impl<S: SigningScheme> Epochable for Nullify<S> {
     }
 }
 
-impl<S: SigningScheme> Viewable for Nullify<S> {
+impl<S: Scheme> Viewable for Nullify<S> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1208,14 +1208,14 @@ impl<S: SigningScheme> Viewable for Nullify<S> {
 /// Aggregated nullification certificate recovered from nullify votes.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 #[derive(Clone, Debug)]
-pub struct Nullification<S: SigningScheme> {
+pub struct Nullification<S: Scheme> {
     /// The round in which this nullification is made.
     pub round: Round,
     /// The recovered certificate for the nullification.
     pub certificate: S::Certificate,
 }
 
-impl<S: SigningScheme> Nullification<S> {
+impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from matching nullify votes.
     pub fn from_nullifies(signing: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
         if nullifies.is_empty() {
@@ -1239,29 +1239,29 @@ impl<S: SigningScheme> Nullification<S> {
     }
 }
 
-impl<S: SigningScheme> PartialEq for Nullification<S> {
+impl<S: Scheme> PartialEq for Nullification<S> {
     fn eq(&self, other: &Self) -> bool {
         self.round == other.round && self.certificate == other.certificate
     }
 }
 
-impl<S: SigningScheme> Eq for Nullification<S> {}
+impl<S: Scheme> Eq for Nullification<S> {}
 
-impl<S: SigningScheme> Hash for Nullification<S> {
+impl<S: Scheme> Hash for Nullification<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.round.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<S: SigningScheme> Write for Nullification<S> {
+impl<S: Scheme> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S: SigningScheme> Nullification<S> {
+impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
@@ -1280,13 +1280,13 @@ impl<S: SigningScheme> Nullification<S> {
     }
 }
 
-impl<S: SigningScheme> EncodeSize for Nullification<S> {
+impl<S: Scheme> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S: SigningScheme> Read for Nullification<S> {
+impl<S: Scheme> Read for Nullification<S> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -1297,7 +1297,7 @@ impl<S: SigningScheme> Read for Nullification<S> {
     }
 }
 
-impl<S: SigningScheme> Epochable for Nullification<S> {
+impl<S: Scheme> Epochable for Nullification<S> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -1305,7 +1305,7 @@ impl<S: SigningScheme> Epochable for Nullification<S> {
     }
 }
 
-impl<S: SigningScheme> Viewable for Nullification<S> {
+impl<S: Scheme> Viewable for Nullification<S> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1317,36 +1317,36 @@ impl<S: SigningScheme> Viewable for Nullification<S> {
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this round.
 #[derive(Clone, Debug)]
-pub struct Finalize<S: SigningScheme, D: Digest> {
+pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
     pub vote: Vote<S>,
 }
 
-impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Returns the round associated with this finalize vote.
     pub fn round(&self) -> Round {
         self.proposal.round
     }
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for Finalize<S, D> {}
+impl<S: Scheme, D: Digest> Eq for Finalize<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
         self.vote.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Signs a finalize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
         let vote = scheme.sign_vote(
@@ -1373,20 +1373,20 @@ impl<S: SigningScheme, D: Digest> Finalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Finalize<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1397,13 +1397,13 @@ impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Attributable for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
         self.vote.signer
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Finalize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -1411,7 +1411,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Finalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Finalize<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Finalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1423,16 +1423,16 @@ impl<S: SigningScheme, D: Digest> Viewable for Finalize<S, D> {
 /// When a proposal is finalized, it becomes the canonical block for its view.
 ///
 /// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`SigningScheme::seed`].
+/// leader rotation), it can be accessed via [`Scheme::seed`].
 #[derive(Clone, Debug)]
-pub struct Finalization<S: SigningScheme, D: Digest> {
+pub struct Finalization<S: Scheme, D: Digest> {
     /// The proposal that has been finalized.
     pub proposal: Proposal<D>,
     /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
 }
 
-impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from matching finalize votes.
     ///
     /// `notarization` carries an optional notarization certificate for the same proposal.
@@ -1479,22 +1479,22 @@ impl<S: SigningScheme, D: Digest> Finalization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for Finalization<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for Finalization<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.certificate == other.certificate
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for Finalization<S, D> {}
+impl<S: Scheme, D: Digest> Eq for Finalization<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
+impl<S: Scheme, D: Digest> Hash for Finalization<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
@@ -1510,20 +1510,20 @@ impl<S: SigningScheme, D: Digest> Finalization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Finalization<S, D> {
+impl<S: Scheme, D: Digest> Write for Finalization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Finalization<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Finalization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
+impl<S: Scheme, D: Digest> Read for Finalization<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -1537,7 +1537,7 @@ impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Finalization<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -1545,7 +1545,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Finalization<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Finalization<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Finalization<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -1556,14 +1556,14 @@ impl<S: SigningScheme, D: Digest> Viewable for Finalization<S, D> {
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<S: SigningScheme, D: Digest> {
+pub enum Backfiller<S: Scheme, D: Digest> {
     /// Request for missing notarizations and nullifications
     Request(Request),
     /// Response containing requested notarizations and nullifications
     Response(Response<S, D>),
 }
 
-impl<S: SigningScheme, D: Digest> Write for Backfiller<S, D> {
+impl<S: Scheme, D: Digest> Write for Backfiller<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(request) => {
@@ -1578,7 +1578,7 @@ impl<S: SigningScheme, D: Digest> Write for Backfiller<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Backfiller<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Backfiller<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Backfiller::Request(v) => v.encode_size(),
@@ -1587,7 +1587,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Backfiller<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Backfiller<S, D> {
+impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
     type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -1686,7 +1686,7 @@ impl Read for Request {
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Response<S: SigningScheme, D: Digest> {
+pub struct Response<S: Scheme, D: Digest> {
     /// Identifier matching the original request
     pub id: u64,
     /// Notarizations for the requested views
@@ -1695,7 +1695,7 @@ pub struct Response<S: SigningScheme, D: Digest> {
     pub nullifications: Vec<Nullification<S>>,
 }
 
-impl<S: SigningScheme, D: Digest> Response<S, D> {
+impl<S: Scheme, D: Digest> Response<S, D> {
     /// Creates a new response with the given id, notarizations, and nullifications.
     pub fn new(
         id: u64,
@@ -1736,7 +1736,7 @@ impl<S: SigningScheme, D: Digest> Response<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Response<S, D> {
+impl<S: Scheme, D: Digest> Write for Response<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.id).write(writer);
         self.notarizations.write(writer);
@@ -1744,7 +1744,7 @@ impl<S: SigningScheme, D: Digest> Write for Response<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Response<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Response<S, D> {
     fn encode_size(&self) -> usize {
         UInt(self.id).encode_size()
             + self.notarizations.encode_size()
@@ -1752,7 +1752,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Response<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
+impl<S: Scheme, D: Digest> Read for Response<S, D> {
     type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -1805,7 +1805,7 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
 /// Unless the scheme provides attributable signatures, do not use unverified activities for
 /// incentives, an attacker may be able to synthesize contributions for offline participants.
 #[derive(Clone, Debug)]
-pub enum Activity<S: SigningScheme, D: Digest> {
+pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization (scheme-specific)
@@ -1826,7 +1826,7 @@ pub enum Activity<S: SigningScheme, D: Digest> {
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for Activity<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Activity::Notarize(a), Activity::Notarize(b)) => a == b,
@@ -1843,9 +1843,9 @@ impl<S: SigningScheme, D: Digest> PartialEq for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for Activity<S, D> {}
+impl<S: Scheme, D: Digest> Eq for Activity<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for Activity<S, D> {
+impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             Activity::Notarize(v) => {
@@ -1888,7 +1888,7 @@ impl<S: SigningScheme, D: Digest> Hash for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Activity<S, D> {
+impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity has been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
@@ -1905,7 +1905,7 @@ impl<S: SigningScheme, D: Digest> Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for Activity<S, D> {
+impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(v) => {
@@ -1948,7 +1948,7 @@ impl<S: SigningScheme, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for Activity<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(v) => v.encode_size(),
@@ -1964,7 +1964,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
+impl<S: Scheme, D: Digest> Read for Activity<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -2014,7 +2014,7 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for Activity<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -2032,7 +2032,7 @@ impl<S: SigningScheme, D: Digest> Epochable for Activity<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -2053,29 +2053,29 @@ impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug)]
-pub struct ConflictingNotarize<S: SigningScheme, D: Digest> {
+pub struct ConflictingNotarize<S: Scheme, D: Digest> {
     /// The first conflicting notarize
     notarize_1: Notarize<S, D>,
     /// The second conflicting notarize
     notarize_2: Notarize<S, D>,
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for ConflictingNotarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.notarize_1 == other.notarize_1 && self.notarize_2 == other.notarize_2
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for ConflictingNotarize<S, D> {}
+impl<S: Scheme, D: Digest> Eq for ConflictingNotarize<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Hash for ConflictingNotarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.notarize_1.hash(state);
         self.notarize_2.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         assert_eq!(notarize_1.round(), notarize_2.round());
@@ -2093,13 +2093,13 @@ impl<S: SigningScheme, D: Digest> ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
     fn signer(&self) -> u32 {
         self.notarize_1.signer()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -2107,7 +2107,7 @@ impl<S: SigningScheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -2115,14 +2115,14 @@ impl<S: SigningScheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.notarize_1.write(writer);
         self.notarize_2.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -2143,7 +2143,7 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     fn encode_size(&self) -> usize {
         self.notarize_1.encode_size() + self.notarize_2.encode_size()
     }
@@ -2152,29 +2152,29 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug)]
-pub struct ConflictingFinalize<S: SigningScheme, D: Digest> {
+pub struct ConflictingFinalize<S: Scheme, D: Digest> {
     /// The second conflicting finalize
     finalize_1: Finalize<S, D>,
     /// The second conflicting finalize
     finalize_2: Finalize<S, D>,
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for ConflictingFinalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.finalize_1 == other.finalize_1 && self.finalize_2 == other.finalize_2
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for ConflictingFinalize<S, D> {}
+impl<S: Scheme, D: Digest> Eq for ConflictingFinalize<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Hash for ConflictingFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.finalize_1.hash(state);
         self.finalize_2.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         assert_eq!(finalize_1.round(), finalize_2.round());
@@ -2192,13 +2192,13 @@ impl<S: SigningScheme, D: Digest> ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
     fn signer(&self) -> u32 {
         self.finalize_1.signer()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -2206,7 +2206,7 @@ impl<S: SigningScheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -2214,14 +2214,14 @@ impl<S: SigningScheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.finalize_1.write(writer);
         self.finalize_2.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -2242,7 +2242,7 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     fn encode_size(&self) -> usize {
         self.finalize_1.encode_size() + self.finalize_2.encode_size()
     }
@@ -2252,29 +2252,29 @@ impl<S: SigningScheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
 #[derive(Clone, Debug)]
-pub struct NullifyFinalize<S: SigningScheme, D: Digest> {
+pub struct NullifyFinalize<S: Scheme, D: Digest> {
     /// The conflicting nullify
     nullify: Nullify<S>,
     /// The conflicting finalize
     finalize: Finalize<S, D>,
 }
 
-impl<S: SigningScheme, D: Digest> PartialEq for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> PartialEq for NullifyFinalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.nullify == other.nullify && self.finalize == other.finalize
     }
 }
 
-impl<S: SigningScheme, D: Digest> Eq for NullifyFinalize<S, D> {}
+impl<S: Scheme, D: Digest> Eq for NullifyFinalize<S, D> {}
 
-impl<S: SigningScheme, D: Digest> Hash for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Hash for NullifyFinalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.nullify.hash(state);
         self.finalize.hash(state);
     }
 }
 
-impl<S: SigningScheme, D: Digest> NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
         assert_eq!(nullify.round, finalize.round());
@@ -2289,13 +2289,13 @@ impl<S: SigningScheme, D: Digest> NullifyFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Attributable for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Attributable for NullifyFinalize<S, D> {
     fn signer(&self) -> u32 {
         self.nullify.signer()
     }
 }
 
-impl<S: SigningScheme, D: Digest> Epochable for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Epochable for NullifyFinalize<S, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -2303,7 +2303,7 @@ impl<S: SigningScheme, D: Digest> Epochable for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Viewable for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Viewable for NullifyFinalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
@@ -2311,14 +2311,14 @@ impl<S: SigningScheme, D: Digest> Viewable for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> Write for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Write for NullifyFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.nullify.write(writer);
         self.finalize.write(writer);
     }
 }
 
-impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -2336,7 +2336,7 @@ impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: SigningScheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
     fn encode_size(&self) -> usize {
         self.nullify.encode_size() + self.finalize.encode_size()
     }
@@ -2421,7 +2421,7 @@ mod tests {
         assert_eq!(proposal, decoded);
     }
 
-    fn notarize_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal);
@@ -2442,7 +2442,7 @@ mod tests {
         notarize_encode_decode(&ed_schemes);
     }
 
-    fn notarization_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn notarization_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2465,7 +2465,7 @@ mod tests {
         notarization_encode_decode(&ed_schemes);
     }
 
-    fn nullify_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn nullify_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round);
         let encoded = nullify.encode();
@@ -2483,7 +2483,7 @@ mod tests {
         nullify_encode_decode(&ed_schemes);
     }
 
-    fn nullification_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn nullification_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(333, 10);
         let nullifies: Vec<_> = schemes
             .iter()
@@ -2506,7 +2506,7 @@ mod tests {
         nullification_encode_decode(&ed_schemes);
     }
 
-    fn finalize_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal);
@@ -2525,7 +2525,7 @@ mod tests {
         finalize_encode_decode(&ed_schemes);
     }
 
-    fn finalization_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn finalization_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let finalizes: Vec<_> = schemes
@@ -2549,7 +2549,7 @@ mod tests {
         finalization_encode_decode(&ed_schemes);
     }
 
-    fn finalization_rejects_mismatched_notarization<S: SigningScheme>(schemes: &[S]) {
+    fn finalization_rejects_mismatched_notarization<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let finalizes: Vec<_> = schemes
@@ -2581,7 +2581,7 @@ mod tests {
         finalization_rejects_mismatched_notarization(&ed_schemes);
     }
 
-    fn backfiller_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn backfiller_encode_decode<S: Scheme>(schemes: &[S]) {
         let cfg = schemes[0].certificate_codec_config();
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
         let encoded_request = Backfiller::<S, Sha256>::Request(request.clone()).encode();
@@ -2628,7 +2628,7 @@ mod tests {
         assert_eq!(request, decoded);
     }
 
-    fn response_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn response_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
 
@@ -2672,7 +2672,7 @@ mod tests {
         response_encode_decode(&ed_schemes);
     }
 
-    fn conflicting_notarize_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn conflicting_notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
         let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1);
@@ -2695,7 +2695,7 @@ mod tests {
         conflicting_notarize_encode_decode(&ed_schemes);
     }
 
-    fn conflicting_finalize_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn conflicting_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
         let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1);
@@ -2718,7 +2718,7 @@ mod tests {
         conflicting_finalize_encode_decode(&ed_schemes);
     }
 
-    fn nullify_finalize_encode_decode<S: SigningScheme>(schemes: &[S]) {
+    fn nullify_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round);
@@ -2741,7 +2741,7 @@ mod tests {
         nullify_finalize_encode_decode(&ed_schemes);
     }
 
-    fn notarize_verify_wrong_namespace<S: SigningScheme>(scheme: &S) {
+    fn notarize_verify_wrong_namespace<S: Scheme>(scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal);
@@ -2759,7 +2759,7 @@ mod tests {
         notarize_verify_wrong_namespace(&ed_schemes[0]);
     }
 
-    fn notarize_verify_wrong_scheme<S: SigningScheme>(scheme: &S, wrong_scheme: &S) {
+    fn notarize_verify_wrong_scheme<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(2));
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal);
@@ -2779,7 +2779,7 @@ mod tests {
         notarize_verify_wrong_scheme(&ed_schemes[0], &ed_wrong_scheme);
     }
 
-    fn notarization_verify_wrong_scheme<S: SigningScheme>(schemes: &[S], wrong_scheme: &S) {
+    fn notarization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(3));
         let quorum = quorum(schemes.len() as u32);
@@ -2809,7 +2809,7 @@ mod tests {
         notarization_verify_wrong_scheme(&ed_schemes, &ed_wrong_scheme);
     }
 
-    fn notarization_verify_wrong_namespace<S: SigningScheme>(schemes: &[S]) {
+    fn notarization_verify_wrong_namespace<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(4));
         let quorum = quorum(schemes.len() as u32);
@@ -2837,7 +2837,7 @@ mod tests {
         notarization_verify_wrong_namespace(&ed_schemes);
     }
 
-    fn notarization_recover_insufficient_signatures<S: SigningScheme>(schemes: &[S]) {
+    fn notarization_recover_insufficient_signatures<S: Scheme>(schemes: &[S]) {
         let quorum = quorum(schemes.len() as u32);
         assert!(quorum > 1, "test requires quorum larger than one");
         let round = Round::new(0, 10);
@@ -2863,7 +2863,7 @@ mod tests {
         notarization_recover_insufficient_signatures(&ed_schemes);
     }
 
-    fn conflicting_notarize_detection<S: SigningScheme>(scheme: &S, wrong_scheme: &S) {
+    fn conflicting_notarize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal1 = Proposal::new(round, 5, sample_digest(6));
         let proposal2 = Proposal::new(round, 5, sample_digest(7));
@@ -2888,7 +2888,7 @@ mod tests {
         conflicting_notarize_detection(&ed_schemes[0], &ed_wrong_scheme);
     }
 
-    fn nullify_finalize_detection<S: SigningScheme>(scheme: &S, wrong_scheme: &S) {
+    fn nullify_finalize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(8));
 
@@ -2912,7 +2912,7 @@ mod tests {
         nullify_finalize_detection(&ed_schemes[0], &ed_wrong_scheme);
     }
 
-    fn finalization_verify_wrong_scheme<S: SigningScheme>(schemes: &[S], wrong_scheme: &S) {
+    fn finalization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(9));
         let quorum = quorum(schemes.len() as u32);
@@ -2943,7 +2943,7 @@ mod tests {
     }
 
     // Helper to create a Notarize message for any signing scheme
-    fn create_notarize<S: SigningScheme>(
+    fn create_notarize<S: Scheme>(
         scheme: &S,
         round: Round,
         parent_view: View,
@@ -2955,13 +2955,13 @@ mod tests {
 
     // Helper to create a Nullify message for any signing scheme
     #[allow(dead_code)]
-    fn create_nullify<S: SigningScheme>(scheme: &S, round: Round) -> Nullify<S> {
+    fn create_nullify<S: Scheme>(scheme: &S, round: Round) -> Nullify<S> {
         Nullify::sign::<Sha256>(scheme, NAMESPACE, round)
     }
 
     // Helper to create a Finalize message for any signing scheme
     #[allow(dead_code)]
-    fn create_finalize<S: SigningScheme>(
+    fn create_finalize<S: Scheme>(
         scheme: &S,
         round: Round,
         parent_view: View,
@@ -2971,7 +2971,7 @@ mod tests {
         Finalize::sign(scheme, NAMESPACE, proposal)
     }
 
-    fn create_notarization<S: SigningScheme>(
+    fn create_notarization<S: Scheme>(
         schemes: &[S],
         round: Round,
         parent_view: View,
@@ -2987,7 +2987,7 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
-    fn batch_verifier_add_notarize<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
@@ -3044,7 +3044,7 @@ mod tests {
         batch_verifier_add_notarize(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_set_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
@@ -3078,7 +3078,7 @@ mod tests {
         batch_verifier_set_leader(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_and_verify_notarizes<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3141,7 +3141,7 @@ mod tests {
         batch_verifier_ready_and_verify_notarizes(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_add_nullify<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3162,7 +3162,7 @@ mod tests {
         batch_verifier_add_nullify(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_and_verify_nullifies<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3197,7 +3197,7 @@ mod tests {
         batch_verifier_ready_and_verify_nullifies(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_add_finalize<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3233,7 +3233,7 @@ mod tests {
         batch_verifier_add_finalize(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_and_verify_finalizes<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3273,7 +3273,7 @@ mod tests {
         batch_verifier_ready_and_verify_finalizes(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_quorum_none<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut rng = OsRng;
         let round = Round::new(0, 1);
 
@@ -3321,7 +3321,7 @@ mod tests {
         batch_verifier_quorum_none(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_leader_proposal_filters_messages<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3358,7 +3358,7 @@ mod tests {
         batch_verifier_leader_proposal_filters_messages(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_set_leader_twice_panics<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(3));
         verifier.set_leader(0);
         verifier.set_leader(1);
@@ -3376,7 +3376,7 @@ mod tests {
         batch_verifier_set_leader_twice_panics(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_add_recovered_message_panics<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_add_recovered_message_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let notarization = create_notarization(&schemes, Round::new(0, 1), 0, 1, quorum);
@@ -3395,7 +3395,7 @@ mod tests {
         batch_verifier_add_recovered_message_panics(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_notarizes_force_flag<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3426,7 +3426,7 @@ mod tests {
         batch_verifier_notarizes_force_flag(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_ready_notarizes_without_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3459,7 +3459,7 @@ mod tests {
         batch_verifier_ready_notarizes_without_leader(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_ready_finalizes_without_leader<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3491,7 +3491,7 @@ mod tests {
         batch_verifier_ready_finalizes_without_leader(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_verify_notarizes_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3508,7 +3508,7 @@ mod tests {
         batch_verifier_verify_notarizes_empty(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_verify_nullifies_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3526,7 +3526,7 @@ mod tests {
         batch_verifier_verify_nullifies_empty(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_verify_finalizes_empty<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3545,7 +3545,7 @@ mod tests {
         batch_verifier_verify_finalizes_empty(generate_ed25519_schemes(3));
     }
 
-    fn batch_verifier_ready_notarizes_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
@@ -3578,7 +3578,7 @@ mod tests {
         batch_verifier_ready_notarizes_exact_quorum(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_nullifies_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3600,7 +3600,7 @@ mod tests {
         batch_verifier_ready_nullifies_exact_quorum(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_finalizes_exact_quorum<S: SigningScheme + Clone>(schemes: Vec<S>) {
+    fn batch_verifier_ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(0, 1);
@@ -3624,7 +3624,7 @@ mod tests {
         batch_verifier_ready_finalizes_exact_quorum(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: SigningScheme + Clone>(
+    fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
         let quorum = quorum(schemes.len() as u32);
@@ -3668,7 +3668,7 @@ mod tests {
         batch_verifier_ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: SigningScheme + Clone>(
+    fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
         let quorum = quorum(schemes.len() as u32);
@@ -3706,7 +3706,7 @@ mod tests {
         batch_verifier_ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(5));
     }
 
-    fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: SigningScheme + Clone>(
+    fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
         let quorum = quorum(schemes.len() as u32);
