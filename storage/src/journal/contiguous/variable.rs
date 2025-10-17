@@ -142,12 +142,7 @@ pub struct Variable<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
-    /// Index mapping positions to (section, offset) pairs for O(1) reads.
-    ///
-    /// # Invariant
-    ///
-    /// `locations.size()` must always equal the number of items in the data journal.
-    /// During crash recovery, locations may temporarily be behind, but NEVER ahead.
+    /// Index mapping positions to (section, offset) pairs within the data journal.
     locations: fixed::Journal<E, Location>,
 
     /// The number of items per section.
