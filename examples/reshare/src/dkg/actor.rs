@@ -173,15 +173,12 @@ where
         //
         // For the sake of the example, we assume a fixed set of contributors that can be selected
         // from.
-        let (initial_epoch, current_public, current_share) = if let Some(state) =
-            self.epoch_metadata
-                .get(&EPOCH_METADATA_KEY)
-                .cloned()
-        {
-            (state.epoch, state.public, state.share)
-        } else {
-            (0, initial_public, initial_share)
-        };
+        let (current_epoch, current_public, current_share) =
+            if let Some(state) = self.epoch_metadata.get(&EPOCH_METADATA_KEY).cloned() {
+                (state.epoch, state.public, state.share)
+            } else {
+                (0, initial_public, initial_share)
+            };
 
         let all_participants = active_participants
             .iter()
@@ -189,9 +186,9 @@ where
             .cloned()
             .collect::<Set<_>>();
 
-        let mut rng = StdRng::seed_from_u64(initial_epoch);
+        let mut rng = StdRng::seed_from_u64(current_epoch);
 
-        if initial_epoch <= 1 {
+        if current_epoch <= 1 {
             // Ensure the number of inactive participants is equal to the number of players per epoch.
             //
             // If there are too few, randomly select some from the active set to participate next epoch
@@ -215,7 +212,7 @@ where
             // special case: If the starting epoch has already passed, we set the dealers for the current epoch
             // as the first epoch's players, and randomly select a new set of players for the next epoch as
             // usual.
-            if initial_epoch == 1 {
+            if current_epoch == 1 {
                 active_participants = inactive_participants.clone();
                 inactive_participants = all_participants
                     .iter()
@@ -225,7 +222,7 @@ where
         } else {
             // If we're starting from a later epoch, we need to pseudorandomly select both the dealers
             // and players for the current epoch, based on the epoch number as a seed.
-            let mut last_epoch_rng = StdRng::seed_from_u64(initial_epoch - 1);
+            let mut last_epoch_rng = StdRng::seed_from_u64(current_epoch - 1);
             active_participants = all_participants
                 .iter()
                 .cloned()
@@ -240,7 +237,7 @@ where
         let mut manager = DkgManager::init(
             &mut self.context,
             self.namespace.clone(),
-            initial_epoch,
+            current_epoch,
             current_public.clone(),
             current_share.clone(),
             &mut self.signer,
@@ -307,7 +304,20 @@ where
                             epoch,
                             "finalized epoch's reshare; instructing reconfiguration after reshare."
                         );
+
+                        // Persist the next epoch information
                         let next_epoch = epoch + 1;
+                        let next_public = public.clone();
+                        let next_share = share.clone();
+                        let epoch_state = EpochState {
+                            epoch: next_epoch,
+                            public: next_public.clone(),
+                            share: next_share.clone(),
+                        };
+                        self.epoch_metadata
+                            .put_sync(EPOCH_METADATA_KEY, epoch_state)
+                            .await
+                            .expect("epoch metadata must update");
 
                         // Pseudorandomly select some random players to receive shares for the next epoch.
                         let mut rng = StdRng::seed_from_u64(next_epoch);
@@ -318,6 +328,7 @@ where
                             .into_iter()
                             .collect::<Set<_>>();
 
+                        // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                             epoch: next_epoch,
                             poly: public.clone(),
@@ -326,25 +337,12 @@ where
                         };
                         orchestrator.report(transition).await;
 
-                        let next_public = public.clone();
-                        let next_share = share.clone();
-                        let epoch_state = EpochState {
-                            epoch: next_epoch,
-                            public: next_public.clone(),
-                            share: next_share.clone(),
-                        };
-
-                        // Prune the round metadata for the previous epoch.
+                        // Prune the round metadata for the previous epoch
                         self.round_metadata.remove(&epoch.into());
                         self.round_metadata
                             .sync()
                             .await
                             .expect("metadata must sync");
-
-                        self.epoch_metadata
-                            .put_sync(EPOCH_METADATA_KEY, epoch_state)
-                            .await
-                            .expect("epoch metadata must update");
 
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
@@ -437,9 +435,7 @@ impl<V: Variant> Write for EpochState<V> {
 
 impl<V: Variant> EncodeSize for EpochState<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.epoch).encode_size()
-            + self.public.encode_size()
-            + self.share.encode_size()
+        UInt(self.epoch).encode_size() + self.public.encode_size() + self.share.encode_size()
     }
 }
 
