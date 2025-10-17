@@ -49,6 +49,9 @@ where
     test_rewind_invalid_pruned(&factory).await;
     test_rewind_then_append(&factory).await;
     test_rewind_zero_then_append(&factory).await;
+    test_rewind_after_prune(&factory).await;
+    test_section_boundary_behavior(&factory).await;
+    test_destroy_and_reinit(&factory).await;
 }
 
 /// Test that an empty journal has size 0.
@@ -92,6 +95,8 @@ where
 }
 
 /// Test that oldest_retained_pos updates after pruning.
+///
+/// This test assumes items_per_section = 10.
 async fn test_oldest_retained_pos_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
@@ -99,7 +104,7 @@ where
 {
     let mut journal = factory("oldest_after_prune".to_string()).await.unwrap();
 
-    // Append items across multiple sections (assuming items_per_section = 10)
+    // Append items across multiple sections
     for i in 0..30 {
         journal.append(i * 100).await.unwrap();
     }
@@ -110,9 +115,9 @@ where
     // Prune first section - trait only guarantees section-aligned pruning
     journal.prune(10).await.unwrap();
 
-    // Oldest should be at most 10 (due to section alignment, might keep items before 10)
+    // Assumed section-aligned pruning and items_per_section = 10
     let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
-    assert!(oldest <= 10);
+    assert_eq!(oldest, 10);
 
     // Prune more
     let prev_oldest = oldest;
@@ -121,7 +126,7 @@ where
     // Oldest should have advanced and be at most 25
     let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
     assert!(oldest > prev_oldest);
-    assert!(oldest <= 25);
+    assert_eq!(oldest, 20);
 
     journal.destroy().await.unwrap();
 }
@@ -313,6 +318,9 @@ where
 }
 
 /// Test pruning all items then appending new ones.
+///
+/// Verifies that positions continue monotonically increasing even after
+/// pruning all retained items. Assumes items_per_section = 10.
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
@@ -320,13 +328,16 @@ where
 {
     let mut journal = factory("prune_then_append".to_string()).await.unwrap();
 
+    // Append exactly one section (10 items)
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
     }
 
+    // Prune all items (prune at section boundary)
     journal.prune(10).await.unwrap();
+    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
 
-    // Append new items after pruning all
+    // Append new items after pruning - position should continue from 10
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
 
@@ -826,7 +837,8 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test rewind then append maintains position continuity
+/// Test rewind then append maintains position continuity.
+/// Assumes items_per_section = 10.
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
@@ -834,12 +846,12 @@ where
 {
     let mut journal = factory("rewind_then_append".to_string()).await.unwrap();
 
-    // Append across section boundary (assuming items_per_section = 10)
+    // Append across section boundary (15 items = 1.5 sections)
     for i in 0..15u64 {
         journal.append(i).await.unwrap();
     }
 
-    // Rewind to position 8 (within first section)
+    // Rewind to position 8 (within first section, not at boundary)
     journal.rewind(8).await.unwrap();
 
     // Append should continue from position 8
@@ -854,7 +866,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test that rewinding to zero and then appending works (regression test for oldest_retained_pos bug)
+/// Test that rewinding to zero and then appending works
 async fn test_rewind_zero_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
@@ -876,11 +888,165 @@ where
     assert_eq!(journal.size().await.unwrap(), 0);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
-    // Append should work without error (regression: previously could underflow in Variable)
+    // Append should work
     let pos = journal.append(42).await.unwrap();
     assert_eq!(pos, 0);
     assert_eq!(journal.size().await.unwrap(), 1);
     assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
+}
+
+/// Test rewinding after pruning to verify correct interaction between operations.
+/// Assumes items_per_section = 10.
+async fn test_rewind_after_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("rewind_after_prune".to_string()).await.unwrap();
+
+    // Append items across 3 sections (30 items, assuming items_per_section = 10)
+    for i in 0..30u64 {
+        journal.append(i * 100).await.unwrap();
+    }
+
+    // Prune first section (items 0-9)
+    journal.prune(10).await.unwrap();
+    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    assert_eq!(oldest, 10);
+
+    // Rewind to position 20 (still in retained range)
+    journal.rewind(20).await.unwrap();
+    assert_eq!(journal.size().await.unwrap(), 20);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+
+    // Verify items in range [oldest, 20) are still readable
+    for i in oldest..20 {
+        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+    }
+
+    // Attempt to rewind to a pruned position should fail
+    let result = journal.rewind(5).await;
+    assert!(
+        matches!(result, Err(Error::InvalidRewind(5))),
+        "rewinding to pruned position should fail"
+    );
+
+    // Verify journal state is unchanged after failed rewind
+    assert_eq!(journal.size().await.unwrap(), 20);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+
+    // Append should continue from position 20
+    let pos = journal.append(999).await.unwrap();
+    assert_eq!(pos, 20);
+    assert_eq!(journal.read(20).await.unwrap(), 999);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test behavior at section boundaries.
+/// Assumes items_per_section = 10.
+async fn test_section_boundary_behavior<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let mut journal = factory("section_boundary".to_string()).await.unwrap();
+
+    // Append exactly one section worth of items (10 items)
+    for i in 0..10u64 {
+        let pos = journal.append(i * 100).await.unwrap();
+        assert_eq!(pos, i);
+    }
+
+    // Verify we're at a section boundary
+    assert_eq!(journal.size().await.unwrap(), 10);
+
+    // Append one more item to cross the boundary
+    let pos = journal.append(999).await.unwrap();
+    assert_eq!(pos, 10);
+    assert_eq!(journal.size().await.unwrap(), 11);
+
+    // Prune exactly at the section boundary
+    journal.prune(10).await.unwrap();
+    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    assert_eq!(oldest, 10);
+
+    // Verify only the item after the boundary is readable
+    assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
+    assert_eq!(journal.read(10).await.unwrap(), 999);
+
+    // Append another item to move past the boundary
+    let pos = journal.append(888).await.unwrap();
+    assert_eq!(pos, 11);
+    assert_eq!(journal.size().await.unwrap(), 12);
+
+    // Rewind to exactly the section boundary (position 10)
+    // This leaves size=10, oldest=10, making the journal fully pruned
+    journal.rewind(10).await.unwrap();
+    assert_eq!(journal.size().await.unwrap(), 10);
+    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
+
+    // Append after rewinding to boundary should continue from position 10
+    let pos = journal.append(777).await.unwrap();
+    assert_eq!(pos, 10);
+    assert_eq!(journal.size().await.unwrap(), 11);
+    assert_eq!(journal.read(10).await.unwrap(), 777);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test that destroy properly cleans up storage and re-init starts fresh.
+///
+/// Verifies that after destroying a journal, a new journal with the same
+/// partition name starts from a clean state.
+async fn test_destroy_and_reinit<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
+    J: Contiguous<Item = u64> + Send + 'static,
+{
+    let test_name = "destroy_and_reinit".to_string();
+
+    // Create journal and add data
+    {
+        let mut journal = factory(test_name.clone()).await.unwrap();
+
+        for i in 0..20u64 {
+            journal.append(i * 100).await.unwrap();
+        }
+
+        journal.prune(10).await.unwrap();
+        assert_eq!(journal.size().await.unwrap(), 20);
+        let oldest = journal.oldest_retained_pos().await.unwrap();
+        assert!(oldest.is_some());
+
+        // Explicitly destroy the journal
+        journal.destroy().await.unwrap();
+    }
+
+    // Re-initialize with the same partition name
+    {
+        let journal = factory(test_name.clone()).await.unwrap();
+
+        // Journal should be completely empty, not contain previous data
+        assert_eq!(journal.size().await.unwrap(), 0);
+        assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+        // Replay should yield no items
+        {
+            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            futures::pin_mut!(stream);
+
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                items.push(result.unwrap());
+            }
+            assert!(items.is_empty());
+        }
+
+        journal.destroy().await.unwrap();
+    }
 }
