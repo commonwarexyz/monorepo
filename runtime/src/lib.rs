@@ -1484,27 +1484,39 @@ mod tests {
             //   c0      c1      c2
             //  /  \    /  \    /  \
             // g0  g1  g2  g3  g4  g5
+            let c0 = context.clone();
+            let g0 = c0.clone();
+            let g1 = c0.clone();
+            let c1 = context.clone();
+            let g2 = c1.clone();
+            let g3 = c1.clone();
+            let c2 = context.clone();
+            let g4 = c2.clone();
+            let g5 = c2.clone();
+
+            // Spawn tasks
             let handles = Arc::new(Mutex::new(Vec::new()));
             let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
             let root_task = context.spawn({
                 let handles = handles.clone();
-                move |context| async move {
-                    for _ in 0..3 {
-                        let handle = context.clone().spawn({
+                move |_| async move {
+                    for (context, grandchildren) in [(c0, [g0, g1]), (c1, [g2, g3]), (c2, [g4, g5])]
+                    {
+                        let handle = context.spawn({
                             let handles = handles.clone();
                             let mut initialized_tx = initialized_tx.clone();
-                            move |context| async move {
-                                for _ in 0..2 {
-                                    let handle = context.clone().spawn(|_| async {
+                            move |_| async move {
+                                for grandchild in grandchildren {
+                                    let handle = grandchild.spawn(|_| async {
                                         pending::<()>().await;
                                     });
                                     handles.lock().unwrap().push(handle);
                                     initialized_tx.send(()).await.unwrap();
                                 }
+
                                 pending::<()>().await;
                             }
                         });
-
                         handles.lock().unwrap().push(handle);
                         initialized_tx.send(()).await.unwrap();
                     }
