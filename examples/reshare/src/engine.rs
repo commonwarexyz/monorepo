@@ -107,9 +107,6 @@ where
                 num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
-                log_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                locations_items_per_blob: IMMUTABLE_ITEMS_PER_SECTION,
-                buffer_pool: buffer_pool.clone(),
             },
         )
         .await;

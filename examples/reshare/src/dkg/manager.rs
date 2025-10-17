@@ -22,7 +22,7 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::{store::Store, translator::TwoCap};
+use commonware_storage::metadata::Metadata;
 use commonware_utils::{sequence::U64, set::Set};
 use futures::FutureExt;
 use rand_core::CryptoRngCore;
@@ -78,8 +78,8 @@ where
     /// The local [Arbiter] for this round.
     arbiter: Arbiter<C::PublicKey, V>,
 
-    /// The [Store] used for persisting round state.
-    store: &'ctx mut Store<E, U64, RoundInfo<V, C>, TwoCap>,
+    /// The [Metadata] store used for persisting round state.
+    round_metadata: &'ctx mut Metadata<E, U64, RoundInfo<V, C>>,
 }
 
 /// Metadata associated with a [Dealer].
@@ -128,7 +128,7 @@ where
         dealers: Set<C::PublicKey>,
         players: Set<C::PublicKey>,
         mux: &'ctx mut MuxHandle<S, R>,
-        store: &'ctx mut Store<E, U64, RoundInfo<V, C>, TwoCap>,
+        store: &'ctx mut Metadata<E, U64, RoundInfo<V, C>>,
     ) -> Self {
         let mut player = players.position(&signer.public_key()).map(|signer_index| {
             let player = Player::new(
@@ -149,8 +149,8 @@ where
         );
 
         // If the node crashed in the middle of dealing, recover the dealer state from storage.
-        let dealer_meta = if let Some(meta) = store.get(&epoch.into()).await.unwrap() {
-            for outcome in meta.outcomes {
+        let dealer_meta = if let Some(meta) = store.get(&epoch.into()) {
+            for outcome in &meta.outcomes {
                 let ack_indices = outcome
                     .acks
                     .iter()
@@ -167,12 +167,12 @@ where
             }
 
             if let Some((_, ref mut player)) = player {
-                for (dealer, commitment, share) in meta.received_shares {
+                for (dealer, commitment, share) in meta.received_shares.clone() {
                     player.share(dealer, commitment, share).unwrap();
                 }
             }
 
-            if let Some((commitment, shares, acks)) = meta.deal {
+            if let Some((commitment, shares, acks)) = meta.deal.clone() {
                 let (mut dealer, _, _) = Dealer::new(context, share.clone(), players.clone());
                 for ack in acks.values() {
                     dealer
@@ -184,7 +184,7 @@ where
                     commitment,
                     shares,
                     acks,
-                    outcome: meta.local_outcome,
+                    outcome: meta.local_outcome.clone(),
                 })
             } else {
                 None
@@ -217,7 +217,7 @@ where
             dealer_meta,
             player,
             arbiter,
-            store,
+            round_metadata: store,
         }
     }
 
@@ -269,8 +269,8 @@ where
                     acks.insert(signer_index, ack.clone());
 
                     // Persist the acknowledgement to storage.
-                    self.store
-                        .upsert(self.epoch.into(), |meta| {
+                    self.round_metadata
+                        .upsert_sync(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(signer_index, ack);
                             } else {
@@ -288,8 +288,6 @@ where
                         })
                         .await
                         .expect("must persist ack");
-                    self.store.commit(None).await.expect("must commit ack");
-                    self.store.sync().await.unwrap();
 
                     continue;
                 }
@@ -382,8 +380,8 @@ where
                     acks.insert(ack.player, ack.clone());
 
                     // Persist the acknowledgement to storage.
-                    self.store
-                        .upsert(self.epoch.into(), |meta| {
+                    self.round_metadata
+                        .upsert_sync(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(ack.player, ack);
                             } else {
@@ -396,8 +394,6 @@ where
                         })
                         .await
                         .expect("must persist ack");
-                    self.store.commit(None).await.expect("must commit acks");
-                    self.store.sync().await.unwrap();
                 }
                 Payload::Share(Share { commitment, share }) => {
                     let Some((signer_index, ref mut player)) = self.player else {
@@ -412,15 +408,13 @@ where
                     }
 
                     // Persist the share to storage.
-                    self.store
-                        .upsert(self.epoch.into(), |meta| {
+                    self.round_metadata
+                        .upsert_sync(self.epoch.into(), |meta| {
                             meta.received_shares
                                 .push((peer.clone(), commitment.clone(), share));
                         })
                         .await
                         .expect("must persist share");
-                    self.store.commit(None).await.expect("must commit share");
-                    self.store.sync().await.unwrap();
 
                     // Send ack
                     let payload = Payload::<V, C::Signature>::Ack(Ack::new::<_, V>(
@@ -510,8 +504,8 @@ where
         }
 
         // Persist deal outcome to storage.
-        self.store
-            .upsert(self.epoch.into(), |meta| {
+        self.round_metadata
+            .upsert_sync(self.epoch.into(), |meta| {
                 if let Some(pos) = meta
                     .outcomes
                     .iter()
@@ -524,11 +518,6 @@ where
             })
             .await
             .expect("must persist deal outcome");
-        self.store
-            .commit(None)
-            .await
-            .expect("must commit deal outcome");
-        self.store.sync().await.unwrap();
 
         info!(
             round,
@@ -618,17 +607,12 @@ where
             reveals,
         ));
 
-        self.store
-            .upsert(self.epoch.into(), |meta| {
+        self.round_metadata
+            .upsert_sync(self.epoch.into(), |meta| {
                 meta.local_outcome = local_outcome.clone();
             })
             .await
             .expect("must persist local outcome");
-        self.store
-            .commit(None)
-            .await
-            .expect("must commit local outcome");
-        self.store.sync().await.unwrap();
 
         *outcome = local_outcome;
     }

@@ -14,19 +14,12 @@ use commonware_cryptography::{
     Hasher, Signer,
 };
 use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
-use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
-use commonware_storage::{
-    metadata::Metadata,
-    store::{self, Store},
-    translator::TwoCap,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_storage::metadata::Metadata;
 use commonware_utils::{
     quorum,
     sequence::{FixedBytes, U64},
     set::Set,
-    NZUsize,
 };
 use futures::{channel::mpsc, StreamExt};
 use rand::{
@@ -35,10 +28,10 @@ use rand::{
     SeedableRng,
 };
 use rand_core::CryptoRngCore;
-use std::{cmp::Ordering, collections::BTreeMap, num::NonZero};
+use std::{cmp::Ordering, collections::BTreeMap};
 use tracing::info;
 
-const METADATA_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
+const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
 
 pub struct Config<C> {
     pub signer: C,
@@ -46,9 +39,6 @@ pub struct Config<C> {
     pub mailbox_size: usize,
 
     pub partition_prefix: String,
-    pub buffer_pool: PoolRef,
-    pub log_items_per_section: NonZero<u64>,
-    pub locations_items_per_blob: NonZero<u64>,
 }
 
 pub struct Actor<E, H, C, V>
@@ -62,8 +52,8 @@ where
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     num_participants_per_epoch: usize,
-    store: Store<ContextCell<E>, U64, RoundInfo<V, C>, TwoCap>,
-    metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
+    round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
+    epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, u64>,
 }
 
 impl<E, H, C, V> Actor<E, H, C, V>
@@ -77,36 +67,26 @@ where
     pub async fn init(context: E, config: Config<C>) -> (Self, Mailbox<H, C, V>) {
         let context = ContextCell::new(context);
 
-        // Initialize a store for round information, to recover in case of restarts.
-        let store = Store::<_, U64, RoundInfo<V, C>, _>::init(
-            context.with_label("store"),
-            store::Config {
-                log_journal_partition: format!("{}_dkg_store", config.partition_prefix),
-                log_write_buffer: NZUsize!(1024 * 1024),
-                log_compression: None,
-                log_codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
-                log_items_per_section: config.log_items_per_section,
-                locations_journal_partition: format!(
-                    "{}_dkg_store_locations",
-                    config.partition_prefix
-                ),
-                locations_items_per_blob: config.locations_items_per_blob,
-                translator: TwoCap,
-                buffer_pool: config.buffer_pool,
+        // Initialize a metadata store for the round information.
+        let round_metadata = Metadata::init(
+            context.with_label("round_metadata"),
+            commonware_storage::metadata::Config {
+                partition: format!("{}_dkg_rounds", config.partition_prefix),
+                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
             },
         )
         .await
-        .expect("failed to initialize store");
+        .expect("failed to initialize dkg round metadata");
 
-        let metadata = Metadata::init(
+        let epoch_metadata = Metadata::init(
             context.with_label("metadata"),
             commonware_storage::metadata::Config {
-                partition: format!("{}_dkg_metadata", config.partition_prefix),
+                partition: format!("{}_current_epoch", config.partition_prefix),
                 codec_config: (),
             },
         )
         .await
-        .expect("failed to initialize orchestrator metadata");
+        .expect("failed to initialize epoch metadata");
 
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -115,8 +95,8 @@ where
                 mailbox,
                 signer: config.signer,
                 num_participants_per_epoch: config.num_participants_per_epoch,
-                store,
-                metadata,
+                round_metadata,
+                epoch_metadata,
             },
             Mailbox::new(sender),
         )
@@ -174,7 +154,11 @@ where
             .collect::<Set<_>>();
 
         // Fetch the initial epoch from metadata, defaulting to 0 if not present.
-        let initial_epoch = self.metadata.get(&METADATA_KEY).cloned().unwrap_or(0);
+        let initial_epoch = self
+            .epoch_metadata
+            .get(&EPOCH_METADATA_KEY)
+            .cloned()
+            .unwrap_or(0);
         let mut rng = StdRng::seed_from_u64(initial_epoch);
 
         if initial_epoch <= 1 {
@@ -232,7 +216,7 @@ where
             Set::from_iter(active_participants),
             Set::from_iter(inactive_participants),
             &mut dkg_mux,
-            &mut self.store,
+            &mut self.round_metadata,
         )
         .await;
 
@@ -290,6 +274,13 @@ where
                         };
                         orchestrator.report(transition).await;
 
+                        // Prune the round metadata for the previous epoch.
+                        self.round_metadata.remove(&epoch.into());
+                        self.round_metadata
+                            .sync()
+                            .await
+                            .expect("metadata must sync");
+
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
                             &mut self.context,
@@ -300,12 +291,12 @@ where
                             next_participants,
                             next_players,
                             &mut dkg_mux,
-                            &mut self.store,
+                            &mut self.round_metadata,
                         )
                         .await;
 
-                        self.metadata
-                            .put_sync(METADATA_KEY, next_epoch)
+                        self.epoch_metadata
+                            .put_sync(EPOCH_METADATA_KEY, next_epoch)
                             .await
                             .expect("epoch metadata must update");
                     };
