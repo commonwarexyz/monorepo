@@ -7,7 +7,7 @@ use super::Contiguous;
 use crate::journal::{fixed, variable, Error};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, FixedSize, Read, Write};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use futures::{stream, Stream, StreamExt as _};
 use std::{
@@ -137,7 +137,7 @@ pub struct Config<C> {
 /// - `locations.size()` must NEVER exceed the number of items in the data journal
 /// - On crash recovery, locations may be behind data (expected), but never ahead
 /// - If locations are ahead, this indicates a critical bug and will return [Error::Corruption]
-pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
+pub struct Variable<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -173,7 +173,7 @@ pub struct Variable<E: Storage + Metrics + Clock, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -542,7 +542,8 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
 
         if locations_size < expected_locations_size {
             // Locations behind data → rebuild missing entries
-            Self::rebuild_locations(data, locations, expected_locations_size).await?;
+            Self::rebuild_locations(data, locations, locations_size, expected_locations_size)
+                .await?;
         }
 
         // === Step 4: Fix pruning mismatch ===
@@ -592,20 +593,35 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
     /// Rebuild missing location entries by replaying the data journal and
     /// appending the missing entries to the locations journal.
     ///
+    /// The data journal is the source of truth. This function brings the locations
+    /// journal up to date by replaying data items and indexing their positions.
+    ///
+    /// # Invariants
+    ///
+    /// - `data.blobs` must not be empty (data journal has at least one section)
+    /// - `locations_size < expected_size` (locations is behind, not ahead)
+    /// - `expected_size` is the true size derived from scanning the data journal
+    /// - Write ordering: data is always written/synced before locations, so locations
+    ///   can be behind but never ahead of data
+    ///
     /// # Panics
     ///
     /// This function panics if `data.blobs` is empty.
     async fn rebuild_locations(
         data: &variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
+        locations_size: u64,
         expected_size: u64,
     ) -> Result<(), Error> {
         assert!(
             !data.blobs.is_empty(),
             "rebuild_locations called with empty data journal"
         );
+        assert!(
+            locations_size < expected_size,
+            "rebuild_locations requires locations_size < expected_size, got {locations_size} >= {expected_size}"
+        );
 
-        let locations_size = locations.size().await?;
         let missing_count = expected_size - locations_size;
 
         // Find where to start replaying
@@ -680,7 +696,7 @@ impl<E: Storage + Metrics + Clock, V: Codec + Send> Variable<E, V> {
 }
 
 // Implement Contiguous trait for Variable
-impl<E: Storage + Metrics + Clock, V: Codec + Send + Sync> Contiguous for Variable<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
