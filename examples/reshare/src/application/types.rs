@@ -97,9 +97,7 @@ where
     type Digest = H::Digest;
 
     fn digest(&self) -> H::Digest {
-        let mut hasher = H::new();
-        hasher.update(&self.encode());
-        hasher.finalize()
+        H::hash(&self.encode())
     }
 }
 
