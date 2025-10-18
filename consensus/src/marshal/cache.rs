@@ -118,22 +118,17 @@ impl<
         .await
         .expect("failed to initialize metadata");
 
-        // Restore cache from metadata
-        let mut cache = Self {
+        // We don't eagerly initialize any epoch caches here, they will be
+        // initialized on demand, otherwise there could be coordination issues
+        // around the scheme provider.
+        Self {
             context,
             scheme_provider,
             cfg,
             block_codec_config,
             metadata,
             caches: BTreeMap::new(),
-        };
-
-        let (floor, ceiling) = cache.get_metadata();
-        for epoch in floor..=ceiling {
-            cache.init_epoch(epoch).await;
         }
-
-        cache
     }
 
     /// Retrieve the epoch range that may have data.
