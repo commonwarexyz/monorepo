@@ -2,8 +2,7 @@
 
 use crate::{
     application::Block,
-    dkg::{actor::RoundInfo, DealOutcome, Dkg, Payload, OUTCOME_NAMESPACE},
-    validator::APP_NAMESPACE,
+    dkg::{actor::RoundInfo, DealOutcome, Dkg, Payload},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::types::Epoch;
@@ -16,7 +15,7 @@ use commonware_cryptography::{
         },
         primitives::{group, poly::Public, variant::Variant},
     },
-    Hasher, Signer, Verifier,
+    Hasher, Signer,
 };
 use commonware_p2p::{
     utils::mux::{MuxHandle, SubReceiver, SubSender},
@@ -24,7 +23,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{sequence::U64, set::Set, union};
+use commonware_utils::{max_faults, sequence::U64, set::Set, union};
 use futures::FutureExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -36,6 +35,9 @@ use tracing::{debug, error, info, warn};
 
 /// The signature namespace for DKG acknowledgment messages.
 const ACK_NAMESPACE: &[u8] = b"_DKG_ACK";
+
+/// The namespace used when signing [DealOutcome]s.
+const OUTCOME_NAMESPACE: &[u8] = b"_DEAL_OUTCOME";
 
 /// The concurrency level for DKG/reshare operations.
 const CONCURRENCY: usize = 1;
@@ -56,6 +58,9 @@ where
     S: Sender<PublicKey = C::PublicKey>,
     R: Receiver<PublicKey = C::PublicKey>,
 {
+    /// Prefix all signed messages to prevent replay attacks.
+    namespace: Vec<u8>,
+
     /// The local signer.
     signer: &'ctx mut C,
 
@@ -64,6 +69,9 @@ where
 
     /// The previous group polynomial and (if dealing) share.
     previous: RoundResult<V>,
+
+    /// The dealers in the round.
+    dealers: Set<C::PublicKey>,
 
     /// The players in the round.
     players: Set<C::PublicKey>,
@@ -131,6 +139,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
         context: &mut E,
+        namespace: Vec<u8>,
         epoch: Epoch,
         public: Public<V>,
         share: Option<group::Share>,
@@ -219,11 +228,13 @@ where
         let rate_limiter = RateLimiter::hashmap_with_clock(send_rate_limit, context.deref());
 
         Self {
+            namespace,
             signer,
             epoch,
             previous: share.map_or(RoundResult::Polynomial(public.clone()), |share| {
                 RoundResult::Output(Output { public, share })
             }),
+            dealers,
             players,
             sender: s,
             receiver: r,
@@ -278,7 +289,7 @@ where
                     dealer.ack(self.signer.public_key()).unwrap();
 
                     let ack = Ack::new::<_, V>(
-                        &union(APP_NAMESPACE, ACK_NAMESPACE),
+                        &union(&self.namespace, ACK_NAMESPACE),
                         self.signer,
                         signer_index,
                         round,
@@ -379,7 +390,7 @@ where
 
                     // Verify signature on incoming ack
                     if !ack.verify::<V, _>(
-                        &union(APP_NAMESPACE, ACK_NAMESPACE),
+                        &union(&self.namespace, ACK_NAMESPACE),
                         &peer,
                         round,
                         &self.signer.public_key(),
@@ -437,7 +448,7 @@ where
 
                     // Send ack
                     let payload = Payload::<V, C::Signature>::Ack(Ack::new::<_, V>(
-                        &union(APP_NAMESPACE, ACK_NAMESPACE),
+                        &union(&self.namespace, ACK_NAMESPACE),
                         self.signer,
                         signer_index,
                         round,
@@ -478,12 +489,7 @@ where
         }
 
         // Verify the dealer's signature before considering processing the outcome.
-        let outcome_payload = outcome.signature_payload();
-        if !outcome.dealer.verify(
-            Some(OUTCOME_NAMESPACE),
-            &outcome_payload,
-            &outcome.dealer_signature,
-        ) {
+        if !outcome.verify(&union(&self.namespace, OUTCOME_NAMESPACE)) {
             warn!(round, "invalid dealer signature; ignoring deal outcome");
             return;
         }
@@ -494,7 +500,7 @@ where
                 .get(ack.player as usize)
                 .map(|public_key| {
                     ack.verify::<V, _>(
-                        ACK_NAMESPACE,
+                        &union(&self.namespace, ACK_NAMESPACE),
                         public_key,
                         round,
                         &outcome.dealer,
@@ -553,8 +559,8 @@ where
         let result = match result {
             Ok(output) => output,
             Err(e) => {
-                error!(error = ?e, "failed to finalize arbiter; aborting round");
-                return (self.players, self.previous, false);
+                error!(error = ?e, ?disqualified, "failed to finalize arbiter; aborting round");
+                return (self.dealers, self.previous, false);
             }
         };
 
@@ -580,7 +586,7 @@ where
                     Ok(output) => output,
                     Err(e) => {
                         error!(error = ?e, "failed to finalize player; aborting round");
-                        return (self.players, self.previous, false);
+                        return (self.dealers, self.previous, false);
                     }
                 };
 
@@ -612,6 +618,7 @@ where
             return;
         };
 
+        // Collect required reveals.
         let reveals = (0..self.players.len() as u32)
             .filter_map(|i| {
                 (!acks.contains_key(&i))
@@ -620,8 +627,18 @@ where
             })
             .collect::<Vec<_>>();
 
+        // If too many reveals, don't attempt to construct a deal outcome.
+        if reveals.len() > max_faults(self.players.len() as u32) as usize {
+            warn!(
+                round,
+                "too many reveals; skipping deal outcome construction"
+            );
+            return;
+        }
+
         let local_outcome = Some(DealOutcome::new(
             self.signer,
+            &union(&self.namespace, OUTCOME_NAMESPACE),
             round,
             commitment.deref().clone(),
             acks.values().cloned().collect(),

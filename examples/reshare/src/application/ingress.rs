@@ -1,12 +1,11 @@
 //! Application ingress (mailbox and messages).
 
-use crate::application::Block;
 use commonware_consensus::{
     threshold_simplex::types::Context,
     types::{Epoch, Round, View},
-    Automaton, Epochable, Relay, Reporter,
+    Automaton, Epochable, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::Hasher;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -16,11 +15,9 @@ use futures::{
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<H, C, V>
+pub enum Message<H>
 where
     H: Hasher,
-    C: Signer,
-    V: Variant,
 {
     /// A request for the genesis payload.
     Genesis {
@@ -45,39 +42,30 @@ where
 
     /// A notification that a payload should be broadcasted to peers.
     Broadcast { digest: H::Digest },
-
-    /// A notification that a block has been finalized.
-    Finalized { block: Block<H, C, V> },
 }
 
 /// Mailbox for the application.
 #[derive(Clone)]
-pub struct Mailbox<H, C, V>
+pub struct Mailbox<H>
 where
     H: Hasher,
-    C: Signer,
-    V: Variant,
 {
-    sender: mpsc::Sender<Message<H, C, V>>,
+    sender: mpsc::Sender<Message<H>>,
 }
 
-impl<H, C, V> Mailbox<H, C, V>
+impl<H> Mailbox<H>
 where
     H: Hasher,
-    C: Signer,
-    V: Variant,
 {
     /// Create a new application mailbox.
-    pub(super) fn new(sender: mpsc::Sender<Message<H, C, V>>) -> Self {
+    pub(super) fn new(sender: mpsc::Sender<Message<H>>) -> Self {
         Self { sender }
     }
 }
 
-impl<H, C, V> Automaton for Mailbox<H, C, V>
+impl<H> Automaton for Mailbox<H>
 where
     H: Hasher,
-    C: Signer,
-    V: Variant,
 {
     type Digest = H::Digest;
     type Context = Context<Self::Digest>;
@@ -123,11 +111,9 @@ where
     }
 }
 
-impl<H, C, V> Relay for Mailbox<H, C, V>
+impl<H> Relay for Mailbox<H>
 where
     H: Hasher,
-    C: Signer,
-    V: Variant,
 {
     type Digest = H::Digest;
 
@@ -136,21 +122,5 @@ where
             .send(Message::Broadcast { digest })
             .await
             .expect("Failed to send broadcast");
-    }
-}
-
-impl<H, C, V> Reporter for Mailbox<H, C, V>
-where
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    type Activity = Block<H, C, V>;
-
-    async fn report(&mut self, block: Self::Activity) {
-        self.sender
-            .send(Message::Finalized { block })
-            .await
-            .expect("Failed to send finalized");
     }
 }

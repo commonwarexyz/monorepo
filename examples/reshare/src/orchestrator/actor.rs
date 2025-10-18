@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, Supervisor},
-    orchestrator::{ingress::EpochTransition, Mailbox},
+    orchestrator::{Mailbox, Message},
 };
 use commonware_consensus::{
     marshal,
@@ -21,15 +21,12 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::{sequence::FixedBytes, set::Set, NZUsize, NZU32};
+use commonware_utils::{set::Set, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 use tracing::info;
-
-const METADATA_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A>
@@ -63,7 +60,7 @@ where
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<EpochTransition<V, C::PublicKey>>,
+    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
     signer: C,
     application: A,
 
@@ -74,9 +71,6 @@ where
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
-
-    epoch: Epoch,
-    engine: Option<Handle<()>>,
 }
 
 impl<E, B, V, C, H, A> Actor<E, B, V, C, H, A>
@@ -104,8 +98,6 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
-                epoch: 0,
-                engine: None,
             },
             Mailbox::new(sender),
         )
@@ -125,22 +117,8 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        initial_participants: Vec<C::PublicKey>,
-        initial_poly: Public<V>,
-        initial_share: Option<group::Share>,
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(
-                pending,
-                recovered,
-                resolver,
-                initial_participants,
-                initial_poly,
-                initial_share
-            )
-            .await
-        )
+        spawn_cell!(self.context, self.run(pending, recovered, resolver,).await)
     }
 
     async fn run(
@@ -157,9 +135,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        initial_participants: Vec<C::PublicKey>,
-        initial_poly: Public<V>,
-        initial_share: Option<group::Share>,
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut pending_mux) = Muxer::new(
@@ -184,48 +159,49 @@ where
         );
         mux.start();
 
-        let mut metadata = Metadata::init(
-            self.context.with_label("metadata"),
-            metadata::Config {
-                partition: format!("{}-metadata", self.partition_prefix),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("failed to initialize orchestrator metadata");
-
-        // Enter the initial epoch
-        let initial_epoch = metadata.get(&METADATA_KEY).cloned().unwrap_or(0);
-        self.enter_epoch(
-            initial_epoch,
-            initial_poly,
-            initial_share,
-            Set::from_iter(initial_participants),
-            &mut metadata,
-            &mut pending_mux,
-            &mut recovered_mux,
-            &mut resolver_mux,
-        )
-        .await;
-
         // Wait for instructions to transition epochs.
+        let mut engines = BTreeMap::new();
         while let Some(transition) = self.mailbox.next().await {
-            if transition.epoch <= self.epoch {
-                continue;
-            }
+            match transition {
+                Message::Enter(transition) => {
+                    // If the epoch is already in the map, ignore.
+                    if engines.contains_key(&transition.epoch) {
+                        continue;
+                    }
 
-            // Enter the new epoch.
-            self.enter_epoch(
-                transition.epoch,
-                transition.poly,
-                transition.share,
-                transition.participants,
-                &mut metadata,
-                &mut pending_mux,
-                &mut recovered_mux,
-                &mut resolver_mux,
-            )
-            .await;
+                    // Enter the new epoch.
+                    let engine = self
+                        .enter_epoch(
+                            transition.epoch,
+                            transition.poly,
+                            transition.share,
+                            transition.participants,
+                            &mut pending_mux,
+                            &mut recovered_mux,
+                            &mut resolver_mux,
+                        )
+                        .await;
+                    engines.insert(transition.epoch, engine);
+
+                    info!(transition.epoch, "entered new epoch");
+                }
+                Message::Exit(epoch) => {
+                    // Remove all entries with key less than or equal to the requested exit epoch.
+                    let epochs_to_remove: Vec<_> = engines
+                        .keys()
+                        .take_while(|k| **k <= epoch)
+                        .copied()
+                        .collect();
+
+                    // Abort all engines for the epochs to remove.
+                    for epoch in epochs_to_remove {
+                        let engine = engines.remove(&epoch).unwrap();
+                        engine.abort();
+
+                        info!(epoch, "exited epoch");
+                    }
+                }
+            }
         }
     }
 
@@ -236,7 +212,6 @@ where
         polynomial: Public<V>,
         share: Option<group::Share>,
         participants: Set<C::PublicKey>,
-        metadata: &mut Metadata<ContextCell<E>, FixedBytes<1>, Epoch>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -249,15 +224,8 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-    ) {
-        let _ = metadata.put_sync(METADATA_KEY, epoch).await;
-        self.epoch = epoch;
-
-        // Stop the previous consensus engine, if there is one.
-        if let Some(engine) = self.engine.take() {
-            engine.abort();
-        }
-
+    ) -> Handle<()> {
+        // Start the new engine
         let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants.into(), share);
         let engine = threshold_simplex::Engine::new(
             self.context.with_label("consensus_engine"),
@@ -292,9 +260,6 @@ where
         let recovered_sc = recovered_mux.register(epoch as u32).await.unwrap();
         let resolver_sc = resolver_mux.register(epoch as u32).await.unwrap();
 
-        let engine_handle = engine.start(pending_sc, recovered_sc, resolver_sc);
-        self.engine = Some(engine_handle);
-
-        info!(epoch, "entered new epoch");
+        engine.start(pending_sc, recovered_sc, resolver_sc)
     }
 }

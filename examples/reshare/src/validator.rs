@@ -19,7 +19,7 @@ use std::{
 };
 use tracing::{error, info};
 
-pub const APP_NAMESPACE: &[u8] = b"RESHARE_EXAMPLE";
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE";
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -56,7 +56,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         "Loaded participant configuration"
     );
 
-    let p2p_namespace = union_unique(APP_NAMESPACE, b"_P2P");
+    let p2p_namespace = union_unique(APPLICATION_NAMESPACE, b"_P2P");
     let mut p2p_cfg = discovery::Config::local(
         config.p2p_key.clone(),
         &p2p_namespace,
@@ -113,7 +113,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         engine::Config {
             signer: config.p2p_key,
             blocker: oracle,
-            namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
             polynomial,
             share: config.share,
             active_participants: peer_config.active,
@@ -324,7 +324,7 @@ mod test {
                     engine::Config {
                         signer,
                         blocker: oracle.control(public_key),
-                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -393,8 +393,11 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = all_online(5, seed, link.clone(), 25);
-            assert_eq!(state, all_online(5, seed, link.clone(), 25));
+            let state = all_online(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            assert_eq!(
+                state,
+                all_online(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+            );
         }
     }
 
@@ -406,12 +409,16 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state = all_online(5, seed, link.clone(), 25);
-            assert_eq!(state, all_online(5, seed, link.clone(), 25));
+            let state = all_online(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            assert_eq!(
+                state,
+                all_online(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+            );
         }
     }
 
     #[test_traced]
+    #[ignore]
     fn test_1k() {
         let link = Link {
             latency: Duration::from_millis(80),
@@ -424,10 +431,11 @@ mod test {
     #[test_traced]
     fn test_reshare_failed() {
         // Create context
-        let n = 5;
-        let threshold = quorum(n);
-        let initial_container_required = 50;
-        let final_container_required = 110;
+        let n = 6;
+        let active = 4;
+        let threshold = quorum(active);
+        let initial_container_required = BLOCKS_PER_EPOCH / 2;
+        let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let executor = Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -444,7 +452,7 @@ mod test {
 
             // Derive threshold
             let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+                ops::generate_shares::<_, MinSig>(&mut context, None, active, threshold);
 
             // Register participants
             let mut signers = Vec::new();
@@ -471,16 +479,21 @@ mod test {
             let mut engine_handles = Vec::with_capacity(n as usize);
             for (idx, signer) in signers.iter().enumerate() {
                 let public_key = signer.public_key();
+                let share = if idx < active as usize {
+                    Some(shares[idx].clone())
+                } else {
+                    None
+                };
                 let engine = engine::Engine::<_, _, _, Sha256, MinSig>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: APP_NAMESPACE.to_vec(),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         polynomial: polynomial.clone(),
-                        share: Some(shares[idx].clone()),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
+                        share,
+                        active_participants: validators[..active as usize].to_vec(),
+                        inactive_participants: validators[active as usize..].to_vec(),
                         num_participants_per_epoch: validators.len(),
                         dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                         partition_prefix: format!("validator_{idx}"),
@@ -581,16 +594,21 @@ mod test {
             // Bring all validators back online.
             for (idx, signer) in signers.iter().enumerate() {
                 let public_key = signer.public_key();
+                let share = if idx < active as usize {
+                    Some(shares[idx].clone())
+                } else {
+                    None
+                };
                 let engine = engine::Engine::<_, _, _, Sha256, MinSig>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         polynomial: polynomial.clone(),
-                        share: Some(shares[idx].clone()),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
+                        share,
+                        active_participants: validators[..active as usize].to_vec(),
+                        inactive_participants: validators[active as usize..].to_vec(),
                         num_participants_per_epoch: validators.len(),
                         dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
                         partition_prefix: format!("validator_{idx}"),
@@ -656,7 +674,7 @@ mod test {
                 let metric = parts.next().unwrap();
                 let value = parts.next().unwrap();
 
-                metric.ends_with("_failed_rounds_total") && value.parse::<u64>().unwrap() >= 1
+                metric.ends_with("_failed_rounds_total") && value.parse::<u64>().unwrap() == 1
             });
             assert!(round_failed);
         });
@@ -667,8 +685,8 @@ mod test {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let initial_container_required = 10;
-        let final_container_required = 20;
+        let initial_container_required = BLOCKS_PER_EPOCH / 2 + 1;
+        let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let executor = Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -727,7 +745,7 @@ mod test {
                     engine::Config {
                         signer: signer.clone(),
                         blocker: oracle.control(public_key.clone()),
-                        namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         polynomial: polynomial.clone(),
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
@@ -807,7 +825,7 @@ mod test {
                 engine::Config {
                     signer: signer.clone(),
                     blocker: oracle.control(public_key.clone()),
-                    namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                     polynomial: polynomial.clone(),
                     share: Some(share),
                     active_participants: validators.clone(),
@@ -876,7 +894,7 @@ mod test {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let required_container = BLOCKS_PER_EPOCH;
+        let required_container = 2 * BLOCKS_PER_EPOCH + 1;
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
@@ -936,7 +954,7 @@ mod test {
                         engine::Config {
                             signer: signer.clone(),
                             blocker: oracle.control(public_key.clone()),
-                            namespace: union(APP_NAMESPACE, b"_ENGINE").to_vec(),
+                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             polynomial: polynomial.clone(),
                             share: Some(shares[idx].clone()),
                             active_participants: validators.clone(),

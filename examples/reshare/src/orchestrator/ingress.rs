@@ -8,6 +8,12 @@ use commonware_cryptography::{
 use commonware_utils::set::Set;
 use futures::{channel::mpsc, SinkExt};
 
+/// Messages that can be sent to the orchestrator.
+pub enum Message<V: Variant, P: PublicKey> {
+    Enter(EpochTransition<V, P>),
+    Exit(Epoch),
+}
+
 /// A notification of an epoch transition.
 pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The epoch to transition to.
@@ -23,18 +29,18 @@ pub struct EpochTransition<V: Variant, P: PublicKey> {
 /// Inbound communication channel for epoch transitions.
 #[derive(Debug, Clone)]
 pub struct Mailbox<V: Variant, P: PublicKey> {
-    sender: mpsc::Sender<EpochTransition<V, P>>,
+    sender: mpsc::Sender<Message<V, P>>,
 }
 
 impl<V: Variant, P: PublicKey> Mailbox<V, P> {
     /// Create a new [Mailbox].
-    pub fn new(sender: mpsc::Sender<EpochTransition<V, P>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<V, P>>) -> Self {
         Self { sender }
     }
 }
 
 impl<V: Variant, P: PublicKey> Reporter for Mailbox<V, P> {
-    type Activity = EpochTransition<V, P>;
+    type Activity = Message<V, P>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

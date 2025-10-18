@@ -5,10 +5,7 @@ use crate::{
     dkg, orchestrator,
 };
 use commonware_broadcast::buffered;
-use commonware_consensus::{
-    marshal::{self, ingress::handler},
-    Reporters,
-};
+use commonware_consensus::marshal::{self, ingress::handler};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -21,7 +18,7 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{quorum, NZUsize, NZU64};
+use commonware_utils::{quorum, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -78,12 +75,11 @@ where
     dkg: dkg::Actor<E, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     application: application::Actor<E, H, C, V>,
-    application_mailbox: application::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     marshal: marshal::Actor<Block<H, C, V>, E, V>,
     marshal_mailbox: marshal::Mailbox<V, Block<H, C, V>>,
-    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C, V>>,
+    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H>>,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
@@ -98,12 +94,15 @@ where
 {
     pub async fn new(context: E, config: Config<C, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+        let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
+        let dkg_namespace = union(&config.namespace, b"_DKG");
         let identity = *public::<V>(&config.polynomial);
         let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
+                namespace: dkg_namespace,
                 signer: config.signer.clone(),
                 num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
@@ -135,7 +134,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ACTIVITY_TIMEOUT
                     .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
-                namespace: config.namespace.clone(),
+                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 freezer_table_initial_size: config.freezer_table_initial_size,
@@ -159,7 +158,7 @@ where
                 signer: config.signer.clone(),
                 application: application_mailbox.clone(),
                 marshal: marshal_mailbox.clone(),
-                namespace: config.namespace.clone(),
+                namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
@@ -172,7 +171,6 @@ where
             dkg,
             dkg_mailbox,
             application,
-            application_mailbox,
             buffer,
             buffered_mailbox,
             marshal,
@@ -253,32 +251,22 @@ where
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
     ) {
-        let finalized_reporter =
-            Reporters::from((self.application_mailbox, self.dkg_mailbox.clone()));
-
         let dkg_handle = self.dkg.start(
-            self.config.polynomial.clone(),
-            self.config.share.clone(),
-            self.config.active_participants.clone(),
+            self.config.polynomial,
+            self.config.share,
+            self.config.active_participants,
             self.config.inactive_participants,
             self.orchestrator_mailbox,
             dkg,
         );
         let application_handle = self
             .application
-            .start(self.marshal_mailbox, self.dkg_mailbox);
+            .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle =
             self.marshal
-                .start(finalized_reporter, self.buffered_mailbox, backfill_network);
-        let orchestrator_handle = self.orchestrator.start(
-            pending,
-            recovered,
-            resolver,
-            self.config.active_participants,
-            self.config.polynomial,
-            self.config.share,
-        );
+                .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
+        let orchestrator_handle = self.orchestrator.start(pending, recovered, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
