@@ -187,14 +187,14 @@ where
                 }
                 Message::Exit(epoch) => {
                     // Remove all entries with key less than or equal to the requested exit epoch.
-                    let keys_to_remove: Vec<_> = engines
+                    let epochs_to_remove: Vec<_> = engines
                         .keys()
                         .take_while(|k| **k <= epoch)
                         .copied()
                         .collect();
 
                     // Abort all engines for the epochs to remove.
-                    for epoch in keys_to_remove {
+                    for epoch in epochs_to_remove {
                         let engine = engines.remove(&epoch).unwrap();
                         engine.abort();
 
