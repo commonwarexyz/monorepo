@@ -396,31 +396,13 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
         self.notarizes_force = false;
 
-        let mut notarizes = std::mem::take(&mut self.notarizes);
+        let notarizes = std::mem::take(&mut self.notarizes);
 
         // Early return if there are no notarizes to verify
         if notarizes.is_empty() {
             return (vec![], vec![]);
         }
 
-        // If there is only one notarize, we can skip batch verification
-        if notarizes.len() == 1 {
-            let notarize = notarizes.pop().expect("checked above that length is 1");
-            if self.signing.verify_vote(
-                namespace,
-                VoteContext::Notarize {
-                    proposal: &notarize.proposal,
-                },
-                &notarize.vote,
-            ) {
-                self.notarizes_verified += 1;
-                return (vec![Voter::Notarize(notarize)], vec![]);
-            } else {
-                return (vec![], vec![notarize.signer()]);
-            };
-        }
-
-        // Otherwise, we need to batch verify
         let (proposals, votes): (Vec<_>, Vec<_>) =
             notarizes.into_iter().map(|n| (n.proposal, n.vote)).unzip();
 
@@ -512,31 +494,13 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        let mut nullifies = std::mem::take(&mut self.nullifies);
+        let nullifies = std::mem::take(&mut self.nullifies);
 
         // Early return if there are no nullifies to verify
         if nullifies.is_empty() {
             return (vec![], vec![]);
         }
 
-        // If there is only one nullify, we can skip batch verification
-        if nullifies.len() == 1 {
-            let nullify = nullifies.pop().expect("checked above that length is 1");
-            if self.signing.verify_vote::<D>(
-                namespace,
-                VoteContext::Nullify {
-                    round: nullify.round,
-                },
-                &nullify.vote,
-            ) {
-                self.nullifies_verified += 1;
-                return (vec![Voter::Nullify(nullify)], vec![]);
-            } else {
-                return (vec![], vec![nullify.signer()]);
-            };
-        }
-
-        // Otherwise, we need to batch verify
         let round = nullifies[0].round;
 
         let VoteVerification {
@@ -612,31 +576,13 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        let mut finalizes = std::mem::take(&mut self.finalizes);
+        let finalizes = std::mem::take(&mut self.finalizes);
 
         // Early return if there are no finalizes to verify
         if finalizes.is_empty() {
             return (vec![], vec![]);
         }
 
-        // If there is only one finalize, we can skip batch verification
-        if finalizes.len() == 1 {
-            let finalize = finalizes.pop().expect("checked above that length is 1");
-            if self.signing.verify_vote(
-                namespace,
-                VoteContext::Finalize {
-                    proposal: &finalize.proposal,
-                },
-                &finalize.vote,
-            ) {
-                self.finalizes_verified += 1;
-                return (vec![Voter::Finalize(finalize)], vec![]);
-            } else {
-                return (vec![], vec![finalize.signer()]);
-            };
-        }
-
-        // Otherwise, we need to batch verify
         let (proposals, votes): (Vec<_>, Vec<_>) =
             finalizes.into_iter().map(|n| (n.proposal, n.vote)).unzip();
 
