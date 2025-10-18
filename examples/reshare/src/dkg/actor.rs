@@ -239,8 +239,40 @@ where
                     //     ...
                     // }
 
+                    // Split the epoch into a "send" and "post" phase.
+                    //
+                    // In the first half of the epoch, dealers continuously distribute shares and process
+                    // acknowledgements from players.
+                    //
+                    // In the second half of the epoch, dealers include their commitment, acknowledgements,
+                    // and any share reveals in blocks. Players process these deal outcomes to gather
+                    // all of the information needed to reconstruct their new shares and the new group
+                    // polynomial.
+                    let epoch_transition = is_last_block_in_epoch(block.height);
+                    match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
+                        Ordering::Less => {
+                            // Continuously distribute shares to any players who haven't acknowledged
+                            // receipt yet.
+                            manager.distribute(epoch).await;
+
+                            // Process any incoming messages from other dealers/players.
+                            manager.process_messages(epoch).await;
+                        }
+                        Ordering::Equal => {
+                            // Process any final messages from other dealers/players.
+                            manager.process_messages(epoch).await;
+
+                            // At the midpoint of the epoch, construct the deal outcome for inclusion.
+                            manager.construct_deal_outcome(epoch).await;
+                        }
+                        Ordering::Greater => {
+                            // Process any incoming deal outcomes from dealing contributors.
+                            manager.process_block(epoch, block).await;
+                        }
+                    }
+
                     // Attempt to transition epochs.
-                    if let Some(epoch) = is_last_block_in_epoch(block.height) {
+                    if let Some(epoch) = epoch_transition {
                         let (next_participants, next_public, next_share, success) =
                             match manager.finalize(epoch).await {
                                 (
@@ -320,37 +352,6 @@ where
                             &mut self.round_metadata,
                         )
                         .await;
-                    };
-
-                    // Split the epoch into a "send" and "post" phase.
-                    //
-                    // In the first half of the epoch, dealers continuously distribute shares and process
-                    // acknowledgements from players.
-                    //
-                    // In the second half of the epoch, dealers include their commitment, acknowledgements,
-                    // and any share reveals in blocks. Players process these deal outcomes to gather
-                    // all of the information needed to reconstruct their new shares and the new group
-                    // polynomial.
-                    match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
-                        Ordering::Less => {
-                            // Continuously distribute shares to any players who haven't acknowledged
-                            // receipt yet.
-                            manager.distribute(epoch).await;
-
-                            // Process any incoming messages from other dealers/players.
-                            manager.process_messages(epoch).await;
-                        }
-                        Ordering::Equal => {
-                            // Process any final messages from other dealers/players.
-                            manager.process_messages(epoch).await;
-
-                            // At the midpoint of the epoch, construct the deal outcome for inclusion.
-                            manager.construct_deal_outcome(epoch).await;
-                        }
-                        Ordering::Greater => {
-                            // Process any incoming deal outcomes from dealing contributors.
-                            manager.process_block(epoch, block).await;
-                        }
                     }
 
                     // Wait to acknowledge until the block has been processed by the application.

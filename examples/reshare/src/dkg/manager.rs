@@ -559,7 +559,7 @@ where
         let result = match result {
             Ok(output) => output,
             Err(e) => {
-                error!(error = ?e, "failed to finalize arbiter; aborting round");
+                error!(error = ?e, ?disqualified, "failed to finalize arbiter; aborting round");
                 return (self.dealers, self.previous, false);
             }
         };
