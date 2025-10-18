@@ -1,6 +1,5 @@
 use criterion::criterion_main;
 
-mod current_init;
 mod fixed_generate;
 mod fixed_init;
 mod keyless_generate;
@@ -13,5 +12,4 @@ criterion_main!(
     variable_generate::benches,
     fixed_init::benches,
     variable_init::benches,
-    current_init::benches,
 );
