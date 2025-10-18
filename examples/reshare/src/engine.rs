@@ -252,9 +252,9 @@ where
         ),
     ) {
         let dkg_handle = self.dkg.start(
-            self.config.polynomial.clone(),
-            self.config.share.clone(),
-            self.config.active_participants.clone(),
+            self.config.polynomial,
+            self.config.share,
+            self.config.active_participants,
             self.config.inactive_participants,
             self.orchestrator_mailbox,
             dkg,
@@ -266,14 +266,7 @@ where
         let marshal_handle =
             self.marshal
                 .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
-        let orchestrator_handle = self.orchestrator.start(
-            pending,
-            recovered,
-            resolver,
-            self.config.active_participants,
-            self.config.polynomial,
-            self.config.share,
-        );
+        let orchestrator_handle = self.orchestrator.start(pending, recovered, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

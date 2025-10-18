@@ -21,15 +21,12 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::{sequence::FixedBytes, set::Set, NZUsize, NZU32};
+use commonware_utils::{set::Set, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::info;
-
-const METADATA_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A>
@@ -75,7 +72,6 @@ where
     partition_prefix: String,
     pool_ref: PoolRef,
 
-    epoch: Epoch,
     engine: Option<Handle<()>>,
 }
 
@@ -104,7 +100,6 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
-                epoch: 0,
                 engine: None,
             },
             Mailbox::new(sender),
@@ -125,22 +120,8 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        initial_participants: Vec<C::PublicKey>,
-        initial_poly: Public<V>,
-        initial_share: Option<group::Share>,
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(
-                pending,
-                recovered,
-                resolver,
-                initial_participants,
-                initial_poly,
-                initial_share
-            )
-            .await
-        )
+        spawn_cell!(self.context, self.run(pending, recovered, resolver,).await)
     }
 
     async fn run(
@@ -157,9 +138,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        initial_participants: Vec<C::PublicKey>,
-        initial_poly: Public<V>,
-        initial_share: Option<group::Share>,
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut pending_mux) = Muxer::new(
@@ -184,35 +162,13 @@ where
         );
         mux.start();
 
-        let mut metadata = Metadata::init(
-            self.context.with_label("metadata"),
-            metadata::Config {
-                partition: format!("{}-metadata", self.partition_prefix),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("failed to initialize orchestrator metadata");
-
-        // Enter the initial epoch
-        let initial_epoch = metadata.get(&METADATA_KEY).cloned().unwrap_or(0);
-        self.enter_epoch(
-            initial_epoch,
-            initial_poly,
-            initial_share,
-            Set::from_iter(initial_participants),
-            &mut metadata,
-            &mut pending_mux,
-            &mut recovered_mux,
-            &mut resolver_mux,
-        )
-        .await;
-
         // Wait for instructions to transition epochs.
+        let mut current_epoch = None;
         while let Some(transition) = self.mailbox.next().await {
-            if transition.epoch <= self.epoch {
+            if current_epoch.is_some_and(|epoch| transition.epoch <= epoch) {
                 continue;
             }
+            current_epoch = Some(transition.epoch);
 
             // Enter the new epoch.
             self.enter_epoch(
@@ -220,7 +176,6 @@ where
                 transition.poly,
                 transition.share,
                 transition.participants,
-                &mut metadata,
                 &mut pending_mux,
                 &mut recovered_mux,
                 &mut resolver_mux,
@@ -236,7 +191,6 @@ where
         polynomial: Public<V>,
         share: Option<group::Share>,
         participants: Set<C::PublicKey>,
-        metadata: &mut Metadata<ContextCell<E>, FixedBytes<1>, Epoch>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -250,14 +204,12 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         >,
     ) {
-        let _ = metadata.put_sync(METADATA_KEY, epoch).await;
-        self.epoch = epoch;
-
         // Stop the previous consensus engine, if there is one.
         if let Some(engine) = self.engine.take() {
             engine.abort();
         }
 
+        // Start the new engine
         let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants.into(), share);
         let engine = threshold_simplex::Engine::new(
             self.context.with_label("consensus_engine"),

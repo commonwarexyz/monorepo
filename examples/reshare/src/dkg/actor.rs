@@ -190,6 +190,16 @@ where
             inactive_participants,
         );
 
+        // Inform the orchestrator of the epoch transition
+        let active_participants = Set::from_iter(active_participants);
+        let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
+            epoch: current_epoch,
+            poly: current_public.clone(),
+            share: current_share.clone(),
+            participants: active_participants.clone(),
+        };
+        orchestrator.report(transition).await;
+
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
             &mut self.context,
@@ -198,7 +208,7 @@ where
             current_public,
             current_share,
             &mut self.signer,
-            Set::from_iter(active_participants),
+            active_participants,
             Set::from_iter(inactive_participants),
             &mut dkg_mux,
             self.rate_limit,
