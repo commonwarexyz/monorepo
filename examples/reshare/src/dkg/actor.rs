@@ -372,16 +372,15 @@ where
         inactive_participants: Vec<C::PublicKey>,
     ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
         let epoch0_players = Self::players_for_initial_epoch(
-            inactive_participants,
+            inactive_participants.clone(),
             &active_participants,
             num_participants,
         );
-
         if current_epoch == 0 {
             return (active_participants, epoch0_players);
         }
 
-        let all_participants = Self::collect_all(&active_participants, &epoch0_players);
+        let all_participants = Self::collect_all(&active_participants, &inactive_participants);
         let dealers = if current_epoch == 1 {
             epoch0_players.clone()
         } else {
