@@ -185,21 +185,22 @@ where
 
                     info!(transition.epoch, "entered new epoch");
                 }
-                Message::Exit(epoch) => loop {
-                    // Loop over all epochs less then the requested epoch exit.
-                    let Some(min_epoch) = engines.keys().next().copied() else {
-                        break;
-                    };
-                    if min_epoch > epoch {
-                        break;
+                Message::Exit(epoch) => {
+                    // Remove all entries with key less than or equal to the requested exit epoch.
+                    let keys_to_remove: Vec<_> = engines
+                        .keys()
+                        .take_while(|k| **k <= epoch)
+                        .copied()
+                        .collect();
+
+                    // Abort all engines for the epochs to remove.
+                    for epoch in keys_to_remove {
+                        let engine = engines.remove(&epoch).unwrap();
+                        engine.abort();
+
+                        info!(epoch, "exited epoch");
                     }
-
-                    // Abort the engine for the minimum epoch.
-                    let engine = engines.remove(&min_epoch).unwrap();
-                    engine.abort();
-
-                    info!(epoch = min_epoch, "exited epoch");
-                },
+                }
             }
         }
     }
