@@ -56,7 +56,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::new(&config.participants, &config.identity, config.share),
+            Scheme::new(config.participants.as_ref(), &config.identity, config.share),
             Mailbox::new(sender),
         )
     }

@@ -192,7 +192,7 @@ fn main() {
             application::Config {
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 private_key: signer.clone(),
             },
         );
@@ -200,7 +200,7 @@ fn main() {
         // Initialize consensus
         let cfg = threshold_simplex::Config {
             crypto: signer.clone(),
-            participants: validators.clone(),
+            participants: validators.clone().into(),
             signing,
             blocker: oracle,
             automaton: mailbox.clone(),

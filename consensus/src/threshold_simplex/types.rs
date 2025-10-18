@@ -146,8 +146,7 @@ pub struct Participants<P: PublicKey> {
 
 impl<P: PublicKey> Participants<P> {
     /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Vec<P>) -> Self {
-        let keys: Set<_> = keys.into_iter().collect();
+    pub fn new(keys: Set<P>) -> Self {
         let quorum = quorum_from_slice(keys.as_ref());
         let max_faults = max_faults(keys.len() as u32);
 
@@ -187,9 +186,15 @@ impl<P: PublicKey> Deref for Participants<P> {
     }
 }
 
+impl<P: PublicKey> From<Set<P>> for Participants<P> {
+    fn from(keys: Set<P>) -> Self {
+        Self::new(keys)
+    }
+}
+
 impl<P: PublicKey> From<Vec<P>> for Participants<P> {
     fn from(keys: Vec<P>) -> Self {
-        Self::new(keys)
+        Self::new(keys.into())
     }
 }
 

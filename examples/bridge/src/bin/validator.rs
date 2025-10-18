@@ -222,7 +222,7 @@ fn main() {
                 other_public,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 share,
             },
         );
@@ -232,7 +232,7 @@ fn main() {
             context.with_label("engine"),
             threshold_simplex::Config {
                 crypto: signer.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing,
                 blocker: oracle,
                 automaton: mailbox.clone(),

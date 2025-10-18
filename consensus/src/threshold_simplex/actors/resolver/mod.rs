@@ -5,6 +5,7 @@ use crate::{threshold_simplex::signing_scheme::Scheme, types::Epoch};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;
+use commonware_utils::set::Set;
 use governor::Quota;
 pub use ingress::Mailbox;
 #[cfg(test)]
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 pub struct Config<P: PublicKey, S: Scheme, B: Blocker> {
     pub crypto: P,
-    pub participants: Vec<P>,
+    pub participants: Set<P>,
     pub signing: S,
 
     pub blocker: B,

@@ -412,7 +412,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -433,7 +433,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -674,7 +674,7 @@ mod tests {
                 };
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing.clone(),
                 };
                 let reporter =
@@ -696,7 +696,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -831,7 +831,7 @@ mod tests {
                     let validator = scheme.public_key();
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
@@ -851,7 +851,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -1011,7 +1011,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1032,7 +1032,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1133,7 +1133,7 @@ mod tests {
             // Configure engine
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
             };
             let mut reporter =
@@ -1154,7 +1154,7 @@ mod tests {
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
                 crypto: scheme,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
@@ -1266,7 +1266,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1287,7 +1287,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1508,7 +1508,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -1539,7 +1539,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1683,7 +1683,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -1704,7 +1704,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1884,7 +1884,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -1905,7 +1905,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -2081,7 +2081,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -2102,7 +2102,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -2252,7 +2252,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2290,7 +2290,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2432,7 +2432,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2466,7 +2466,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -2597,7 +2597,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2634,7 +2634,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -2761,7 +2761,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2797,7 +2797,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -2924,7 +2924,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -2957,7 +2957,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -3097,7 +3097,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
@@ -3131,7 +3131,7 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
-                        participants: validators.clone(),
+                        participants: validators.clone().into(),
                         signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -3252,7 +3252,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -3273,7 +3273,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -3383,7 +3383,7 @@ mod tests {
             // Create engine
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
             };
             let reporter =
@@ -3404,7 +3404,7 @@ mod tests {
             let blocker = oracle.control(validators[0].clone());
             let cfg = config::Config {
                 crypto: schemes[0].clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
@@ -3536,7 +3536,7 @@ mod tests {
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -3562,7 +3562,7 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
-                    participants: validators.clone(),
+                    participants: validators.clone().into(),
                     signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),

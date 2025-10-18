@@ -13,6 +13,7 @@ pub use actor::Actor;
 use commonware_cryptography::{Digest, Signer};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
+use commonware_utils::set::Set;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -26,7 +27,7 @@ pub struct Config<
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub crypto: C,
-    pub participants: Vec<C::PublicKey>,
+    pub participants: Set<C::PublicKey>,
     pub signing: S,
     pub blocker: B,
     pub automaton: A,
@@ -154,7 +155,7 @@ mod tests {
             let validator = scheme.public_key();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing.clone(),
             };
             let reporter =
@@ -174,7 +175,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
@@ -416,7 +417,7 @@ mod tests {
             let validator = private_key.public_key();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing.clone(),
             };
             let reporter =
@@ -434,7 +435,7 @@ mod tests {
             actor.start();
             let voter_config = Config {
                 crypto: private_key.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
@@ -719,7 +720,7 @@ mod tests {
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
             };
             let reporter =
@@ -739,7 +740,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 crypto: schemes[0].clone(),
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 signing: signing_schemes[0].clone(),
                 blocker: oracle.control(validators[0].clone()),
                 automaton: application.clone(),

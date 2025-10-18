@@ -234,12 +234,10 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        // FIXME just take participants in the config
-        let participants = participants.into_iter().collect::<Vec<_>>();
         let signing = if let Some(share) = share {
-            Scheme::<V>::new(&participants, &polynomial, share)
+            Scheme::<V>::new(participants.as_ref(), &polynomial, share)
         } else {
-            Scheme::<V>::verifier(&participants, &polynomial)
+            Scheme::<V>::verifier(participants.as_ref(), &polynomial)
         };
 
         // Register the new signing scheme with the scheme provider
