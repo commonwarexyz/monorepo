@@ -23,7 +23,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{sequence::U64, set::Set, union};
+use commonware_utils::{max_faults, sequence::U64, set::Set, union};
 use futures::FutureExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -622,6 +622,7 @@ where
             return;
         };
 
+        // Collect required reveals.
         let reveals = (0..self.players.len() as u32)
             .filter_map(|i| {
                 (!acks.contains_key(&i))
@@ -629,6 +630,15 @@ where
                     .flatten()
             })
             .collect::<Vec<_>>();
+
+        // If too many reveals, don't attempt to construct a deal outcome.
+        if reveals.len() > max_faults(self.players.len() as u32) as usize {
+            warn!(
+                round,
+                "too many reveals; skipping deal outcome construction"
+            );
+            return;
+        }
 
         let local_outcome = Some(DealOutcome::new(
             self.signer,
