@@ -1,17 +1,13 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{self, Block},
+    application::{self, Block, Scheme, SchemeProvider},
     dkg, orchestrator,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::marshal::{self, ingress::handler};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{public, Public},
-        variant::Variant,
-    },
+    bls12381::primitives::{group, poly::Public, variant::Variant},
     Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -22,7 +18,7 @@ use commonware_utils::{quorum, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::num::NonZero;
+use std::{marker::PhantomData, num::NonZero};
 use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -77,8 +73,8 @@ where
     application: application::Actor<E, H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
-    marshal: marshal::Actor<Block<H, C, V>, E, V>,
-    marshal_mailbox: marshal::Mailbox<V, Block<H, C, V>>,
+    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<V>, Scheme<V>>,
+    marshal_mailbox: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
     orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H>>,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
@@ -96,7 +92,6 @@ where
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
-        let identity = *public::<V>(&config.polynomial);
         let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
@@ -126,10 +121,12 @@ where
             },
         );
 
+        let scheme_provider = SchemeProvider::default();
+
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
-                identity,
+                scheme_provider: scheme_provider.clone(),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ACTIVITY_TIMEOUT
@@ -145,8 +142,9 @@ where
                 freezer_journal_buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                codec_config: threshold,
+                block_codec_config: threshold,
                 max_repair: MAX_REPAIR,
+                _marker: PhantomData,
             },
         )
         .await;
@@ -157,6 +155,7 @@ where
                 oracle: config.blocker.clone(),
                 signer: config.signer.clone(),
                 application: application_mailbox.clone(),
+                scheme_provider,
                 marshal: marshal_mailbox.clone(),
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,

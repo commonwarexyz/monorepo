@@ -1,5 +1,5 @@
 use crate::{
-    application::{types::genesis_block, Block, Mailbox, Message},
+    application::{types::genesis_block, Block, Mailbox, Message, Scheme},
     dkg,
     utils::{get_last_height, height_in_epoch},
 };
@@ -56,7 +56,7 @@ where
     /// Start the application.
     pub fn start(
         mut self,
-        marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(marshal, dkg).await)
@@ -65,7 +65,7 @@ where
     /// Application control loop
     async fn run(
         mut self,
-        mut marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        mut marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) {
         let genesis = genesis_block();

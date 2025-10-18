@@ -181,7 +181,7 @@ impl<
         let signing = self
             .scheme_provider
             .scheme(epoch)
-            .expect("failed to get signing scheme for epoch");
+            .expect(&format!("failed to get signing scheme for epoch: {epoch}"));
 
         let verified_blocks = self
             .init_archive(epoch, "verified", self.block_codec_config.clone())
