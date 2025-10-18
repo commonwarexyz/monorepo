@@ -2,7 +2,7 @@
 
 use crate::dkg::DealOutcome;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
@@ -97,10 +97,7 @@ where
     type Digest = H::Digest;
 
     fn digest(&self) -> H::Digest {
-        let mut hasher = H::new();
-        hasher.update(&self.parent);
-        hasher.update(&self.height.to_le_bytes());
-        hasher.finalize()
+        H::hash(&self.encode())
     }
 }
 
