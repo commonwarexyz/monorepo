@@ -50,6 +50,7 @@ use crate::{
 };
 use commonware_utils::{max_faults, quorum, set::Set};
 use std::collections::{BTreeMap, HashSet};
+use tracing::warn;
 
 /// Output of the DKG/Resharing procedure.
 #[derive(Clone)]
@@ -103,6 +104,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
 
     /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
     pub fn disqualify(&mut self, participant: P) {
+        panic!("disqualifying participant");
         self.disqualified.insert(participant);
     }
 
@@ -139,6 +141,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             idx,
             self.player_threshold,
         ) {
+            panic!("invalid commitment");
             self.disqualified.insert(dealer);
             return Err(e);
         }
@@ -150,12 +153,14 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             // Ensure index is valid
             if *ack >= players_len {
                 self.disqualified.insert(dealer);
+                panic!("invalid ack");
                 return Err(Error::PlayerInvalid);
             }
 
             // Ensure index not already active
             if !active.insert(ack) {
                 self.disqualified.insert(dealer);
+                panic!("already active");
                 return Err(Error::AlreadyActive);
             }
         }
@@ -164,6 +169,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         let reveals_len = reveals.len();
         let max_faults = max_faults(players_len) as usize;
         if reveals_len > max_faults {
+            panic!("too many reveals");
             self.disqualified.insert(dealer);
             return Err(Error::TooManyReveals);
         }
@@ -173,12 +179,14 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             // Ensure index is valid
             if share.index >= players_len {
                 self.disqualified.insert(dealer);
+                panic!("invalid share");
                 return Err(Error::PlayerInvalid);
             }
 
             // Ensure index not already active
             if !active.insert(&share.index) {
                 self.disqualified.insert(dealer);
+                panic!("already active");
                 return Err(Error::AlreadyActive);
             }
 
@@ -189,6 +197,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         // Active must be equal to number of players
         if active.len() != players_len as usize {
             self.disqualified.insert(dealer);
+            panic!("incorrect active");
             return Err(Error::IncorrectActive);
         }
 
@@ -218,6 +227,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 continue;
             }
             self.disqualified.insert(dealer.clone());
+            warn!(disqualified = ?dealer, "disqualified dealer for inactivity");
         }
 
         // Ensure we have enough commitments to proceed
