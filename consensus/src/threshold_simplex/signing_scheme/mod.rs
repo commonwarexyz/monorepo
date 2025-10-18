@@ -85,17 +85,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
     ///
-    /// `certificate` carries a previously recovered certificate for the same proposal (in
-    /// a different context), when available. Schemes such as threshold BLS can reuse part
-    /// of that certificate (e.g. the seed signature from a notarization) when assembling
-    /// a finalization certificate, while most other schemes may simply ignore it.
-    ///
     /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(
-        &self,
-        votes: I,
-        certificate: Option<Self::Certificate>,
-    ) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>;
 

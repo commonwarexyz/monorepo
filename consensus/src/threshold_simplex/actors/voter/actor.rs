@@ -341,12 +341,8 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(
-            &self.signing,
-            &self.finalizes,
-            self.notarization.as_ref(),
-        )
-        .expect("failed to recover finalization certificate");
+        let finalization = Finalization::from_finalizes(&self.signing, &self.finalizes)
+            .expect("failed to recover finalization certificate");
         timer.observe();
 
         self.broadcast_finalization = true;

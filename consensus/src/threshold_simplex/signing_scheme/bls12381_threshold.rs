@@ -24,8 +24,8 @@ use commonware_cryptography::{
             group::Share,
             ops::{
                 aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover,
-                threshold_signature_recover_pair, verify_message,
+                partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
+                verify_message,
             },
             poly::{self, PartialSignature, Public},
             variant::Variant,
@@ -378,40 +378,12 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         }
     }
 
-    fn assemble_certificate<I>(
-        &self,
-        votes: I,
-        certificate: Option<Self::Certificate>,
-    ) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
         let threshold = self.threshold();
 
-        // We can re-use the notarization certificate's seed signature
-        if let Some(notarization_certificate) = certificate {
-            let message_partials: Vec<_> = votes
-                .into_iter()
-                .map(|vote| PartialSignature::<V> {
-                    index: vote.signer,
-                    value: vote.signature.message_signature,
-                })
-                .collect();
-
-            if message_partials.len() < threshold as usize {
-                return None;
-            }
-
-            let message_signature =
-                threshold_signature_recover::<V, _>(threshold, message_partials.iter()).ok()?;
-
-            return Some(Signature {
-                message_signature,
-                seed_signature: notarization_certificate.seed_signature,
-            });
-        }
-
-        // Otherwise we need to recover both signatures
         let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
@@ -1099,7 +1071,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(votes, None).is_none());
+        assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
     #[test]
@@ -1127,7 +1099,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
@@ -1166,7 +1138,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
@@ -1218,7 +1190,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
@@ -1252,7 +1224,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let seed = schemes[0]
@@ -1289,7 +1261,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let seed = schemes[0]
@@ -1332,16 +1304,10 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect();
 
-        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes, None).unwrap();
+        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes).unwrap();
 
         assert_eq!(notarization.seed(), finalization.seed());
         assert!(notarization.seed().verify(&schemes[0], NAMESPACE));
-
-        // Re-use the seed singature from the notarization
-        let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, Some(&notarization)).unwrap();
-
-        assert_eq!(notarization.seed(), finalization.seed());
     }
 
     #[test]
@@ -1387,7 +1353,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
@@ -1440,57 +1406,6 @@ mod tests {
         certificate_verifier_panics_on_vote::<MinSig>();
     }
 
-    fn assemble_certificate_reuses_notarization_seed<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(5, 41);
-        let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 17, 9);
-
-        let notarize_votes: Vec<_> = schemes
-            .iter()
-            .take(quorum)
-            .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-            })
-            .collect();
-
-        let notarization_certificate = schemes[0]
-            .assemble_certificate(notarize_votes, None)
-            .expect("assemble notarization");
-
-        let finalize_votes: Vec<_> = schemes
-            .iter()
-            .take(quorum)
-            .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Finalize {
-                        proposal: &proposal,
-                    },
-                )
-            })
-            .collect();
-
-        let finalization_certificate = schemes[0]
-            .assemble_certificate(finalize_votes, Some(notarization_certificate.clone()))
-            .expect("assemble finalization");
-
-        assert_eq!(
-            finalization_certificate.seed_signature,
-            notarization_certificate.seed_signature
-        );
-    }
-
-    #[test]
-    fn test_assemble_certificate_reuses_notarization_seed() {
-        assemble_certificate_reuses_notarization_seed::<MinPk>();
-        assemble_certificate_reuses_notarization_seed::<MinSig>();
-    }
-
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 43);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -1510,7 +1425,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let seed = schemes[0].seed(proposal.round, &certificate).unwrap();
@@ -1542,7 +1457,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let mut encoded = certificate.encode().freeze();
@@ -1614,7 +1529,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);

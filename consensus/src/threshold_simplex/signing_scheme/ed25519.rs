@@ -256,11 +256,7 @@ impl signing_scheme::Scheme for Scheme {
         VoteVerification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble_certificate<I>(
-        &self,
-        votes: I,
-        _certificate: Option<Self::Certificate>,
-    ) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -565,7 +561,7 @@ mod tests {
         ];
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
         assert_eq!(certificate.signers, vec![0, 1, 2]);
     }
@@ -588,7 +584,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble_certificate(votes, None).is_none());
+        assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
     #[test]
@@ -604,7 +600,7 @@ mod tests {
         );
 
         let votes = vec![vote.clone(), vote];
-        assert!(schemes[0].assemble_certificate(votes, None).is_none());
+        assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
     #[test]
@@ -626,7 +622,7 @@ mod tests {
             .collect();
         votes[0].signer = 42;
 
-        assert!(schemes[0].assemble_certificate(votes, None).is_none());
+        assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
     #[test]
@@ -648,7 +644,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let verifier = Scheme::verifier(participants.clone());
@@ -692,7 +688,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
@@ -731,7 +727,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         // Well-formed certificate decodes successfully.
@@ -787,7 +783,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let verifier = Scheme::verifier(participants);
@@ -820,7 +816,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let mut truncated = certificate.clone();
@@ -857,7 +853,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble_certificate(votes, None)
+            .assemble_certificate(votes)
             .expect("assemble certificate");
 
         let mut invalid = certificate.clone();
@@ -906,10 +902,10 @@ mod tests {
             .collect();
 
         let certificate_a = schemes[0]
-            .assemble_certificate(votes_a, None)
+            .assemble_certificate(votes_a)
             .expect("assemble certificate");
         let mut bad_certificate = schemes[0]
-            .assemble_certificate(votes_b, None)
+            .assemble_certificate(votes_b)
             .expect("assemble certificate");
         bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
 
