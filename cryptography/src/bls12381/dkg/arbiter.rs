@@ -50,7 +50,6 @@ use crate::{
 };
 use commonware_utils::{max_faults, quorum, set::Set};
 use std::collections::{BTreeMap, HashSet};
-use tracing::warn;
 
 /// Output of the DKG/Resharing procedure.
 #[derive(Clone)]
@@ -219,7 +218,6 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 continue;
             }
             self.disqualified.insert(dealer.clone());
-            warn!(disqualified = ?dealer, "disqualified dealer for inactivity");
         }
 
         // Ensure we have enough commitments to proceed
