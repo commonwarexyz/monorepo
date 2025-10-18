@@ -16,6 +16,9 @@ where
     /// Provider for epoch-specific signing schemes.
     pub scheme_provider: P,
 
+    /// The length of an epoch in number of blocks.
+    pub epoch_length: u64,
+
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 

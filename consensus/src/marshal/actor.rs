@@ -13,14 +13,13 @@ use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
     threshold_simplex::{
         signing_scheme::Scheme,
-        types::{Finalization, Notarization, Proposal},
+        types::{Finalization, Notarization},
     },
     types::Round,
-    Block, Epochable, Reporter,
+    Block, Reporter,
 };
-use bytes::Buf;
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Decode, Encode, Read, ReadExt};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -76,6 +75,8 @@ pub struct Actor<
     mailbox: mpsc::Receiver<Message<S, B>>,
 
     // ---------- Configuration ----------
+    // Epoch length (in blocks)
+    epoch_length: u64,
     // Mailbox size
     mailbox_size: usize,
     // Unique application namespace
@@ -226,6 +227,7 @@ impl<
             Self {
                 context: ContextCell::new(context),
                 mailbox,
+                epoch_length: config.epoch_length,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -591,48 +593,23 @@ impl<
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let mut reader = value;
+                                    let epoch = height / self.epoch_length;
 
-                                    // We can't decode the Finalization immediately, as we first need to know
-                                    // which epoch it belongs to in order to use the appropriate signing
-                                    // scheme. The signing scheme determines the certificate codec
-                                    // configuration, for example in Ed25519 it depends on the number of
-                                    // participants in the epoch.
-
-                                    // Decode the proposal to learn the epoch.
-                                    let Ok(proposal) = Proposal::<B::Commitment>::read(&mut reader) else {
+                                    let Some(signing) = self.cache.get_scheme(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
-                                    // Get signing scheme for epoch
-                                    let Some(signing) = self.cache.get_scheme(proposal.epoch()) else {
+                                    // Parse finalization
+                                    let Ok((finalization, block)) =
+                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                            value,
+                                            &(signing.certificate_codec_config(), self.block_codec_config.clone()),
+                                        )
+                                    else {
                                         let _ = response.send(false);
                                         continue;
                                     };
-
-                                    // Decode the certificate
-                                    let Ok(certificate) = S::Certificate::read_cfg(&mut reader, &signing.certificate_codec_config()) else {
-                                        let _ = response.send(false);
-                                        continue;
-                                    };
-
-                                    let finalization = Finalization::<S, _> {
-                                        proposal,
-                                        certificate,
-                                    };
-
-                                    // Decode the block
-                                    let Ok(block) = B::read_cfg(&mut reader, &self.block_codec_config) else {
-                                        let _ = response.send(false);
-                                        continue;
-                                    };
-
-                                    // There should be no remaining data
-                                    if reader.has_remaining() {
-                                        let _ = response.send(false);
-                                        continue;
-                                    }
 
                                     // Validation
                                     if block.height() != height

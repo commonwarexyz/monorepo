@@ -3,6 +3,7 @@
 use crate::{
     application::{self, Block, Scheme, SchemeProvider},
     dkg, orchestrator,
+    utils::BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::marshal::{self, ingress::handler};
@@ -127,6 +128,7 @@ where
             context.with_label("marshal"),
             marshal::Config {
                 scheme_provider: scheme_provider.clone(),
+                epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ACTIVITY_TIMEOUT
