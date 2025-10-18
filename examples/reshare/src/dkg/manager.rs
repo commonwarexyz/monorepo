@@ -475,10 +475,9 @@ where
     /// all acknowledgement signatures are valid.
     pub async fn process_block(&mut self, round: u64, block: Block<impl Hasher, C, V>) {
         let Some(outcome) = block.deal_outcome else {
-            warn!(height = block.height, "saw block with no deal outcome");
+            debug!(height = block.height, "saw block with no deal outcome");
             return;
         };
-        info!(height = block.height, "processing deal outcome from block");
 
         // Ensure the outcome is for the current round.
         if outcome.round != round {
@@ -491,7 +490,6 @@ where
 
         // Verify the dealer's signature before considering processing the outcome.
         if !outcome.verify(&union(&self.namespace, OUTCOME_NAMESPACE)) {
-            panic!("invalid dealer signature");
             warn!(round, "invalid dealer signature; ignoring deal outcome");
             return;
         }
@@ -511,7 +509,6 @@ where
                 })
                 .unwrap_or(false)
         }) {
-            panic!("invalid ack signatures");
             warn!(round, "invalid ack signatures; disqualifying dealer");
             self.arbiter.disqualify(outcome.dealer.clone());
             return;
@@ -529,7 +526,6 @@ where
             ack_indices,
             outcome.reveals.clone(),
         ) {
-            panic!("failed to track dealer outcome in arbiter");
             warn!(round, error = ?e, "failed to track dealer outcome in arbiter");
             return;
         }
