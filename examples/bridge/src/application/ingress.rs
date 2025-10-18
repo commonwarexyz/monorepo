@@ -1,6 +1,6 @@
 use crate::Scheme;
 use commonware_consensus::{
-    threshold_simplex::types::{Activity, Context},
+    simplex::types::{Activity, Context},
     types::{Epoch, Round},
     Automaton as Au, Epochable, Relay as Re, Reporter,
 };

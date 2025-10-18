@@ -11,7 +11,7 @@ use crate::{
     Scheme,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
+use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         poly,

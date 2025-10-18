@@ -1,5 +1,5 @@
 use commonware_consensus::{
-    threshold_simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
+    simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
 };
 use commonware_cryptography::Digest;
 use futures::{

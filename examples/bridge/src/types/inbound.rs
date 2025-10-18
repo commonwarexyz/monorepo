@@ -2,7 +2,7 @@ use super::block::BlockFormat;
 use crate::Scheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use commonware_consensus::threshold_simplex::types::Finalization;
+use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Digest,
@@ -215,7 +215,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::{
-        threshold_simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
         types::Round,
     };
     use commonware_cryptography::{

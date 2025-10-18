@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal,
-    threshold_simplex::{self, signing_scheme::Scheme as _, types::Context},
+    simplex::{self, signing_scheme::Scheme as _, types::Context},
     types::Epoch,
     Automaton, Relay,
 };
@@ -248,9 +248,9 @@ where
             warn!(epoch, "registered duplicate signing scheme for epoch");
         }
 
-        let engine = threshold_simplex::Engine::new(
+        let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
-            threshold_simplex::Config {
+            simplex::Config {
                 crypto: self.signer.clone(),
                 participants,
                 signing,

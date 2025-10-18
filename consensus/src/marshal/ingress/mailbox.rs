@@ -1,5 +1,5 @@
 use crate::{
-    threshold_simplex::{
+    simplex::{
         signing_scheme::Scheme,
         types::{Activity, Finalization, Notarization},
     },

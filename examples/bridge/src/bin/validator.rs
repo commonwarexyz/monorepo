@@ -3,7 +3,7 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::threshold_simplex::{self, Engine};
+use commonware_consensus::simplex::{self, Engine};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -230,7 +230,7 @@ fn main() {
         // Initialize consensus
         let engine = Engine::new(
             context.with_label("engine"),
-            threshold_simplex::Config {
+            simplex::Config {
                 crypto: signer.clone(),
                 participants: validators.clone().into(),
                 signing,

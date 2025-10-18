@@ -11,7 +11,7 @@
 //!
 //! The actor interacts with four main components:
 //! - [crate::Reporter]: Receives ordered, finalized blocks at-least-once
-//! - [crate::threshold_simplex]: Provides consensus messages
+//! - [crate::simplex]: Provides consensus messages
 //! - Application: Provides verified blocks
 //! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
 //! - [commonware_resolver::Resolver]: Provides a backfill mechanism for missing blocks
@@ -46,7 +46,7 @@
 //!
 //! ## Limitations and Future Work
 //!
-//! - Only works with [crate::threshold_simplex] rather than general consensus.
+//! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
 //! - No state sync supported. Will attempt to sync every block in the history of the chain.
 //! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
@@ -64,7 +64,7 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{threshold_simplex::signing_scheme::Scheme, types::Epoch};
+use crate::{simplex::signing_scheme::Scheme, types::Epoch};
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
 pub trait SchemeProvider<S: Scheme>: Send + Sync + 'static {
@@ -86,7 +86,7 @@ mod tests {
     };
     use crate::{
         marshal::ingress::mailbox::Identifier,
-        threshold_simplex::{
+        simplex::{
             self,
             signing_scheme::bls12381_threshold,
             types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
@@ -275,10 +275,7 @@ mod tests {
         context: &mut deterministic::Context,
     ) -> (Vec<E>, Vec<K>, Vec<S>) {
         let (schemes, peers, signing_schemes) =
-            threshold_simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(
-                context,
-                NUM_VALIDATORS,
-            );
+            simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(context, NUM_VALIDATORS);
 
         (schemes, peers, signing_schemes)
     }

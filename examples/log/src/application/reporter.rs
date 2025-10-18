@@ -1,5 +1,5 @@
 use super::Scheme;
-use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
+use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
 use std::marker::PhantomData;
 use tracing::info;

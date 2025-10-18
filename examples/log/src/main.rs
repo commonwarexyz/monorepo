@@ -1,6 +1,6 @@
 //! Commit to a secret log and agree to its hash.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::threshold_simplex].
+//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
 //! Whenever it is a participant's turn to build a block, they randomly generate a 16-byte secret message and send the
 //! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
 //! view.
@@ -12,7 +12,7 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::threshold_simplex] can minimally be used. It purposely avoids
+//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids
 //! introducing logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as
 //! an exercise for the reader.
 //!
@@ -48,7 +48,7 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::threshold_simplex;
+use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -198,7 +198,7 @@ fn main() {
         );
 
         // Initialize consensus
-        let cfg = threshold_simplex::Config {
+        let cfg = simplex::Config {
             crypto: signer.clone(),
             participants: validators.clone().into(),
             signing,
@@ -223,7 +223,7 @@ fn main() {
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
-        let engine = threshold_simplex::Engine::new(context.with_label("engine"), cfg);
+        let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
         application.start();

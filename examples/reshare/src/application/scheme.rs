@@ -1,7 +1,7 @@
-//! (Simplex)[commonware_consensus::threshold_simplex] signing scheme and
+//! (Simplex)[commonware_consensus::simplex] signing scheme and
 //! [commonware_consensus::marshal::SchemeProvider] implementation.
 
-use commonware_consensus::{marshal, threshold_simplex::signing_scheme, types::Epoch};
+use commonware_consensus::{marshal, simplex::signing_scheme, types::Epoch};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_resolver::p2p;
 use std::{

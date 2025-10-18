@@ -8,7 +8,7 @@ use commonware_bridge::{
     Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Finalization, Viewable};
+use commonware_consensus::{simplex::types::Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,

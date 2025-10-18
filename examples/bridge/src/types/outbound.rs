@@ -2,7 +2,7 @@ use super::block::BlockFormat;
 use crate::Scheme;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_consensus::threshold_simplex::types::Finalization;
+use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
 
 /// Enum representing responses from the indexer to validators.
@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        threshold_simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
         types::Round,
     };
     use commonware_cryptography::{
