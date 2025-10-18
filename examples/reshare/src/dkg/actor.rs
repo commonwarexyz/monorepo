@@ -258,8 +258,10 @@ where
                         }
 
                         info!(
+                            success,
                             epoch,
-                            "finalized epoch's reshare; instructing reconfiguration after reshare."
+                            ?next_public,
+                            "finalized epoch's reshare; instructing reconfiguration after reshare.",
                         );
                         let next_epoch = epoch + 1;
 

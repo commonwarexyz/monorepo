@@ -70,6 +70,9 @@ where
     /// The previous group polynomial and (if dealing) share.
     previous: RoundResult<V>,
 
+    /// The dealers in the round.
+    dealers: Set<C::PublicKey>,
+
     /// The players in the round.
     players: Set<C::PublicKey>,
 
@@ -231,6 +234,7 @@ where
             previous: share.map_or(RoundResult::Polynomial(public.clone()), |share| {
                 RoundResult::Output(Output { public, share })
             }),
+            dealers,
             players,
             sender: s,
             receiver: r,
@@ -556,7 +560,7 @@ where
             Ok(output) => output,
             Err(e) => {
                 error!(error = ?e, "failed to finalize arbiter; aborting round");
-                return (self.players, self.previous, false);
+                return (self.dealers, self.previous, false);
             }
         };
 
@@ -582,7 +586,7 @@ where
                     Ok(output) => output,
                     Err(e) => {
                         error!(error = ?e, "failed to finalize player; aborting round");
-                        return (self.players, self.previous, false);
+                        return (self.dealers, self.previous, false);
                     }
                 };
 
