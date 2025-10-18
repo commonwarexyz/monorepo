@@ -274,6 +274,16 @@ where
                             .await
                             .expect("epoch metadata must update");
 
+                        // Prune the round metadata for two epochs ago (if this block is replayed,
+                        // we may still need the old metadata)
+                        if let Some(epoch) = next_epoch.checked_sub(2) {
+                            self.round_metadata.remove(&epoch.into());
+                            self.round_metadata
+                                .sync()
+                                .await
+                                .expect("metadata must sync");
+                        }
+
                         // Pseudorandomly select some random players to receive shares for the next epoch.
                         let next_players = Set::from_iter(
                             Self::choose_from_all(
@@ -292,13 +302,6 @@ where
                             participants: next_participants.clone(),
                         };
                         orchestrator.report(transition).await;
-
-                        // Prune the round metadata for the previous epoch
-                        self.round_metadata.remove(&epoch.into());
-                        self.round_metadata
-                            .sync()
-                            .await
-                            .expect("metadata must sync");
 
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
@@ -354,7 +357,7 @@ where
                     // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                     // and not willing to enter the next epoch).
                     response.send(()).expect("response channel closed");
-                    info!(epoch, relative_height, "finalized block")
+                    info!(epoch, relative_height, "finalized block");
                 }
             }
         }
