@@ -141,7 +141,7 @@ to implement authenticated networking.
 When instantiating the client, it asks the server for a target root digest to sync to. During the sync, the client periodically
 requests sync target updates from the server.
 
-In a real application, the client should source this information from a trusted source (like a [commonware_consensus::threshold_simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)
+In a real application, the client should source this information from a trusted source (like a [commonware_consensus::simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html)
 consensus certificate) and only use the server for data that can be cryptographically verified against
 this target root digest.
 

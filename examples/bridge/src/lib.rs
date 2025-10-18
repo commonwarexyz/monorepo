@@ -1,12 +1,12 @@
 //! Send succinct consensus certificates between two networks.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::threshold_simplex].
+//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
 //! Whenever it is a participant's turn to build a block, they either randomly generate a 16-byte message or
 //! include a succinct consensus certificate from the other network (if available). They then upload the block to an
 //! `indexer` and send a digest of the block to other participants. Participants in the network will fetch the block
 //! from the `indexer` and verify it contains a 16-byte message or a valid consensus certificate from the other network.
 //! Once a block is finalized, all participants attempt to post the emitted succinct consensus certificate to the `indexer`.
-//! Leader election is performed using the embedded VRF provided by [commonware_consensus::threshold_simplex].
+//! Leader election is performed using the embedded VRF provided by [commonware_consensus::simplex].
 //!
 //! # Architecture
 //!
@@ -35,7 +35,7 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::threshold_simplex] can minimally be used to efficiently power
+//! This example demonstrates how [commonware_consensus::simplex] can minimally be used to efficiently power
 //! interoperability between two networks. To simplify the example, an `indexer` is used both to distribute blocks
 //! and to collect finality certificates. A production-grade implementation would likely replace the `indexer` with
 //! a p2p broadcast mechanism.
@@ -152,6 +152,11 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+
+use commonware_consensus::simplex::signing_scheme::bls12381_threshold;
+use commonware_cryptography::bls12381::primitives::variant::MinSig;
+
+pub type Scheme = bls12381_threshold::Scheme<MinSig>;
 
 #[doc(hidden)]
 pub mod application;

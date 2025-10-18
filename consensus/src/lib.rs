@@ -16,7 +16,6 @@ use commonware_cryptography::{Committable, Digestible};
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
-pub mod threshold_simplex;
 pub mod types;
 
 /// Epochable is a trait that provides access to the epoch number.

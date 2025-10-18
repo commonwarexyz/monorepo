@@ -9,5 +9,5 @@ pub use actor::Actor;
 mod ingress;
 pub use ingress::{Mailbox, Message};
 
-mod supervisor;
-pub use supervisor::{Coordinator, Supervisor};
+mod scheme;
+pub use scheme::{Coordinator, Scheme, SchemeProvider};
