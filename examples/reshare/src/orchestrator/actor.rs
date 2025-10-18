@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, Supervisor},
-    orchestrator::{ingress::EpochTransition, Mailbox},
+    orchestrator::{Mailbox, Message},
 };
 use commonware_consensus::{
     marshal,
@@ -25,7 +25,7 @@ use commonware_utils::{set::Set, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 use tracing::info;
 
 /// Configuration for the orchestrator.
@@ -60,7 +60,7 @@ where
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<EpochTransition<V, C::PublicKey>>,
+    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
     signer: C,
     application: A,
 
@@ -71,8 +71,6 @@ where
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
-
-    engine: Option<Handle<()>>,
 }
 
 impl<E, B, V, C, H, A> Actor<E, B, V, C, H, A>
@@ -100,7 +98,6 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
-                engine: None,
             },
             Mailbox::new(sender),
         )
@@ -163,24 +160,47 @@ where
         mux.start();
 
         // Wait for instructions to transition epochs.
-        let mut current_epoch = None;
+        let mut engines = BTreeMap::new();
         while let Some(transition) = self.mailbox.next().await {
-            if current_epoch.is_some_and(|epoch| transition.epoch <= epoch) {
-                continue;
-            }
-            current_epoch = Some(transition.epoch);
+            match transition {
+                Message::Enter(transition) => {
+                    // If the epoch is already in the map, ignore.
+                    if engines.contains_key(&transition.epoch) {
+                        continue;
+                    }
 
-            // Enter the new epoch.
-            self.enter_epoch(
-                transition.epoch,
-                transition.poly,
-                transition.share,
-                transition.participants,
-                &mut pending_mux,
-                &mut recovered_mux,
-                &mut resolver_mux,
-            )
-            .await;
+                    // Enter the new epoch.
+                    let engine = self
+                        .enter_epoch(
+                            transition.epoch,
+                            transition.poly,
+                            transition.share,
+                            transition.participants,
+                            &mut pending_mux,
+                            &mut recovered_mux,
+                            &mut resolver_mux,
+                        )
+                        .await;
+                    engines.insert(transition.epoch, engine);
+
+                    info!(transition.epoch, "entered new epoch");
+                }
+                Message::Exit(epoch) => loop {
+                    // Loop over all epochs less then the requested epoch exit.
+                    let Some(min_epoch) = engines.keys().next().copied() else {
+                        break;
+                    };
+                    if min_epoch > epoch {
+                        break;
+                    }
+
+                    // Abort the engine for the minimum epoch.
+                    let engine = engines.remove(&min_epoch).unwrap();
+                    engine.abort();
+
+                    info!(epoch = min_epoch, "exited epoch");
+                },
+            }
         }
     }
 
@@ -203,12 +223,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-    ) {
-        // Stop the previous consensus engine, if there is one.
-        if let Some(engine) = self.engine.take() {
-            engine.abort();
-        }
-
+    ) -> Handle<()> {
         // Start the new engine
         let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants.into(), share);
         let engine = threshold_simplex::Engine::new(
@@ -244,9 +259,6 @@ where
         let recovered_sc = recovered_mux.register(epoch as u32).await.unwrap();
         let resolver_sc = resolver_mux.register(epoch as u32).await.unwrap();
 
-        let engine_handle = engine.start(pending_sc, recovered_sc, resolver_sc);
-        self.engine = Some(engine_handle);
-
-        info!(epoch, "entered new epoch");
+        engine.start(pending_sc, recovered_sc, resolver_sc)
     }
 }

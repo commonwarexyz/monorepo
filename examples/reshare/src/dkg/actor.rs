@@ -1,7 +1,7 @@
 use super::{Mailbox, Message};
 use crate::{
     dkg::{manager::RoundResult, DealOutcome, DkgManager},
-    orchestrator::EpochTransition,
+    orchestrator::{self, EpochTransition},
     utils::{is_last_block_in_epoch, BLOCKS_PER_EPOCH},
 };
 use commonware_codec::{varint::UInt, EncodeSize, RangeCfg, Read, ReadExt, Write};
@@ -129,7 +129,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
+        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         dkg_chan: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -158,7 +158,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        mut orchestrator: impl Reporter<Activity = EpochTransition<V, C::PublicKey>>,
+        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -198,7 +198,9 @@ where
             share: current_share.clone(),
             participants: active_participants.clone(),
         };
-        orchestrator.report(transition).await;
+        orchestrator
+            .report(orchestrator::Message::Enter(transition))
+            .await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -234,6 +236,13 @@ where
                 Message::Finalized { block, response } => {
                     let epoch = block.height / BLOCKS_PER_EPOCH;
                     let relative_height = block.height % BLOCKS_PER_EPOCH;
+
+                    // Inform the orchestrator of the epoch exit after first finalization
+                    if relative_height == 1 && epoch > 0 {
+                        orchestrator
+                            .report(orchestrator::Message::Exit(epoch - 1))
+                            .await;
+                    }
 
                     // While not done in the example, an implementor could choose to mark a deal outcome as
                     // "sent" as to not re-include it in future blocks in the event of a dealer node's
@@ -345,7 +354,9 @@ where
                             share: next_share.clone(),
                             participants: next_participants.clone(),
                         };
-                        orchestrator.report(transition).await;
+                        orchestrator
+                            .report(orchestrator::Message::Enter(transition))
+                            .await;
 
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
