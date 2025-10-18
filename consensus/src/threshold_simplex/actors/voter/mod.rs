@@ -54,7 +54,7 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
-            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
+            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture, Fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -63,7 +63,6 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
@@ -79,8 +78,6 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
-    type Fixture<S> = (Vec<EdPrivateKey>, Vec<EdPublicKey>, Vec<S>);
 
     fn build_notarization<S: Scheme>(
         schemes: &[S],

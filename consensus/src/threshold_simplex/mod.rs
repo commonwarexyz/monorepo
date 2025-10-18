@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     use crate::{
         threshold_simplex::{
-            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
+            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture, Fixture},
             signing_scheme::seed_namespace,
         },
         types::Round,
@@ -269,12 +269,6 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
-    type Fixture<S> = (
-        Vec<PrivateKey>,
-        Vec<<PrivateKey as commonware_cryptography::Signer>::PublicKey>,
-        Vec<S>,
-    );
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: PublicKey>(
