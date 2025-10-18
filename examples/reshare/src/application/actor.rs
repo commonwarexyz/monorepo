@@ -185,7 +185,7 @@ where
                                     .unwrap();
 
                             // You can only re-propose the same block if it's the last height in the epoch.
-                            if block.parent == block.commitment() {
+                            if parent.digest() == block.commitment() {
                                 if block.height == get_last_height(round.epoch()) {
                                     marshal.verified(round, block).await;
                                     let _ = response.send(true);
