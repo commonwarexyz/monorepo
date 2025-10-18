@@ -4,12 +4,13 @@
 use crate::{
     bls12381::{
         dkg::{
-            ops::{recover_public_with_weights, verify_commitment, verify_share},
+            arbiter,
+            ops::{self, verify_commitment, verify_share},
             Error,
         },
         primitives::{
-            group::{self, Element, Share},
-            poly::{self, Eval},
+            group::{self, Element, Scalar, Share},
+            poly::{self, Eval, Weight},
             variant::Variant,
         },
     },
@@ -28,6 +29,48 @@ pub struct Output<V: Variant> {
     /// the group polynomial. Any `2f + 1` players can combine their
     /// shares to recover the shared secret.
     pub share: Share,
+}
+
+/// Collector of inputs for [`Player::finalize`]
+#[derive(Clone)]
+pub struct FinalizeInput<V: Variant> {
+    // The commitments for each dealer
+    pub commitments: BTreeMap<u32, poly::Public<V>>,
+    /// The player's revealed share for each dealer
+    pub reveals: BTreeMap<u32, Share>,
+    /// Optional: The group polynomial output by the DKG/Resharing procedure
+    pub group_poly: Option<poly::Public<V>>,
+    /// Optional: Barycentric Weights for Lagrange interpolation
+    pub weights: Option<BTreeMap<u32, Weight>>,
+}
+
+impl<V: Variant> FinalizeInput<V> {
+    pub fn new(commitments: BTreeMap<u32, poly::Public<V>>, reveals: BTreeMap<u32, Share>) -> Self {
+        Self {
+            commitments,
+            reveals,
+            group_poly: None,
+            weights: None,
+        }
+    }
+    pub fn from_arbiter_output(value: arbiter::Output<V>, player_idx: u32) -> Self {
+        let reveals = value
+            .reveals
+            .into_iter()
+            .filter_map(|(k, vec)| {
+                // Find the first Share whose index matches `idx`
+                vec.into_iter()
+                    .find(|share| share.index == player_idx)
+                    .map(|share| (k, share))
+            })
+            .collect();
+        Self {
+            commitments: value.commitments,
+            reveals,
+            group_poly: Some(value.public),
+            weights: value.weights,
+        }
+    }
 }
 
 /// Track commitments and dealings distributed by dealers.
@@ -113,20 +156,46 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
 
     /// If we are tracking shares for all provided `commitments`, recover
     /// the new group public polynomial and our share.
-    pub fn finalize(
-        mut self,
-        commitments: BTreeMap<u32, poly::Public<V>>,
-        mut reveals: BTreeMap<u32, Share>,
-    ) -> Result<Output<V>, Error> {
+    pub fn finalize(mut self, input: FinalizeInput<V>) -> Result<Output<V>, Error> {
+        let commitments = input.commitments;
+        let reveals = input.reveals;
+
         // Ensure commitments equals required commitment count
         let dealer_threshold = self.dealer_threshold as usize;
         if commitments.len() != dealer_threshold {
             return Err(Error::InvalidCommitments);
         }
+        // Remove all dealings not in commitments
+        self.dealings
+            .retain(|dealer, _| commitments.contains_key(dealer));
 
-        // Remove unnecessary dealings
-        self.dealings.retain(|idx, _| commitments.contains_key(idx));
+        self.verify_commitments_and_reveals(reveals, commitments)?;
 
+        if self.dealings.len() != dealer_threshold {
+            return Err(Error::MissingShare);
+        }
+
+        // Construct secret
+        let (public, secret) = match self.previous.take() {
+            None => self.compute_share(input.group_poly),
+            Some(previous) => self.recompute_share(previous, input.group_poly, input.weights)?,
+        };
+
+        // Return the public polynomial and share
+        Ok(Output {
+            public,
+            share: Share {
+                index: self.me,
+                private: secret,
+            },
+        })
+    }
+
+    fn verify_commitments_and_reveals(
+        &mut self,
+        mut reveals: BTreeMap<u32, Share>,
+        commitments: BTreeMap<u32, poly::Public<V>>,
+    ) -> Result<(), Error> {
         // Iterate over selected commitments and confirm they match what we've acknowledged
         // or that we have received a reveal.
         for (idx, commitment) in commitments {
@@ -171,67 +240,75 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                 }
             }
         }
-        if self.dealings.len() != dealer_threshold {
-            return Err(Error::MissingShare);
-        }
+        Ok(())
+    }
 
-        // Construct secret
-        let mut public = poly::Public::<V>::zero();
+    fn compute_share(
+        &self,
+        group_poly: Option<poly::Public<V>>,
+    ) -> (poly::Poly<<V as Variant>::Public>, Scalar) {
+        // Add all valid commitments/dealings
         let mut secret = group::Private::zero();
-        match self.previous {
-            None => {
-                // Add all valid commitments/dealings
-                for (commitment, private) in self.dealings.values() {
-                    public.add(commitment);
-                    secret.add(private.as_ref());
-                }
+        let compute_public = group_poly.is_none();
+        let mut public_sum = group_poly.unwrap_or_else(poly::Public::<V>::zero);
+        for (commitment, private) in self.dealings.values() {
+            if compute_public {
+                public_sum.add(commitment);
             }
-            Some(previous) => {
-                // Construct commitments and shares
-                let mut indices = Vec::with_capacity(self.dealings.len());
-                let mut commitments = BTreeMap::new();
-                let mut dealings = Vec::with_capacity(self.dealings.len());
-                for (dealer, (commitment, share)) in self.dealings.into_iter() {
-                    indices.push(dealer);
-                    commitments.insert(dealer, commitment);
-                    dealings.push(Eval {
-                        index: dealer,
-                        value: share.private,
-                    });
-                }
+            secret.add(private.as_ref());
+        }
+        (public_sum, secret)
+    }
 
-                // Compute weights
-                let weights = poly::compute_weights(indices)
-                    .map_err(|_| Error::PublicKeyInterpolationFailed)?;
-
-                // Recover public via interpolation
-                //
-                // While it is tempting to remove this work (given we only need the secret
-                // to generate a threshold signature), this polynomial is required to verify
-                // dealings of future resharings.
-                public = recover_public_with_weights::<V>(
-                    &previous,
-                    &commitments,
-                    &weights,
-                    self.player_threshold,
-                    self.concurrency,
-                )?;
-
-                // Recover share via interpolation
-                secret = match poly::Private::recover_with_weights(&weights, &dealings) {
-                    Ok(share) => share,
-                    Err(_) => return Err(Error::ShareInterpolationFailed),
-                };
-            }
+    fn recompute_share(
+        &mut self,
+        previous: poly::Public<V>,
+        group_poly: Option<poly::Public<V>>,
+        weights: Option<BTreeMap<u32, Weight>>,
+    ) -> Result<(poly::Poly<<V as Variant>::Public>, Scalar), Error> {
+        // Construct commitments and shares
+        let mut indices = Vec::with_capacity(self.dealings.len());
+        let mut commitments = BTreeMap::new();
+        let mut dealings = Vec::with_capacity(self.dealings.len());
+        while let Some((dealer, (commitment, share))) = self.dealings.pop_first() {
+            indices.push(dealer);
+            commitments.insert(dealer, commitment);
+            dealings.push(Eval {
+                index: dealer,
+                value: share.private,
+            });
         }
 
-        // Return the public polynomial and share
-        Ok(Output {
-            public,
-            share: Share {
-                index: self.me,
-                private: secret,
-            },
-        })
+        // Compute weights
+        let weights = match weights {
+            Some(w) => w,
+            None => {
+                let indices = commitments.keys().copied().collect::<Vec<_>>();
+                poly::compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?
+            }
+        };
+
+        // Recover public via interpolation
+        //
+        // While it is tempting to remove this work (given we only need the secret
+        // to generate a threshold signature), this polynomial is required to verify
+        // dealings of future resharings.
+        let public = match group_poly {
+            Some(p) => p,
+            None => ops::recover_public_with_weights::<V>(
+                &previous,
+                &commitments,
+                &weights,
+                self.player_threshold,
+                self.concurrency,
+            )?,
+        };
+
+        // Recover share via interpolation
+        let secret = match poly::Private::recover_with_weights(&weights, &dealings) {
+            Ok(share) => share,
+            Err(_) => return Err(Error::ShareInterpolationFailed),
+        };
+        Ok((public, secret))
     }
 }
