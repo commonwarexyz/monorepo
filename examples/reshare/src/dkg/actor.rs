@@ -439,7 +439,7 @@ where
     }
 
     fn choose_from_all(
-        participants: &[C::PublicKey],
+        participants: &Set<C::PublicKey>,
         num_participants: usize,
         seed: u64,
     ) -> Vec<C::PublicKey> {
@@ -453,16 +453,12 @@ where
     fn collect_all(
         active_participants: &[C::PublicKey],
         inactive_participants: &[C::PublicKey],
-    ) -> Vec<C::PublicKey> {
-        Set::from_iter(
-            active_participants
-                .iter()
-                .chain(inactive_participants.iter())
-                .cloned(),
-        )
-        .iter()
-        .cloned()
-        .collect()
+    ) -> Set<C::PublicKey> {
+        active_participants
+            .iter()
+            .chain(inactive_participants.iter())
+            .cloned()
+            .collect::<Set<_>>()
     }
 }
 
