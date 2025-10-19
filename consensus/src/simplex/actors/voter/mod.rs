@@ -91,7 +91,7 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
             .collect();
         let certificate = Notarization::from_notarizes(&schemes[0], &votes)
             .expect("notarization requires a quorum of votes");
@@ -110,7 +110,7 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()))
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
             .collect();
         let certificate = Finalization::from_finalizes(&schemes[0], &votes)
             .expect("finalization requires a quorum of votes");

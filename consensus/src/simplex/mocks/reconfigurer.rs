@@ -67,7 +67,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let n = Notarize::sign(&self.scheme, &self.namespace, proposal);
+                    let n = Notarize::sign(&self.scheme, &self.namespace, proposal).unwrap();
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -79,7 +79,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let f = Finalize::sign(&self.scheme, &self.namespace, proposal);
+                    let f = Finalize::sign(&self.scheme, &self.namespace, proposal).unwrap();
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -89,7 +89,8 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     let new_epoch: Epoch = old_round.epoch().saturating_add(1);
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round);
+                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
+                        .unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

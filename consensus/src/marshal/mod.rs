@@ -234,11 +234,11 @@ mod tests {
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
         // Generate proposal signature
-        let finalizes = schemes
+        let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
-            .collect::<Vec<_>>();
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .collect();
 
         // Generate certificate signatures
         Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
@@ -246,11 +246,11 @@ mod tests {
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
         // Generate proposal signature
-        let notarizes = schemes
+        let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
-            .collect::<Vec<_>>();
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .collect();
 
         // Generate certificate signatures
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()

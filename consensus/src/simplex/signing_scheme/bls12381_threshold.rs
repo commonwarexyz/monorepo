@@ -290,14 +290,12 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         }
     }
 
-    fn can_sign(&self) -> bool {
-        self.share().is_some()
-    }
-
-    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self> {
-        let share = self
-            .share()
-            .expect("can only be called after checking can_sign");
+    fn sign_vote<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+    ) -> Option<Vote<Self>> {
+        let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
         let vote_signature =
@@ -314,10 +312,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             seed_signature,
         };
 
-        Vote {
+        Some(Vote {
             signer: share.index,
             signature,
-        }
+        })
     }
 
     fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
@@ -638,15 +636,16 @@ mod tests {
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
-        assert!(scheme.can_sign());
 
         let proposal = sample_proposal(0, 2, 1);
-        let notarize_vote = scheme.sign_vote(
-            NAMESPACE,
-            VoteContext::Notarize {
-                proposal: &proposal,
-            },
-        );
+        let notarize_vote = scheme
+            .sign_vote(
+                NAMESPACE,
+                VoteContext::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
         assert!(scheme.verify_vote(
             NAMESPACE,
             VoteContext::Notarize {
@@ -655,12 +654,14 @@ mod tests {
             &notarize_vote
         ));
 
-        let nullify_vote = scheme.sign_vote::<Sha256Digest>(
-            NAMESPACE,
-            VoteContext::Nullify {
-                round: proposal.round,
-            },
-        );
+        let nullify_vote = scheme
+            .sign_vote::<Sha256Digest>(
+                NAMESPACE,
+                VoteContext::Nullify {
+                    round: proposal.round,
+                },
+            )
+            .unwrap();
         assert!(scheme.verify_vote::<Sha256Digest>(
             NAMESPACE,
             VoteContext::Nullify {
@@ -669,12 +670,14 @@ mod tests {
             &nullify_vote
         ));
 
-        let finalize_vote = scheme.sign_vote(
-            NAMESPACE,
-            VoteContext::Finalize {
-                proposal: &proposal,
-            },
-        );
+        let finalize_vote = scheme
+            .sign_vote(
+                NAMESPACE,
+                VoteContext::Finalize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
         assert!(scheme.verify_vote(
             NAMESPACE,
             VoteContext::Finalize {
@@ -693,41 +696,38 @@ mod tests {
     fn verifier_cannot_sign<V: Variant>() {
         let (_, participants, polynomial) = setup_signers::<V>(4, 11);
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
-        assert!(!verifier.can_sign());
 
         let proposal = sample_proposal(0, 3, 2);
-        verifier.sign_vote(
-            NAMESPACE,
-            VoteContext::Notarize {
-                proposal: &proposal,
-            },
+        assert!(
+            verifier
+                .sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+                .is_none(),
+            "verifier should not produce signatures"
         );
     }
 
     #[test]
-    #[should_panic(expected = "can only be called after checking can_sign")]
-    fn test_verifier_cannot_sign_min_pk() {
+    fn test_verifier_cannot_sign() {
         verifier_cannot_sign::<MinPk>();
-    }
-
-    #[test]
-    #[should_panic(expected = "can only be called after checking can_sign")]
-    fn test_verifier_cannot_sign_min_sig() {
         verifier_cannot_sign::<MinSig>();
     }
 
     fn verifier_accepts_votes<V: Variant>() {
         let (schemes, participants, polynomial) = setup_signers::<V>(4, 11);
-        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
-        assert!(!verifier.can_sign());
-
         let proposal = sample_proposal(0, 3, 2);
-        let vote = schemes[1].sign_vote(
-            NAMESPACE,
-            VoteContext::Notarize {
-                proposal: &proposal,
-            },
-        );
+        let vote = schemes[1]
+            .sign_vote(
+                NAMESPACE,
+                VoteContext::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
         assert!(verifier.verify_vote(
             NAMESPACE,
@@ -753,12 +753,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -801,12 +803,14 @@ mod tests {
             .iter()
             .take(quorum - 1)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -828,12 +832,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Finalize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -867,12 +873,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -919,12 +927,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -953,12 +963,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Finalize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -990,12 +1002,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Finalize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -1032,7 +1046,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum(schemes.len() as u32) as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
@@ -1040,7 +1054,7 @@ mod tests {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum(schemes.len() as u32) as usize)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         let finalization = Finalization::from_finalizes(&schemes[0], &finalizes).unwrap();
@@ -1058,13 +1072,45 @@ mod tests {
     fn scheme_clone_and_into_verifier<V: Variant>() {
         let (schemes, participants, polynomial) = setup_signers::<V>(3, 31);
         let signer = schemes[0].clone();
-        assert!(signer.can_sign());
+        let proposal = sample_proposal(0, 21, 9);
+
+        assert!(
+            signer
+                .sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+                .is_some(),
+            "signer should produce votes"
+        );
 
         let verifier = signer.clone().into_verifier();
-        assert!(!verifier.can_sign());
+        assert!(
+            verifier
+                .sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+                .is_none(),
+            "verifier should not produce votes"
+        );
 
-        let pure_verifier = Scheme::<V>::verifier(&participants, &polynomial);
-        assert!(!pure_verifier.can_sign());
+        let verifier = Scheme::<V>::verifier(&participants, &polynomial);
+        assert!(
+            verifier
+                .sign_vote(
+                    NAMESPACE,
+                    VoteContext::Notarize {
+                        proposal: &proposal,
+                    },
+                )
+                .is_none(),
+            "verifier should not produce votes"
+        );
     }
 
     #[test]
@@ -1082,12 +1128,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Finalize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -1096,7 +1144,17 @@ mod tests {
             .expect("assemble certificate");
 
         let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
-        assert!(!certificate_verifier.can_sign());
+        assert!(
+            certificate_verifier
+                .sign_vote(
+                    NAMESPACE,
+                    VoteContext::Finalize {
+                        proposal: &proposal,
+                    },
+                )
+                .is_none(),
+            "certificate verifier should not produce votes"
+        );
         assert!(certificate_verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1117,12 +1175,14 @@ mod tests {
         let (schemes, _, polynomial) = setup_signers::<V>(4, 37);
         let certificate_verifier = Scheme::<V>::certificate_verifier(*polynomial.constant());
         let proposal = sample_proposal(0, 15, 8);
-        let vote = schemes[1].sign_vote(
-            NAMESPACE,
-            VoteContext::Finalize {
-                proposal: &proposal,
-            },
-        );
+        let vote = schemes[1]
+            .sign_vote(
+                NAMESPACE,
+                VoteContext::Finalize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
 
         certificate_verifier.verify_vote(
             NAMESPACE,
@@ -1154,12 +1214,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -1186,12 +1248,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote::<Sha256Digest>(
-                    NAMESPACE,
-                    VoteContext::Nullify {
-                        round: proposal.round,
-                    },
-                )
+                scheme
+                    .sign_vote::<Sha256Digest>(
+                        NAMESPACE,
+                        VoteContext::Nullify {
+                            round: proposal.round,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 
@@ -1216,12 +1280,14 @@ mod tests {
         let share = scheme.share().expect("has share");
 
         let proposal = sample_proposal(0, 23, 12);
-        let vote = scheme.sign_vote(
-            NAMESPACE,
-            VoteContext::Notarize {
-                proposal: &proposal,
-            },
-        );
+        let vote = scheme
+            .sign_vote(
+                NAMESPACE,
+                VoteContext::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
 
         let notarize_namespace = notarize_namespace(NAMESPACE);
         let notarize_message = proposal.encode();
@@ -1258,12 +1324,14 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|scheme| {
-                scheme.sign_vote::<Sha256Digest>(
-                    NAMESPACE,
-                    VoteContext::Nullify {
-                        round: proposal.round,
-                    },
-                )
+                scheme
+                    .sign_vote::<Sha256Digest>(
+                        NAMESPACE,
+                        VoteContext::Nullify {
+                            round: proposal.round,
+                        },
+                    )
+                    .unwrap()
             })
             .collect();
 

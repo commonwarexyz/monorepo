@@ -39,11 +39,13 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// The returned instance should return `false` from `can_sign()`.
     fn into_verifier(self) -> Self;
 
-    /// Returns `true` if this instance holds the secrets required to author votes.
-    fn can_sign(&self) -> bool;
-
     /// Signs a vote for the given context using the supplied namespace for domain separation.
-    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self>;
+    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
+    fn sign_vote<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+    ) -> Option<Vote<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(

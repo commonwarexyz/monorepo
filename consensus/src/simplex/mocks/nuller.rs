@@ -57,13 +57,15 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
                 Voter::Notarize(notarize) => {
                     // Nullify
                     let n =
-                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round());
+                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
+                            .unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
+                    let f =
+                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal).unwrap();
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

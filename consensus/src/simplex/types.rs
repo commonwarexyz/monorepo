@@ -887,15 +887,15 @@ impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
-    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
+    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
         let vote = scheme.sign_vote(
             namespace,
             VoteContext::Notarize {
                 proposal: &proposal,
             },
-        );
+        )?;
 
-        Self { proposal, vote }
+        Some(Self { proposal, vote })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
@@ -1101,10 +1101,10 @@ impl<S: Scheme> Hash for Nullify<S> {
 
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
-    pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Self {
-        let vote = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round });
+    pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Option<Self> {
+        let vote = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round })?;
 
-        Self { round, vote }
+        Some(Self { round, vote })
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
@@ -1308,15 +1308,15 @@ impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Signs a finalize vote for the provided proposal.
-    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
+    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
         let vote = scheme.sign_vote(
             namespace,
             VoteContext::Finalize {
                 proposal: &proposal,
             },
-        );
+        )?;
 
-        Self { proposal, vote }
+        Some(Self { proposal, vote })
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
@@ -2366,7 +2366,7 @@ mod tests {
     fn notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
-        let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal);
+        let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
 
         let encoded = notarize.encode();
         let decoded = Notarize::decode(encoded).unwrap();
@@ -2388,7 +2388,7 @@ mod tests {
         let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarizes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
         let encoded = notarization.encode();
@@ -2409,7 +2409,7 @@ mod tests {
 
     fn nullify_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
-        let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round);
+        let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
@@ -2429,7 +2429,7 @@ mod tests {
         let round = Round::new(333, 10);
         let nullifies: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round))
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&schemes[0], &nullifies).unwrap();
         let encoded = nullification.encode();
@@ -2451,7 +2451,7 @@ mod tests {
     fn finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
-        let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal);
+        let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
@@ -2472,7 +2472,7 @@ mod tests {
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let finalizes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
         let finalization = Finalization::from_finalizes(&schemes[0], &finalizes).unwrap();
         let encoded = finalization.encode();
@@ -2504,13 +2504,13 @@ mod tests {
         let proposal = Proposal::new(round, 5, sample_digest(1));
         let notarizes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
 
         let nullifies: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round))
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&schemes[0], &nullifies).unwrap();
 
@@ -2544,13 +2544,13 @@ mod tests {
 
         let notarizes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
 
         let nullifies: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round))
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&schemes[0], &nullifies).unwrap();
 
@@ -2585,8 +2585,8 @@ mod tests {
     fn conflicting_notarize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
-        let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1);
-        let notarize2 = Notarize::sign(&schemes[0], NAMESPACE, proposal2);
+        let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
+        let notarize2 = Notarize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
 
         let encoded = conflicting.encode();
@@ -2608,8 +2608,8 @@ mod tests {
     fn conflicting_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
-        let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1);
-        let finalize2 = Finalize::sign(&schemes[0], NAMESPACE, proposal2);
+        let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
+        let finalize2 = Finalize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
 
         let encoded = conflicting.encode();
@@ -2631,8 +2631,8 @@ mod tests {
     fn nullify_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
-        let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round);
-        let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal);
+        let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
+        let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
         let encoded = conflict.encode();
@@ -2654,7 +2654,7 @@ mod tests {
     fn notarize_verify_wrong_namespace<S: Scheme>(scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(1));
-        let notarize = Notarize::sign(scheme, NAMESPACE, proposal);
+        let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
         assert!(!notarize.verify(scheme, b"wrong_namespace"));
@@ -2672,7 +2672,7 @@ mod tests {
     fn notarize_verify_wrong_scheme<S: Scheme>(scheme: &S, wrong_scheme: &S) {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(2));
-        let notarize = Notarize::sign(scheme, NAMESPACE, proposal);
+        let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
         assert!(!notarize.verify(wrong_scheme, NAMESPACE));
@@ -2696,7 +2696,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         let notarization =
@@ -2726,7 +2726,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         let notarization =
@@ -2755,7 +2755,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take((quorum - 1) as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         assert!(
@@ -2778,8 +2778,8 @@ mod tests {
         let proposal1 = Proposal::new(round, 5, sample_digest(6));
         let proposal2 = Proposal::new(round, 5, sample_digest(7));
 
-        let notarize1 = Notarize::sign(scheme, NAMESPACE, proposal1);
-        let notarize2 = Notarize::sign(scheme, NAMESPACE, proposal2);
+        let notarize1 = Notarize::sign(scheme, NAMESPACE, proposal1).unwrap();
+        let notarize2 = Notarize::sign(scheme, NAMESPACE, proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
         assert!(conflict.verify(scheme, NAMESPACE));
@@ -2802,8 +2802,8 @@ mod tests {
         let round = Round::new(0, 10);
         let proposal = Proposal::new(round, 5, sample_digest(8));
 
-        let nullify = Nullify::sign::<Sha256>(scheme, NAMESPACE, round);
-        let finalize = Finalize::sign(scheme, NAMESPACE, proposal);
+        let nullify = Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap();
+        let finalize = Finalize::sign(scheme, NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
         assert!(conflict.verify(scheme, NAMESPACE));
@@ -2829,7 +2829,7 @@ mod tests {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
         let finalization =
@@ -2860,13 +2860,13 @@ mod tests {
         payload_val: u8,
     ) -> Notarize<S, Sha256> {
         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-        Notarize::sign(scheme, NAMESPACE, proposal)
+        Notarize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
     // Helper to create a Nullify message for any signing scheme
     #[allow(dead_code)]
     fn create_nullify<S: Scheme>(scheme: &S, round: Round) -> Nullify<S> {
-        Nullify::sign::<Sha256>(scheme, NAMESPACE, round)
+        Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap()
     }
 
     // Helper to create a Finalize message for any signing scheme
@@ -2878,7 +2878,7 @@ mod tests {
         payload_val: u8,
     ) -> Finalize<S, Sha256> {
         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-        Finalize::sign(scheme, NAMESPACE, proposal)
+        Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
     fn create_notarization<S: Scheme>(
@@ -2892,7 +2892,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
@@ -3238,10 +3238,10 @@ mod tests {
         let proposal_a = Proposal::new(round, 0, sample_digest(10));
         let proposal_b = Proposal::new(round, 0, sample_digest(20));
 
-        let notarize_a = Notarize::sign(&schemes[0], NAMESPACE, proposal_a.clone());
-        let notarize_b = Notarize::sign(&schemes[1], NAMESPACE, proposal_b.clone());
-        let finalize_a = Finalize::sign(&schemes[0], NAMESPACE, proposal_a.clone());
-        let finalize_b = Finalize::sign(&schemes[1], NAMESPACE, proposal_b.clone());
+        let notarize_a = Notarize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
+        let notarize_b = Notarize::sign(&schemes[1], NAMESPACE, proposal_b.clone()).unwrap();
+        let finalize_a = Finalize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
+        let finalize_b = Finalize::sign(&schemes[1], NAMESPACE, proposal_b.clone()).unwrap();
 
         verifier.add(Voter::Notarize(notarize_a.clone()), false);
         verifier.add(Voter::Notarize(notarize_b.clone()), false);

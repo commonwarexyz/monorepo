@@ -700,11 +700,6 @@ impl<
         round.advance_deadline = None;
         round.nullify_retry = None;
 
-        // Return early if we are not a participant
-        if !self.scheme.can_sign() {
-            return;
-        }
-
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
@@ -748,11 +743,13 @@ impl<
         }
 
         // Construct nullify
-        let nullify = Nullify::sign::<D>(
+        let Some(nullify) = Nullify::sign::<D>(
             &self.scheme,
             &self.namespace,
             Rnd::new(self.epoch, self.view),
-        );
+        ) else {
+            return;
+        };
 
         // Handle the nullify
         if !retry {
@@ -1235,10 +1232,6 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
-        if !self.scheme.can_sign() {
-            return None;
-        }
-
         // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
@@ -1254,11 +1247,7 @@ impl<
 
         // Construct notarize
         let proposal = round.proposal.as_ref().unwrap();
-        Some(Notarize::sign(
-            &self.scheme,
-            &self.namespace,
-            proposal.clone(),
-        ))
+        Notarize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
     async fn construct_notarization(
@@ -1286,10 +1275,6 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
-        if !self.scheme.can_sign() {
-            return None;
-        }
-
         // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
@@ -1310,11 +1295,7 @@ impl<
         let Some(proposal) = &round.proposal else {
             return None;
         };
-        Some(Finalize::sign(
-            &self.scheme,
-            &self.namespace,
-            proposal.clone(),
-        ))
+        Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
     async fn construct_finalization(

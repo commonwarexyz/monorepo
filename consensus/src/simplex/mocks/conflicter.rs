@@ -60,13 +60,15 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
-                    let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
+                    let n =
+                        Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal).unwrap();
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
                     let n =
-                        Notarize::<S, _>::sign(&self.scheme, &self.namespace, notarize.proposal);
+                        Notarize::<S, _>::sign(&self.scheme, &self.namespace, notarize.proposal)
+                            .unwrap();
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -75,13 +77,15 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.round(), finalize.proposal.parent, payload);
-                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
+                    let f =
+                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal).unwrap();
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize provided digest
                     let f =
-                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, finalize.proposal);
+                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, finalize.proposal)
+                            .unwrap();
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

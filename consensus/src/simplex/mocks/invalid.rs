@@ -65,11 +65,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
                         &self.scheme,
                         &self.namespace,
                         notarize.proposal.clone(),
-                    );
+                    )
+                    .unwrap();
 
                     // Manipulate signature
                     let invalid_signature =
                         Notarize::<S, _>::sign(&self.scheme, &[], notarize.proposal)
+                            .unwrap()
                             .vote
                             .signature;
 
@@ -85,11 +87,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
                         &self.scheme,
                         &self.namespace,
                         finalize.proposal.clone(),
-                    );
+                    )
+                    .unwrap();
 
                     // Manipulate signature
                     let invalid_signature =
                         Finalize::<S, _>::sign(&self.scheme, &[], finalize.proposal)
+                            .unwrap()
                             .vote
                             .signature;
 

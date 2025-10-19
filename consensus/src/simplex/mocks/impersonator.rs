@@ -61,7 +61,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E,
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
-                    let mut n = Notarize::sign(&self.scheme, &self.namespace, notarize.proposal);
+                    let mut n =
+                        Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
 
                     // Manipulate index
                     if n.vote.signer == 0 {
@@ -76,7 +77,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E,
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
-                    let mut f = Finalize::sign(&self.scheme, &self.namespace, finalize.proposal);
+                    let mut f =
+                        Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
 
                     // Manipulate signature
                     if f.vote.signer == 0 {

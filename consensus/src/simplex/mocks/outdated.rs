@@ -80,7 +80,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone());
+                    let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone())
+                        .unwrap();
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -94,7 +95,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone());
+                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone())
+                        .unwrap();
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
