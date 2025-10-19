@@ -17,8 +17,8 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::Private,
         ops::{
-            aggregate_public_keys, aggregate_signatures, aggregate_verify_multiple_public_keys,
-            compute_public, hash_message_namespace, sign_message, verify_message,
+            aggregate_signatures, aggregate_verify_multiple_public_keys, compute_public,
+            sign_message, verify_message,
         },
         variant::Variant,
     },
@@ -179,7 +179,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
     fn verify_votes<R, D, I>(
         &self,
-        rng: &mut R,
+        _: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
@@ -189,17 +189,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-        let message_hash =
-            hash_message_namespace::<V>(V::MESSAGE, namespace.as_ref(), message.as_ref());
-
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
-
         let mut publics = Vec::new();
-        let mut hms = Vec::new();
         let mut signatures = Vec::new();
-
         for vote in votes.into_iter() {
             let Some(public_key) = self.participant(vote.signer) else {
                 invalid.insert(vote.signer);
@@ -207,13 +200,25 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             };
 
             publics.push(*public_key);
-            hms.push(message_hash);
             signatures.push(vote.signature);
-
             candidates.push(vote);
         }
 
-        if !candidates.is_empty() && V::batch_verify(rng, &publics, &hms, &signatures).is_err() {
+        // If there are no candidates to verify, return before doing any work.
+        if candidates.is_empty() {
+            return VoteVerification::new(candidates, invalid.into_iter().collect());
+        }
+
+        // Verify the aggregate signature.
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        if aggregate_verify_multiple_public_keys::<V, _>(
+            publics.iter(),
+            Some(namespace.as_ref()),
+            message.as_ref(),
+            &aggregate_signatures::<V, _>(signatures.iter()),
+        )
+        .is_err()
+        {
             for (vote, public_key) in candidates.iter().zip(publics.iter()) {
                 if verify_message::<V>(
                     public_key,
@@ -228,11 +233,11 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             }
         }
 
+        // Collect the invalid signers.
         let verified = candidates
             .into_iter()
             .filter(|vote| !invalid.contains(&vote.signer))
             .collect();
-
         let invalid_signers: Vec<_> = invalid.into_iter().collect();
 
         VoteVerification::new(verified, invalid_signers)
@@ -270,10 +275,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
+        // Ensure signers are valid.
         if certificate.signers.len() < self.quorum as usize {
             return false;
         }
-
         if certificate
             .signers
             .iter()
@@ -282,8 +287,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             return false;
         }
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-
+        // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.len());
         for signer in &certificate.signers {
             let Some(public_key) = self.participant(*signer) else {
@@ -293,6 +297,8 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             publics.push(*public_key);
         }
 
+        // Verify the aggregate signature.
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
         aggregate_verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
@@ -300,48 +306,6 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             &certificate.signature,
         )
         .is_ok()
-    }
-
-    fn verify_certificates<'a, R, D, I>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        certificates: I,
-    ) -> bool
-    where
-        R: Rng + CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
-    {
-        let mut publics = Vec::new();
-        let mut hms = Vec::new();
-        let mut signatures = Vec::new();
-
-        for (context, certificate) in certificates {
-            if certificate.signers.len() < self.quorum as usize {
-                return false;
-            }
-
-            let (namespace, message) = vote_namespace_and_message(namespace, context);
-            let hm = hash_message_namespace::<V>(V::MESSAGE, namespace.as_ref(), message.as_ref());
-
-            let mut signer_publics = Vec::with_capacity(certificate.signers.len());
-            for signer in &certificate.signers {
-                let Some(public_key) = self.participant(*signer) else {
-                    return false;
-                };
-
-                signer_publics.push(*public_key);
-            }
-
-            let aggregated = aggregate_public_keys::<V, _>(signer_publics.iter());
-
-            publics.push(aggregated);
-            hms.push(hm);
-            signatures.push(certificate.signature);
-        }
-
-        V::batch_verify(rng, &publics, &hms, &signatures).is_ok()
     }
 
     fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
