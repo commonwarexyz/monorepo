@@ -517,14 +517,16 @@ impl<
         )
     }
 
-    fn new_round(&self, view: View) -> Round<E, C::PublicKey, S, D> {
-        Round::new(
-            &self.context,
-            self.participants.clone(),
-            self.signing.clone(),
-            self.recover_latency.clone(),
-            Rnd::new(self.epoch, view),
-        )
+    fn round_mut(&mut self, view: View) -> &mut Round<E, C::PublicKey, S, D> {
+        self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                &self.context,
+                self.participants.clone(),
+                self.signing.clone(),
+                self.recover_latency.clone(),
+                Rnd::new(self.epoch, view),
+            )
+        })
     }
 
     fn is_notarized(&self, view: View) -> Option<&D> {
@@ -779,22 +781,20 @@ impl<
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        // Check to see if nullify is for proposal in view
+        // Get view for nullify
         let view = nullify.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
 
         // Handle nullify
-        if self.journal.is_some() {
+        if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Nullify(nullify.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
+            journal
                 .append(view, msg)
                 .await
                 .expect("unable to append nullify");
         }
-        round.add_verified_nullify(nullify).await
+
+        // Create round (if it doesn't exist) and add verified nullify
+        self.round_mut(view).add_verified_nullify(nullify).await
     }
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
@@ -982,10 +982,11 @@ impl<
         }
 
         // Setup new view
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
-        round.leader_deadline = Some(self.context.current() + self.leader_timeout);
-        round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
+        let leader_deadline = self.context.current() + self.leader_timeout;
+        let advance_deadline = self.context.current() + self.notarization_timeout;
+        let round = self.round_mut(view);
+        round.leader_deadline = Some(leader_deadline);
+        round.advance_deadline = Some(advance_deadline);
         round.set_leader(seed);
         self.view = view;
 
@@ -1032,22 +1033,20 @@ impl<
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        // Check to see if notarize is for proposal in view
+        // Get view for notarize
         let view = notarize.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
 
         // Handle notarize
-        if self.journal.is_some() {
+        if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Notarize(notarize.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
+            journal
                 .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
-        round.add_verified_notarize(notarize).await;
+
+        // Create round (if it doesn't exist) and add verified notarize
+        self.round_mut(view).add_verified_notarize(notarize).await;
     }
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
@@ -1082,23 +1081,23 @@ impl<
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
-        // Create round (if it doesn't exist)
+        // Get view for notarization
         let view = notarization.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
         let seed = self
             .signing
             .seed(notarization.round(), &notarization.certificate);
-        if round.add_verified_notarization(notarization) && self.journal.is_some() {
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+
+        // Create round (if it doesn't exist) and add verified notarization
+        if self.round_mut(view).add_verified_notarization(notarization) {
+            if let Some(journal) = self.journal.as_mut() {
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Enter next view
@@ -1136,23 +1135,24 @@ impl<
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
-        // Create round (if it doesn't exist)
-        let view = nullification.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
-
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
         let seed = self
             .signing
             .seed(nullification.round, &nullification.certificate);
-        if round.add_verified_nullification(nullification) && self.journal.is_some() {
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+
+        // Create round (if it doesn't exist) and add verified nullification
+        let view = nullification.view();
+        if self
+            .round_mut(view)
+            .add_verified_nullification(nullification)
+        {
+            if let Some(journal) = self.journal.as_mut() {
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Enter next view
@@ -1162,20 +1162,18 @@ impl<
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
         // Get view for finalize
         let view = finalize.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
 
         // Handle finalize
-        if self.journal.is_some() {
+        if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Finalize(finalize.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
+            journal
                 .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
-        round.add_verified_finalize(finalize).await
+
+        // Create round (if it doesn't exist) and add verified finalize
+        self.round_mut(view).add_verified_finalize(finalize).await
     }
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
@@ -1210,23 +1208,21 @@ impl<
     }
 
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
-        // Create round (if it doesn't exist)
-        let view = finalization.view();
-        let round = self.new_round(view);
-        let round = self.views.entry(view).or_insert(round);
-
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
         let seed = self
             .signing
             .seed(finalization.round(), &finalization.certificate);
-        if round.add_verified_finalization(finalization) && self.journal.is_some() {
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+
+        // Create round (if it doesn't exist) and add verified finalization
+        let view = finalization.view();
+        if self.round_mut(view).add_verified_finalization(finalization) {
+            if let Some(journal) = self.journal.as_mut() {
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Track view finalized

@@ -456,7 +456,7 @@ impl<
                             finalized = new_finalized;
                             let leader_index = self.participants.index(&leader).unwrap();
                             work.entry(current)
-                                .or_insert(self.new_round(initialized))
+                                .or_insert_with(|| self.new_round(initialized))
                                 .set_leader(leader_index);
                             initialized = true;
 
@@ -504,7 +504,7 @@ impl<
 
                             // Add the message to the verifier
                             work.entry(view)
-                                .or_insert(self.new_round(initialized))
+                                .or_insert_with(|| self.new_round(initialized))
                                 .add_constructed(message)
                                 .await;
                             self.added.inc();
@@ -549,7 +549,7 @@ impl<
                     // Add the message to the verifier
                     let added = work
                         .entry(view)
-                        .or_insert(self.new_round(initialized))
+                        .or_insert_with(|| self.new_round(initialized))
                         .add(sender, message)
                         .await;
                     if added {
