@@ -175,11 +175,31 @@ async fn gen_random_kv<
     db.close().await.unwrap();
 }
 
-const VARIANTS: [&str; 4] = [
-    "any::unordered",
-    "any::ordered",
-    "current::unordered",
-    "current::ordered",
+/// ADB variants to benchmark.
+#[derive(Debug, Clone, Copy)]
+enum Variant {
+    AnyUnordered,
+    AnyOrdered,
+    CurrentUnordered,
+    CurrentOrdered,
+}
+
+impl Variant {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Variant::AnyUnordered => "any::unordered",
+            Variant::AnyOrdered => "any::ordered",
+            Variant::CurrentUnordered => "current::unordered",
+            Variant::CurrentOrdered => "current::ordered",
+        }
+    }
+}
+
+const VARIANTS: [Variant; 4] = [
+    Variant::AnyUnordered,
+    Variant::AnyOrdered,
+    Variant::CurrentUnordered,
+    Variant::CurrentOrdered,
 ];
 
 /// Benchmark the initialization of a large randomly generated any db.
@@ -191,23 +211,22 @@ fn bench_fixed_init(c: &mut Criterion) {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     match variant {
-                        "any::unordered" => {
+                        Variant::AnyUnordered => {
                             let db = get_unordered_any(ctx.clone()).await;
                             gen_random_kv(db, elements, operations).await;
                         }
-                        "any::ordered" => {
+                        Variant::AnyOrdered => {
                             let db = get_ordered_any(ctx.clone()).await;
                             gen_random_kv(db, elements, operations).await;
                         }
-                        "current::unordered" => {
+                        Variant::CurrentUnordered => {
                             let db = get_unordered_current(ctx.clone()).await;
                             gen_random_kv(db, elements, operations).await;
                         }
-                        "current::ordered" => {
+                        Variant::CurrentOrdered => {
                             let db = get_ordered_current(ctx.clone()).await;
                             gen_random_kv(db, elements, operations).await;
                         }
-                        _ => unreachable!(),
                     }
                 });
                 let runner = tokio::Runner::new(cfg.clone());
@@ -218,7 +237,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                         module_path!(),
                         elements,
                         operations,
-                        variant,
+                        variant.name(),
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
@@ -230,21 +249,21 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
-                                    "any::unordered" => {
+                                    Variant::AnyUnordered => {
                                         let db = UAnyDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    "any::ordered" => {
+                                    Variant::AnyOrdered => {
                                         let db = OAnyDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    "current::unordered" => {
+                                    Variant::CurrentUnordered => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
@@ -252,14 +271,13 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         db.close().await.unwrap();
                                     }
 
-                                    "current::ordered" => {
+                                    Variant::CurrentOrdered => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    _ => unreachable!(),
                                 }
                             }
                             start.elapsed()
@@ -274,27 +292,26 @@ fn bench_fixed_init(c: &mut Criterion) {
                     let current_cfg = current_cfg(pool);
                     // Clean up the database after the benchmark.
                     match variant {
-                        "any::unordered" => {
+                        Variant::AnyUnordered => {
                             let db = UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                             db.destroy().await.unwrap();
                         }
-                        "any::ordered" => {
+                        Variant::AnyOrdered => {
                             let db = OAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                             db.destroy().await.unwrap();
                         }
-                        "current::unordered" => {
+                        Variant::CurrentUnordered => {
                             let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                 .await
                                 .unwrap();
                             db.destroy().await.unwrap();
                         }
-                        "current::ordered" => {
+                        Variant::CurrentOrdered => {
                             let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                 .await
                                 .unwrap();
                             db.destroy().await.unwrap();
                         }
-                        _ => unreachable!(),
                     }
                 });
             }
