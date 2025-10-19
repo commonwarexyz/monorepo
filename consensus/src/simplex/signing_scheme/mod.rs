@@ -36,7 +36,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Converts the scheme into a pure verifier.
     ///
-    /// The returned instance should return `false` from `can_sign()`.
+    /// The returned instance should return `None` on `sign_vote` calls.
     fn into_verifier(self) -> Self;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
