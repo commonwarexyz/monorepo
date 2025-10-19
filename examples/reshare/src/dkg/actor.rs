@@ -2,10 +2,13 @@ use super::{Mailbox, Message};
 use crate::{
     dkg::{manager::RoundResult, DealOutcome, DkgManager},
     orchestrator::{self, EpochTransition},
-    utils::{is_last_block_in_epoch, BLOCKS_PER_EPOCH},
+    BLOCKS_PER_EPOCH,
 };
 use commonware_codec::{varint::UInt, EncodeSize, RangeCfg, Read, ReadExt, Write};
-use commonware_consensus::Reporter;
+use commonware_consensus::{
+    utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
+    Reporter,
+};
 use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, types::Ack},
@@ -234,11 +237,11 @@ where
                     let _ = response.send(outcome);
                 }
                 Message::Finalized { block, response } => {
-                    let epoch = block.height / BLOCKS_PER_EPOCH;
-                    let relative_height = block.height % BLOCKS_PER_EPOCH;
+                    let epoch = epoch(BLOCKS_PER_EPOCH, block.height);
+                    let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
                     // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 1 && epoch > 0 {
+                    if relative_height == 0 && epoch > 0 {
                         orchestrator
                             .report(orchestrator::Message::Exit(epoch - 1))
                             .await;
@@ -267,7 +270,7 @@ where
                     // and any share reveals in blocks. Players process these deal outcomes to gather
                     // all of the information needed to reconstruct their new shares and the new group
                     // polynomial.
-                    let epoch_transition = is_last_block_in_epoch(block.height);
+                    let epoch_transition = is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height);
                     match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
                         Ordering::Less => {
                             // Continuously distribute shares to any players who haven't acknowledged

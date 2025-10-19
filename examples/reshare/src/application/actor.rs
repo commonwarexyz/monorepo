@@ -1,9 +1,12 @@
 use crate::{
-    application::{types::genesis_block, Block, Mailbox, Message},
-    dkg,
-    utils::{get_last_height, height_in_epoch},
+    application::{types::genesis_block, Block, Mailbox, Message, Scheme},
+    dkg, BLOCKS_PER_EPOCH,
 };
-use commonware_consensus::{marshal, types::Round};
+use commonware_consensus::{
+    marshal,
+    types::Round,
+    utils::{epoch, last_block_in_epoch},
+};
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
 };
@@ -56,7 +59,7 @@ where
     /// Start the application.
     pub fn start(
         mut self,
-        marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(marshal, dkg).await)
@@ -65,7 +68,7 @@ where
     /// Application control loop
     async fn run(
         mut self,
-        mut marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        mut marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) {
         let genesis = genesis_block();
@@ -82,7 +85,7 @@ where
                     }
 
                     // Case: Non-genesis.
-                    let height = get_last_height(epoch - 1);
+                    let height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch - 1);
                     let Some(block) = marshal.get_block(height).await else {
                         // A new consensus engine will never be started without having the genesis block
                         // of the new epoch (the last block of the previous epoch) already stored.
@@ -117,7 +120,8 @@ where
                             let parent = parent_request.await.expect("parent request cancelled");
 
                             // Re-propose the parent block if it's already at the last height in the epoch.
-                            if parent.height == get_last_height(round.epoch()) {
+                            if parent.height == last_block_in_epoch(BLOCKS_PER_EPOCH, round.epoch())
+                            {
                                 let result = response.send(parent.digest());
                                 info!(
                                     ?round,
@@ -185,8 +189,10 @@ where
                                     .unwrap();
 
                             // You can only re-propose the same block if it's the last height in the epoch.
-                            if block.parent == block.commitment() {
-                                if block.height == get_last_height(round.epoch()) {
+                            if parent.commitment() == block.commitment() {
+                                if block.height
+                                    == last_block_in_epoch(BLOCKS_PER_EPOCH, round.epoch())
+                                {
                                     marshal.verified(round, block).await;
                                     let _ = response.send(true);
                                 } else {
@@ -198,7 +204,7 @@ where
                             // Verify the block
                             if block.height != parent.height + 1
                                 || block.parent != parent.digest()
-                                || !height_in_epoch(block.height, round.epoch())
+                                || epoch(BLOCKS_PER_EPOCH, block.height) != round.epoch()
                             {
                                 let _ = response.send(false);
                                 return;

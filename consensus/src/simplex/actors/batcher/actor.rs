@@ -1,18 +1,19 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    threshold_simplex::{
+    simplex::{
         actors::voter,
         interesting,
         metrics::Inbound,
+        signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, Participants, Voter,
         },
     },
     types::{Epoch, View},
-    Epochable, Reporter, ThresholdSupervisor, Viewable,
+    Epochable, Reporter, Viewable,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -20,92 +21,77 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
+use rand::{CryptoRng, Rng};
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
-    C: PublicKey,
-    B: Blocker<PublicKey = C>,
-    V: Variant,
+    P: PublicKey,
+    S: Scheme,
+    B: Blocker<PublicKey = P>,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<
-        Index = View,
-        Polynomial = Vec<V::Public>,
-        PublicKey = C,
-        Identity = V::Public,
-    >,
+    R: Reporter<Activity = Activity<S, D>>,
 > {
-    view: View,
+    participants: Participants<P>,
 
     blocker: B,
     reporter: R,
-    supervisor: S,
-    verifier: BatchVerifier<V, D>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
-    nullifies: Vec<Option<Nullify<V>>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    verifier: BatchVerifier<S, D>,
+    notarizes: Vec<Option<Notarize<S, D>>>,
+    nullifies: Vec<Option<Nullify<S>>>,
+    finalizes: Vec<Option<Finalize<S, D>>>,
 
     inbound_messages: Family<Inbound, Counter>,
-
-    _phantom: PhantomData<C>,
 }
 
 impl<
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
+        P: PublicKey,
+        S: Scheme,
+        B: Blocker<PublicKey = P>,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
-            Index = View,
-            Polynomial = Vec<V::Public>,
-            PublicKey = C,
-            Identity = V::Public,
-        >,
-    > Round<C, B, V, D, R, S>
+        R: Reporter<Activity = Activity<S, D>>,
+    > Round<P, S, B, D, R>
 {
     fn new(
+        participants: Participants<P>,
+        scheme: S,
         blocker: B,
         reporter: R,
-        supervisor: S,
         inbound_messages: Family<Inbound, Counter>,
-        view: View,
         batch: bool,
     ) -> Self {
         // Configure quorum params
-        let participants = supervisor.participants(view).unwrap().len();
         let quorum = if batch {
-            Some(quorum(participants as u32))
+            Some(participants.quorum())
         } else {
             None
         };
 
+        let notarizes = vec![None; participants.len()];
+        let nullifies = vec![None; participants.len()];
+        let finalizes = vec![None; participants.len()];
+
         // Initialize data structures
         Self {
-            view,
+            participants,
 
             blocker,
             reporter,
-            supervisor,
-            verifier: BatchVerifier::new(quorum),
+            verifier: BatchVerifier::new(scheme, quorum),
 
-            notarizes: vec![None; participants],
-            nullifies: vec![None; participants],
-            finalizes: vec![None; participants],
+            notarizes,
+            nullifies,
+            finalizes,
 
             inbound_messages,
-
-            _phantom: PhantomData,
         }
     }
 
-    async fn add(&mut self, sender: C, message: Voter<V, D>) -> bool {
+    async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
         // Check if sender is a participant
-        let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
+        let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
             return false;
@@ -247,7 +233,7 @@ impl<
         }
     }
 
-    async fn add_constructed(&mut self, message: Voter<V, D>) {
+    async fn add_constructed(&mut self, message: Voter<S, D>) {
         match &message {
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer() as usize;
@@ -285,89 +271,84 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_notarizes(namespace, polynomial)
+    fn verify_notarizes<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_notarizes(rng, namespace)
     }
 
     fn ready_nullifies(&self) -> bool {
         self.verifier.ready_nullifies()
     }
 
-    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_nullifies(namespace, polynomial)
+    fn verify_nullifies<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_nullifies(rng, namespace)
     }
 
     fn ready_finalizes(&self) -> bool {
         self.verifier.ready_finalizes()
     }
 
-    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_finalizes(namespace, polynomial)
+    fn verify_finalizes<E: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        namespace: &[u8],
+    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+        self.verifier.verify_finalizes(rng, namespace)
     }
 
-    fn is_active(&self, leader: &C) -> Option<bool> {
-        let leader_index = self.supervisor.is_participant(self.view, leader)?;
-        Some(
-            self.notarizes[leader_index as usize].is_some()
-                || self.nullifies[leader_index as usize].is_some(),
-        )
+    fn is_active(&self, leader: &P) -> Option<bool> {
+        let leader_index = self.participants.index(leader)? as usize;
+        Some(self.notarizes[leader_index].is_some() || self.nullifies[leader_index].is_some())
     }
 }
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock,
-    C: PublicKey,
-    B: Blocker<PublicKey = C>,
-    V: Variant,
+    E: Spawner + Metrics + Clock + Rng + CryptoRng,
+    P: PublicKey,
+    S: Scheme,
+    B: Blocker<PublicKey = P>,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C,
-        Identity = V::Public,
-        Polynomial = Vec<V::Public>,
-    >,
+    R: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
+
+    participants: Participants<P>,
+    scheme: S,
+
     blocker: B,
     reporter: R,
-    supervisor: S,
 
     activity_timeout: View,
     skip_timeout: View,
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    mailbox_receiver: mpsc::Receiver<Message<C, V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<P, S, D>>,
 
     added: Counter,
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
-
-    _phantom: PhantomData<C>,
 }
 
 impl<
-        E: Spawner + Metrics + Clock,
-        C: PublicKey,
-        B: Blocker<PublicKey = C>,
-        V: Variant,
+        E: Spawner + Metrics + Clock + Rng + CryptoRng,
+        P: PublicKey,
+        S: Scheme,
+        B: Blocker<PublicKey = P>,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
-            Index = View,
-            PublicKey = C,
-            Identity = V::Public,
-            Polynomial = Vec<V::Public>,
-        >,
-    > Actor<E, C, B, V, D, R, S>
+        R: Reporter<Activity = Activity<S, D>>,
+    > Actor<E, P, S, B, D, R>
 {
-    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C, V, D>) {
+    pub fn new(context: E, cfg: Config<P, S, B, R>) -> (Self, Mailbox<P, S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -401,9 +382,12 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
+
+                participants: cfg.participants.into(),
+                scheme: cfg.scheme,
+
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
-                supervisor: cfg.supervisor,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -417,33 +401,44 @@ impl<
                 inbound_messages,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock),
-                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
     }
 
+    fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
+        Round::new(
+            self.participants.clone(),
+            self.scheme.clone(),
+            self.blocker.clone(),
+            self.reporter.clone(),
+            self.inbound_messages.clone(),
+            batch,
+        )
+    }
+
     pub fn start(
         mut self,
-        consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C>,
+        consensus: voter::Mailbox<S, D>,
+        receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(consensus, receiver).await)
     }
 
     pub async fn run(
         mut self,
-        mut consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C>,
+        mut consensus: voter::Mailbox<S, D>,
+        receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
-        let mut receiver: WrappedReceiver<_, Voter<V, D>> = WrappedReceiver::new((), receiver);
+        let mut receiver: WrappedReceiver<_, Voter<S, D>> =
+            WrappedReceiver::new(self.scheme.certificate_codec_config(), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
         #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
+        let mut work: BTreeMap<u64, Round<P, S, B, D, R>> = BTreeMap::new();
         let mut initialized = false;
 
         loop {
@@ -459,9 +454,9 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            let leader_index = self.supervisor.is_participant(current, &leader).unwrap();
+                            let leader_index = self.participants.index(&leader).unwrap();
                             work.entry(current)
-                                .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), current, initialized))
+                                .or_insert_with(|| self.new_round(initialized))
                                 .set_leader(leader_index);
                             initialized = true;
 
@@ -508,9 +503,10 @@ impl<
                             }
 
                             // Add the message to the verifier
-                            work.entry(view).or_insert(
-                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
-                            ).add_constructed(message).await;
+                            work.entry(view)
+                                .or_insert_with(|| self.new_round(initialized))
+                                .add_constructed(message)
+                                .await;
                             self.added.inc();
                         }
                         None => {
@@ -551,9 +547,11 @@ impl<
                     }
 
                     // Add the message to the verifier
-                    let added = work.entry(view).or_insert(
-                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
-                    ).add(sender, message).await;
+                    let added = work
+                        .entry(view)
+                        .or_insert_with(|| self.new_round(initialized))
+                        .add(sender, message)
+                        .await;
                     if added {
                         self.added.inc();
                     }
@@ -565,10 +563,12 @@ impl<
             let mut selected = None;
             if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_notarizes() {
-                    let (voters, failed) = verifier.verify_notarizes(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_notarizes(&mut self.context, &self.namespace);
                     selected = Some((current, voters, failed));
                 } else if verifier.ready_nullifies() {
-                    let (voters, failed) = verifier.verify_nullifies(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_nullifies(&mut self.context, &self.namespace);
                     selected = Some((current, voters, failed));
                 }
             }
@@ -581,7 +581,8 @@ impl<
                     })
                     .map(|(view, verifier)| (*view, verifier));
                 if let Some((view, verifier)) = potential {
-                    let (voters, failed) = verifier.verify_finalizes(&self.namespace);
+                    let (voters, failed) =
+                        verifier.verify_finalizes(&mut self.context, &self.namespace);
                     selected = Some((view, voters, failed));
                 }
             }
@@ -605,9 +606,8 @@ impl<
 
             // Block invalid signers
             if !failed.is_empty() {
-                let participants = self.supervisor.participants(view).unwrap();
                 for invalid in failed {
-                    let signer = participants[invalid as usize].clone();
+                    let signer = self.participants[invalid as usize].clone();
                     warn!(?signer, "blocking peer");
                     self.blocker.block(signer).await;
                 }

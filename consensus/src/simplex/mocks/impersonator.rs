@@ -1,57 +1,40 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
-use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Voter},
-    types::View,
-    ThresholdSupervisor, Viewable,
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Finalize, Notarize, Voter},
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Hasher,
-};
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: Scheme> {
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Impersonator<
-    E: Clock + Rng + CryptoRng + Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    supervisor: S,
+    scheme: S,
 
     namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Impersonator<E, V, H, S>
-{
+impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            supervisor: cfg.supervisor,
+            scheme: cfg.scheme,
 
             namespace: cfg.namespace,
 
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -63,7 +46,10 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode_cfg(
+                msg,
+                &self.scheme.certificate_codec_config(),
+            ) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -75,16 +61,14 @@ impl<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
-                    let share = self.supervisor.share(notarize.view()).unwrap();
-                    let mut n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
+                    let mut n =
+                        Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.seed_signature.index == 0 {
-                        n.seed_signature.index = 1;
-                        n.proposal_signature.index = 1;
+                    if n.vote.signer == 0 {
+                        n.vote.signer = 1;
                     } else {
-                        n.seed_signature.index = 0;
-                        n.proposal_signature.index = 0;
+                        n.vote.signer = 0;
                     }
 
                     // Send invalid message
@@ -93,14 +77,14 @@ impl<
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
-                    let share = self.supervisor.share(finalize.view()).unwrap();
-                    let mut f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
+                    let mut f =
+                        Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.proposal_signature.index == 0 {
-                        f.proposal_signature.index = 1;
+                    if f.vote.signer == 0 {
+                        f.vote.signer = 1;
                     } else {
-                        f.proposal_signature.index = 0;
+                        f.vote.signer = 0;
                     }
 
                     // Send invalid message

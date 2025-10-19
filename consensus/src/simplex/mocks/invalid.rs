@@ -1,60 +1,40 @@
 //! Byzantine participant that sends invalid notarize/finalize messages.
 
-use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Voter},
-    types::View,
-    ThresholdSupervisor, Viewable,
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Finalize, Notarize, Voter},
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        variant::Variant,
-    },
-    Hasher,
-};
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: Scheme> {
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Invalid<
-    E: Clock + Rng + CryptoRng + Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    supervisor: S,
+    scheme: S,
 
     namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Invalid<E, V, H, S>
-{
+impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            supervisor: cfg.supervisor,
+            scheme: cfg.scheme,
 
             namespace: cfg.namespace,
 
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -66,7 +46,10 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode_cfg(
+                msg,
+                &self.scheme.certificate_codec_config(),
+            ) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -78,11 +61,21 @@ impl<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
-                    let share = self.supervisor.share(notarize.view()).unwrap();
-                    let mut n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
+                    let mut n = Notarize::<S, _>::sign(
+                        &self.scheme,
+                        &self.namespace,
+                        notarize.proposal.clone(),
+                    )
+                    .unwrap();
 
                     // Manipulate signature
-                    n.seed_signature.value.add(&V::Signature::one());
+                    let invalid_signature =
+                        Notarize::<S, _>::sign(&self.scheme, &[], notarize.proposal)
+                            .unwrap()
+                            .vote
+                            .signature;
+
+                    n.vote.signature = invalid_signature;
 
                     // Send invalid message
                     let msg = Voter::Notarize(n).encode().into();
@@ -90,11 +83,21 @@ impl<
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
-                    let share = self.supervisor.share(finalize.view()).unwrap();
-                    let mut f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
+                    let mut f = Finalize::<S, _>::sign(
+                        &self.scheme,
+                        &self.namespace,
+                        finalize.proposal.clone(),
+                    )
+                    .unwrap();
 
                     // Manipulate signature
-                    f.proposal_signature.value.add(&V::Signature::one());
+                    let invalid_signature =
+                        Finalize::<S, _>::sign(&self.scheme, &[], finalize.proposal)
+                            .unwrap()
+                            .vote
+                            .signature;
+
+                    f.vote.signature = invalid_signature;
 
                     // Send invalid message
                     let msg = Voter::Finalize(f).encode().into();

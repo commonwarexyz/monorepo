@@ -5,10 +5,11 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response},
+        signing_scheme::Scheme,
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
-    Epochable, Supervisor, Viewable,
+    Epochable, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
@@ -17,13 +18,14 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::set::Set;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rand::{seq::IteratorRandom, Rng};
+use rand::{seq::IteratorRandom, CryptoRng, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -99,32 +101,34 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + Metrics + Spawner,
-    C: PublicKey,
+    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+    P: PublicKey,
+    S: Scheme,
+    B: Blocker<PublicKey = P>,
     D: Digest,
-    S: Supervisor<Index = View, PublicKey = C>,
 > {
     context: ContextCell<E>,
-    supervisor: S,
+    scheme: S,
+
+    blocker: B,
 
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, Notarization<C::Signature, D>>,
-    nullifications: BTreeMap<View, Nullification<C::Signature>>,
+    notarizations: BTreeMap<View, Notarization<S, D>>,
+    nullifications: BTreeMap<View, Nullification<S>>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message<C::Signature, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
     fetch_concurrent: usize,
-    max_participants: usize,
-    requester: requester::Requester<E, C>,
+    requester: requester::Requester<E, P>,
 
     unfulfilled: Gauge,
     outstanding: Gauge,
@@ -132,13 +136,14 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
-        C: PublicKey,
+        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+        P: PublicKey,
+        S: Scheme,
+        B: Blocker<PublicKey = P>,
         D: Digest,
-        S: Supervisor<Index = View, PublicKey = C>,
-    > Actor<E, C, D, S>
+    > Actor<E, P, S, B, D>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<C::Signature, D>) {
+    pub fn new(context: E, cfg: Config<P, S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto,
@@ -146,7 +151,9 @@ impl<
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
-        let requester = requester::Requester::new(context.with_label("requester"), config);
+        let mut requester = requester::Requester::new(context.with_label("requester"), config);
+        let participants: Set<_> = cfg.participants.into_iter().collect();
+        requester.reconcile(participants.as_ref());
 
         // Initialize metrics
         let unfulfilled = Gauge::default();
@@ -169,7 +176,9 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                supervisor: cfg.supervisor,
+                scheme: cfg.scheme,
+
+                blocker: cfg.blocker,
 
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
@@ -177,7 +186,6 @@ impl<
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
                 activity_timeout: cfg.activity_timeout,
-                max_participants: cfg.max_participants,
 
                 required: BTreeSet::new(),
                 inflight: Inflight::new(),
@@ -199,10 +207,10 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send<Sr: Sender<PublicKey = C>>(
+    async fn send<Sr: Sender<PublicKey = P>>(
         &mut self,
         shuffle: bool,
-        sender: &mut WrappedSender<Sr, Backfiller<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Backfiller<S, D>>,
     ) {
         // Clear retry
         self.retry = None;
@@ -267,7 +275,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = Backfiller::Request(msg.clone());
+                let encoded = Backfiller::<S, D>::Request(msg.clone());
 
                 // Try to send
                 if sender
@@ -298,22 +306,22 @@ impl<
 
     pub fn start(
         mut self,
-        voter: voter::Mailbox<C::Signature, D>,
-        sender: impl Sender<PublicKey = C>,
-        receiver: impl Receiver<PublicKey = C>,
+        voter: voter::Mailbox<S, D>,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<C::Signature, D>,
-        sender: impl Sender<PublicKey = C>,
-        receiver: impl Receiver<PublicKey = C>,
+        mut voter: voter::Mailbox<S, D>,
+        sender: impl Sender<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
-            (self.max_fetch_count, self.max_participants),
+            (self.max_fetch_count, self.scheme.certificate_codec_config()),
             sender,
             receiver,
         );
@@ -364,9 +372,11 @@ impl<
                             // Add to all outstanding required
                             for view in notarizations {
                                 self.required.insert(Entry { task: Task::Notarization, view });
+                                debug!(?view, "notarization required");
                             }
                             for view in nullifications {
                                 self.required.insert(Entry { task: Task::Nullification, view });
+                                debug!(?view, "nullification required");
                             }
 
                             // Trigger fetch of new notarizations and nullifications as soon as possible
@@ -380,10 +390,6 @@ impl<
                             } else {
                                 continue;
                             }
-
-                            // Update stored validators
-                            let validators = self.supervisor.participants(view).unwrap();
-                            self.requester.reconcile(validators);
 
                             // If waiting for this notarization, remove it
                             self.required.remove(&Entry { task: Task::Notarization, view });
@@ -399,10 +405,6 @@ impl<
                             } else {
                                 continue;
                             }
-
-                            // Update stored validators
-                            let validators = self.supervisor.participants(view).unwrap();
-                            self.requester.reconcile(validators);
 
                             // If waiting for this nullification, remove it
                             self.required.remove(&Entry { task: Task::Nullification, view });
@@ -449,11 +451,13 @@ impl<
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = ?s, "failed to decode message");
-                            self.requester.block(s);
+                            warn!(?err, sender = ?s, "blocking peer for decoding error");
+                            self.requester.block(s.clone());
+                            self.blocker.block(s).await;
                             continue;
-                        }
+                        },
                     };
+
                     match msg {
                         Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
@@ -487,13 +491,10 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let msg = Backfiller::Response(Response::new(
-                                request.id,
-                                notarizations_found,
-                                nullifications_found,
-                            ));
+                            let response = Response::new(request.id, notarizations_found, nullifications_found);
+                            let response = Backfiller::Response(response);
                             sender
-                                .send(Recipients::One(s), msg, false)
+                                .send(Recipients::One(s), response, false)
                                 .await
                                 .unwrap();
                         },
@@ -505,65 +506,51 @@ impl<
                             };
                             self.inflight.clear(request.id);
 
-                            // Parse notarizations
+                            // Verify message
+                            if !response.verify(&mut self.context, &self.scheme, &self.namespace) {
+                                warn!(sender = ?s, "blocking peer");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
+                                continue;
+                            }
+
+                            // Validate that all notarizations and nullifications are from the current epoch
+                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
+                                warn!(sender = ?s, "blocking peer for epoch mismatch");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
+                                continue;
+                            }
+
+                            // Update cache
+                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
-                            let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let epoch = notarization.epoch();
-                                if epoch != self.epoch {
-                                    warn!(?epoch, sender = ?s, "blocking peer for epoch mismatch");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let Some(participants) = self.supervisor.participants(view) else {
-                                    debug!(view, sender = ?s, "unknown view");
-                                    continue;
-                                };
-                                if !notarization.verify(&self.namespace, participants) {
-                                    warn!(view, sender = ?s, "invalid notarization");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
-                                self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(notarization).await;
+                                voters.push(Voter::Notarization(notarization));
                                 notarizations_found.insert(view);
                             }
-
-                            // Parse nullifications
+                            let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
-                                let epoch = nullification.epoch();
-                                if epoch != self.epoch {
-                                    warn!(?epoch, sender = ?s, "blocking peer for epoch mismatch");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
                                 let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let Some(participants) = self.supervisor.participants(view) else {
-                                    debug!(view, sender = ?s, "unknown view");
-                                    continue;
-                                };
-                                if !nullification.verify(&self.namespace, participants) {
-                                    warn!(view, sender = ?s, "invalid nullification");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
-                                self.required.remove(&entry);
                                 self.nullifications.insert(view, nullification.clone());
-                                voter.nullification(nullification).await;
+                                voters.push(Voter::Nullification(nullification));
                                 nullifications_found.insert(view);
                             }
+
+                            // Send voters
+                            voter.verified(voters).await;
 
                             // Update performance
                             let mut shuffle = false;

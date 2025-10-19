@@ -1,11 +1,14 @@
-use crate::{threshold_simplex::types::Voter, types::View};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use crate::{
+    simplex::{signing_scheme::Scheme, types::Voter},
+    types::View,
+};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
-pub enum Message<P: PublicKey, V: Variant, D: Digest> {
+pub enum Message<P: PublicKey, S: Scheme, D: Digest> {
     Update {
         current: View,
         leader: P,
@@ -13,16 +16,16 @@ pub enum Message<P: PublicKey, V: Variant, D: Digest> {
 
         active: oneshot::Sender<bool>,
     },
-    Constructed(Voter<V, D>),
+    Constructed(Voter<S, D>),
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: PublicKey, V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<P, V, D>>,
+pub struct Mailbox<P: PublicKey, S: Scheme, D: Digest> {
+    sender: mpsc::Sender<Message<P, S, D>>,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
-    pub fn new(sender: mpsc::Sender<Message<P, V, D>>) -> Self {
+impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
+    pub fn new(sender: mpsc::Sender<Message<P, S, D>>) -> Self {
         Self { sender }
     }
 
@@ -40,7 +43,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
         active_receiver.await.unwrap()
     }
 
-    pub async fn constructed(&mut self, message: Voter<V, D>) {
+    pub async fn constructed(&mut self, message: Voter<S, D>) {
         self.sender
             .send(Message::Constructed(message))
             .await

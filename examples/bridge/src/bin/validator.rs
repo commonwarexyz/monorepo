@@ -3,7 +3,7 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::threshold_simplex::{self, Engine};
+use commonware_consensus::simplex::{self, Engine};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -213,7 +213,7 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let (application, supervisor, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
@@ -222,7 +222,7 @@ fn main() {
                 other_public,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 share,
             },
         );
@@ -230,13 +230,14 @@ fn main() {
         // Initialize consensus
         let engine = Engine::new(
             context.with_label("engine"),
-            threshold_simplex::Config {
+            simplex::Config {
                 crypto: signer.clone(),
+                participants: validators.clone().into(),
+                scheme,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
-                supervisor,
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: 0,

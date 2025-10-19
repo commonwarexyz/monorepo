@@ -1,12 +1,12 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, Supervisor},
+    application::{Block, Scheme, SchemeProvider},
     orchestrator::{Mailbox, Message},
 };
 use commonware_consensus::{
     marshal,
-    threshold_simplex::{self, types::Context},
+    simplex::{self, types::Context},
     types::Epoch,
     Automaton, Relay,
 };
@@ -26,7 +26,7 @@ use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A>
@@ -40,7 +40,8 @@ where
     pub oracle: B,
     pub signer: C,
     pub application: A,
-    pub marshal: marshal::Mailbox<V, Block<H, C, V>>,
+    pub scheme_provider: SchemeProvider<V>,
+    pub marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
@@ -65,7 +66,8 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<V, Block<H, C, V>>,
+    marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
+    scheme_provider: SchemeProvider<V>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -94,6 +96,7 @@ where
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
+                scheme_provider: config.scheme_provider,
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
@@ -198,6 +201,11 @@ where
                         let engine = engines.remove(&epoch).unwrap();
                         engine.abort();
 
+                        // Unregister the signing scheme for the epoch.
+                        if !self.scheme_provider.unregister(&epoch) {
+                            warn!(epoch, "unregistered non-existent signing scheme for epoch");
+                        }
+
                         info!(epoch, "exited epoch");
                     }
                 }
@@ -226,16 +234,27 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let supervisor = Supervisor::<V, C::PublicKey>::new(polynomial, participants.into(), share);
-        let engine = threshold_simplex::Engine::new(
+        let scheme = if let Some(share) = share {
+            Scheme::<V>::new(participants.as_ref(), &polynomial, share)
+        } else {
+            Scheme::<V>::verifier(participants.as_ref(), &polynomial)
+        };
+
+        // Register the new signing scheme with the scheme provider
+        if !self.scheme_provider.register(epoch, scheme.clone()) {
+            warn!(epoch, "registered duplicate signing scheme for epoch");
+        }
+
+        let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
-            threshold_simplex::Config {
+            simplex::Config {
                 crypto: self.signer.clone(),
+                participants,
+                scheme,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
-                supervisor,
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: 1024,
                 epoch,

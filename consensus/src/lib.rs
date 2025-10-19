@@ -16,8 +16,8 @@ use commonware_cryptography::{Committable, Digestible};
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
-pub mod threshold_simplex;
 pub mod types;
+pub mod utils;
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -153,9 +153,6 @@ cfg_if::cfg_if! {
             /// Public key used to identify participants.
             type PublicKey: PublicKey;
 
-            /// Return the leader at a given index for the provided seed.
-            fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
-
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
             fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]>;
@@ -187,9 +184,6 @@ cfg_if::cfg_if! {
             /// Returns the static identity of the shared secret (typically the constant term
             /// of a polynomial).
             fn identity(&self) -> &Self::Identity;
-
-            /// Return the leader at a given index over the provided seed.
-            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
             /// Returns the polynomial over which partial signatures are verified at a given index.
             fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;
