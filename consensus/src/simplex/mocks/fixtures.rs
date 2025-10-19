@@ -11,7 +11,7 @@ use rand::{CryptoRng, RngCore};
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator.
 pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>);
 
-/// Builds deterministic ed25519 identities and matching BLS threshold schemes for tests.
+/// Builds ed25519 identities and matching BLS threshold schemes for tests.
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, bls_threshold_schemes)` where
 /// all vectors share the same ordering.
@@ -43,7 +43,7 @@ where
     (ed25519_keys, ed25519_public, schemes)
 }
 
-/// Builds deterministic ed25519 identities alongside the ed25519 signing scheme.
+/// Builds ed25519 identities alongside the ed25519 signing scheme.
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes)` where
 /// all vectors share the same ordering.
