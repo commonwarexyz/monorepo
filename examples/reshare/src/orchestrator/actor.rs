@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal,
-    simplex::{self, signing_scheme::Scheme as _, types::Context},
+    simplex::{self, types::Context},
     types::Epoch,
     Automaton, Relay,
 };
