@@ -88,7 +88,7 @@ where
     }
 
     fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
-        // we use the seed from view N to select the leader for view N+1
+        // We use the seed from view N to select the leader for view N+1
         let next_round = Round::new(round.epoch(), round.view() + 1);
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
