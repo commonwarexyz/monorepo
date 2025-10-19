@@ -295,7 +295,9 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics if there is not at least one active operation above the inactivity floor.
+    /// # Panics
+    ///
+    /// Panics if there is not at least one active operation above the inactivity floor.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Use the status bitmap to find the first active operation above the inactivity floor.
         while !self.status.get_bit(*self.any.inactivity_floor_loc) {
