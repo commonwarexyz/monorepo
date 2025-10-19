@@ -221,7 +221,7 @@ impl<P: PublicKey> From<Vec<P>> for Participants<P> {
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 pub struct BatchVerifier<S: Scheme, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
-    signing: S,
+    scheme: S,
 
     /// Required quorum size. `None` disables quorum-based readiness.
     quorum: Option<usize>,
@@ -258,9 +258,9 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
-    pub fn new(signing: S, quorum: Option<u32>) -> Self {
+    pub fn new(scheme: S, quorum: Option<u32>) -> Self {
         Self {
-            signing,
+            scheme,
 
             // Store quorum as usize to simplify comparisons against queue lengths.
             quorum: quorum.map(|q| q as usize),
@@ -424,7 +424,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
             verified,
             invalid_signers,
         } = self
-            .signing
+            .scheme
             .verify_votes(rng, namespace, VoteContext::Notarize { proposal }, votes);
 
         self.notarizes_verified += verified.len();
@@ -518,7 +518,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         let VoteVerification {
             verified,
             invalid_signers,
-        } = self.signing.verify_votes::<_, D, _>(
+        } = self.scheme.verify_votes::<_, D, _>(
             rng,
             namespace,
             VoteContext::Nullify { round },
@@ -604,7 +604,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
             verified,
             invalid_signers,
         } = self
-            .signing
+            .scheme
             .verify_votes(rng, namespace, VoteContext::Finalize { proposal }, votes);
 
         self.finalizes_verified += verified.len();
@@ -973,7 +973,7 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from matching notarize votes, if enough are present.
-    pub fn from_notarizes(signing: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
+    pub fn from_notarizes(scheme: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
         if notarizes.is_empty() {
             return None;
         }
@@ -986,7 +986,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         }
 
         let notarization_certificate =
-            signing.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
+            scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
 
         Some(Notarization {
             proposal,
@@ -1177,7 +1177,7 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from matching nullify votes.
-    pub fn from_nullifies(signing: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
+    pub fn from_nullifies(scheme: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
         if nullifies.is_empty() {
             return None;
         }
@@ -1190,7 +1190,7 @@ impl<S: Scheme> Nullification<S> {
         }
 
         let nullification_certificate =
-            signing.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
+            scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
 
         Some(Nullification {
             round,
@@ -1394,7 +1394,7 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from matching finalize votes, if enough are present.
-    pub fn from_finalizes(signing: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
+    pub fn from_finalizes(scheme: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
         if finalizes.is_empty() {
             return None;
         }
@@ -1407,7 +1407,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         }
 
         let finalization_certificate =
-            signing.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
+            scheme.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
 
         Some(Finalization {
             proposal,
@@ -1652,7 +1652,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, signing: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
@@ -1674,7 +1674,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        signing.verify_certificates(rng, namespace, notarizations.chain(nullifications))
+        scheme.verify_certificates(rng, namespace, notarizations.chain(nullifications))
     }
 }
 
@@ -2030,8 +2030,8 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        self.notarize_1.verify(signing, namespace) && self.notarize_2.verify(signing, namespace)
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        self.notarize_1.verify(scheme, namespace) && self.notarize_2.verify(scheme, namespace)
     }
 }
 
@@ -2129,8 +2129,8 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        self.finalize_1.verify(signing, namespace) && self.finalize_2.verify(signing, namespace)
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        self.finalize_1.verify(scheme, namespace) && self.finalize_2.verify(scheme, namespace)
     }
 }
 
@@ -2226,8 +2226,8 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        self.nullify.verify::<D>(signing, namespace) && self.finalize.verify(signing, namespace)
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        self.nullify.verify::<D>(scheme, namespace) && self.finalize.verify(scheme, namespace)
     }
 }
 

@@ -33,14 +33,14 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 pub struct Config<P: PublicKey, S: Scheme> {
     pub namespace: Vec<u8>,
     pub participants: Set<P>,
-    pub signing: S,
+    pub scheme: S,
 }
 
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
     participants: Participants<P>,
-    signing: S,
+    scheme: S,
 
     namespace: Vec<u8>,
 
@@ -71,7 +71,7 @@ where
             context,
             namespace: cfg.namespace,
             participants: cfg.participants.into(),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             seeds: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -114,7 +114,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.signing, &self.namespace) {
+                if !notarize.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -134,7 +134,7 @@ where
             Activity::Notarization(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.signing.verify_certificate(
+                if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
                     VoteContext::Notarize {
@@ -147,20 +147,20 @@ where
                     return;
                 }
                 let encoded = notarization.encode();
-                Notarization::<S, D>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.notarizations
                     .lock()
                     .unwrap()
                     .insert(view, notarization.clone());
                 let seed = self
-                    .signing
+                    .scheme
                     .seed(notarization.round(), &notarization.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(notarization.round(), seed);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify::<D>(&self.signing, &self.namespace) {
+                if !nullify.verify::<D>(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -178,7 +178,7 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.signing.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
                     VoteContext::Nullify {
@@ -191,20 +191,20 @@ where
                     return;
                 }
                 let encoded = nullification.encode();
-                Nullification::<S>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                Nullification::<S>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.nullifications
                     .lock()
                     .unwrap()
                     .insert(view, nullification.clone());
                 let seed = self
-                    .signing
+                    .scheme
                     .seed(nullification.round, &nullification.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(nullification.round, seed);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&self.signing, &self.namespace) {
+                if !finalize.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -224,7 +224,7 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.signing.verify_certificate(
+                if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
                     VoteContext::Finalize {
@@ -237,14 +237,14 @@ where
                     return;
                 }
                 let encoded = finalization.encode();
-                Finalization::<S, D>::decode_cfg(encoded, &self.signing.certificate_codec_config())
+                Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.finalizations
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
                 let seed = self
-                    .signing
+                    .scheme
                     .seed(finalization.round(), &finalization.certificate);
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(finalization.round(), seed);
@@ -258,7 +258,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.signing, &self.namespace) {
+                if !conflicting.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -277,7 +277,7 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.signing, &self.namespace) {
+                if !conflicting.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -296,7 +296,7 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.signing, &self.namespace) {
+                if !conflicting.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;

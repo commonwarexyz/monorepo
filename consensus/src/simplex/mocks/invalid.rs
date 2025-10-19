@@ -13,13 +13,13 @@ use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
-    pub signing: S,
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
 pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
 
     namespace: Vec<u8>,
 
@@ -30,7 +30,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
 
             namespace: cfg.namespace,
 
@@ -48,7 +48,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(
                 msg,
-                &self.signing.certificate_codec_config(),
+                &self.scheme.certificate_codec_config(),
             ) {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -62,14 +62,14 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
                     let mut n = Notarize::<S, _>::sign(
-                        &self.signing,
+                        &self.scheme,
                         &self.namespace,
                         notarize.proposal.clone(),
                     );
 
                     // Manipulate signature
                     let invalid_signature =
-                        Notarize::<S, _>::sign(&self.signing, &[], notarize.proposal)
+                        Notarize::<S, _>::sign(&self.scheme, &[], notarize.proposal)
                             .vote
                             .signature;
 
@@ -82,14 +82,14 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Invalid<E, S, H
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
                     let mut f = Finalize::<S, _>::sign(
-                        &self.signing,
+                        &self.scheme,
                         &self.namespace,
                         finalize.proposal.clone(),
                     );
 
                     // Manipulate signature
                     let invalid_signature =
-                        Finalize::<S, _>::sign(&self.signing, &[], finalize.proposal)
+                        Finalize::<S, _>::sign(&self.scheme, &[], finalize.proposal)
                             .vote
                             .signature;
 

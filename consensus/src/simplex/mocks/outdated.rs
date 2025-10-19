@@ -16,14 +16,14 @@ use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
-    pub signing: S,
+    pub scheme: S,
     pub namespace: Vec<u8>,
     pub view_delta: u64,
 }
 
 pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
 
     namespace: Vec<u8>,
 
@@ -37,7 +37,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
 
             namespace: cfg.namespace,
 
@@ -58,7 +58,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(
                 msg,
-                &self.signing.certificate_codec_config(),
+                &self.scheme.certificate_codec_config(),
             ) {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -80,8 +80,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let n =
-                        Notarize::<S, _>::sign(&self.signing, &self.namespace, proposal.clone());
+                    let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone());
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -95,8 +94,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, 
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let f =
-                        Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal.clone());
+                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone());
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

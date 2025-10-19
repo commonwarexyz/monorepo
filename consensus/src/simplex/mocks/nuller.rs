@@ -12,13 +12,13 @@ use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
-    pub signing: S,
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
 pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
@@ -27,7 +27,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
             namespace: cfg.namespace,
             _hasher: PhantomData,
         }
@@ -43,7 +43,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(
                 msg,
-                &self.signing.certificate_codec_config(),
+                &self.scheme.certificate_codec_config(),
             ) {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -56,17 +56,14 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
             match msg {
                 Voter::Notarize(notarize) => {
                     // Nullify
-                    let n = Nullify::sign::<H::Digest>(
-                        &self.signing,
-                        &self.namespace,
-                        notarize.round(),
-                    );
+                    let n =
+                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round());
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal);
+                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

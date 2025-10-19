@@ -407,7 +407,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -428,7 +428,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -669,7 +669,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing.clone(),
+                    scheme: signing.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -691,7 +691,7 @@ mod tests {
                     crypto: scheme,
                     blocker,
                     participants: validators.clone().into(),
-                    signing: signing.clone(),
+                    scheme: signing.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
@@ -826,7 +826,7 @@ mod tests {
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx].clone(),
+                        scheme: signing_schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
@@ -846,7 +846,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx].clone(),
+                        scheme: signing_schemes[idx].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -1006,7 +1006,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1027,7 +1027,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1128,7 +1128,7 @@ mod tests {
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
             };
             let mut reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1149,7 +1149,7 @@ mod tests {
             let cfg = config::Config {
                 crypto: scheme,
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1261,7 +1261,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1282,7 +1282,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1503,7 +1503,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1534,7 +1534,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1678,7 +1678,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1699,7 +1699,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1879,7 +1879,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1900,7 +1900,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -2076,7 +2076,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2097,7 +2097,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -2247,7 +2247,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2257,7 +2257,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         namespace: namespace.clone(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                     };
 
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
@@ -2285,7 +2285,7 @@ mod tests {
                         crypto: scheme,
                         blocker,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
@@ -2427,7 +2427,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2436,7 +2436,7 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::invalid::Config {
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
 
@@ -2461,7 +2461,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2592,7 +2592,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2601,7 +2601,7 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::impersonator::Config {
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
 
@@ -2629,7 +2629,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2756,7 +2756,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2765,7 +2765,7 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::reconfigurer::Config {
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
                     let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
@@ -2792,7 +2792,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2919,7 +2919,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2929,7 +2929,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         namespace: namespace.clone(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
@@ -2952,7 +2952,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -3092,7 +3092,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx_scheme].clone(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3101,7 +3101,7 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
@@ -3126,7 +3126,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         participants: validators.clone().into(),
-                        signing: signing_schemes[idx_scheme].clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -3247,7 +3247,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3268,7 +3268,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -3378,7 +3378,7 @@ mod tests {
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3399,7 +3399,7 @@ mod tests {
             let cfg = config::Config {
                 crypto: schemes[0].clone(),
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3531,7 +3531,7 @@ mod tests {
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3557,7 +3557,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     participants: validators.clone().into(),
-                    signing: signing_schemes[idx].clone(),
+                    scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),

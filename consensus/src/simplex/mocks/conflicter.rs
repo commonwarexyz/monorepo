@@ -13,13 +13,13 @@ use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
-    pub signing: S,
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
 pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
@@ -28,7 +28,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
             namespace: cfg.namespace,
             _hasher: PhantomData,
         }
@@ -44,7 +44,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(
                 msg,
-                &self.signing.certificate_codec_config(),
+                &self.scheme.certificate_codec_config(),
             ) {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -60,13 +60,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
-                    let n = Notarize::<S, _>::sign(&self.signing, &self.namespace, proposal);
+                    let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
                     let n =
-                        Notarize::<S, _>::sign(&self.signing, &self.namespace, notarize.proposal);
+                        Notarize::<S, _>::sign(&self.scheme, &self.namespace, notarize.proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -75,13 +75,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.round(), finalize.proposal.parent, payload);
-                    let f = Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal);
+                    let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize provided digest
                     let f =
-                        Finalize::<S, _>::sign(&self.signing, &self.namespace, finalize.proposal);
+                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, finalize.proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

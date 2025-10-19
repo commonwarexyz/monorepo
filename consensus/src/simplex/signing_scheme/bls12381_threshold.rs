@@ -191,12 +191,12 @@ impl<V: Variant> Seed<V> {
     }
 
     /// Verifies the threshold signature on this [Seed].
-    pub fn verify(&self, signing: &Scheme<V>, namespace: &[u8]) -> bool {
+    pub fn verify(&self, scheme: &Scheme<V>, namespace: &[u8]) -> bool {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = self.round.encode();
 
         verify_message::<V>(
-            signing.identity(),
+            scheme.identity(),
             Some(&seed_namespace),
             &seed_message,
             &self.signature,

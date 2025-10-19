@@ -213,7 +213,7 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let (application, signing, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
@@ -233,7 +233,7 @@ fn main() {
             simplex::Config {
                 crypto: signer.clone(),
                 participants: validators.clone().into(),
-                signing,
+                scheme,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),

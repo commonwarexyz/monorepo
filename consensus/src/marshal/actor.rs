@@ -595,7 +595,7 @@ impl<
                                 Request::Finalized { height } => {
                                     let epoch = height / self.epoch_length;
 
-                                    let Some(signing) = self.cache.get_scheme(epoch) else {
+                                    let Some(scheme) = self.cache.get_scheme(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -604,7 +604,7 @@ impl<
                                     let Ok((finalization, block)) =
                                         <(Finalization<S, B::Commitment>, B)>::decode_cfg(
                                             value,
-                                            &(signing.certificate_codec_config(), self.block_codec_config.clone()),
+                                            &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
                                     else {
                                         let _ = response.send(false);
@@ -614,7 +614,7 @@ impl<
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &signing, &self.namespace)
+                                        || !finalization.verify(&mut self.context, &scheme, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -626,7 +626,7 @@ impl<
                                     self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
                                 Request::Notarized { round } => {
-                                    let Some(signing) = self.cache.get_scheme(round.epoch()) else {
+                                    let Some(scheme) = self.cache.get_scheme(round.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -635,7 +635,7 @@ impl<
                                     let Ok((notarization, block)) =
                                         <(Notarization<S, B::Commitment>, B)>::decode_cfg(
                                             value,
-                                            &(signing.certificate_codec_config(), self.block_codec_config.clone()),
+                                            &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
                                     else {
                                         let _ = response.send(false);
@@ -645,7 +645,7 @@ impl<
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &signing, &self.namespace)
+                                        || !notarization.verify(&mut self.context, &scheme, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;

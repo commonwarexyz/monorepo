@@ -17,13 +17,13 @@ use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
-    pub signing: S,
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
 pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
@@ -32,7 +32,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
-            signing: cfg.signing,
+            scheme: cfg.scheme,
             namespace: cfg.namespace,
             _hasher: PhantomData,
         }
@@ -48,7 +48,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(
                 msg,
-                &self.signing.certificate_codec_config(),
+                &self.scheme.certificate_codec_config(),
             ) {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -67,7 +67,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let n = Notarize::sign(&self.signing, &self.namespace, proposal);
+                    let n = Notarize::sign(&self.scheme, &self.namespace, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -79,7 +79,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let f = Finalize::sign(&self.signing, &self.namespace, proposal);
+                    let f = Finalize::sign(&self.scheme, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -89,7 +89,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     let new_epoch: Epoch = old_round.epoch().saturating_add(1);
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign::<H::Digest>(&self.signing, &self.namespace, new_round);
+                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round);
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

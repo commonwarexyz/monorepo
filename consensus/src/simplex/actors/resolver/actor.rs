@@ -108,7 +108,7 @@ pub struct Actor<
     D: Digest,
 > {
     context: ContextCell<E>,
-    signing: S,
+    scheme: S,
 
     blocker: B,
 
@@ -176,7 +176,7 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                signing: cfg.signing,
+                scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
 
@@ -321,10 +321,7 @@ impl<
     ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
-            (
-                self.max_fetch_count,
-                self.signing.certificate_codec_config(),
-            ),
+            (self.max_fetch_count, self.scheme.certificate_codec_config()),
             sender,
             receiver,
         );
@@ -510,7 +507,7 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            if !response.verify(&mut self.context, &self.signing, &self.namespace) {
+                            if !response.verify(&mut self.context, &self.scheme, &self.namespace) {
                                 warn!(sender = ?s, "blocking peer");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;

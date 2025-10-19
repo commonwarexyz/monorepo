@@ -56,7 +56,7 @@ impl<
             context.with_label("batcher"),
             batcher::Config {
                 participants: cfg.participants.clone(),
-                signing: cfg.signing.clone(),
+                scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
                 epoch: cfg.epoch,
@@ -73,7 +73,7 @@ impl<
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 participants: cfg.participants.clone(),
-                signing: cfg.signing.clone(),
+                scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -99,7 +99,7 @@ impl<
                 blocker: cfg.blocker,
                 crypto: cfg.crypto.public_key(),
                 participants: cfg.participants,
-                signing: cfg.signing,
+                scheme: cfg.scheme,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,

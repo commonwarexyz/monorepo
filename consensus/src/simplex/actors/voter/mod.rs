@@ -28,7 +28,7 @@ pub struct Config<
 > {
     pub crypto: C,
     pub participants: Set<C::PublicKey>,
-    pub signing: S,
+    pub scheme: S,
     pub blocker: B,
     pub automaton: A,
     pub relay: R,
@@ -153,7 +153,7 @@ mod tests {
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                signing: signing.clone(),
+                scheme: signing.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -173,7 +173,7 @@ mod tests {
             let cfg = Config {
                 crypto: scheme,
                 participants: validators.clone().into(),
-                signing: signing.clone(),
+                scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -415,7 +415,7 @@ mod tests {
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                signing: signing.clone(),
+                scheme: signing.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -433,7 +433,7 @@ mod tests {
             let voter_config = Config {
                 crypto: private_key.clone(),
                 participants: validators.clone().into(),
-                signing: signing.clone(),
+                scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -718,7 +718,7 @@ mod tests {
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -738,7 +738,7 @@ mod tests {
             let voter_cfg = Config {
                 crypto: schemes[0].clone(),
                 participants: validators.clone().into(),
-                signing: signing_schemes[0].clone(),
+                scheme: signing_schemes[0].clone(),
                 blocker: oracle.control(validators[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),

@@ -40,7 +40,7 @@ pub(crate) struct Config {
 /// Prunable archives for a single epoch.
 struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
     /// Signing scheme for this epoch
-    signing: S,
+    scheme: S,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -175,7 +175,7 @@ impl<
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let signing = self
+        let scheme = self
             .scheme_provider
             .scheme(epoch)
             .unwrap_or_else(|| panic!("failed to get signing scheme for epoch: {epoch}"));
@@ -187,15 +187,15 @@ impl<
             .init_archive(epoch, "notarized", self.block_codec_config.clone())
             .await;
         let notarizations = self
-            .init_archive(epoch, "notarizations", signing.certificate_codec_config())
+            .init_archive(epoch, "notarizations", scheme.certificate_codec_config())
             .await;
         let finalizations = self
-            .init_archive(epoch, "finalizations", signing.certificate_codec_config())
+            .init_archive(epoch, "finalizations", scheme.certificate_codec_config())
             .await;
         let existing = self.caches.insert(
             epoch,
             Cache {
-                signing,
+                scheme,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -232,7 +232,7 @@ impl<
 
     pub(crate) fn get_scheme(&mut self, epoch: Epoch) -> Option<S> {
         if let Some(cache) = self.caches.get(&epoch) {
-            Some(cache.signing.clone())
+            Some(cache.scheme.clone())
         } else {
             self.scheme_provider.scheme(epoch)
         }

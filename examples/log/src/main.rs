@@ -187,7 +187,7 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let (application, signing, reporter, mailbox) = application::Application::new(
+        let (application, scheme, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
@@ -201,7 +201,7 @@ fn main() {
         let cfg = simplex::Config {
             crypto: signer.clone(),
             participants: validators.clone().into(),
-            signing,
+            scheme,
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),

@@ -60,7 +60,7 @@ enum Action {
 struct Round<E: Clock, P: PublicKey, S: Scheme, D: Digest> {
     start: SystemTime,
     participants: Participants<P>,
-    signing: S,
+    scheme: S,
 
     round: Rnd,
 
@@ -110,7 +110,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
     pub fn new(
         context: &ContextCell<E>,
         participants: Participants<P>,
-        signing: S,
+        scheme: S,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
@@ -121,7 +121,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
         Self {
             start: context.current(),
             participants,
-            signing,
+            scheme,
 
             round,
 
@@ -268,7 +268,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.signing, &self.notarizes)
+        let notarization = Notarization::from_notarizes(&self.scheme, &self.notarizes)
             .expect("failed to recover notarization certificate");
         timer.observe();
 
@@ -297,7 +297,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.signing, &self.nullifies)
+        let nullification = Nullification::from_nullifies(&self.scheme, &self.nullifies)
             .expect("failed to recover nullification certificate");
         timer.observe();
 
@@ -341,7 +341,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.signing, &self.finalizes)
+        let finalization = Finalization::from_finalizes(&self.scheme, &self.finalizes)
             .expect("failed to recover finalization certificate");
         timer.observe();
 
@@ -372,7 +372,7 @@ pub struct Actor<
     context: ContextCell<E>,
     crypto: C,
     participants: Participants<C::PublicKey>,
-    signing: S,
+    scheme: S,
     blocker: B,
     automaton: A,
     relay: R,
@@ -475,7 +475,7 @@ impl<
                 context: ContextCell::new(context),
                 crypto: cfg.crypto,
                 participants: cfg.participants.into(),
-                signing: cfg.signing,
+                scheme: cfg.scheme,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -522,7 +522,7 @@ impl<
             Round::new(
                 &self.context,
                 self.participants.clone(),
-                self.signing.clone(),
+                self.scheme.clone(),
                 self.recover_latency.clone(),
                 Rnd::new(self.epoch, view),
             )
@@ -701,7 +701,7 @@ impl<
         round.nullify_retry = None;
 
         // Return early if we are not a participant
-        if !self.signing.can_sign() {
+        if !self.scheme.can_sign() {
             return;
         }
 
@@ -749,7 +749,7 @@ impl<
 
         // Construct nullify
         let nullify = Nullify::sign::<D>(
-            &self.signing,
+            &self.scheme,
             &self.namespace,
             Rnd::new(self.epoch, self.view),
         );
@@ -1071,7 +1071,7 @@ impl<
         }
 
         // Verify notarization
-        if !notarization.verify(&mut self.context, &self.signing, &self.namespace) {
+        if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
             return Action::Block;
         }
 
@@ -1087,7 +1087,7 @@ impl<
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
         let seed = self
-            .signing
+            .scheme
             .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
@@ -1125,7 +1125,7 @@ impl<
         }
 
         // Verify nullification
-        if !nullification.verify::<_, D>(&mut self.context, &self.signing, &self.namespace) {
+        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
             return Action::Block;
         }
 
@@ -1138,7 +1138,7 @@ impl<
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
         let seed = self
-            .signing
+            .scheme
             .seed(nullification.round, &nullification.certificate);
 
         // Create round (if it doesn't exist) and add verified nullification
@@ -1198,7 +1198,7 @@ impl<
         }
 
         // Verify finalization
-        if !finalization.verify(&mut self.context, &self.signing, &self.namespace) {
+        if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
             return Action::Block;
         }
 
@@ -1211,7 +1211,7 @@ impl<
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
         let seed = self
-            .signing
+            .scheme
             .seed(finalization.round(), &finalization.certificate);
 
         // Create round (if it doesn't exist) and add verified finalization
@@ -1235,7 +1235,7 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
-        if !self.signing.can_sign() {
+        if !self.scheme.can_sign() {
             return None;
         }
 
@@ -1255,7 +1255,7 @@ impl<
         // Construct notarize
         let proposal = round.proposal.as_ref().unwrap();
         Some(Notarize::sign(
-            &self.signing,
+            &self.scheme,
             &self.namespace,
             proposal.clone(),
         ))
@@ -1286,7 +1286,7 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
-        if !self.signing.can_sign() {
+        if !self.scheme.can_sign() {
             return None;
         }
 
@@ -1311,7 +1311,7 @@ impl<
             return None;
         };
         Some(Finalize::sign(
-            &self.signing,
+            &self.scheme,
             &self.namespace,
             proposal.clone(),
         ))
@@ -1580,7 +1580,7 @@ impl<
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);
         let (mut recovered_sender, mut recovered_receiver) = wrap::<_, _, Voter<S, D>>(
-            self.signing.certificate_codec_config(),
+            self.scheme.certificate_codec_config(),
             recovered_sender,
             recovered_receiver,
         );
@@ -1600,7 +1600,7 @@ impl<
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
-                codec_config: self.signing.certificate_codec_config(),
+                codec_config: self.scheme.certificate_codec_config(),
                 buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },

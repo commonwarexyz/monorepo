@@ -232,36 +232,28 @@ mod tests {
         (application, mailbox)
     }
 
-    fn make_finalization(
-        proposal: Proposal<D>,
-        signing_schemes: &[S],
-        quorum: u32,
-    ) -> Finalization<S, D> {
+    fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
         // Generate proposal signature
-        let finalizes = signing_schemes
+        let finalizes = schemes
             .iter()
             .take(quorum as usize)
-            .map(|signing| Finalize::sign(signing, NAMESPACE, proposal.clone()))
+            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect::<Vec<_>>();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&signing_schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
     }
 
-    fn make_notarization(
-        proposal: Proposal<D>,
-        signing_schemes: &[S],
-        quorum: u32,
-    ) -> Notarization<S, D> {
+    fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
         // Generate proposal signature
-        let notarizes = signing_schemes
+        let notarizes = schemes
             .iter()
             .take(quorum as usize)
-            .map(|signing| Notarize::sign(signing, NAMESPACE, proposal.clone()))
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()))
             .collect::<Vec<_>>();
 
         // Generate certificate signatures
-        Notarization::from_notarizes(&signing_schemes[0], &notarizes).unwrap()
+        Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
     fn setup_network(context: deterministic::Context) -> Oracle<K> {
@@ -279,10 +271,7 @@ mod tests {
     fn setup_validators_and_shares(
         context: &mut deterministic::Context,
     ) -> (Vec<E>, Vec<K>, Vec<S>) {
-        let (schemes, peers, signing_schemes) =
-            simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(context, NUM_VALIDATORS);
-
-        (schemes, peers, signing_schemes)
+        simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(context, NUM_VALIDATORS)
     }
 
     async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {

@@ -29,7 +29,7 @@ pub struct Config<
     pub participants: Set<C::PublicKey>,
 
     /// Signing scheme for the consensus engine.
-    pub signing: S,
+    pub scheme: S,
 
     /// Blocker for the network.
     ///

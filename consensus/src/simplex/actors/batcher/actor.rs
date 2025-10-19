@@ -56,7 +56,7 @@ impl<
 {
     fn new(
         participants: Participants<P>,
-        signing: S,
+        scheme: S,
         blocker: B,
         reporter: R,
         inbound_messages: Family<Inbound, Counter>,
@@ -79,7 +79,7 @@ impl<
 
             blocker,
             reporter,
-            verifier: BatchVerifier::new(signing, quorum),
+            verifier: BatchVerifier::new(scheme, quorum),
 
             notarizes,
             nullifies,
@@ -320,7 +320,7 @@ pub struct Actor<
     context: ContextCell<E>,
 
     participants: Participants<P>,
-    signing: S,
+    scheme: S,
 
     blocker: B,
     reporter: R,
@@ -384,7 +384,7 @@ impl<
                 context: ContextCell::new(context),
 
                 participants: cfg.participants.into(),
-                signing: cfg.signing,
+                scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
@@ -409,7 +409,7 @@ impl<
     fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
         Round::new(
             self.participants.clone(),
-            self.signing.clone(),
+            self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
             self.inbound_messages.clone(),
@@ -432,7 +432,7 @@ impl<
     ) {
         // Wrap channel
         let mut receiver: WrappedReceiver<_, Voter<S, D>> =
-            WrappedReceiver::new(self.signing.certificate_codec_config(), receiver);
+            WrappedReceiver::new(self.scheme.certificate_codec_config(), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;

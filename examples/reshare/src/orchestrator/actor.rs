@@ -234,7 +234,7 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let signing = if let Some(share) = share {
+        let scheme = if let Some(share) = share {
             Scheme::<V>::new(participants.as_ref(), &polynomial, share)
         } else {
             Scheme::<V>::verifier(participants.as_ref(), &polynomial)
@@ -243,7 +243,7 @@ where
         // Register the new signing scheme with the scheme provider
         if !self
             .scheme_provider
-            .register(epoch, signing.clone().into_verifier())
+            .register(epoch, scheme.clone().into_verifier())
         {
             warn!(epoch, "registered duplicate signing scheme for epoch");
         }
@@ -253,7 +253,7 @@ where
             simplex::Config {
                 crypto: self.signer.clone(),
                 participants,
-                signing,
+                scheme,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),

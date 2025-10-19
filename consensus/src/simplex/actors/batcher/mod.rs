@@ -14,7 +14,7 @@ pub use ingress::{Mailbox, Message};
 
 pub struct Config<P: PublicKey, S: Scheme, B: Blocker, R: Reporter> {
     pub participants: Set<P>,
-    pub signing: S,
+    pub scheme: S,
 
     pub blocker: B,
     pub reporter: R,

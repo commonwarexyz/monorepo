@@ -15,7 +15,7 @@ use std::time::Duration;
 pub struct Config<P: PublicKey, S: Scheme, B: Blocker> {
     pub crypto: P,
     pub participants: Set<P>,
-    pub signing: S,
+    pub scheme: S,
 
     pub blocker: B,
 
