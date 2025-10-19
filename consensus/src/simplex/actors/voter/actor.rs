@@ -330,9 +330,9 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
             "broadcasting finalization"
         );
 
+        // It is not possible to have a finalization that does not match the notarization proposal. If this
+        // is detected, there is a critical bug or there has been a safety violation.
         if let Some(notarization) = &self.notarization {
-            // It is not possible to have a finalization that does not match the notarization proposal. If this
-            // is detected, there is a critical bug or there has been a safety violation.
             assert_eq!(
                 notarization.proposal, proposal,
                 "finalization proposal does not match notarization"
