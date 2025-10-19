@@ -168,3 +168,43 @@ pub(crate) fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
 pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
+
+/// Produces the vote namespace and message bytes for a given vote context.
+///
+/// Returns the final namespace (with the context-specific suffix) and the
+/// serialized message to sign or verify.
+#[inline]
+pub(crate) fn vote_namespace_and_message<D: Digest>(
+    namespace: &[u8],
+    context: VoteContext<'_, D>,
+) -> (Vec<u8>, Vec<u8>) {
+    match context {
+        VoteContext::Notarize { proposal } => {
+            (notarize_namespace(namespace), proposal.encode().to_vec())
+        }
+        VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
+        VoteContext::Finalize { proposal } => {
+            (finalize_namespace(namespace), proposal.encode().to_vec())
+        }
+    }
+}
+
+/// Produces the seed namespace and message bytes for a given vote context.
+///
+/// Returns the final namespace (with the seed suffix) and the serialized
+/// message to sign or verify.
+#[inline]
+pub(crate) fn seed_namespace_and_message<D: Digest>(
+    namespace: &[u8],
+    context: VoteContext<'_, D>,
+) -> (Vec<u8>, Vec<u8>) {
+    (
+        seed_namespace(namespace),
+        match context {
+            VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+                proposal.round.encode().to_vec()
+            }
+            VoteContext::Nullify { round } => round.encode().to_vec(),
+        },
+    )
+}

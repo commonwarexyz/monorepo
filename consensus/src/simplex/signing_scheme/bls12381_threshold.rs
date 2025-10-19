@@ -9,6 +9,7 @@ use crate::{
     simplex::{
         signing_scheme::{
             self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+            seed_namespace_and_message, vote_namespace_and_message,
         },
         types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
     },
@@ -140,18 +141,18 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
-/// Combined message/seed signature pair emitted by the BLS scheme.
+/// Combined vote/seed signature pair emitted by the BLS scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
-    /// Signature over the consensus message (partial or recovered aggregate).
-    pub message_signature: V::Signature,
+    /// Signature over the consensus vote message (partial or recovered aggregate).
+    pub vote_signature: V::Signature,
     /// Signature over the per-view seed (partial or recovered aggregate).
     pub seed_signature: V::Signature,
 }
 
 impl<V: Variant> Write for Signature<V> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.message_signature.write(writer);
+        self.vote_signature.write(writer);
         self.seed_signature.write(writer);
     }
 }
@@ -160,11 +161,11 @@ impl<V: Variant> Read for Signature<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let message_signature = V::Signature::read(reader)?;
+        let vote_signature = V::Signature::read(reader)?;
         let seed_signature = V::Signature::read(reader)?;
 
         Ok(Self {
-            message_signature,
+            vote_signature,
             seed_signature,
         })
     }
@@ -192,12 +193,12 @@ impl<V: Variant> Seed<V> {
     /// Verifies the threshold signature on this [Seed].
     pub fn verify(&self, signing: &Scheme<V>, namespace: &[u8]) -> bool {
         let seed_namespace = seed_namespace(namespace);
-        let message = self.round.encode();
+        let seed_message = self.round.encode();
 
         verify_message::<V>(
             signing.identity(),
             Some(&seed_namespace),
-            &message,
+            &seed_message,
             &self.signature,
         )
         .is_ok()
@@ -298,78 +299,19 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             .share()
             .expect("can only be called after checking can_sign");
 
-        let signature = match context {
-            VoteContext::Notarize { proposal } => {
-                let notarize_namespace = notarize_namespace(namespace);
-                let notarize_message = proposal.encode();
-                let proposal_signature = partial_sign_message::<V>(
-                    share,
-                    Some(notarize_namespace.as_ref()),
-                    notarize_message.as_ref(),
-                )
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        let vote_signature =
+            partial_sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
                 .value;
 
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_signature = partial_sign_message::<V>(
-                    share,
-                    Some(seed_namespace.as_ref()),
-                    seed_message.as_ref(),
-                )
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        let seed_signature =
+            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
                 .value;
 
-                Signature {
-                    message_signature: proposal_signature,
-                    seed_signature,
-                }
-            }
-            VoteContext::Nullify { round } => {
-                let nullify_namespace = nullify_namespace(namespace);
-                let nullify_message = round.encode();
-                let round_signature = partial_sign_message::<V>(
-                    share,
-                    Some(nullify_namespace.as_ref()),
-                    nullify_message.as_ref(),
-                )
-                .value;
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_signature = partial_sign_message::<V>(
-                    share,
-                    Some(seed_namespace.as_ref()),
-                    nullify_message.as_ref(),
-                )
-                .value;
-
-                Signature {
-                    message_signature: round_signature,
-                    seed_signature,
-                }
-            }
-            VoteContext::Finalize { proposal } => {
-                let finalize_namespace = finalize_namespace(namespace);
-                let finalize_message = proposal.encode();
-                let proposal_signature = partial_sign_message::<V>(
-                    share,
-                    Some(finalize_namespace.as_ref()),
-                    finalize_message.as_ref(),
-                )
-                .value;
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_signature = partial_sign_message::<V>(
-                    share,
-                    Some(seed_namespace.as_ref()),
-                    seed_message.as_ref(),
-                )
-                .value;
-
-                Signature {
-                    message_signature: proposal_signature,
-                    seed_signature,
-                }
-            }
+        let signature = Signature {
+            vote_signature,
+            seed_signature,
         };
 
         Vote {
@@ -384,13 +326,13 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     {
         let threshold = self.threshold();
 
-        let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
                 (
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.message_signature,
+                        value: vote.signature.vote_signature,
                     },
                     PartialSignature::<V> {
                         index: vote.signer,
@@ -400,19 +342,19 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             })
             .unzip();
 
-        if message_partials.len() < threshold as usize {
+        if vote_partials.len() < threshold as usize {
             return None;
         }
 
-        let (message_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
+        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
             threshold,
-            message_partials.iter(),
+            vote_partials.iter(),
             seed_partials.iter(),
         )
         .ok()?;
 
         Some(Signature {
-            message_signature,
+            vote_signature,
             seed_signature,
         })
     }
@@ -425,87 +367,28 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     ) -> bool {
         let polynomial = self.polynomial();
 
-        match context {
-            VoteContext::Notarize { proposal } => {
-                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
-                    return false;
-                };
+        let Some(evaluated) = polynomial.get(vote.signer as usize) else {
+            return false;
+        };
 
-                let notarize_namespace = notarize_namespace(namespace);
-                let notarize_message = proposal.encode();
-                let notarize_message =
-                    (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
 
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let signature = aggregate_signatures::<V, _>(&[
+            vote.signature.vote_signature,
+            vote.signature.seed_signature,
+        ]);
 
-                let signature = aggregate_signatures::<V, _>(&[
-                    vote.signature.message_signature,
-                    vote.signature.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    evaluated,
-                    &[notarize_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-            VoteContext::Nullify { round } => {
-                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
-                    return false;
-                };
-
-                let nullify_namespace = nullify_namespace(namespace);
-                let nullify_encoded = round.encode();
-                let nullify_message = (Some(nullify_namespace.as_ref()), nullify_encoded.as_ref());
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = (Some(seed_namespace.as_ref()), nullify_encoded.as_ref());
-
-                let signature = aggregate_signatures::<V, _>(&[
-                    vote.signature.message_signature,
-                    vote.signature.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    evaluated,
-                    &[nullify_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-            VoteContext::Finalize { proposal } => {
-                let Some(evaluated) = polynomial.get(vote.signer as usize) else {
-                    return false;
-                };
-
-                let finalize_namespace = finalize_namespace(namespace);
-                let finalize_message = proposal.encode();
-                let finalize_message =
-                    (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-
-                let signature = aggregate_signatures::<V, _>(&[
-                    vote.signature.message_signature,
-                    vote.signature.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    evaluated,
-                    &[finalize_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-        }
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
+            &[
+                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
+                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
+            ],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 
     fn verify_votes<R, D, I>(
@@ -523,13 +406,13 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         let polynomial = self.polynomial();
 
         let mut invalid = BTreeSet::new();
-        let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
                 (
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.message_signature,
+                        value: vote.signature.vote_signature,
                     },
                     PartialSignature::<V> {
                         index: vote.signer,
@@ -539,108 +422,39 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             })
             .unzip();
 
-        match context {
-            VoteContext::Notarize { proposal } => {
-                let notarize_namespace = notarize_namespace(namespace);
-                let notarize_message = proposal.encode();
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(notarize_namespace.as_ref()),
-                    notarize_message.as_ref(),
-                    message_partials.iter(),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(seed_namespace.as_ref()),
-                    seed_message.as_ref(),
-                    seed_partials
-                        .iter()
-                        .filter(|partial| !invalid.contains(&partial.index)),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
-            }
-            VoteContext::Nullify { round } => {
-                let nullify_namespace = nullify_namespace(namespace);
-                let nullify_message = round.encode();
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(nullify_namespace.as_ref()),
-                    nullify_message.as_ref(),
-                    message_partials.iter(),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
-
-                let seed_namespace = seed_namespace(namespace);
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(seed_namespace.as_ref()),
-                    nullify_message.as_ref(),
-                    seed_partials
-                        .iter()
-                        .filter(|partial| !invalid.contains(&partial.index)),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
-            }
-            VoteContext::Finalize { proposal } => {
-                let finalize_namespace = finalize_namespace(namespace);
-                let finalize_message = proposal.encode();
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(finalize_namespace.as_ref()),
-                    finalize_message.as_ref(),
-                    message_partials.iter(),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-
-                if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
-                    polynomial,
-                    Some(seed_namespace.as_ref()),
-                    seed_message.as_ref(),
-                    seed_partials
-                        .iter()
-                        .filter(|partial| !invalid.contains(&partial.index)),
-                ) {
-                    for partial in errs {
-                        invalid.insert(partial.index);
-                    }
-                }
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
+            polynomial,
+            Some(vote_namespace.as_ref()),
+            vote_message.as_ref(),
+            vote_partials.iter(),
+        ) {
+            for partial in errs {
+                invalid.insert(partial.index);
             }
         }
 
-        let verified = message_partials
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
+            polynomial,
+            Some(seed_namespace.as_ref()),
+            seed_message.as_ref(),
+            seed_partials
+                .iter()
+                .filter(|partial| !invalid.contains(&partial.index)),
+        ) {
+            for partial in errs {
+                invalid.insert(partial.index);
+            }
+        }
+
+        let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(message, seed)| Vote {
-                signer: message.index,
+            .map(|(vote, seed)| Vote {
+                signer: vote.index,
                 signature: Signature {
-                    message_signature: message.value,
+                    vote_signature: vote.value,
                     seed_signature: seed.value,
                 },
             })
@@ -661,75 +475,22 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     ) -> bool {
         let identity = self.identity();
 
-        match context {
-            VoteContext::Notarize { proposal } => {
-                let notarize_namespace = notarize_namespace(namespace);
-                let notarize_message = proposal.encode();
-                let notarize_message =
-                    (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
 
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let signature =
+            aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);
 
-                let signature = aggregate_signatures::<V, _>(&[
-                    certificate.message_signature,
-                    certificate.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    identity,
-                    &[notarize_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-            VoteContext::Nullify { round } => {
-                let nullify_namespace = nullify_namespace(namespace);
-                let nullify_encoded = round.encode();
-                let nullify_message = (Some(nullify_namespace.as_ref()), nullify_encoded.as_ref());
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = (Some(seed_namespace.as_ref()), nullify_encoded.as_ref());
-
-                let signature = aggregate_signatures::<V, _>(&[
-                    certificate.message_signature,
-                    certificate.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    identity,
-                    &[nullify_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-            VoteContext::Finalize { proposal } => {
-                let finalize_namespace = finalize_namespace(namespace);
-                let finalize_message = proposal.encode();
-                let finalize_message =
-                    (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-
-                let seed_namespace = seed_namespace(namespace);
-                let seed_message = proposal.round.encode();
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-
-                let signature = aggregate_signatures::<V, _>(&[
-                    certificate.message_signature,
-                    certificate.seed_signature,
-                ]);
-
-                aggregate_verify_multiple_messages::<V, _>(
-                    identity,
-                    &[finalize_message, seed_message],
-                    &signature,
-                    1,
-                )
-                .is_ok()
-            }
-        }
+        aggregate_verify_multiple_messages::<V, _>(
+            identity,
+            &[
+                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
+                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
+            ],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 
     fn verify_certificates<'a, R, D, I>(
@@ -761,20 +522,6 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
                     let notarize_message = proposal.encode();
                     let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
                     messages.push(notarize_message);
-                    signatures.push(&certificate.message_signature);
-
-                    // Add seed message (if not already present)
-                    if let Some(previous) = seeds.get(&proposal.view()) {
-                        if *previous != &certificate.seed_signature {
-                            return false;
-                        }
-                    } else {
-                        let seed_message = proposal.round.encode();
-                        let seed_message = (Some(seed_namespace.as_slice()), seed_message);
-                        messages.push(seed_message);
-                        signatures.push(&certificate.seed_signature);
-                        seeds.insert(proposal.view(), &certificate.seed_signature);
-                    }
                 }
                 VoteContext::Nullify { round } => {
                     // Prepare nullify message
@@ -782,40 +529,32 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
                     let nullify_message =
                         (Some(nullify_namespace.as_slice()), nullify_encoded.clone());
                     messages.push(nullify_message);
-                    signatures.push(&certificate.message_signature);
-
-                    // Add seed message (if not already present)
-                    if let Some(previous) = seeds.get(&round.view()) {
-                        if *previous != &certificate.seed_signature {
-                            return false;
-                        }
-                    } else {
-                        let seed_message = (Some(seed_namespace.as_slice()), nullify_encoded);
-                        messages.push(seed_message);
-                        signatures.push(&certificate.seed_signature);
-                        seeds.insert(round.view(), &certificate.seed_signature);
-                    }
                 }
                 VoteContext::Finalize { proposal } => {
                     // Prepare finalize message
                     let finalize_message = proposal.encode();
                     let finalize_message = (Some(finalize_namespace.as_slice()), finalize_message);
                     messages.push(finalize_message);
-                    signatures.push(&certificate.message_signature);
-
-                    // Add seed message (if not already present)
-                    if let Some(previous) = seeds.get(&proposal.view()) {
-                        if *previous != &certificate.seed_signature {
-                            return false;
-                        }
-                    } else {
-                        let seed_message = proposal.round.encode();
-                        let seed_message = (Some(seed_namespace.as_slice()), seed_message);
-                        messages.push(seed_message);
-                        signatures.push(&certificate.seed_signature);
-                        seeds.insert(proposal.view(), &certificate.seed_signature);
-                    }
                 }
+            }
+            signatures.push(&certificate.vote_signature);
+
+            // Add seed message (if not already present)
+            if let Some(previous) = seeds.get(&context.view()) {
+                if *previous != &certificate.seed_signature {
+                    return false;
+                }
+            } else {
+                let seed_message = match context {
+                    VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+                        proposal.round.encode()
+                    }
+                    VoteContext::Nullify { round } => round.encode(),
+                };
+
+                messages.push((Some(seed_namespace.as_slice()), seed_message));
+                signatures.push(&certificate.seed_signature);
+                seeds.insert(context.view(), &certificate.seed_signature);
             }
         }
 
@@ -1152,7 +891,7 @@ mod tests {
         ));
 
         let mut corrupted = certificate.clone();
-        corrupted.message_signature = corrupted.seed_signature;
+        corrupted.vote_signature = corrupted.seed_signature;
         assert!(
             !Scheme::<V>::verifier(&participants, &polynomial).verify_certificate(
                 &mut thread_rng(),
@@ -1500,7 +1239,7 @@ mod tests {
                 .value;
 
         assert_eq!(vote.signer, share.index);
-        assert_eq!(vote.signature.message_signature, expected_message);
+        assert_eq!(vote.signature.vote_signature, expected_message);
         assert_eq!(vote.signature.seed_signature, expected_seed);
     }
 
@@ -1543,7 +1282,7 @@ mod tests {
         ));
 
         let mut corrupted = certificate.clone();
-        corrupted.seed_signature = corrupted.message_signature;
+        corrupted.seed_signature = corrupted.vote_signature;
         assert!(!Scheme::<V>::verifier(&participants, &polynomial)
             .verify_certificate::<_, Sha256Digest>(
                 &mut thread_rng(),

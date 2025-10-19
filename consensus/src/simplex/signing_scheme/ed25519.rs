@@ -5,13 +5,13 @@
 
 use crate::{
     simplex::{
-        signing_scheme::{self, finalize_namespace, notarize_namespace, nullify_namespace},
+        signing_scheme::{self, vote_namespace_and_message},
         types::{Participants, Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     ed25519::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature},
     BatchVerifier, Digest, Signer as _, Verifier as _,
@@ -150,17 +150,8 @@ impl signing_scheme::Scheme for Scheme {
             .as_ref()
             .expect("can only be called after checking can_sign");
 
-        let (domain, message) = match context {
-            VoteContext::Notarize { proposal } => {
-                (notarize_namespace(namespace), proposal.encode())
-            }
-            VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode()),
-            VoteContext::Finalize { proposal } => {
-                (finalize_namespace(namespace), proposal.encode())
-            }
-        };
-
-        let signature = private_key.sign(Some(domain.as_ref()), message.as_ref());
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
 
         Vote {
             signer: *index,
@@ -178,17 +169,8 @@ impl signing_scheme::Scheme for Scheme {
             return false;
         };
 
-        let (domain, message) = match context {
-            VoteContext::Notarize { proposal } => {
-                (notarize_namespace(namespace), proposal.encode())
-            }
-            VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode()),
-            VoteContext::Finalize { proposal } => {
-                (finalize_namespace(namespace), proposal.encode())
-            }
-        };
-
-        public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature)
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
     }
 
     fn verify_votes<R, D, I>(
@@ -203,15 +185,7 @@ impl signing_scheme::Scheme for Scheme {
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let (domain, message) = match context {
-            VoteContext::Notarize { proposal } => {
-                (notarize_namespace(namespace), proposal.encode())
-            }
-            VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode()),
-            VoteContext::Finalize { proposal } => {
-                (finalize_namespace(namespace), proposal.encode())
-            }
-        };
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
 
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -224,7 +198,7 @@ impl signing_scheme::Scheme for Scheme {
             };
 
             batch.add(
-                Some(domain.as_ref()),
+                Some(namespace.as_ref()),
                 message.as_ref(),
                 public_key,
                 &vote.signature,
@@ -236,7 +210,7 @@ impl signing_scheme::Scheme for Scheme {
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(domain.as_ref()), message.as_ref(), &vote.signature) {
+                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);
                 }
             }
@@ -294,15 +268,7 @@ impl signing_scheme::Scheme for Scheme {
             return false;
         }
 
-        let (domain, message) = match context {
-            VoteContext::Notarize { proposal } => {
-                (notarize_namespace(namespace), proposal.encode())
-            }
-            VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode()),
-            VoteContext::Finalize { proposal } => {
-                (finalize_namespace(namespace), proposal.encode())
-            }
-        };
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
 
         let mut batch = Batch::new();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
@@ -311,7 +277,7 @@ impl signing_scheme::Scheme for Scheme {
             };
 
             batch.add(
-                Some(domain.as_ref()),
+                Some(namespace.as_ref()),
                 message.as_ref(),
                 public_key,
                 signature,
@@ -339,15 +305,7 @@ impl signing_scheme::Scheme for Scheme {
                 return false;
             }
 
-            let (domain, message) = match context {
-                VoteContext::Notarize { proposal } => {
-                    (notarize_namespace(namespace), proposal.encode())
-                }
-                VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode()),
-                VoteContext::Finalize { proposal } => {
-                    (finalize_namespace(namespace), proposal.encode())
-                }
-            };
+            let (namespace, message) = vote_namespace_and_message(namespace, context);
 
             for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
                 let Some(public_key) = self.participants.get(*signer) else {
@@ -355,7 +313,7 @@ impl signing_scheme::Scheme for Scheme {
                 };
 
                 batch.add(
-                    Some(domain.as_ref()),
+                    Some(namespace.as_ref()),
                     message.as_ref(),
                     public_key,
                     signature,

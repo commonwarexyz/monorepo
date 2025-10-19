@@ -252,7 +252,7 @@ mod tests {
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {
-                message_signature: proposal_signature,
+                vote_signature: proposal_signature,
                 seed_signature,
             },
         }

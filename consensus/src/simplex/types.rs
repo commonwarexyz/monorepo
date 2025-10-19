@@ -64,6 +64,18 @@ pub enum VoteContext<'a, D: Digest> {
     Finalize { proposal: &'a Proposal<D> },
 }
 
+impl<D: Digest> Viewable for VoteContext<'_, D> {
+    type View = View;
+
+    fn view(&self) -> View {
+        match self {
+            VoteContext::Notarize { proposal } => proposal.view(),
+            VoteContext::Nullify { round } => round.view(),
+            VoteContext::Finalize { proposal } => proposal.view(),
+        }
+    }
+}
+
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
 pub struct Vote<S: Scheme> {

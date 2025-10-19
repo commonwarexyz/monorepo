@@ -200,13 +200,13 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            let proposal_signature = notarization.certificate.message_signature;
+                            let proposal_signature = notarization.certificate.vote_signature;
                             let seed_signature = notarization.certificate.seed_signature;
 
                             info!(view, payload = ?notarization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            let proposal_signature = finalization.certificate.message_signature;
+                            let proposal_signature = finalization.certificate.vote_signature;
                             let seed_signature = finalization.certificate.seed_signature;
 
                             info!(view, payload = ?finalization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "finalized");
@@ -234,7 +234,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             debug!(view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
-                            let round_signature = nullification.certificate.message_signature;
+                            let round_signature = nullification.certificate.vote_signature;
                             let seed_signature = nullification.certificate.seed_signature;
 
                             info!(view, signature=?round_signature, seed=?seed_signature, "nullified");
