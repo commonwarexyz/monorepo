@@ -241,7 +241,7 @@ where
                     let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
                     // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 1 && epoch > 0 {
+                    if relative_height == 0 && epoch > 0 {
                         orchestrator
                             .report(orchestrator::Message::Exit(epoch - 1))
                             .await;
