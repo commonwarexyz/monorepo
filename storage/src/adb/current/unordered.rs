@@ -562,6 +562,10 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
+        if info.next_key.is_some() {
+            debug!("next_key should be None in unordered proof verification");
+            return false;
+        }
         let element = Operation::Update(info.key, info.value).encode();
         verify_key_value_proof::<H, N>(
             hasher,
@@ -833,6 +837,16 @@ pub mod test {
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
+                &root,
+            ));
+
+            // Proof should not verify if next_key is not None
+            let mut info_with_next_key = info.clone();
+            info_with_next_key.next_key = Some(k);
+            assert!(!CurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                &proof.0,
+                info_with_next_key,
                 &root,
             ));
 
