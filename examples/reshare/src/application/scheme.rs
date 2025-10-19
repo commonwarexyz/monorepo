@@ -15,7 +15,7 @@ pub type Scheme<V> = signing_scheme::bls12381_threshold::Scheme<V>;
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
 pub struct SchemeProvider<V: Variant> {
-    schemes: Arc<Mutex<HashMap<Epoch, Scheme<V>>>>,
+    schemes: Arc<Mutex<HashMap<Epoch, Arc<Scheme<V>>>>>,
 }
 
 impl<V: Variant> Default for SchemeProvider<V> {
@@ -32,7 +32,7 @@ impl<V: Variant> SchemeProvider<V> {
     /// Returns `false` if a scheme was already registered for the epoch.
     pub fn register(&self, epoch: Epoch, scheme: Scheme<V>) -> bool {
         let mut schemes = self.schemes.lock().unwrap();
-        schemes.insert(epoch, scheme).is_none()
+        schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
 
     /// Unregisters the signing scheme for the given epoch.
@@ -47,7 +47,7 @@ impl<V: Variant> SchemeProvider<V> {
 impl<V: Variant> marshal::SchemeProvider for SchemeProvider<V> {
     type Scheme = Scheme<V>;
 
-    fn scheme(&self, epoch: Epoch) -> Option<Scheme<V>> {
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<Scheme<V>>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }

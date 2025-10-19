@@ -65,14 +65,15 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch};
+use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SchemeProvider: Send + Sync + 'static {
+pub trait SchemeProvider: Clone + Send + Sync + 'static {
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
     /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: Epoch) -> Option<Self::Scheme>;
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
 }
 
 #[cfg(test)]
@@ -118,6 +119,7 @@ mod tests {
         collections::BTreeMap,
         marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
+        sync::Arc,
         time::Duration,
     };
 
@@ -129,17 +131,18 @@ mod tests {
     type S = bls12381_threshold::Scheme<V>;
     type P = ConstantSchemeProvider;
 
-    struct ConstantSchemeProvider(S);
+    #[derive(Clone)]
+    struct ConstantSchemeProvider(Arc<S>);
     impl SchemeProvider for ConstantSchemeProvider {
         type Scheme = S;
 
-        fn scheme(&self, _: Epoch) -> Option<S> {
+        fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
             Some(self.0.clone())
         }
     }
     impl From<S> for ConstantSchemeProvider {
         fn from(scheme: S) -> Self {
-            Self(scheme)
+            Self(Arc::new(scheme))
         }
     }
 

@@ -39,8 +39,6 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
-    /// Signing scheme for this epoch
-    scheme: S,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -195,7 +193,6 @@ impl<
         let existing = self.caches.insert(
             epoch,
             Cache {
-                scheme,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -228,14 +225,6 @@ impl<
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
-    }
-
-    pub(crate) fn get_scheme(&mut self, epoch: Epoch) -> Option<S> {
-        if let Some(cache) = self.caches.get(&epoch) {
-            Some(cache.scheme.clone())
-        } else {
-            self.scheme_provider.scheme(epoch)
-        }
     }
 
     /// Add a verified block to the prunable archive.

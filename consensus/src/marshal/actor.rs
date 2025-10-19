@@ -75,13 +75,15 @@ pub struct Actor<
     mailbox: mpsc::Receiver<Message<S, B>>,
 
     // ---------- Configuration ----------
+    // Provider for epoch-specific signing schemes
+    scheme_provider: P,
     // Epoch length (in blocks)
     epoch_length: u64,
     // Mailbox size
     mailbox_size: usize,
     // Unique application namespace
     namespace: Vec<u8>,
-    /// Minimum number of views to retain temporary data after the application processes a block
+    // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: u64,
     // Maximum number of blocks to repair at once
     max_repair: u64,
@@ -132,7 +134,7 @@ impl<
             context.with_label("cache"),
             prunable_config,
             config.block_codec_config.clone(),
-            config.scheme_provider,
+            config.scheme_provider.clone(),
         )
         .await;
 
@@ -227,6 +229,7 @@ impl<
             Self {
                 context: ContextCell::new(context),
                 mailbox,
+                scheme_provider: config.scheme_provider,
                 epoch_length: config.epoch_length,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
@@ -594,7 +597,7 @@ impl<
                                 },
                                 Request::Finalized { height } => {
                                     let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.cache.get_scheme(epoch) else {
+                                    let Some(scheme) = self.scheme_provider.scheme(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -625,7 +628,7 @@ impl<
                                     self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
                                 Request::Notarized { round } => {
-                                    let Some(scheme) = self.cache.get_scheme(round.epoch()) else {
+                                    let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
