@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal,
-    simplex::{self, signing_scheme::Scheme as _, types::Context},
+    simplex::{self, types::Context},
     types::Epoch,
     Automaton, Relay,
 };
@@ -241,10 +241,7 @@ where
         };
 
         // Register the new signing scheme with the scheme provider
-        if !self
-            .scheme_provider
-            .register(epoch, scheme.clone().into_verifier())
-        {
+        if !self.scheme_provider.register(epoch, scheme.clone()) {
             warn!(epoch, "registered duplicate signing scheme for epoch");
         }
 

@@ -135,11 +135,6 @@ impl signing_scheme::Scheme for Scheme {
     type Certificate = Certificate;
     type Seed = ();
 
-    fn into_verifier(mut self) -> Self {
-        self.signer = None;
-        self
-    }
-
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
@@ -435,25 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn test_verifier_cannot_sign() {
-        let (schemes, _) = schemes(3);
-        let verifier = schemes[0].clone().into_verifier();
-
-        let proposal = sample_proposal(0, 3, 2);
-        assert!(
-            verifier
-                .sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-                .is_none(),
-            "verifier should not produce votes"
-        );
-    }
-
-    #[test]
     fn test_verify_votes_filters_bad_signers() {
         let (schemes, _) = schemes(5);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -677,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scheme_clone_and_into_verifier() {
+    fn test_scheme_clone_and_verifier() {
         let (schemes, participants) = schemes(3);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
@@ -692,19 +668,6 @@ mod tests {
                 )
                 .is_some(),
             "signer should produce votes"
-        );
-
-        let verifier = signer.clone().into_verifier();
-        assert!(
-            verifier
-                .sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-                .is_none(),
-            "verifier should not produce votes"
         );
 
         let verifier = Scheme::verifier(participants.clone());

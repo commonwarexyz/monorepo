@@ -40,11 +40,6 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
 
-    /// Converts the scheme into a pure verifier.
-    ///
-    /// The returned instance should return `None` on `sign_vote` calls.
-    fn into_verifier(self) -> Self;
-
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
     fn sign_vote<D: Digest>(
