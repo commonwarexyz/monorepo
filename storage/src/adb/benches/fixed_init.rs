@@ -233,7 +233,7 @@ fn bench_fixed_init(c: &mut Criterion) {
 
                 c.bench_function(
                     &format!(
-                        "{}/elements={} operations={}, keyspace={}",
+                        "{}/elements={} operations={}, variant={}",
                         module_path!(),
                         elements,
                         operations,
