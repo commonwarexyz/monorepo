@@ -2,12 +2,16 @@
 //!
 //! The [`Scheme`] trait defines the cryptographic surface consumed by the core consensus engine:
 //! how votes are signed and verified, how quorum certificates are assembled/checked, and whether
-//! additional randomness is exposed for leader rotation. Two concrete schemes are provided:
+//! additional randomness is exposed for leader rotation. Three concrete schemes are provided:
 //!
 //! * [`bls12381_threshold`] – BLS12-381 threshold signing: validators author paired partials, one
 //!   for the vote, one for the randomness seed, that collapse into two aggregated signatures for
 //!   certificates. The recovered proof authenticates consensus progress and produces a per-view
 //!   beacon while keeping certificate size constant.
+//! * [`bls12381_multisig`] – BLS12-381 multisignature signing: validators emit plain BLS signatures
+//!   that aggregate into a succinct single-signature certificate. It keeps the footprint small like
+//!   the threshold scheme but avoids polynomial setup, sitting between the threshold and ed25519
+//!   variants at the cost of providing no randomness seed.
 //! * [`ed25519`] – Ed25519 quorum signing: each validator emits a standalone signature that we
 //!   retain with its index, yielding certificates that grow with the quorum size. The scheme trades
 //!   off certificate succinctness and randomness for operational familiarity - standard key

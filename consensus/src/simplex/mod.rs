@@ -9,6 +9,8 @@
 //!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
 //!   certificate can be verified with just the static public key of the consensus instance) for each view with
 //!   zero message overhead (natively integrated).
+//! * **BLS12-381 multisignatures** – plain BLS signatures aggregated into a single certificate. Provides succinct
+//!   certificates without requiring distributed key generation, but does not expose the per-view randomness seed.
 //! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
 //!   same interface but without succinct certificate aggregation or randomness seed.
 //!
