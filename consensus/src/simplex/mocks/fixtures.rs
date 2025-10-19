@@ -9,7 +9,7 @@ use commonware_utils::quorum;
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator.
-pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>);
+pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>, S);
 
 /// Builds ed25519 identities and matching BLS threshold schemes for tests.
 ///
@@ -39,8 +39,9 @@ where
         .into_iter()
         .map(|share| bls12381_threshold::Scheme::new(&ed25519_public, &polynomial, share))
         .collect();
+    let verifier = bls12381_threshold::Scheme::verifier(&ed25519_public, &polynomial.clone());
 
-    (ed25519_keys, ed25519_public, schemes)
+    (ed25519_keys, ed25519_public, schemes, verifier)
 }
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
@@ -68,6 +69,7 @@ where
         .cloned()
         .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
         .collect();
+    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 
-    (ed25519_keys, ed25519_public, schemes)
+    (ed25519_keys, ed25519_public, schemes, verifier)
 }
