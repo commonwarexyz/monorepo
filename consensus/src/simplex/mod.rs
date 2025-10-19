@@ -3436,7 +3436,7 @@ mod tests {
             let is_running = |name: &str| -> bool {
                 metrics_before.lines().any(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{}\"", name))
+                        && line.contains(&format!("name=\"{name}\""))
                         && line.contains("kind=\"Task\"")
                         && line.trim_end().ends_with(" 1")
                 })
@@ -3462,7 +3462,7 @@ mod tests {
                 // Either the gauge is 0, or the entry is absent (both imply not running)
                 metrics_after.lines().any(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{}\"", name))
+                        && line.contains(&format!("name=\"{name}\""))
                         && line.contains("kind=\"Task\"")
                         && line.trim_end().ends_with(" 0")
                 })

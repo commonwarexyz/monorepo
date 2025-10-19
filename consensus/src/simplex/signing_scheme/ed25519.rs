@@ -366,12 +366,6 @@ mod tests {
         (schemes, participants)
     }
 
-    fn verifier(n: usize) -> Scheme {
-        let keys = generate_private_keys(n);
-        let participants = participants(&keys);
-        Scheme::verifier(participants)
-    }
-
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(round, view),

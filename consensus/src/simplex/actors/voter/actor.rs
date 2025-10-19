@@ -1292,9 +1292,9 @@ impl<
             return None;
         }
         round.broadcast_finalize = true;
-        let Some(proposal) = &round.proposal else {
-            return None;
-        };
+
+        // Construct finalize
+        let proposal = round.proposal.as_ref().unwrap(); // cannot broadcast notarize without a proposal
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
