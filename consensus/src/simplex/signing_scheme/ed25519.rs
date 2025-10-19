@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = schemes(3);
+        let (schemes, _) = schemes(4);
         let proposal = sample_proposal(0, 11, 6);
 
         let vote = schemes[0]
@@ -550,7 +550,7 @@ mod tests {
             )
             .unwrap();
 
-        let votes = vec![vote.clone(), vote];
+        let votes = vec![vote.clone(), vote.clone(), vote];
         assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, participants) = schemes(3);
+        let (schemes, participants) = schemes(4);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
 
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate() {
-        let (schemes, participants) = schemes(3);
+        let (schemes, participants) = schemes(4);
         let proposal = sample_proposal(0, 21, 11);
 
         let votes: Vec<_> = schemes
