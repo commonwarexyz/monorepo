@@ -628,9 +628,8 @@ mod tests {
             // Register participants (active)
             let (mut schemes, validators, signing_schemes) = fixture(&mut context, n_active);
 
-            let observer_signing_scheme = signing_schemes[0].clone().into_verifier();
-
             // Add observer (no share)
+            let observer_signing_scheme = signing_schemes[0].clone();
             let scheme_observer = PrivateKey::from_seed(n_active as u64);
             let pk_observer = scheme_observer.public_key();
             schemes.push(scheme_observer);

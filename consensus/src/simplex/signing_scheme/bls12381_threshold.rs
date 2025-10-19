@@ -273,23 +273,6 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     type Certificate = Signature<V>;
     type Seed = Seed<V>;
 
-    fn into_verifier(self) -> Self {
-        match self {
-            Scheme::Signer {
-                identity,
-                polynomial,
-                threshold,
-                ..
-            } => Scheme::Verifier {
-                identity,
-                polynomial,
-                threshold,
-            },
-            Scheme::Verifier { .. } => self,
-            _ => panic!("cannot convert certificate verifier into verifier"),
-        }
-    }
-
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
@@ -1069,7 +1052,7 @@ mod tests {
         seedable::<MinSig>();
     }
 
-    fn scheme_clone_and_into_verifier<V: Variant>() {
+    fn scheme_clone_and_verifier<V: Variant>() {
         let (schemes, participants, polynomial) = setup_signers::<V>(3, 31);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 9);
@@ -1084,19 +1067,6 @@ mod tests {
                 )
                 .is_some(),
             "signer should produce votes"
-        );
-
-        let verifier = signer.clone().into_verifier();
-        assert!(
-            verifier
-                .sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-                .is_none(),
-            "verifier should not produce votes"
         );
 
         let verifier = Scheme::<V>::verifier(&participants, &polynomial);
@@ -1114,9 +1084,9 @@ mod tests {
     }
 
     #[test]
-    fn test_scheme_clone_and_into_verifier() {
-        scheme_clone_and_into_verifier::<MinPk>();
-        scheme_clone_and_into_verifier::<MinSig>();
+    fn test_scheme_clone_and_verifier() {
+        scheme_clone_and_verifier::<MinPk>();
+        scheme_clone_and_verifier::<MinSig>();
     }
 
     fn certificate_verifier_accepts_certificates<V: Variant>() {

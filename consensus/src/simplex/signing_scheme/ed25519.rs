@@ -135,11 +135,6 @@ impl signing_scheme::Scheme for Scheme {
     type Certificate = Certificate;
     type Seed = ();
 
-    fn into_verifier(mut self) -> Self {
-        self.signer = None;
-        self
-    }
-
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
@@ -371,6 +366,12 @@ mod tests {
         (schemes, participants)
     }
 
+    fn verifier(n: usize) -> Scheme {
+        let keys = generate_private_keys(n);
+        let participants = participants(&keys);
+        Scheme::verifier(participants)
+    }
+
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(round, view),
@@ -432,25 +433,6 @@ mod tests {
             },
             &vote
         ));
-    }
-
-    #[test]
-    fn test_verifier_cannot_sign() {
-        let (schemes, _) = schemes(3);
-        let verifier = schemes[0].clone().into_verifier();
-
-        let proposal = sample_proposal(0, 3, 2);
-        assert!(
-            verifier
-                .sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-                .is_none(),
-            "verifier should not produce votes"
-        );
     }
 
     #[test]
@@ -677,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scheme_clone_and_into_verifier() {
+    fn test_scheme_clone_and_verifier() {
         let (schemes, participants) = schemes(3);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
@@ -692,19 +674,6 @@ mod tests {
                 )
                 .is_some(),
             "signer should produce votes"
-        );
-
-        let verifier = signer.clone().into_verifier();
-        assert!(
-            verifier
-                .sign_vote(
-                    NAMESPACE,
-                    VoteContext::Notarize {
-                        proposal: &proposal,
-                    },
-                )
-                .is_none(),
-            "verifier should not produce votes"
         );
 
         let verifier = Scheme::verifier(participants.clone());

@@ -2329,8 +2329,10 @@ mod tests {
         n: u32,
         seed: u64,
     ) -> bls12381_threshold::Scheme<MinSig> {
-        let mut schemes = generate_bls12381_threshold_schemes(n, seed);
-        schemes.remove(0).into_verifier()
+        let mut rng = StdRng::seed_from_u64(seed);
+        let t = quorum(n);
+        let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        bls12381_threshold::Scheme::verifier(&vec![0; n as usize], &polynomial)
     }
 
     fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme> {
