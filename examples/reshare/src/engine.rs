@@ -2,8 +2,7 @@
 
 use crate::{
     application::{self, Block, Scheme, SchemeProvider},
-    dkg, orchestrator,
-    utils::BLOCKS_PER_EPOCH,
+    dkg, orchestrator, BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::marshal::{self, ingress::handler};

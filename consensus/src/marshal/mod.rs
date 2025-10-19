@@ -95,7 +95,7 @@ mod tests {
             types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round},
-        Block as _, Reporter,
+        utils, Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -357,7 +357,7 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = height / BLOCKS_PER_EPOCH;
+                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
                 let round = Round::new(epoch, height);
 
                 // Broadcast block by one validator
@@ -387,7 +387,7 @@ mod tests {
                     // Always finalize 1) the last block in each epoch 2) the last block in the chain.
                     // Otherwise, finalize randomly.
                     if height == NUM_BLOCKS
-                        || height % BLOCKS_PER_EPOCH == 0
+                        || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
                         || context.gen_bool(0.2)
                     // 20% chance to finalize randomly
                     {

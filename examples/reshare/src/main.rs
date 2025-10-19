@@ -13,8 +13,13 @@ mod dkg;
 mod engine;
 mod orchestrator;
 mod setup;
-mod utils;
 mod validator;
+
+/// The number of blocks in an epoch.
+///
+/// Production systems should use a much larger value, as safety in the DKG/reshare depends on
+/// synchrony. All players must be online for a small duration during this window.
+pub const BLOCKS_PER_EPOCH: u64 = 100;
 
 /// Reshare example CLI.
 #[derive(Parser)]

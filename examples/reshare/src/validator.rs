@@ -144,7 +144,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{application::Block, utils::BLOCKS_PER_EPOCH};
+    use crate::{application::Block, BLOCKS_PER_EPOCH};
     use commonware_consensus::marshal::ingress::handler;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinSig},

@@ -16,7 +16,7 @@ use crate::{
         types::{Finalization, Notarization},
     },
     types::Round,
-    Block, Reporter,
+    utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
@@ -593,8 +593,7 @@ impl<
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let epoch = height / self.epoch_length;
-
+                                    let epoch = utils::epoch(self.epoch_length, height);
                                     let Some(scheme) = self.cache.get_scheme(epoch) else {
                                         let _ = response.send(false);
                                         continue;
