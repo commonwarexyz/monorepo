@@ -179,7 +179,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
     fn verify_votes<R, D, I>(
         &self,
-        _: &mut R,
+        _rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
         votes: I,
