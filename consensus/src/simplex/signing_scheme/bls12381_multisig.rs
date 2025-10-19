@@ -247,8 +247,8 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
+        // Collect the signers and signatures.
         let mut entries = Vec::new();
-
         for Vote { signer, signature } in votes {
             if signer as usize >= self.participants.len() {
                 return None;
@@ -256,11 +256,11 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
             entries.push((signer, signature));
         }
-
         if entries.len() < self.quorum as usize {
             return None;
         }
 
+        // Sort the signers and aggregate the signatures.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let signature = aggregate_signatures::<V, _>(signatures.iter());
