@@ -4,8 +4,14 @@
 //! how votes are signed and verified, how quorum certificates are assembled/checked, and whether
 //! additional randomness is exposed for leader rotation. Two concrete schemes are provided:
 //!
-//! * [`bls12381_threshold`] – aggregated threshold signatures that also expose per-view randomness.
-//! * [`ed25519`] – quorum signatures collected into a vector.
+//! * [`bls12381_threshold`] – BLS12-381 threshold signing: validators author paired partials, one
+//!   for the vote, one for the randomness seed, that collapse into two aggregated signatures for
+//!   certificates. The recovered proof authenticates consensus progress and produces a per-view
+//!   beacon while keeping certificate size constant.
+//! * [`ed25519`] – Ed25519 quorum signing: each validator emits a standalone signature that we
+//!   retain with its index, yielding certificates that grow with the quorum size. The scheme trades
+//!   off certificate succinctness and randomness for operational familiarity - standard key
+//!   material with mature tooling.
 
 pub mod bls12381_threshold;
 pub mod ed25519;
