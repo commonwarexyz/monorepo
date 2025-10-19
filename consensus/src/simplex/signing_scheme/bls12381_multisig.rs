@@ -439,7 +439,7 @@ mod tests {
     }
 
     fn verifier_cannot_sign<V: Variant>() {
-        let (_, participants) = signing_schemes::<V>(3);
+        let (_, participants) = signing_schemes::<V>(4);
         let verifier = Scheme::<V>::verifier(participants);
 
         let proposal = sample_proposal(0, 3, 2);
@@ -587,7 +587,7 @@ mod tests {
     }
 
     fn assemble_certificate_rejects_duplicate_signers<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(3);
+        let (schemes, _) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 11, 6);
 
         let vote = schemes[0]
@@ -599,7 +599,7 @@ mod tests {
             )
             .unwrap();
 
-        let votes = vec![vote.clone(), vote];
+        let votes = vec![vote.clone(), vote.clone(), vote];
         assert!(schemes[0].assemble_certificate(votes).is_none());
     }
 
@@ -723,7 +723,7 @@ mod tests {
     }
 
     fn scheme_clone_and_into_verifier<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(3);
+        let (schemes, participants) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 23, 12);
 
         let clone = schemes[0].clone();
@@ -760,7 +760,7 @@ mod tests {
     }
 
     fn verify_certificate<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(3);
+        let (schemes, participants) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
