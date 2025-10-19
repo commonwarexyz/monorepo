@@ -10,7 +10,7 @@ use std::{
 pub struct Config<B, P, S>
 where
     B: Block,
-    P: SchemeProvider<S>,
+    P: SchemeProvider<Scheme = S>,
     S: Scheme,
 {
     /// Provider for epoch-specific signing schemes.

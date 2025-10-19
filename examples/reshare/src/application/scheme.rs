@@ -44,7 +44,9 @@ impl<V: Variant> SchemeProvider<V> {
     }
 }
 
-impl<V: Variant> marshal::SchemeProvider<Scheme<V>> for SchemeProvider<V> {
+impl<V: Variant> marshal::SchemeProvider for SchemeProvider<V> {
+    type Scheme = Scheme<V>;
+
     fn scheme(&self, epoch: Epoch) -> Option<Scheme<V>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()

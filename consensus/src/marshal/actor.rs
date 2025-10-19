@@ -64,7 +64,7 @@ struct BlockSubscription<B: Block> {
 pub struct Actor<
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<S>,
+    P: SchemeProvider<Scheme = S>,
     S: Scheme,
 > {
     // ---------- Context ----------
@@ -114,7 +114,7 @@ pub struct Actor<
 impl<
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        P: SchemeProvider<S>,
+        P: SchemeProvider<Scheme = S>,
         S: Scheme,
     > Actor<E, B, P, S>
 {

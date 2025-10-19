@@ -70,7 +70,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<S>,
+    P: SchemeProvider<Scheme = S>,
     S: Scheme,
 > {
     /// Context
@@ -96,7 +96,7 @@ pub(crate) struct Manager<
 impl<
         R: Rng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        P: SchemeProvider<S>,
+        P: SchemeProvider<Scheme = S>,
         S: Scheme,
     > Manager<R, B, P, S>
 {

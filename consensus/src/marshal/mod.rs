@@ -67,9 +67,12 @@ pub mod resolver;
 use crate::{simplex::signing_scheme::Scheme, types::Epoch};
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SchemeProvider<S: Scheme>: Send + Sync + 'static {
+pub trait SchemeProvider: Send + Sync + 'static {
+    /// The signing scheme to provide.
+    type Scheme: Scheme;
+
     /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: Epoch) -> Option<S>;
+    fn scheme(&self, epoch: Epoch) -> Option<Self::Scheme>;
 }
 
 #[cfg(test)]
@@ -127,7 +130,9 @@ mod tests {
     type P = ConstantSchemeProvider;
 
     struct ConstantSchemeProvider(S);
-    impl SchemeProvider<S> for ConstantSchemeProvider {
+    impl SchemeProvider for ConstantSchemeProvider {
+        type Scheme = S;
+
         fn scheme(&self, _: Epoch) -> Option<S> {
             Some(self.0.clone())
         }
