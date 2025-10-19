@@ -395,16 +395,14 @@ impl<
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
