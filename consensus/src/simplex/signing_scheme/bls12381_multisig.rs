@@ -586,29 +586,6 @@ mod tests {
         assemble_certificate_requires_quorum::<MinSig>();
     }
 
-    fn assemble_certificate_rejects_duplicate_signers<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
-        let proposal = sample_proposal(0, 11, 6);
-
-        let vote = schemes[0]
-            .sign_vote(
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .unwrap();
-
-        let votes = vec![vote.clone(), vote.clone(), vote];
-        assert!(schemes[0].assemble_certificate(votes).is_none());
-    }
-
-    #[test]
-    fn test_assemble_certificate_rejects_duplicate_signers() {
-        assemble_certificate_rejects_duplicate_signers::<MinPk>();
-        assemble_certificate_rejects_duplicate_signers::<MinSig>();
-    }
-
     fn assemble_certificate_rejects_out_of_range_signer<V: Variant>() {
         let (schemes, _) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 13, 7);

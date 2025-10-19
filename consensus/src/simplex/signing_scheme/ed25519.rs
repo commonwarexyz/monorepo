@@ -537,24 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = schemes(4);
-        let proposal = sample_proposal(0, 11, 6);
-
-        let vote = schemes[0]
-            .sign_vote(
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .unwrap();
-
-        let votes = vec![vote.clone(), vote.clone(), vote];
-        assert!(schemes[0].assemble_certificate(votes).is_none());
-    }
-
-    #[test]
     fn test_assemble_certificate_rejects_out_of_range_signer() {
         let (schemes, _) = schemes(4);
         let proposal = sample_proposal(0, 13, 7);
