@@ -299,18 +299,25 @@ impl signing_scheme::Scheme for Scheme {
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         let mut batch = Batch::new();
-
         for (context, certificate) in certificates {
+            // If the certificate does not meet the quorum, return false.
             if certificate.signers.len() < self.participants.quorum() as usize {
                 return false;
             }
 
+            // Collect the public keys and add them to the batch.
+            let mut last_signer = None;
             let (namespace, message) = vote_namespace_and_message(namespace, context);
-
             for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
                 let Some(public_key) = self.participants.get(*signer) else {
                     return false;
                 };
+                if let Some(last_signer) = last_signer {
+                    if last_signer >= *signer {
+                        return false;
+                    }
+                }
+                last_signer = Some(*signer);
 
                 batch.add(
                     Some(namespace.as_ref()),
@@ -832,6 +839,46 @@ mod tests {
 
         let mut invalid = certificate.clone();
         invalid.signers[0] = participants.len() as u32;
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &invalid,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_duplicate_signers() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 25, 13);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+
+        let mut invalid = certificate.clone();
+        if invalid.signers.len() > 1 {
+            invalid.signers[1] = invalid.signers[0];
+        }
 
         let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(

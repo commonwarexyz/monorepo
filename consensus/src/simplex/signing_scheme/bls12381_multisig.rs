@@ -955,6 +955,51 @@ mod tests {
         verify_certificate_rejects_sub_quorum::<MinSig>();
     }
 
+    fn verify_certificate_rejects_duplicate_signers<V: Variant>() {
+        let (schemes, participants) = signing_schemes::<V>(4);
+        let proposal = sample_proposal(0, 19, 10);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+
+        let mut invalid = certificate.clone();
+        if invalid.signers.len() > 1 {
+            invalid.signers[1] = invalid.signers[0];
+        }
+
+        let verifier = Scheme::<V>::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &invalid,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_duplicate_signers() {
+        verify_certificate_rejects_duplicate_signers::<MinPk>();
+        verify_certificate_rejects_duplicate_signers::<MinSig>();
+    }
+
     fn verify_certificate_rejects_unknown_signer<V: Variant>() {
         let (schemes, participants) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 19, 10);
