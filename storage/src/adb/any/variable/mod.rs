@@ -369,17 +369,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
@@ -437,16 +435,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
-
-        assert!(loc < self.op_count());
+        if loc >= self.op_count() {
+            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
+        }
 
         match self.locations.read(*loc).await {
             Ok(offset) => {
@@ -469,6 +465,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
     /// matches `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::UnexpectedData] if the location does not reference an Update operation.
     async fn get_from_offset(
         &self,
         key: &K,
@@ -477,7 +477,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Option<V>, Error> {
         let section = *loc / self.log_items_per_section;
         let Operation::Update(k, v) = self.log.get(section, offset).await? else {
-            panic!("didn't find Update operation at location {loc} and offset {offset}");
+            return Err(Error::UnexpectedData(loc));
         };
 
         if k != *key {
@@ -683,6 +683,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::UnexpectedData] if the location does not reference a commit operation.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let mut last_commit = *self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
@@ -692,7 +696,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = last_commit / self.log_items_per_section;
         let offset = self.locations.read(last_commit).await?;
         let Operation::CommitFloor(metadata, _) = self.log.get(section, offset).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
+            return Err(Error::UnexpectedData(Location::new_unchecked(last_commit)));
         };
 
         Ok(Some((Location::new_unchecked(last_commit), metadata)))
@@ -779,14 +783,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let target_prune_pos = Position::try_from(target_prune_loc)?;
 
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if target_prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondInactivityFloor(
+                target_prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
         if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());
         }
@@ -896,7 +902,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
@@ -1638,6 +1644,107 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
             assert_ne!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_get_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Test getting from empty database
+            let result = db.get_loc(Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            db.update(Digest::random(&mut context), vec![10]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations succeeds
+            assert!(db.get_loc(Location::new_unchecked(0)).await.unwrap().is_some());
+            assert!(db.get_loc(Location::new_unchecked(1)).await.unwrap().is_some());
+            assert!(db.get_loc(Location::new_unchecked(2)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary 
+            let op_count = *db.op_count();
+            let result = db.get_loc(Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_get_from_loc_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key = Digest::random(&mut context);
+
+            // Test getting from empty database
+            let result = db.get_from_loc(&key, Location::new_unchecked(0)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
+            );
+
+            // Add some operations
+            db.update(key, vec![10]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
+            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // Test getting valid locations succeeds
+            assert!(db.get_from_loc(&key, Location::new_unchecked(0)).await.unwrap().is_some());
+
+            // Test getting exactly at boundary
+            let op_count = *db.op_count();
+            let result = db.get_from_loc(&key, Location::new_unchecked(op_count)).await;
+            assert!(
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_db_prune_beyond_inactivity_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // Add some operations
+            let key1 = Digest::random(&mut context);
+            let key2 = Digest::random(&mut context);
+            let key3 = Digest::random(&mut context);
+
+            db.update(key1, vec![10]).await.unwrap();
+            db.update(key2, vec![20]).await.unwrap();
+            db.update(key3, vec![30]).await.unwrap();
+            db.commit(None).await.unwrap();
+
+            // inactivity_floor should be at some location < op_count
+            let inactivity_floor = db.inactivity_floor_loc();
+            let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
+
+            // Try to prune beyond the inactivity floor
+            let result = db.prune(beyond_floor).await;
+            assert!(
+                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor)) 
+                    if loc == beyond_floor && floor == inactivity_floor)
+            );
 
             db.destroy().await.unwrap();
         });

@@ -5,12 +5,13 @@ use crate::Runner;
 use crate::{Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::task::ArcWake;
 use rayon::{ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
 };
 
@@ -24,9 +25,11 @@ pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
 mod cell;
 pub use cell::Cell as ContextCell;
 
-/// The mode of a task.
+pub(crate) mod supervision;
+
+/// The execution mode of a task.
 #[derive(Copy, Clone, Debug)]
-enum Mode {
+pub enum Execution {
     /// Task runs on a dedicated thread.
     Dedicated,
     /// Task runs on the shared executor. `true` marks short blocking work that should
@@ -34,60 +37,9 @@ enum Mode {
     Shared(bool),
 }
 
-/// Configuration that determines how a task is spawned.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Model {
-    supervised: bool,
-    mode: Mode,
-}
-
-impl Default for Model {
+impl Default for Execution {
     fn default() -> Self {
-        Self {
-            // Default to supervised tasks like UNIX (and **unlike tokio**)
-            supervised: true,
-            // Default to the shared executor with `blocking == false`
-            mode: Mode::Shared(false),
-        }
-    }
-}
-
-impl Model {
-    /// Enable supervision so child tasks are cancelled when the parent exits.
-    pub(crate) fn supervised(&mut self) {
-        self.supervised = true;
-    }
-
-    /// Disable supervision so child tasks outlive the parent.
-    pub(crate) fn detached(&mut self) {
-        self.supervised = false;
-    }
-
-    /// Request a dedicated thread for long-lived or heavily blocking work.
-    pub(crate) fn dedicated(&mut self) {
-        self.mode = Mode::Dedicated;
-    }
-
-    /// Return a new configuration that uses the shared executor.
-    ///
-    /// Set `blocking` to `true` for short-lived blocking work so the runtime can isolate it.
-    pub(crate) fn shared(&mut self, blocking: bool) {
-        self.mode = Mode::Shared(blocking);
-    }
-
-    /// Returns `true` when the task should be supervised by its parent.
-    pub(crate) fn is_supervised(&self) -> bool {
-        self.supervised
-    }
-
-    /// Returns `true` when the task should run on a dedicated thread.
-    pub(crate) fn is_dedicated(&self) -> bool {
-        matches!(self.mode, Mode::Dedicated)
-    }
-
-    /// Returns `true` when the task is shared but is blocking.
-    pub(crate) fn is_blocking(&self) -> bool {
-        matches!(self.mode, Mode::Shared(true))
+        Self::Shared(false)
     }
 }
 
@@ -232,6 +184,46 @@ impl<T> RwLock<T> {
     }
 }
 
+/// Synchronization primitive that enables a thread to block until a waker delivers a signal.
+pub struct Blocker {
+    /// Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
+    state: Mutex<bool>,
+    /// Condvar used to park and resume the thread when the signal flips to true.
+    cv: Condvar,
+}
+
+impl Blocker {
+    /// Create a new [Blocker].
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+
+    /// Block the current thread until a waker delivers a signal.
+    pub fn wait(&self) {
+        // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
+        let mut signaled = self.state.lock().unwrap();
+        while !*signaled {
+            signaled = self.cv.wait(signaled).unwrap();
+        }
+
+        // Reset the flag so subsequent waits park again until the next wake signal.
+        *signaled = false;
+    }
+}
+
+impl ArcWake for Blocker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let mut signaled = arc_self.state.lock().unwrap();
+        *signaled = true;
+
+        // Notify a single waiter so the blocked thread re-checks the flag.
+        arc_self.cv.notify_one();
+    }
+}
+
 #[cfg(test)]
 async fn task(i: usize) -> usize {
     for _ in 0..5 {
@@ -264,7 +256,9 @@ mod tests {
     use super::*;
     use crate::{deterministic, tokio, Metrics};
     use commonware_macros::test_traced;
+    use futures::task::waker;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test_traced]
     fn test_create_pool() {
@@ -303,5 +297,73 @@ mod tests {
             // Check the value
             assert_eq!(*w, 101);
         });
+    }
+
+    #[test]
+    fn test_blocker_waits_until_wake() {
+        let blocker = Blocker::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+
+        let thread_blocker = blocker.clone();
+        let thread_started = started.clone();
+        let thread_completed = completed.clone();
+        let handle = std::thread::spawn(move || {
+            thread_started.store(true, Ordering::SeqCst);
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        });
+
+        while !started.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        assert!(!completed.load(Ordering::SeqCst));
+        waker(blocker.clone()).wake();
+        handle.join().unwrap();
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_handles_pre_wake() {
+        let blocker = Blocker::new();
+        waker(blocker.clone()).wake();
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        std::thread::spawn(move || {
+            thread_blocker.wait();
+            thread_completed.store(true, Ordering::SeqCst);
+        })
+        .join()
+        .unwrap();
+
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_blocker_reusable_across_signals() {
+        let blocker = Blocker::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        let thread_blocker = blocker.clone();
+        let thread_completed = completed.clone();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                thread_blocker.wait();
+                thread_completed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        for expected in 1..=2 {
+            waker(blocker.clone()).wake();
+            while completed.load(Ordering::SeqCst) < expected {
+                std::thread::yield_now();
+            }
+        }
+
+        handle.join().unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
     }
 }

@@ -1,3 +1,6 @@
+//! Mock application used by `simplex` tests to produce and verify payloads,
+//! simulating proposal/verification latency and broadcasting via a mock relay.
+
 use super::relay::Relay;
 use crate::{
     simplex::types::Context,
@@ -64,7 +67,7 @@ impl<D: Digest> Au for Mailbox<D> {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, context: Context<Self::Digest>) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose { context, response })
@@ -75,7 +78,7 @@ impl<D: Digest> Au for Mailbox<D> {
 
     async fn verify(
         &mut self,
-        context: Context<Self::Digest>,
+        context: Self::Context,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
@@ -194,9 +197,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Generate the payload
-        let parent = context.parent.1;
-        let random = self.context.gen::<u64>(); // Ensures we always have a unique payload
-        let payload = (context.round, parent, random).encode();
+        let rand = self.context.gen::<u64>();
+        let payload = (context.round, context.parent.1, rand).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
@@ -232,7 +234,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         if parent != context.parent.1 {
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",
-                parent, &context.parent.1
+                parent, context.parent.1
             ));
         }
         // We don't care about the random number

@@ -15,9 +15,8 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 /// async block, and restoring the context before the block completes.
 ///
 /// The macro uses the context's default spawn configuration (supervised, shared executor with
-/// `blocking == false`). If you need to adjust the configuration—detach, mark the task as blocking,
-/// or request a dedicated thread—take the context via [`Cell::take`] and call the appropriate
-/// [`crate::Spawner`] methods before spawning.
+/// `blocking == false`). If you need to mark the task as blocking or request a dedicated thread,
+/// take the context via [`Cell::take`] and call the appropriate [`crate::Spawner`] methods before spawning.
 #[macro_export]
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
@@ -95,14 +94,6 @@ impl<C> crate::Spawner for Cell<C>
 where
     C: crate::Spawner,
 {
-    fn supervised(self) -> Self {
-        Self::Present(self.into().supervised())
-    }
-
-    fn detached(self) -> Self {
-        Self::Present(self.into().detached())
-    }
-
     fn dedicated(self) -> Self {
         Self::Present(self.into().dedicated())
     }
@@ -168,6 +159,20 @@ where
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         self.as_ref().sleep_until(deadline)
+    }
+}
+
+#[cfg(feature = "external")]
+impl<C> crate::Pacer for Cell<C>
+where
+    C: crate::Pacer,
+{
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        self.as_ref().pace(latency, future)
     }
 }
 

@@ -43,11 +43,7 @@ impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
     type Index = Epoch;
     type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
         Some(&self.validators)
     }
 
@@ -61,10 +57,6 @@ impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
     type Identity = V::Public;
     type Share = Share;
     type Seed = V::Signature;
-
-    fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
 
     fn identity(&self) -> &Self::Identity {
         public::<V>(&self.polynomial)

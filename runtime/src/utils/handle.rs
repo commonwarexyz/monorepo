@@ -1,4 +1,4 @@
-use crate::{utils::extract_panic_message, Error};
+use crate::{supervision::Tree, utils::extract_panic_message, Error};
 use futures::{
     channel::oneshot,
     future::{select, Either},
@@ -35,7 +35,7 @@ where
         f: F,
         metric: MetricHandle,
         panicker: Panicker,
-        children: Arc<Mutex<Vec<Aborter>>>,
+        tree: Arc<Tree>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -61,18 +61,14 @@ where
         };
 
         // Make the future abortable
-        let abortable = {
-            let metric = metric.clone();
-            Abortable::new(wrapped, abort_registration).map(move |_| {
-                // Abort all children
-                for aborter in children.lock().unwrap().drain(..) {
-                    aborter.abort();
-                }
+        let metric_handle = metric.clone();
+        let abortable = Abortable::new(wrapped, abort_registration).map(move |_| {
+            // Mark the task as aborted and abort all descendants.
+            tree.abort();
 
-                // Mark the task as finished
-                metric.finish();
-            })
-        };
+            // Finish the metric.
+            metric_handle.finish();
+        });
 
         (
             abortable,
@@ -82,6 +78,22 @@ where
                 metric,
             },
         )
+    }
+
+    /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
+    pub(crate) fn closed(metric: MetricHandle) -> Self {
+        // Mark the task as finished immediately so gauges remain accurate.
+        metric.finish();
+
+        // Create a receiver that will yield `Err(Error::Closed)` when awaited.
+        let (sender, receiver) = oneshot::channel();
+        drop(sender);
+
+        Self {
+            abort_handle: None,
+            receiver,
+            metric,
+        }
     }
 
     /// Abort the task (if not blocking).

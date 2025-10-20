@@ -219,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                         let size_before = mmr.size();
                         let root_before = mmr.root(&mut hasher);
 
-                        mmr.update_leaf(&mut hasher, pos, limited_data);
+                        mmr.update_leaf(&mut hasher, pos, limited_data).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change

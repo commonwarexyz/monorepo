@@ -67,6 +67,46 @@ impl Position {
     pub const fn saturating_sub(self, rhs: u64) -> Self {
         Self(self.0.saturating_sub(rhs))
     }
+
+    /// Returns whether this is a valid MMR size.
+    ///
+    /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
+    /// MMR of the given size have strictly decreasing height, which is a necessary condition for
+    /// MMR validity.
+    #[inline]
+    pub const fn is_mmr_size(self) -> bool {
+        if self.0 == 0 {
+            return true;
+        }
+        let leading_zeros = self.0.leading_zeros();
+        if leading_zeros == 0 {
+            // size overflow
+            return false;
+        }
+        let start = u64::MAX >> leading_zeros;
+        let mut two_h = 1 << start.trailing_ones();
+        let mut node_pos = start.checked_sub(1).expect("start > 0 because size != 0");
+        while two_h > 1 {
+            if node_pos < self.0 {
+                if two_h == 2 {
+                    // If this peak is a leaf yet there are more nodes remaining, then this MMR is
+                    // invalid.
+                    return node_pos == self.0 - 1;
+                }
+                // move to the right sibling
+                node_pos += two_h - 1;
+                if node_pos < self.0 {
+                    // If the right sibling is in the MMR, then it is invalid.
+                    return false;
+                }
+                continue;
+            }
+            // descend to the left child
+            two_h >>= 1;
+            node_pos -= two_h;
+        }
+        true
+    }
 }
 
 impl fmt::Display for Position {
@@ -257,7 +297,8 @@ impl SubAssign<u64> for Position {
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
-    use crate::mmr::{MAX_LOCATION, MAX_POSITION};
+    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use commonware_cryptography::Sha256;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -420,5 +461,35 @@ mod tests {
         let max_loc = Location::new_unchecked(MAX_LOCATION);
         let last_leaf_pos = Position::try_from(max_loc).unwrap();
         assert!(*last_leaf_pos < MAX_POSITION);
+    }
+
+    #[test]
+    fn test_is_mmr_size() {
+        // Build an MMR one node at a time and check that the validity check is correct for all
+        // sizes up to the current size.
+        let mut mmr = Mmr::new();
+        let mut size_to_check = Position::new(0);
+        let mut hasher = Standard::<Sha256>::new();
+        let digest = [1u8; 32];
+        for _i in 0..10000 {
+            while size_to_check != mmr.size() {
+                assert!(
+                    !size_to_check.is_mmr_size(),
+                    "size_to_check: {} {}",
+                    size_to_check,
+                    mmr.size()
+                );
+                size_to_check += 1;
+            }
+            assert!(size_to_check.is_mmr_size());
+            mmr.add(&mut hasher, &digest);
+            size_to_check += 1;
+        }
+
+        // Test overflow boundaries.
+        assert!(!Position::new(u64::MAX).is_mmr_size());
+        assert!(Position::new(u64::MAX >> 1).is_mmr_size());
+        assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
+        assert!(!MAX_POSITION.is_mmr_size());
     }
 }

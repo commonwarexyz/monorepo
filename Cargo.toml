@@ -21,6 +21,7 @@ members = [
     "examples/log",
     "examples/sync",
     "examples/vrf",
+    "examples/reshare",
 
     # Fuzz builds
     "broadcast/fuzz",
@@ -72,6 +73,7 @@ tokio = "1.43.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 paste = "1.0.15"
+pin-project = "1.1.10"
 prost = "0.13.5"
 prost-build = "0.13.5"
 governor = "0.6.3"
