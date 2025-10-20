@@ -17,7 +17,7 @@ use crate::{
     store::{operation::Fixed as Operation, Db},
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -517,15 +517,15 @@ impl<
             debug!("next_key should be None in unordered proof verification");
             return false;
         }
-        let element = Operation::Update(info.key, info.value).encode();
-        verify_key_value_proof::<H, N>(
+        let element = Operation::Update(info.key, info.value);
+        verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
             Self::grafting_height(),
             proof,
             info.loc,
             &info.chunk,
             root,
-            &element,
+            element,
         )
     }
 

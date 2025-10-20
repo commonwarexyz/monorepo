@@ -9,7 +9,7 @@ use crate::{
     store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _};
+use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, ThreadPool};
 use commonware_utils::Array;
@@ -78,14 +78,14 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
 /// and only if the operation at location `loc` was active and has the value `element` in the
 /// Current db with the given `root`.
-fn verify_key_value_proof<H: CHasher, const N: usize>(
+fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
     hasher: &mut H,
     grafting_height: u32,
     proof: &Proof<H::Digest>,
     loc: Location,
     chunk: &[u8; N],
     root: &H::Digest,
-    element: &[u8],
+    element: E,
 ) -> bool {
     let Ok(op_count) = Location::try_from(proof.size) else {
         debug!("verification failed, invalid proof size");
@@ -106,9 +106,10 @@ fn verify_key_value_proof<H: CHasher, const N: usize>(
     let mut verifier =
         Verifier::<H>::new(grafting_height, Location::new_unchecked(num), vec![chunk]);
 
+    let element = element.encode();
     let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
     if next_bit == 0 {
-        return proof.verify_element_inclusion(&mut verifier, element, loc, root);
+        return proof.verify_element_inclusion(&mut verifier, &element, loc, root);
     }
 
     // The proof must contain the partial chunk digest as its last hash.

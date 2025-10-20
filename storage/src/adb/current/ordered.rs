@@ -21,7 +21,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -606,8 +606,7 @@ impl<
             key: info.key,
             value: info.value,
             next_key,
-        })
-        .encode();
+        });
 
         super::verify_key_value_proof(
             hasher,
@@ -616,7 +615,7 @@ impl<
             info.loc,
             &info.chunk,
             root,
-            &element,
+            element,
         )
     }
 
@@ -666,8 +665,7 @@ impl<
                     key: info.key,
                     value: info.value,
                     next_key,
-                })
-                .encode();
+                });
 
                 (info.loc, info.chunk, element)
             }
@@ -675,7 +673,7 @@ impl<
                 // Handle the case where the proof shows the db is empty, hence any key is proven
                 // excluded.
                 let op = Operation::<K, V>::CommitFloor(loc);
-                (loc, chunk, op.encode())
+                (loc, chunk, op)
             }
             ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
@@ -693,7 +691,7 @@ impl<
             loc,
             &chunk,
             root,
-            &element,
+            element,
         )
     }
 
