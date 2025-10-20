@@ -58,7 +58,7 @@ impl Scheme {
     }
 
     /// Stage a certificate for batch verification.
-    fn stage_certificate<'a, D: Digest>(
+    fn batch_verify_certificate<'a, D: Digest>(
         &self,
         batch: &mut Batch,
         namespace: &[u8],
@@ -298,7 +298,7 @@ impl signing_scheme::Scheme for Scheme {
         certificate: &Self::Certificate,
     ) -> bool {
         let mut batch = Batch::new();
-        if !self.stage_certificate(&mut batch, namespace, context, certificate) {
+        if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
             return false;
         }
 
@@ -318,7 +318,7 @@ impl signing_scheme::Scheme for Scheme {
     {
         let mut batch = Batch::new();
         for (context, certificate) in certificates {
-            if !self.stage_certificate(&mut batch, namespace, context, certificate) {
+            if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
                 return false;
             }
         }
