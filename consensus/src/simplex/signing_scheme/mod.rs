@@ -1,21 +1,18 @@
-//! Signing-scheme abstraction and implementations used by `simplex`.
+//! Signing-scheme abstractions and implementations used by `simplex`.
 //!
 //! The [`Scheme`] trait defines the cryptographic surface consumed by the core consensus engine:
-//! how votes are signed and verified, how quorum certificates are assembled/checked, and whether
-//! additional randomness is exposed for leader rotation. Three concrete schemes are provided:
+//! how votes are authored and validated, how quorum certificates are recovered, and whether
+//! deterministic randomness is derived for leader rotation. Three concrete schemes are maintained:
 //!
-//! * [`bls12381_threshold`] – BLS12-381 threshold signing: validators author paired partials, one
-//!   for the vote, one for the randomness seed, that collapse into two aggregated signatures for
-//!   certificates. The recovered proof authenticates consensus progress and produces a per-view
-//!   beacon while keeping certificate size constant.
-//! * [`bls12381_multisig`] – BLS12-381 multisignature signing: validators emit plain BLS signatures
-//!   that aggregate into a succinct single-signature certificate. It keeps the footprint small like
-//!   the threshold scheme but avoids polynomial setup, sitting between the threshold and ed25519
-//!   variants at the cost of providing no randomness seed.
-//! * [`ed25519`] – Ed25519 quorum signing: each validator emits a standalone signature that we
-//!   retain with its index, yielding certificates that grow with the quorum size. The scheme trades
-//!   off certificate succinctness and randomness for operational familiarity - standard key
-//!   material with mature tooling.
+//! * [`ed25519`] - Implements Ed25519 quorum signatures that retain each validator's signature together
+//!   with its index. Certificates grow proportionally with the quorum size yet operate with widely
+//!   deployed key material and tooling; no randomness is produced.
+//! * [`bls12381_multisig`] - Uses plain BLS12-381 signatures that aggregate into a single multisignature
+//!   certificate. This keeps the certificate footprint constant and requires only static public keys,
+//!   but the scheme does not expose randomness.
+//! * [`bls12381_threshold`] - Executes a BLS12-381 threshold protocol in which validators emit paired
+//!   partial signatures for the vote body and the randomness seed. Any `2f+1` partials collapse into
+//!   a constant-size certificate that authenticates consensus progress and yields a per-view beacon.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;

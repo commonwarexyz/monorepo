@@ -2,17 +2,20 @@
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
 //! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
-//! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, letting deployments
-//! plug in different signature schemes. The following schemes are currently implemented:
+//! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, allowing deployments
+//! to select a certificate format that matches their operational and interoperability requirements. The
+//! following implementations are available:
 //!
-//! * **[signing_scheme::ed25519]** – traditional individual signatures collected into a vector, retaining the
-//!   same interface but without succinct certificate aggregation or randomness seed.
-//! * **[signing_scheme::bls12381_multisig]** – plain BLS signatures aggregated into a single certificate. Provides succinct
-//!   certificates without requiring distributed key generation, but does not expose the per-view randomness seed.
-//! * **[signing_scheme::bls12381_threshold]** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
-//!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
-//!   certificate can be verified with just the static public key of the consensus instance) for each view with
-//!   zero message overhead (natively integrated).
+//! * **[signing_scheme::ed25519]** - Maintains an ordered collection of individual Ed25519 signatures and
+//!   accompanying voter indices. Certificates remain compatible with commodity validator tooling but grow
+//!   linearly with the quorum size and do not yield a randomness beacon.
+//! * **[signing_scheme::bls12381_multisig]** - Aggregates plain BLS12-381 signatures into a single multisignature.
+//!   The resulting certificates have constant size and require only static public keys, but the scheme does not
+//!   export per-view randomness.
+//! * **[signing_scheme::bls12381_threshold]** - Combines `2f+1` partials from a `3f+1` committee into both a
+//!   succinct BLS12-381 threshold certificate and a deterministic randomness seed. The same group public key
+//!   authenticates every view, enabling light-client verification and leader selection without additional
+//!   message overhead.
 //!
 //! # Features
 //!
@@ -144,19 +147,22 @@
 //!
 //! #### Consensus Certificates
 //!
-//! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence (i.e. consensus certificates) whose
-//! concrete representation is dictated by the active signing scheme. These certificates are produced as soon as `2f+1` vote messages
-//! (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are collected and they can be used to secure interoperability between different
-//! consensus instances and user interactions with an infrastructure provider.
+//! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence—collectively
+//! referred to as consensus certificates—whose encoding is determined by the active signing scheme. A certificate
+//! is assembled once `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been
+//! validated. The resulting object is a standalone proof of consensus progress that downstream systems can ingest
+//! without executing the protocol.
 //!
-//! * With **Ed25519 quorum signatures**, certificates consist of the individual signatures from the quorum. While larger, they preserve
-//!   the same interface and can be validated against the ordered participant set exported by the scheme.
-//! * With **BLS12-381 multisignature signatures**, certificates consist of the aggregated signature from the quorum.
-//! * With **BLS12-381 threshold signatures**, each broadcast vote carries a partial signature for a static group public key (derived
-//!   from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)). Once a
-//!   quorum (`2f+1`) is collected, these partials aggregate into a succinct certificate that can be verified using only the committee
-//!   public key. Because the public key is static, any of these certificates can be verified by an external process without following
-//!   the consensus instance and/or tracking the current set of participants (as is typically required to operate a lite client).
+//! * With **Ed25519 quorum signatures**, a certificate retains each validator signature paired with its index in
+//!   the ordered participant list. Verification replays individual Ed25519 checks and tolerates heterogeneous key
+//!   custody at the cost of linear-sized artifacts and no embedded randomness.
+//! * With **BLS12-381 multisignatures**, votes aggregate into a single BLS signature authenticated by the static
+//!   public-key set. The certificate footprint stays constant and supports light-client verification, but no
+//!   randomness seed is exported.
+//! * With **BLS12-381 threshold signatures**, every vote carries a partial against a group public key derived from
+//!   a polynomial generated during reconfiguration (via [dkg](commonware_cryptography::bls12381::dkg)). Any `2f+1`
+//!   partials interpolate to a succinct certificate and simultaneously recover the per-view randomness seed. External
+//!   verifiers need only the committee public key to authenticate progress across the entire execution.
 //!
 //! ### Deviations from Simplex Consensus
 //!
