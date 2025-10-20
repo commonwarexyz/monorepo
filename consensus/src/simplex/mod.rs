@@ -11,9 +11,9 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Lazy Message Verification
-//! * Flexible Block Format
-//! * Pluggable Cryptography
-//! * Embedded VRF for Leader Election and Post-Facto Execution Randomness (via [signing_scheme::bls12381_threshold])
+//! * Application-Defined Block Format
+//! * Pluggable Hashing and Cryptography
+//! * Embedded VRF (via [signing_scheme::bls12381_threshold])
 //!
 //! # Design
 //!
