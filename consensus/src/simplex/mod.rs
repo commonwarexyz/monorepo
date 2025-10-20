@@ -121,13 +121,10 @@
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
 //!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! ### Consensus Certificates
-//!
-//! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence—collectively
-//! referred to as consensus certificates—whose encoding is determined by the active signing scheme. A certificate
-//! is assembled once `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been
-//! validated. The resulting object is a standalone proof of consensus progress that downstream systems can ingest
-//! without executing the protocol.
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
+//! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
+//! the protocol._
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -175,10 +172,10 @@
 //!   stays constant and includes signer indices so verifiers can rebuild the aggregate public key from the static
 //!   participant set. No randomness seed is exported.
 //!
-//! #### Embedded VRF (BLS Threshold Scheme)
+//! #### Embedded VRF
 //!
-//! When the BLS threshold signing scheme is in use, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial
-//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
+//! When the [signing_scheme::bls12381_threshold] is employed, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)`
+//! message (a partial signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
 //! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
 //! whether or not a block was notarized in said view `v`.
 //!
@@ -187,10 +184,9 @@
 //! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
 //! is used as a seed in `v`).
 //!
-//! * With **BLS12-381 threshold signatures**, every vote carries a partial against a group public key derived from
-//!   a polynomial generated during reconfiguration (via [dkg](commonware_cryptography::bls12381::dkg)). Any `2f+1`
-//!   partials interpolate to a succinct certificate and simultaneously recover the per-view randomness seed. External
-//!   verifiers need only the committee public key to authenticate progress across the entire execution.
+//! #### Succinct Certificates
+//!
+//!
 
 pub mod signing_scheme;
 pub mod types;
