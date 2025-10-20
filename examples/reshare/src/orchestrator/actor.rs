@@ -16,10 +16,7 @@ use commonware_consensus::{
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
-    Hasher, Signer,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -32,7 +29,7 @@ use commonware_utils::{set::Set, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for the orchestrator.
@@ -174,13 +171,12 @@ where
         mux.start();
 
         // Wait for instructions to transition epochs.
-        let mut engines = BTreeMap::new();
+        let mut engines = HashMap::new();
         loop {
             select! {
                 message = pending_backup.next() => {
                     // If a message is received in an unregistered sub-channel in the recovered or pending network,
                     // attempt to forward the boundary finalization for the epoch.
-
                     let Some((epoch, (from, _))) = message else {
                         warn!("recovered/pending mux backup channel closed, shutting down orchestrator");
                         break;
@@ -204,7 +200,6 @@ where
                         debug!(epoch, ?from, "missing finalization for old epoch");
                         continue;
                     };
-
                     debug!(
                         epoch,
                         boundary_height,
@@ -234,16 +229,24 @@ where
                         Message::Enter(transition) => {
                             // If the epoch is already in the map, ignore.
                             if engines.contains_key(&transition.epoch) {
+                                warn!(epoch = transition.epoch, "entered existing epoch");
                                 continue;
                             }
+
+                            // Register the new signing scheme with the scheme provider.
+                            let scheme = if let Some(share) = transition.share {
+                                Scheme::<V>::new(transition.participants.as_ref(), &transition.poly, share)
+                            } else {
+                                Scheme::<V>::verifier(transition.participants.as_ref(), &transition.poly)
+                            };
+                            assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
 
                             // Enter the new epoch.
                             let engine = self
                                 .enter_epoch(
                                     transition.epoch,
-                                    transition.poly,
-                                    transition.share,
                                     transition.participants,
+                                    scheme,
                                     &mut pending_mux,
                                     &mut recovered_mux,
                                     &mut resolver_mux,
@@ -251,28 +254,20 @@ where
                                 .await;
                             engines.insert(transition.epoch, engine);
 
-                            info!(transition.epoch, "entered new epoch");
+                            info!(epoch = transition.epoch, "entered epoch");
                         }
                         Message::Exit(epoch) => {
-                            // Remove all entries with key less than or equal to the requested exit epoch.
-                            let epochs_to_remove: Vec<_> = engines
-                                .keys()
-                                .take_while(|k| **k <= epoch)
-                                .copied()
-                                .collect();
+                            // Remove the engine and abort it.
+                            let Some(engine) = engines.remove(&epoch) else {
+                                warn!(epoch, "exited non-existent epoch");
+                                continue;
+                            };
+                            engine.abort();
 
-                            // Abort all engines for the epochs to remove.
-                            for epoch in epochs_to_remove {
-                                let engine = engines.remove(&epoch).unwrap();
-                                engine.abort();
+                            // Unregister the signing scheme for the epoch.
+                            assert!(self.scheme_provider.unregister(&epoch));
 
-                                // Unregister the signing scheme for the epoch.
-                                if !self.scheme_provider.unregister(&epoch) {
-                                    warn!(epoch, "unregistered non-existent signing scheme for epoch");
-                                }
-
-                                info!(epoch, "exited epoch");
-                            }
+                            info!(epoch, "exited epoch");
                         }
                     }
                 },
@@ -280,13 +275,11 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        polynomial: Public<V>,
-        share: Option<group::Share>,
         participants: Set<C::PublicKey>,
+        scheme: Scheme<V>,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -301,17 +294,6 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let scheme = if let Some(share) = share {
-            Scheme::<V>::new(participants.as_ref(), &polynomial, share)
-        } else {
-            Scheme::<V>::verifier(participants.as_ref(), &polynomial)
-        };
-
-        // Register the new signing scheme with the scheme provider
-        if !self.scheme_provider.register(epoch, scheme.clone()) {
-            warn!(epoch, "registered duplicate signing scheme for epoch");
-        }
-
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
