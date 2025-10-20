@@ -6,11 +6,11 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
     simplex::{
-        mocks::supervisor::Supervisor,
+        mocks::reporter::Reporter,
         types::{Finalize, Notarize, Nullify, Proposal, Voter},
     },
     types::Round,
-    Supervisor as SupervisorTrait, Viewable,
+    Viewable,
 };
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey, Signature},
@@ -22,29 +22,30 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use commonware_consensus::simplex::signing_scheme::Scheme;
 
-pub struct Fuzzer<E: Clock + Spawner> {
+pub struct Fuzzer<E: Clock + Spawner, S: Scheme, D: Digest> {
     context: E,
-    crypto: PrivateKey,
-    supervisor: Supervisor<PublicKey, Sha256Digest>,
+    scheme: S,
+    reporter: Reporter<PublicKey, Sha256Digest, S, D>,
     namespace: Vec<u8>,
     rng: StdRng,
     view: u64,
 }
 
-impl<E: Clock + Spawner> Fuzzer<E> {
+impl<E: Clock + Spawner, S: Scheme, D: Digest> Fuzzer<E, S, D> {
     pub fn new(
         context: E,
-        crypto: PrivateKey,
-        supervisor: Supervisor<PublicKey, Sha256Digest>,
+        scheme: S,
+        reporter: Reporter<PublicKey, Sha256Digest, S, D>,
         namespace: Vec<u8>,
         input: FuzzInput,
     ) -> Self {
         Self {
             view: 0,
             context,
-            crypto,
-            supervisor,
+            scheme,
+            reporter,
             namespace,
             rng: StdRng::seed_from_u64(input.seed),
         }
@@ -154,17 +155,16 @@ impl<E: Clock + Spawner> Fuzzer<E> {
             Voter::Notarize(notarize) => {
                 // Get our index
                 let public_key_index = self
-                    .supervisor
-                    .is_participant(self.view, &self.crypto.public_key())
+                    .reporter
+                    .is_participant(self.view, &self.scheme.public_key())
                     .unwrap();
 
                 // Notarize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&notarize.proposal, mutation);
                 let msg = Notarize::sign(
+                    &self.scheme,
                     &self.namespace,
-                    &mut self.crypto,
-                    public_key_index,
                     mutated_proposal,
                 );
                 let msg = Voter::<Signature, Sha256Digest>::Notarize(msg)
@@ -175,17 +175,16 @@ impl<E: Clock + Spawner> Fuzzer<E> {
             Voter::Finalize(finalize) => {
                 // Get our index
                 let public_key_index = self
-                    .supervisor
-                    .is_participant(self.view, &self.crypto.public_key())
+                    .reporter
+                    .is_participant(self.view, &self.scheme.public_key())
                     .unwrap();
 
                 // Finalize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&finalize.proposal, mutation);
                 let msg = Finalize::sign(
+                    &self.scheme,
                     &self.namespace,
-                    &mut self.crypto,
-                    public_key_index,
                     mutated_proposal,
                 );
                 let msg = Voter::<Signature, Sha256Digest>::Finalize(msg)
@@ -196,16 +195,15 @@ impl<E: Clock + Spawner> Fuzzer<E> {
             Voter::Nullify(nullify) => {
                 // Get our index
                 let public_key_index = self
-                    .supervisor
-                    .is_participant(nullify.view(), &self.crypto.public_key())
+                    .reporter
+                    .is_participant(nullify.view(), &self.scheme.public_key())
                     .unwrap();
 
                 // Nullify random view
                 let mutated_view = self.random_view(nullify.view());
                 let msg = Nullify::sign(
+                    &self.scheme,
                     &self.namespace,
-                    &mut self.crypto,
-                    public_key_index,
                     Round::new(0, mutated_view),
                 );
                 let msg = Voter::<Signature, Sha256Digest>::Nullify(msg)
@@ -269,17 +267,16 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         );
 
         if let Some(public_key_index) = self
-            .supervisor
-            .is_participant(real_view, &self.crypto.public_key())
+            .reporter
+            .is_participant(real_view, &self.scheme.public_key())
         {
             let message = self.random_message();
 
             match message {
                 Message::Notarize => {
                     let msg = Notarize::sign(
+                        &self.scheme,
                         &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
                         proposal,
                     );
                     let encoded_msg = Voter::<Signature, Sha256Digest>::Notarize(msg)
@@ -289,9 +286,8 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                 }
                 Message::Finalize => {
                     let msg = Finalize::sign(
+                        &self.scheme,
                         &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
                         proposal,
                     );
                     let encoded_msg = Voter::<Signature, Sha256Digest>::Finalize(msg)
@@ -301,9 +297,8 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                 }
                 Message::Nullify => {
                     let msg = Nullify::sign(
+                        &self.scheme,
                         &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
                         Round::new(0, real_view),
                     );
                     let encoded_msg = Voter::<Signature, Sha256Digest>::Nullify(msg)

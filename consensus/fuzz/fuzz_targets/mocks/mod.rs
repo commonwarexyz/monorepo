@@ -1,8 +1,4 @@
 use arbitrary::Arbitrary;
-use commonware_consensus::{
-    simplex::mocks::supervisor::Supervisor as SimplexSupervisor,
-    threshold_simplex::mocks::supervisor::Supervisor as ThresholdSimplexSupervisor,
-};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk, ed25519::PublicKey, sha256::Digest as Sha256Digest,
 };
@@ -13,6 +9,7 @@ use std::{
     num::NonZeroUsize,
     time::Duration,
 };
+use commonware_consensus::aggregation::mocks::Reporter;
 
 pub mod simplex_fuzzer;
 pub mod threshold_simplex_fuzzer;
@@ -261,12 +258,12 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
 
 #[allow(dead_code)]
 pub fn extract_threshold_simplex_state(
-    supervisors: Vec<ThresholdSimplexSupervisor<PublicKey, MinPk, Sha256Digest>>,
+    reporter: Vec<Reporter<PublicKey, MinPk>>,
 ) -> Vec<ReplicaState> {
-    supervisors
-        .into_iter()
-        .map(|supervisor| {
-            let notarizations = supervisor.notarizations.lock().unwrap();
+    reporter
+        .iter()
+        .map(|reporter| {
+            let notarizations = reporter.into().notarizes.lock().unwrap();
             let notarization_data = notarizations
                 .iter()
                 .map(|(&view, cert)| {
@@ -280,7 +277,7 @@ pub fn extract_threshold_simplex_state(
                 })
                 .collect();
 
-            let nullifications = supervisor.nullifications.lock().unwrap();
+            let nullifications = reporter.into().lock().unwrap();
             let nullification_data = nullifications
                 .iter()
                 .map(|(&view, _cert)| {
@@ -293,7 +290,7 @@ pub fn extract_threshold_simplex_state(
                 })
                 .collect();
 
-            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalizations = reporter.into().finalizations.lock().unwrap();
             let finalization_data = finalizations
                 .iter()
                 .map(|(&view, cert)| {
@@ -314,12 +311,12 @@ pub fn extract_threshold_simplex_state(
 
 #[allow(dead_code)]
 pub fn extract_simplex_state(
-    supervisors: Vec<SimplexSupervisor<PublicKey, Sha256Digest>>,
+    reporter: Vec<Reporter<PublicKey, Sha256Digest>>,
 ) -> Vec<ReplicaState> {
-    supervisors
-        .into_iter()
-        .map(|supervisor| {
-            let notarizations = supervisor.notarizations.lock().unwrap();
+    reporter
+        .iter()
+        .map(|reporter| {
+            let notarizations = reporter.into().notarizations.lock().unwrap();
             let notarization_data = notarizations
                 .iter()
                 .map(|(&view, cert)| {
@@ -333,7 +330,7 @@ pub fn extract_simplex_state(
                 })
                 .collect();
 
-            let nullifications = supervisor.nullifications.lock().unwrap();
+            let nullifications = reporter.into().nullifications.lock().unwrap();
             let nullification_data = nullifications
                 .iter()
                 .map(|(&view, cert)| {
@@ -346,7 +343,7 @@ pub fn extract_simplex_state(
                 })
                 .collect();
 
-            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalizations = reporter.into().finalizations.lock().unwrap();
             let finalization_data = finalizations
                 .iter()
                 .map(|(&view, cert)| {
