@@ -279,7 +279,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // appending missing location entries. If we did data first, locations would
         // be ahead (unrecoverable corruption).
         self.locations.rewind(size).await?;
-
         self.data
             .rewind_to_offset(discard_location.section, discard_location.offset)
             .await?;
