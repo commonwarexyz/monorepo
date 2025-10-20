@@ -264,6 +264,31 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         self.sync().await
     }
 
+    /// Update (or insert) a value in [Metadata] using a closure.
+    pub fn upsert(&mut self, key: K, f: impl FnOnce(&mut V))
+    where
+        V: Default,
+    {
+        if let Some(value) = self.get_mut(&key) {
+            // Update existing value
+            f(value);
+        } else {
+            // Insert new value
+            let mut value = V::default();
+            f(&mut value);
+            self.put(key, value);
+        }
+    }
+
+    /// Update (or insert) a value in [Metadata] using a closure and sync immediately.
+    pub async fn upsert_sync(&mut self, key: K, f: impl FnOnce(&mut V)) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.upsert(key, f);
+        self.sync().await
+    }
+
     /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) -> Option<V> {
         // Get value

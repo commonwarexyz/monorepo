@@ -1,10 +1,13 @@
+use super::SchemeProvider;
 use crate::{
-    threshold_simplex::types::{Finalization, Notarization},
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Finalization, Notarization},
+    },
     types::{Epoch, Round, View},
     Block,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
@@ -35,18 +38,18 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> {
+struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
     notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarizations stored by view
-    notarizations: prunable::Archive<TwoCap, R, B::Commitment, Notarization<V, B::Commitment>>,
+    notarizations: prunable::Archive<TwoCap, R, B::Commitment, Notarization<S, B::Commitment>>,
     /// Finalizations stored by view
-    finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Cache<R, B, V> {
+impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> Cache<R, B, S> {
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
@@ -65,28 +68,43 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    V: Variant,
+    P: SchemeProvider<Scheme = S>,
+    S: Scheme,
 > {
     /// Context
     context: R,
+
+    /// Provider for epoch-specific signing schemes.
+    scheme_provider: P,
 
     /// Configuration for underlying prunable archives
     cfg: Config,
 
     /// Codec configuration for block type
-    codec_config: B::Cfg,
+    block_codec_config: B::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
     metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, B, V>>,
+    caches: BTreeMap<Epoch, Cache<R, B, S>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Manager<R, B, V> {
+impl<
+        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        P: SchemeProvider<Scheme = S>,
+        S: Scheme,
+    > Manager<R, B, P, S>
+{
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(context: R, cfg: Config, codec_config: B::Cfg) -> Self {
+    pub(crate) async fn init(
+        context: R,
+        cfg: Config,
+        block_codec_config: B::Cfg,
+        scheme_provider: P,
+    ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
@@ -98,20 +116,17 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         .await
         .expect("failed to initialize metadata");
 
-        // Restore cache from metadata
-        let mut cache = Self {
+        // We don't eagerly initialize any epoch caches here, they will be
+        // initialized on demand, otherwise there could be coordination issues
+        // around the scheme provider.
+        Self {
             context,
+            scheme_provider,
             cfg,
-            codec_config,
+            block_codec_config,
             metadata,
             caches: BTreeMap::new(),
-        };
-        let (floor, ceiling) = cache.get_metadata();
-        for epoch in floor..=ceiling {
-            cache.init_epoch(epoch).await;
         }
-
-        cache
     }
 
     /// Retrieve the epoch range that may have data.
@@ -134,7 +149,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, V>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, S>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -158,14 +173,23 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
+        let scheme = self
+            .scheme_provider
+            .scheme(epoch)
+            .unwrap_or_else(|| panic!("failed to get signing scheme for epoch: {epoch}"));
+
         let verified_blocks = self
-            .init_archive(epoch, "verified", self.codec_config.clone())
+            .init_archive(epoch, "verified", self.block_codec_config.clone())
             .await;
         let notarized_blocks = self
-            .init_archive(epoch, "notarized", self.codec_config.clone())
+            .init_archive(epoch, "notarized", self.block_codec_config.clone())
             .await;
-        let notarizations = self.init_archive(epoch, "notarizations", ()).await;
-        let finalizations = self.init_archive(epoch, "finalizations", ()).await;
+        let notarizations = self
+            .init_archive(epoch, "notarizations", scheme.certificate_codec_config())
+            .await;
+        let finalizations = self
+            .init_archive(epoch, "finalizations", scheme.certificate_codec_config())
+            .await;
         let existing = self.caches.insert(
             epoch,
             Cache {
@@ -232,7 +256,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        notarization: Notarization<V, B::Commitment>,
+        notarization: Notarization<S, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -249,7 +273,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
+        finalization: Finalization<S, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -280,7 +304,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<V, B::Commitment>> {
+    ) -> Option<Notarization<S, B::Commitment>> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -293,7 +317,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     pub(crate) async fn get_finalization_for(
         &self,
         commitment: B::Commitment,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    ) -> Option<Finalization<S, B::Commitment>> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&commitment)).await {
                 Ok(Some(finalization)) => return Some(finalization),
@@ -342,11 +366,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
-            let Cache::<R, B, V> {
+            let Cache::<R, B, S> {
                 verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
+                ..
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");

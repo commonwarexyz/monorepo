@@ -1,12 +1,23 @@
-use crate::Block;
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use super::SchemeProvider;
+use crate::{simplex::signing_scheme::Scheme, Block};
 use commonware_runtime::buffer::PoolRef;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 /// Marshal configuration.
-pub struct Config<V: Variant, B: Block> {
-    /// The identity of the network.
-    pub identity: V::Public,
+pub struct Config<B, P, S>
+where
+    B: Block,
+    P: SchemeProvider<Scheme = S>,
+    S: Scheme,
+{
+    /// Provider for epoch-specific signing schemes.
+    pub scheme_provider: P,
+
+    /// The length of an epoch in number of blocks.
+    pub epoch_length: u64,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -54,8 +65,10 @@ pub struct Config<V: Variant, B: Block> {
     pub write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    pub codec_config: B::Cfg,
+    pub block_codec_config: B::Cfg,
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
+
+    pub _marker: PhantomData<S>,
 }

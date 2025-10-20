@@ -61,10 +61,6 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
     type Index = Epoch;
     type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
     fn participants(&self, epoch: Self::Index) -> Option<&[Self::PublicKey]> {
         self.validators.get(&epoch).map(|v| v.as_slice())
     }
@@ -82,10 +78,6 @@ impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
 
     fn identity(&self) -> &Self::Identity {
         &self.identity
-    }
-
-    fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
-        unimplemented!()
     }
 
     fn polynomial(&self, epoch: Self::Index) -> Option<&Self::Polynomial> {
