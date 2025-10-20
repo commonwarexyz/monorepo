@@ -8,8 +8,8 @@
 //!   with its index. Certificates grow proportionally with the quorum size yet operate with widely
 //!   deployed key material and tooling; no randomness is produced.
 //! * [`bls12381_multisig`] - Uses plain BLS12-381 signatures that aggregate into a single multisignature
-//!   certificate. This keeps the certificate footprint constant and requires only static public keys,
-//!   but the scheme does not expose randomness.
+//!   certificate. Signer indices accompany the aggregate so verifiers can rebuild the public key set while
+//!   keeping the footprint constant. The scheme does not expose randomness.
 //! * [`bls12381_threshold`] - Executes a BLS12-381 threshold protocol in which validators emit paired
 //!   partial signatures for the vote body and the randomness seed. Any `2f+1` partials collapse into
 //!   a constant-size certificate that authenticates consensus progress and yields a per-view beacon.
