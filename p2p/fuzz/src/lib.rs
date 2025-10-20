@@ -11,11 +11,11 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::NZU32;
-use futures::future::BoxFuture;
 use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -102,14 +102,14 @@ pub trait NetworkScheme: Send + 'static {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>>;
+    ) -> impl Future<Output = NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>>;
 
     fn register_peers<'a>(
         oracle: &'a mut Self::Oracle,
         index: u64,
         peers: &'a [PeerInfo],
         subset: Vec<ed25519::PublicKey>,
-    ) -> BoxFuture<'a, ()>;
+    ) -> impl Future<Output = ()>;
 }
 
 /// Discovery network implementation
@@ -126,8 +126,8 @@ impl NetworkScheme for Discovery {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
-        Box::pin(async move {
+    ) -> impl Future<Output = NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
+        async move {
             let addresses = peers
                 .iter()
                 .map(|p| p.public_key.clone())
@@ -167,7 +167,7 @@ impl NetworkScheme for Discovery {
             let handle = network.start();
 
             (sender, receiver, oracle, handle)
-        })
+        }
     }
 
     fn register_peers<'a>(
@@ -175,10 +175,10 @@ impl NetworkScheme for Discovery {
         index: u64,
         _peers: &'a [PeerInfo],
         subset: Vec<ed25519::PublicKey>,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
+    ) -> impl Future<Output = ()> {
+        async move {
             let _ = oracle.register(index, subset).await;
-        })
+        }
     }
 }
 
@@ -196,8 +196,8 @@ impl NetworkScheme for Lookup {
         peers: &'a [PeerInfo],
         _peer_idx: usize,
         _base_port: u16,
-    ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
-        Box::pin(async move {
+    ) -> impl Future<Output = NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
+        async move {
             let mut config = lookup::Config::recommended(
                 peer.private_key.clone(),
                 b"fuzz_namespace",
@@ -234,7 +234,7 @@ impl NetworkScheme for Lookup {
             let handle = network.start();
 
             (sender, receiver, oracle, handle)
-        })
+        }
     }
 
     fn register_peers<'a>(
@@ -242,8 +242,8 @@ impl NetworkScheme for Lookup {
         index: u64,
         peers: &'a [PeerInfo],
         subset: Vec<ed25519::PublicKey>,
-    ) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
+    ) -> impl Future<Output = ()> {
+        async move {
             let peer_list: Vec<_> = subset
                 .iter()
                 .filter_map(|pk| {
@@ -254,7 +254,7 @@ impl NetworkScheme for Lookup {
                 })
                 .collect();
             let _ = oracle.register(index, peer_list).await;
-        })
+        }
     }
 }
 
