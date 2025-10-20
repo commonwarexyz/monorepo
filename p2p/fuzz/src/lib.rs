@@ -13,7 +13,7 @@ use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, M
 use commonware_utils::NZU32;
 use futures::future::BoxFuture;
 use governor::Quota;
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -60,14 +60,20 @@ pub enum NetworkOperation {
 #[derive(Debug)]
 pub struct FuzzInput {
     pub seed: u64,
+    // Length is in [1, MAX_OPERATIONS]
     pub operations: Vec<NetworkOperation>,
+    // Length is in [MIN_PEERS, MAX_PEERS]
     pub peers: u8,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let operations = u.arbitrary()?;
+        let num_operations = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let mut operations = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            operations.push(u.arbitrary()?);
+        }
         let peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)? as u8;
         Ok(FuzzInput {
             seed,
@@ -96,7 +102,6 @@ pub trait NetworkScheme: Send + 'static {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-        rng: &'a mut StdRng,
     ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>>;
 
     fn register_peers<'a>(
@@ -116,12 +121,11 @@ impl NetworkScheme for Discovery {
     type Oracle = discovery::Oracle<ed25519::PublicKey>;
 
     fn create_network<'a>(
-        context: Context,
+        mut context: Context,
         peer: &'a PeerInfo,
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-        rng: &'a mut StdRng,
     ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
         Box::pin(async move {
             let addresses = peers
@@ -153,7 +157,7 @@ impl NetworkScheme for Discovery {
 
             for index in 0..PEER_SUBSET_NUMBER {
                 let mut addrs = addresses.clone();
-                addrs.shuffle(rng);
+                addrs.shuffle(&mut context);
                 let subset = addrs[..3].to_vec();
                 oracle.register(index as u64, subset).await;
             }
@@ -187,12 +191,11 @@ impl NetworkScheme for Lookup {
     type Oracle = lookup::Oracle<ed25519::PublicKey>;
 
     fn create_network<'a>(
-        context: Context,
+        mut context: Context,
         peer: &'a PeerInfo,
         peers: &'a [PeerInfo],
         _peer_idx: usize,
         _base_port: u16,
-        rng: &'a mut StdRng,
     ) -> BoxFuture<'a, NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>> {
         Box::pin(async move {
             let mut config = lookup::Config::recommended(
@@ -221,7 +224,7 @@ impl NetworkScheme for Lookup {
             // Second registration: register shuffled subsets
             for index in 0..PEER_SUBSET_NUMBER {
                 let mut peers = peer_list.clone();
-                peers.shuffle(rng);
+                peers.shuffle(&mut context);
                 let subset = peers[..3].to_vec();
                 oracle.register(index as u64, subset).await;
             }
@@ -260,16 +263,13 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
     let seed = input.seed;
 
     let executor = deterministic::Runner::seeded(seed);
-    executor.start(|context| async move {
-        let mut rng = StdRng::seed_from_u64(seed);
-
+    executor.start(|mut context| async move {
         // Create peers
         let mut peers = Vec::new();
         let base_port = 63000;
 
         for i in 0..n {
-            let seed = rng.gen::<u64>() ^ (i as u64);
-            let private_key = ed25519::PrivateKey::from_seed(seed);
+            let private_key = ed25519::PrivateKey::from_seed(context.gen());
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
             peers.push(PeerInfo {
@@ -292,12 +292,11 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         for (peer_idx, peer) in peers.iter().enumerate() {
             let context = context.with_label(&format!("peer-{peer_idx}"));
             let (sender, receiver, oracle, handle) = N::create_network(
-                context,
+                context.clone(),
                 peer,
                 &peers,
                 peer_idx,
                 base_port,
-                &mut rng,
             )
             .await;
 
@@ -309,7 +308,7 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         let mut expected_messages: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
         let mut pending_by_receiver: HashMap<u8, Vec<u8>> = HashMap::new();
 
-        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
+        for op in input.operations.into_iter() {
             match op {
                 NetworkOperation::SendMessage {
                     sender_idx,
@@ -323,7 +322,7 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
 
                     let mut bytes = vec![0u8; msg_size];
-                    rng.fill(&mut bytes[..]);
+                    context.fill(&mut bytes[..]);
                     let message = Bytes::from(bytes);
 
                     let (recipients, recipients_indices) = match recipient_mode {
@@ -343,12 +342,12 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                             (Recipients::One(recipient_pk), vec![idx as u8])
                         }
                         RecipientMode::Some => {
-                            let num_recipients = rng.gen_range(1..peers.len() - 1);
+                            let num_recipients = context.gen_range(1..peers.len() - 1);
                             let mut recipients_set = HashSet::new();
                             let mut indices = Vec::new();
 
                             for _ in 0..num_recipients {
-                                let idx = rng.gen::<usize>() % peers.len();
+                                let idx = context.gen::<usize>() % peers.len();
                                 if idx != sender_idx && recipients_set.insert(peers[idx].public_key.clone()) {
                                     indices.push(idx as u8);
                                 }
@@ -454,7 +453,7 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     let mut peer_set = HashSet::new();
                     for _ in 0..num_peers {
-                        let idx = rng.gen::<usize>() % peers.len();
+                        let idx = context.gen::<usize>() % peers.len();
                         peer_set.insert(peers[idx].public_key.clone());
                     }
                     let peer_subset: Vec<_> = peer_set.into_iter().collect();
