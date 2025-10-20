@@ -2,9 +2,26 @@
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
 //! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
-//! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, allowing deployments
-//! to select a certificate format that matches their operational and interoperability requirements. The
-//! following implementations are implemented:
+//! partially synchronous setting.
+//!
+//! # Features
+//!
+//! * Wicked Fast Block Times (2 Network Hops)
+//! * Optimal Finalization Latency (3 Network Hops)
+//! * Externalized Uptime and Fault Proofs
+//! * Decoupled Block Broadcast and Sync
+//! * Lazy Message Verification
+//! * Flexible Block Format
+//! * Pluggable Cryptography
+//! * Embedded VRF for Leader Election and Post-Facto Execution Randomness (via [signing_scheme::bls12381_threshold])
+//!
+//! # Design
+//!
+//! ## Pluggable Cryptography
+//!
+//! Cryptography is abstracted via the [Scheme] trait, allowing deployments to select a scheme that best matches
+//! their requirements (or to provide their own without modifying any consensus logic). The following schemes are
+//! already supported:
 //!
 //! * **[signing_scheme::ed25519]** - Maintains an ordered collection of individual Ed25519 signatures and
 //!   accompanying voter indices. Certificates remain compatible with commodity validator tooling but grow
@@ -17,18 +34,6 @@
 //!   authenticates every view, enabling light-client verification and leader selection without additional
 //!   message overhead.
 //!
-//! # Features
-//!
-//! * Wicked Fast Block Times (2 Network Hops)
-//! * Optimal Finalization Latency (3 Network Hops)
-//! * Externalized Uptime and Fault Proofs
-//! * Decoupled Block Broadcast and Sync
-//! * Lazy Message Verification
-//! * Flexible Block Format
-//! * Scheme-dependent consensus certificates for notarization, nullification, and finality
-//! * Embedded VRF for leader election and post-facto randomness (exposed by the BLS threshold scheme)
-//!
-//! # Design
 //!
 //! ## Architecture
 //!
