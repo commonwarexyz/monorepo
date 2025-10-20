@@ -144,9 +144,10 @@
 //!
 //! ### [signing_scheme::bls12381_multisig]
 //!
-//! Aggregates plain BLS12-381 signatures into a single multisignature. Certificates remain constant size and carry
-//! the signer indices so verifiers can reconstruct the aggregate public key from the static participant set. The scheme
-//! does not export per-view randomness.
+//! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
+//! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
+//! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
+//! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
 //!
 //! ### [signing_scheme::bls12381_threshold]
 //!
