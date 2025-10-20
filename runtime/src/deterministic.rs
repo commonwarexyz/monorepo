@@ -48,9 +48,10 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter, Panicker,
+        supervision::Tree,
+        Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -755,14 +756,28 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<Aborter>>>,
-    model: Model,
+    tree: Arc<Tree>,
+    execution: Execution,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        let (child, _) = Tree::child(&self.tree);
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+
+            tree: child,
+            execution: Execution::default(),
+        }
+    }
 }
 
 impl Context {
@@ -808,8 +823,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                children: Arc::new(Mutex::new(Vec::new())),
-                model: Model::default(),
+                tree: Tree::root(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -863,8 +878,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                children: Arc::new(Mutex::new(Vec::new())),
-                model: Model::default(),
+                tree: Tree::root(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -888,23 +903,13 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn supervised(mut self) -> Self {
-        self.model.supervised();
-        self
-    }
-
-    fn detached(mut self) -> Self {
-        self.model.detached();
-        self
-    }
-
     fn dedicated(mut self) -> Self {
-        self.model.dedicated();
+        self.execution = Execution::Dedicated;
         self
     }
 
     fn shared(mut self, blocking: bool) -> Self {
-        self.model.shared(blocking);
+        self.execution = Execution::Shared(blocking);
         self
     }
 
@@ -917,29 +922,29 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
-
-        // Set up the task
-        let executor = self.executor();
-        self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
+        // Track supervision before resetting configuration
+        let parent = Arc::clone(&self.tree);
+        self.execution = Execution::default();
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
 
         // Spawn the task (we don't care about Model)
+        let executor = self.executor();
         let future = f(self);
-        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(
+            future,
+            metric,
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
-        // Register this child with the parent
-        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-            parent_children.lock().unwrap().push(aborter);
+        // Register the task on the parent
+        if let Some(aborter) = handle.aborter() {
+            parent.register(aborter);
         }
 
         handle
@@ -1130,7 +1135,8 @@ impl Clock for Context {
 struct Waiter<F: Future> {
     executor: Weak<Executor>,
     target: SystemTime,
-    future: Option<Pin<Box<F>>>,
+    #[pin]
+    future: F,
     ready: Option<F::Output>,
     started: bool,
     registered: bool,
@@ -1144,20 +1150,17 @@ where
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let mut this = self.project();
 
         // Poll once with a noop waker so the future can register interest or start work
         // without being able to wake this task before the sampled delay expires. Any ready
         // value is cached and only released after the clock reaches `self.target`.
         if !*this.started {
             *this.started = true;
-            if let Some(future) = this.future.as_mut() {
-                let waker = noop_waker();
-                let mut cx_noop = task::Context::from_waker(&waker);
-                if let Poll::Ready(value) = future.as_mut().poll(&mut cx_noop) {
-                    *this.future = None;
-                    *this.ready = Some(value);
-                }
+            let waker = noop_waker();
+            let mut cx_noop = task::Context::from_waker(&waker);
+            if let Poll::Ready(value) = this.future.as_mut().poll(&mut cx_noop) {
+                *this.ready = Some(value);
             }
         }
 
@@ -1186,15 +1189,10 @@ where
         // deterministic with respect to executor time.
         let blocker = Blocker::new();
         loop {
-            let future = this
-                .future
-                .as_mut()
-                .expect("future already polled at scheduled time");
             let waker = waker(blocker.clone());
             let mut cx_block = task::Context::from_waker(&waker);
-            match future.as_mut().poll(&mut cx_block) {
+            match this.future.as_mut().poll(&mut cx_block) {
                 Poll::Ready(value) => {
-                    *this.future = None;
                     break Poll::Ready(value);
                 }
                 Poll::Pending => blocker.wait(),
@@ -1222,7 +1220,7 @@ impl Pacer for Context {
         Waiter {
             executor: self.executor.clone(),
             target,
-            future: Some(Box::pin(future)),
+            future,
             ready: None,
             started: false,
             registered: false,
