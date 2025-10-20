@@ -226,8 +226,8 @@ impl signing_scheme::Scheme for Scheme {
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
+        // Collect the signers and signatures.
         let mut entries = Vec::new();
-
         for Vote { signer, signature } in votes {
             if signer as usize >= self.participants.len() {
                 return None;
@@ -235,11 +235,11 @@ impl signing_scheme::Scheme for Scheme {
 
             entries.push((signer, signature));
         }
-
         if entries.len() < self.participants.quorum() as usize {
             return None;
         }
 
+        // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
 
