@@ -43,14 +43,14 @@ pub struct Current<
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: BitMap<H, N>,
+    status: BitMap<H, N>,
 
     /// The location of the last commit operation.
-    pub last_commit_loc: Option<Location>,
+    last_commit_loc: Option<Location>,
 
     context: E,
 
