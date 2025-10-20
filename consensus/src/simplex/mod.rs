@@ -21,12 +21,13 @@
 //!
 //! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
 //! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
-//! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
-//! fetching artifacts from previous views required to verify proposed blocks in the latest view.
+//! is responsible for directing participation in the current view. The `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in the latest view. Lastly, the `Application`
+//! is responsible for proposing new blocks and indicating whether some block is valid.
 //!
 //! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
 //! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
-//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
+//! `Application` verifies a proposed block or the `Resolver` fetches a notarization.
 //!
 //! ```txt
 //!                            +------------+          +++++++++++++++
@@ -65,7 +66,6 @@
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
-//!
 //!
 //! ## Joining Consensus
 //!
