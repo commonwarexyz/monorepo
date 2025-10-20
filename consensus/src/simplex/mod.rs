@@ -138,15 +138,9 @@
 //!
 //! ### [signing_scheme::ed25519]
 //!
-//! Supported out-of-the-box by most HSMs...
-//!
-//! Maintains an ordered collection of individual Ed25519 signatures and accompanying voter indices. Certificates
-//! remain compatible with commodity validator tooling but grow linearly with the quorum size and do not yield a
-//! randomness beacon.
-//!
-//! * With **Ed25519 quorum signatures**, a certificate retains each validator signature paired with its index in
-//!   the ordered participant list. Verification replays individual Ed25519 checks and tolerates heterogeneous key
-//!   custody at the cost of linear-sized artifacts and no embedded randomness.
+//! [commonware_cryptography::ed25519] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
+//! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
+//! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
 //!
 //! ### [signing_scheme::bls12381_multisig]
 //!
