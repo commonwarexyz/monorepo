@@ -883,6 +883,42 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_certificate_rejects_mismatched_signature_count() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 27, 14);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signatures.pop();
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
     fn test_verify_certificates_batch_detects_failure() {
         let (schemes, participants) = schemes(4);
         let proposal_a = sample_proposal(0, 23, 12);
