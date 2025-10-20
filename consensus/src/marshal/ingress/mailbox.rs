@@ -96,9 +96,14 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         block: B,
     },
     /// A request to set the sync floor.
+    ///
+    /// This sets the sync floor only if the provided height is higher than the
+    /// previously recorded floor.
     SetSyncFloor {
-        /// The sync floor.
-        sync_floor: (u64, B::Commitment),
+        /// The candidate sync floor height.
+        height: u64,
+        /// The candidate sync floor commitment.
+        commitment: B::Commitment,
     },
 
     // -------------------- Consensus Engine Messages --------------------
@@ -233,9 +238,14 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         }
     }
 
-    /// A request to set the sync floor.
-    pub async fn set_sync_floor(&mut self, sync_floor: (u64, B::Commitment)) {
-        if self.sender.send(Message::SetSyncFloor { sync_floor }).await.is_err() {
+    /// A request to set the sync floor (conditionally advances if higher).
+    pub async fn set_sync_floor(&mut self, height: u64, commitment: B::Commitment) {
+        if self
+            .sender
+            .send(Message::SetSyncFloor { height, commitment })
+            .await
+            .is_err()
+        {
             error!("failed to send set sync floor message to actor: receiver dropped");
         }
     }

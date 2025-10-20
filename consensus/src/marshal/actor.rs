@@ -25,8 +25,14 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
-use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_storage::{
+    archive::{immutable, Archive as _, Identifier as ArchiveID},
+    metadata::{self, Metadata},
+};
+use commonware_utils::{
+    futures::{AbortablePool, Aborter},
+    sequence::FixedBytes,
+};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -40,6 +46,9 @@ use std::{
     time::Instant,
 };
 use tracing::{debug, info, warn};
+
+// The key used to store the sync height floor in the actor's metadata.
+const SYNC_FLOOR_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<B: Block> {
@@ -105,8 +114,8 @@ pub struct Actor<
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
-    // Sync floor
-    sync_floor: Option<(u64, B::Commitment)>,
+    // Metadata store for actor-level settings
+    metadata: Metadata<E, FixedBytes<1>, (u64, B::Commitment)>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -211,6 +220,17 @@ impl<
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        // Initialize metadata
+        let metadata = Metadata::init(
+            context.with_label("actor_metadata"),
+            metadata::Config {
+                partition: format!("{}-actor-metadata", config.partition_prefix),
+                codec_config: ((), ()),
+            },
+        )
+        .await
+        .expect("failed to initialize actor metadata");
+
         // Create metrics
         let finalized_height = Gauge::default();
         context.register(
@@ -244,6 +264,7 @@ impl<
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
+                metadata,
                 finalized_height,
                 processed_height,
             },
@@ -254,7 +275,6 @@ impl<
     /// Start the actor.
     pub fn start<R, K>(
         mut self,
-        sync_height: u64,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
@@ -269,7 +289,6 @@ impl<
     /// Run the application actor.
     async fn run<R, K>(
         mut self,
-        sync_height: u64,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
@@ -281,6 +300,12 @@ impl<
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
+        let sync_height = self
+            .metadata
+            .get(&SYNC_FLOOR_KEY)
+            .copied()
+            .map(|(h, _)| h)
+            .unwrap_or(0);
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
@@ -341,6 +366,17 @@ impl<
                                 BlockID::Latest => self.get_latest().await,
                             };
                             let _ = response.send(info);
+                        }
+                        Message::SetSyncFloor { height, commitment } => {
+                            // If the new height is less than the current sync height, do nothing
+                            if let Some((h, _)) = self.metadata.get(&SYNC_FLOOR_KEY).copied() {
+                                if h >= height {
+                                    continue;
+                                }
+                            }
+
+                            // Update the sync floor
+                            self.metadata.put_sync(SYNC_FLOOR_KEY.clone(), (height, commitment)).await.expect("failed to persist sync height");
                         }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;
@@ -489,8 +525,10 @@ impl<
                         Orchestration::Repair { height } => {
                             // While this should never happen, if the height is less than the sync
                             // height, then we don't need to repair.
-                            if height < sync_height {
-                                continue;
+                            if let Some((h, _)) = self.metadata.get(&SYNC_FLOOR_KEY).copied() {
+                                if height < h {
+                                    continue;
+                                }
                             }
 
                             // Find the end of the "gap" of missing blocks, starting at `height`

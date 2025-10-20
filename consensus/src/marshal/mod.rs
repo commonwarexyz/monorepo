@@ -229,7 +229,7 @@ mod tests {
         let application = Application::<B>::default();
 
         // Start the application
-        actor.start(0, application.clone(), buffer, resolver);
+        actor.start(application.clone(), buffer, resolver);
 
         (application, mailbox)
     }
