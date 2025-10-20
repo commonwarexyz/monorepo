@@ -151,13 +151,11 @@
 //!
 //! ### [signing_scheme::bls12381_threshold]
 //!
-//! Combines `2f+1` partials from a `3f+1` committee into both a succinct BLS12-381 threshold certificate and a
-//! deterministic randomness seed. The same group public key authenticates every view, enabling light-client verification
-//! and leader selection without additional message overhead.
-//!
-//! * With **BLS12-381 multisignatures**, votes aggregate into a single BLS signature. The certificate footprint
-//!   stays constant and includes signer indices so verifiers can rebuild the aggregate public key from the static
-//!   participant set. No randomness seed is exported.
+//! Last but not least, [signing_scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
+//! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
+//! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
+//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
 //!
 //! #### Embedded VRF
 //!
@@ -191,7 +189,6 @@
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
-//!
 
 pub mod signing_scheme;
 pub mod types;
