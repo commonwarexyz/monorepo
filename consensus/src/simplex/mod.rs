@@ -17,24 +17,6 @@
 //!
 //! # Design
 //!
-//! ## Pluggable Cryptography
-//!
-//! Cryptography is abstracted via the [Scheme] trait, allowing deployments to select a scheme that best matches
-//! their requirements (or to provide their own without modifying any consensus logic). The following schemes are
-//! already supported:
-//!
-//! * **[signing_scheme::ed25519]** - Maintains an ordered collection of individual Ed25519 signatures and
-//!   accompanying voter indices. Certificates remain compatible with commodity validator tooling but grow
-//!   linearly with the quorum size and do not yield a randomness beacon.
-//! * **[signing_scheme::bls12381_multisig]** - Aggregates plain BLS12-381 signatures into a single multisignature.
-//!   Certificates remain constant size and carry the signer indices so verifiers can reconstruct the aggregate
-//!   public key from the static participant set. The scheme does not export per-view randomness.
-//! * **[signing_scheme::bls12381_threshold]** - Combines `2f+1` partials from a `3f+1` committee into both a
-//!   succinct BLS12-381 threshold certificate and a deterministic randomness seed. The same group public key
-//!   authenticates every view, enabling light-client verification and leader selection without additional
-//!   message overhead.
-//!
-//!
 //! ## Architecture
 //!
 //! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
@@ -74,6 +56,17 @@
 //!                            +------------+          +++++++++++++++
 //! ```
 //!
+//! ### Batched Verification
+//!
+//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
+//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
+//! will perform repeated bisections over collected messages to find the offending message (and block the
+//! peer(s) that sent it via [commonware_p2p::Blocker]).
+//!
+//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
+//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//!
+//!
 //! ## Joining Consensus
 //!
 //! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
@@ -87,16 +80,6 @@
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
-//!
-//! ## Batched Verification
-//!
-//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
-//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
-//! will perform repeated bisections over collected messages to find the offending message (and block the
-//! peer(s) that sent it via [commonware_p2p::Blocker]).
-//!
-//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
-//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
 //! ## Protocol Description
 //!
@@ -138,36 +121,13 @@
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
 //!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! #### Embedded VRF (BLS Threshold Scheme)
-//!
-//! When the BLS threshold signing scheme is in use, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial
-//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
-//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
-//! whether or not a block was notarized in said view `v`.
-//!
-//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
-//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
-//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
-//! is used as a seed in `v`).
-//!
-//! #### Consensus Certificates
+//! ### Consensus Certificates
 //!
 //! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence—collectively
 //! referred to as consensus certificates—whose encoding is determined by the active signing scheme. A certificate
 //! is assembled once `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been
 //! validated. The resulting object is a standalone proof of consensus progress that downstream systems can ingest
 //! without executing the protocol.
-//!
-//! * With **Ed25519 quorum signatures**, a certificate retains each validator signature paired with its index in
-//!   the ordered participant list. Verification replays individual Ed25519 checks and tolerates heterogeneous key
-//!   custody at the cost of linear-sized artifacts and no embedded randomness.
-//! * With **BLS12-381 multisignatures**, votes aggregate into a single BLS signature. The certificate footprint
-//!   stays constant and includes signer indices so verifiers can rebuild the aggregate public key from the static
-//!   participant set. No randomness seed is exported.
-//! * With **BLS12-381 threshold signatures**, every vote carries a partial against a group public key derived from
-//!   a polynomial generated during reconfiguration (via [dkg](commonware_cryptography::bls12381::dkg)). Any `2f+1`
-//!   partials interpolate to a succinct certificate and simultaneously recover the per-view randomness seed. External
-//!   verifiers need only the committee public key to authenticate progress across the entire execution.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -180,6 +140,55 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//!
+//! ## Pluggable Cryptography
+//!
+//! Cryptography is abstracted via the [Scheme] trait, allowing deployments to select a scheme that best matches
+//! their requirements (or to provide their own without modifying any consensus logic). The following schemes are
+//! already supported:
+//!
+//! ### [signing_scheme::ed25519]
+//!
+//! Maintains an ordered collection of individual Ed25519 signatures and accompanying voter indices. Certificates
+//! remain compatible with commodity validator tooling but grow linearly with the quorum size and do not yield a
+//! randomness beacon.
+//!
+//! * With **Ed25519 quorum signatures**, a certificate retains each validator signature paired with its index in
+//!   the ordered participant list. Verification replays individual Ed25519 checks and tolerates heterogeneous key
+//!   custody at the cost of linear-sized artifacts and no embedded randomness.
+//!
+//! ### [signing_scheme::bls12381_multisig]
+//!
+//! Aggregates plain BLS12-381 signatures into a single multisignature. Certificates remain constant size and carry
+//! the signer indices so verifiers can reconstruct the aggregate public key from the static participant set. The scheme
+//! does not export per-view randomness.
+//!
+//! ### [signing_scheme::bls12381_threshold]
+//!
+//! Combines `2f+1` partials from a `3f+1` committee into both a succinct BLS12-381 threshold certificate and a
+//! deterministic randomness seed. The same group public key authenticates every view, enabling light-client verification
+//! and leader selection without additional message overhead.
+//!
+//! * With **BLS12-381 multisignatures**, votes aggregate into a single BLS signature. The certificate footprint
+//!   stays constant and includes signer indices so verifiers can rebuild the aggregate public key from the static
+//!   participant set. No randomness seed is exported.
+//!
+//! #### Embedded VRF (BLS Threshold Scheme)
+//!
+//! When the BLS threshold signing scheme is in use, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial
+//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
+//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
+//! whether or not a block was notarized in said view `v`.
+//!
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
+//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
+//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
+//! is used as a seed in `v`).
+//!
+//! * With **BLS12-381 threshold signatures**, every vote carries a partial against a group public key derived from
+//!   a polynomial generated during reconfiguration (via [dkg](commonware_cryptography::bls12381::dkg)). Any `2f+1`
+//!   partials interpolate to a succinct certificate and simultaneously recover the per-view randomness seed. External
+//!   verifiers need only the committee public key to authenticate progress across the entire execution.
 
 pub mod signing_scheme;
 pub mod types;
