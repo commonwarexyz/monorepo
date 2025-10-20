@@ -35,7 +35,7 @@ impl Write for Location {
 }
 
 impl FixedSize for Location {
-    const SIZE: usize = 12; // u64 + u32
+    const SIZE: usize = u64::SIZE + u32::SIZE;
 }
 
 impl Read for Location {
