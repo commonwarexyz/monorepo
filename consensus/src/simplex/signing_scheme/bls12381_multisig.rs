@@ -974,14 +974,10 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
+        let mut certificate = schemes[0]
             .assemble_certificate(votes)
             .expect("assemble certificate");
-
-        let mut invalid = certificate.clone();
-        if invalid.signers.len() > 1 {
-            invalid.signers[1] = invalid.signers[0];
-        }
+        certificate.signers[1] = certificate.signers[0];
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -990,7 +986,7 @@ mod tests {
             VoteContext::Finalize {
                 proposal: &proposal,
             },
-            &invalid,
+            &certificate,
         ));
     }
 
