@@ -5,12 +5,12 @@ use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::{
-    simulated::{Config, Link, Network},
+    simulated::{self},
     Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::{
     collections::{HashMap, VecDeque},
     time::Duration,
@@ -50,41 +50,45 @@ enum SimulatedOperation {
 #[derive(Debug)]
 struct FuzzInput {
     seed: u64,
+    // Length is in [1, MAX_OPERATIONS]
     operations: Vec<SimulatedOperation>,
-    peer_number: u8,
+    // Length is in [2, MAX_PEERS]
+    num_peers: u8,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let operations = u.arbitrary()?;
-        let peer_number = u.int_in_range(2..=MAX_PEERS)? as u8;
+        let num_operations = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let mut operations = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            operations.push(u.arbitrary()?);
+        }
+        let num_peers = u.int_in_range(2..=MAX_PEERS)? as u8;
         Ok(FuzzInput {
             seed,
             operations,
-            peer_number,
+            num_peers,
         })
     }
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
-    let peer_number = input.peer_number;
+    let num_peers = input.num_peers;
 
-    let p2p_cfg = Config {
+    let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
         disconnect_on_block: false,
     };
 
     let executor = deterministic::Runner::seeded(input.seed);
-    executor.start(|context| async move {
+    executor.start(|mut context| async move {
         let mut peers = Vec::new();
-        for i in 0..peer_number {
-            let seed = rng.gen::<u64>() ^ (i as u64);
-            let private_key = ed25519::PrivateKey::from_seed(seed);
+        for _ in 0..num_peers {
+            let private_key = ed25519::PrivateKey::from_seed(context.gen());
             peers.push(private_key.public_key());
         }
-        let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (network, mut oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
         let network_handler = network.start();
 
         let mut channels: HashMap<
@@ -97,7 +101,7 @@ fn fuzz(input: FuzzInput) {
         let mut registered_peer_channels = std::collections::HashSet::new();
         let mut expected: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
 
-        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
+        for op in input.operations.into_iter() {
             match op {
                 SimulatedOperation::RegisterChannel {
                     peer_idx,
@@ -131,7 +135,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let mut bytes = vec![0u8; msg_size];
-                    rng.fill(&mut bytes[..]);
+                    context.fill(&mut bytes[..]);
                     let message = Bytes::from(bytes);
 
                     // Only add expectation if send succeeds
@@ -194,7 +198,7 @@ fn fuzz(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
 
-                    let link = Link {
+                    let link = simulated::Link {
                         latency: Duration::from_millis(latency_ms as u64),
                         jitter: Duration::from_millis(jitter as u64),
                         success_rate: (success_rate as f64) / 255.0,
