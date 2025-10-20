@@ -56,6 +56,47 @@ impl Scheme {
             signer: None,
         }
     }
+
+    /// Stage a certificate for batch verification.
+    fn stage_certificate<'a, D: Digest>(
+        &self,
+        batch: &mut Batch,
+        namespace: &[u8],
+        context: VoteContext<'a, D>,
+        certificate: &'a Certificate,
+    ) -> bool {
+        // If the certificate does not meet the quorum, return false.
+        if certificate.signers.len() < self.participants.quorum() as usize {
+            return false;
+        }
+        if certificate.signers.len() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate
+            .signers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+
+        // Add the certificate to the batch.
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.get(*signer) else {
+                return false;
+            };
+
+            batch.add(
+                Some(namespace.as_ref()),
+                message.as_ref(),
+                public_key,
+                signature,
+            );
+        }
+
+        true
+    }
 }
 
 /// Multi-signature certificate formed by collecting Ed25519 signatures plus
@@ -256,32 +297,9 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.len() < self.participants.quorum() as usize {
-            return false;
-        }
-
-        // Collect the public keys and add them to the batch.
-        let mut last_signer = None;
         let mut batch = Batch::new();
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(*signer) else {
-                return false;
-            };
-            if let Some(last_signer) = last_signer {
-                if last_signer >= *signer {
-                    return false;
-                }
-            }
-            last_signer = Some(*signer);
-
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+        if !self.stage_certificate(&mut batch, namespace, context, certificate) {
+            return false;
         }
 
         batch.verify(rng)
@@ -300,31 +318,8 @@ impl signing_scheme::Scheme for Scheme {
     {
         let mut batch = Batch::new();
         for (context, certificate) in certificates {
-            // If the certificate does not meet the quorum, return false.
-            if certificate.signers.len() < self.participants.quorum() as usize {
+            if !self.stage_certificate(&mut batch, namespace, context, certificate) {
                 return false;
-            }
-
-            // Collect the public keys and add them to the batch.
-            let mut last_signer = None;
-            let (namespace, message) = vote_namespace_and_message(namespace, context);
-            for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-                let Some(public_key) = self.participants.get(*signer) else {
-                    return false;
-                };
-                if let Some(last_signer) = last_signer {
-                    if last_signer >= *signer {
-                        return false;
-                    }
-                }
-                last_signer = Some(*signer);
-
-                batch.add(
-                    Some(namespace.as_ref()),
-                    message.as_ref(),
-                    public_key,
-                    signature,
-                );
             }
         }
 
