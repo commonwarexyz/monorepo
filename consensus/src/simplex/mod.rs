@@ -1,18 +1,18 @@
-//! Simplex-like BFT agreement with pluggable signature schemes and scheme-dependent certificate formats.
+//! Simple and fast BFT agreement with support for multiple signature schemes.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
 //! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
 //! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, letting deployments
-//! plug in different vote/certificate schemes. The following signing schemes are currently implemented:
+//! plug in different signature schemes. The following schemes are currently implemented:
 //!
-//! * **BLS12-381 threshold signatures** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
+//! * **[signing_scheme::ed25519]** – traditional individual signatures collected into a vector, retaining the
+//!   same interface but without succinct certificate aggregation or randomness seed.
+//! * **[signing_scheme::bls12381_multisig]** – plain BLS signatures aggregated into a single certificate. Provides succinct
+//!   certificates without requiring distributed key generation, but does not expose the per-view randomness seed.
+//! * **[signing_scheme::bls12381_threshold]** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
 //!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
 //!   certificate can be verified with just the static public key of the consensus instance) for each view with
 //!   zero message overhead (natively integrated).
-//! * **BLS12-381 multisignatures** – plain BLS signatures aggregated into a single certificate. Provides succinct
-//!   certificates without requiring distributed key generation, but does not expose the per-view randomness seed.
-//! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
-//!   same interface but without succinct certificate aggregation or randomness seed.
 //!
 //! # Features
 //!
