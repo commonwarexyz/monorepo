@@ -275,24 +275,24 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        // Ensure signers are valid.
+        // If the certificate does not meet the quorum, return false.
         if certificate.signers.len() < self.quorum as usize {
-            return false;
-        }
-        if certificate
-            .signers
-            .iter()
-            .any(|signer| (*signer as usize) >= self.participants.len())
-        {
             return false;
         }
 
         // Collect the public keys.
+        let mut last_signer = None;
         let mut publics = Vec::with_capacity(certificate.signers.len());
         for signer in &certificate.signers {
             let Some(public_key) = self.participant(*signer) else {
                 return false;
             };
+            if let Some(last_signer) = last_signer {
+                if last_signer >= *signer {
+                    return false;
+                }
+            }
+            last_signer = Some(*signer);
 
             publics.push(*public_key);
         }

@@ -256,17 +256,25 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
+        // If the certificate does not meet the quorum, return false.
         if certificate.signers.len() < self.participants.quorum() as usize {
             return false;
         }
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-
+        // Collect the public keys and add them to the batch.
+        let mut last_signer = None;
         let mut batch = Batch::new();
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.get(*signer) else {
                 return false;
             };
+            if let Some(last_signer) = last_signer {
+                if last_signer >= *signer {
+                    return false;
+                }
+            }
+            last_signer = Some(*signer);
 
             batch.add(
                 Some(namespace.as_ref()),
