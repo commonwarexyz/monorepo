@@ -25,7 +25,7 @@ pub mod utils;
 pub type Message<P> = (P, Bytes);
 
 /// Alias for identifying communication channels.
-pub type Channel = u32;
+pub type Channel = u64;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone, Debug)]
