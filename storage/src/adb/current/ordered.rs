@@ -67,14 +67,15 @@ pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
     /// is excluded.
     KeyValue(KeyValueProofInfo<K, V, N>),
 
-    /// For the Commit variant, we're proving that there exists a Commit operation in the database that
-    /// establishes an inactivity floor equal to its own location. This implies there are no active
-    /// keys, and therefore any key can be proven excluded against it.
+    /// For the Commit variant, we're proving that there exists a Commit operation in the database
+    /// that establishes an inactivity floor equal to its own location. This implies there are no
+    /// active keys, and therefore any key can be proven excluded against it. The wrapped values
+    /// consist of the location of the commit operation and its digest.
     Commit((Location, [u8; N])),
 
     /// The DbEmpty variant is similar to Commit, only specifically for the case where the DB is
     /// completely empty (having no operations at all against which to prove).
-    DbEmpty(),
+    DbEmpty,
 }
 
 impl<
@@ -543,7 +544,7 @@ impl<
             "must process updates before computing proofs"
         );
         if self.op_count() == 0 {
-            return Ok((Proof::default(), ExclusionProofInfo::DbEmpty()));
+            return Ok((Proof::default(), ExclusionProofInfo::DbEmpty));
         }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
@@ -675,7 +676,7 @@ impl<
                 let op = Operation::<K, V>::CommitFloor(loc);
                 (loc, chunk, op.encode())
             }
-            ExclusionProofInfo::DbEmpty() => {
+            ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
                 // proven excluded.
                 // Compute the root of an empty MMR by hashing the position (equivalent to MMR Hasher::root)
