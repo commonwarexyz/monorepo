@@ -1,10 +1,10 @@
-//! Simple and fast BFT agreement with support for multiple signature schemes.
+//! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
 //! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
 //! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, allowing deployments
 //! to select a certificate format that matches their operational and interoperability requirements. The
-//! following implementations are available:
+//! following implementations are implemented:
 //!
 //! * **[signing_scheme::ed25519]** - Maintains an ordered collection of individual Ed25519 signatures and
 //!   accompanying voter indices. Certificates remain compatible with commodity validator tooling but grow
