@@ -4,7 +4,7 @@
 use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
-        current::{verify_key_value_proof, Config, KeyValueProofInfo},
+        current::{verify_key_value_proof, Config},
         Error,
     },
     index::{Index as _, Unordered as Index},
@@ -53,6 +53,25 @@ pub struct Current<
     context: E,
 
     bitmap_metadata_partition: String,
+}
+
+/// The information required to verify a key value proof from a Current adb.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+    /// The key whose value is being proven.
+    pub key: K,
+
+    /// The value of the key.
+    pub value: V,
+
+    /// The location of the operation that assigned this value to the key.
+    pub loc: Location,
+
+    /// The next key in the key space, for ordered keyspaces.
+    pub next_key: Option<K>,
+
+    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    pub chunk: [u8; N],
 }
 
 impl<

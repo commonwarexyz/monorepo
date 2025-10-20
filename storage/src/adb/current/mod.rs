@@ -9,10 +9,9 @@ use crate::{
     store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixed, Encode};
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, ThreadPool};
-use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -54,25 +53,6 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
-}
-
-/// The information required to verify a key value proof from a Current adb.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
-    /// The key whose value is being proven.
-    pub key: K,
-
-    /// The value of the key.
-    pub value: V,
-
-    /// The location of the operation that assigned this value to the key.
-    pub loc: Location,
-
-    /// The next key in the key space, for ordered keyspaces.
-    pub next_key: Option<K>,
-
-    /// The status bitmap chunk that contains the bit corresponding the operation's location.
-    pub chunk: [u8; N],
 }
 
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if

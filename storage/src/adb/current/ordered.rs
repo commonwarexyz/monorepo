@@ -4,7 +4,7 @@
 use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, ordered::Any, Config as AConfig},
-        current::{Config, KeyValueProofInfo},
+        current::Config,
         Error,
     },
     index::Ordered as Index,
@@ -57,6 +57,25 @@ pub struct Current<
     context: E,
 
     bitmap_metadata_partition: String,
+}
+
+/// The information required to verify a key value proof from a Current adb.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+    /// The key whose value is being proven.
+    pub key: K,
+
+    /// The value of the key.
+    pub value: V,
+
+    /// The location of the operation that assigned this value to the key.
+    pub loc: Location,
+
+    /// The next key in the key space, for ordered keyspaces.
+    pub next_key: K,
+
+    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    pub chunk: [u8; N],
 }
 
 // The information required to verify an exclusion proof.
@@ -515,7 +534,7 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                next_key: Some(next_key),
+                next_key,
                 loc,
                 chunk,
             },
@@ -557,7 +576,7 @@ impl<
                     ExclusionProofInfo::KeyValue(KeyValueProofInfo {
                         key: key_data.key,
                         value: key_data.value,
-                        next_key: Some(key_data.next_key),
+                        next_key: key_data.next_key,
                         loc,
                         chunk,
                     }),
@@ -591,14 +610,10 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(next_key) = info.next_key else {
-            // Invalid proof, no next_key value is set.
-            return false;
-        };
         let element = Operation::Update(OrderedKeyData {
             key: info.key,
             value: info.value,
-            next_key,
+            next_key: info.next_key,
         });
 
         super::verify_key_value_proof(
@@ -632,23 +647,19 @@ impl<
     ) -> bool {
         let (loc, chunk, element) = match info {
             ExclusionProofInfo::KeyValue(info) => {
-                let Some(next_key) = info.next_key else {
-                    // Invalid proof, no next_key value is set.
-                    return false;
-                };
                 if info.key == *key {
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if *next_key <= *info.key {
+                if info.next_key <= info.key {
                     // This proof corresponds to the "cycle-around" span.
-                    if *key >= next_key && *key <= info.key {
+                    if *key >= info.next_key && *key <= info.key {
                         // `key` falls outside of the span.
                         return false;
                     }
                 } else {
                     // This is a normal span, verify excluded key is in its range.
-                    if *key <= info.key || *key >= next_key {
+                    if *key <= info.key || *key >= info.next_key {
                         // `key` falls outside of the span.
                         return false;
                     }
@@ -657,7 +668,7 @@ impl<
                 let element = Operation::Update(OrderedKeyData {
                     key: info.key,
                     value: info.value,
-                    next_key,
+                    next_key: info.next_key,
                 });
 
                 (info.loc, info.chunk, element)
@@ -934,7 +945,7 @@ pub mod test {
             let info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                next_key: Some(k),
+                next_key: k,
                 loc: op.2,
                 chunk: proof.3,
             };
@@ -960,14 +971,7 @@ pub mod test {
 
             // Proof should not be verifiable if we fail to give verification the correct next key.
             let mut bad_info = info.clone();
-            bad_info.next_key = None;
-            assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                &proof.0,
-                bad_info.clone(),
-                &root,
-            ));
-            bad_info.next_key = Some(Sha256::fill(0x02));
+            bad_info.next_key = Sha256::fill(0x02);
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
@@ -998,7 +1002,7 @@ pub mod test {
             let proof_inactive_info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                next_key: Some(k),
+                next_key: k,
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
@@ -1241,7 +1245,7 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                next_key: Some(k),
+                next_key: k,
                 loc: Location::new_unchecked(0),
                 chunk: [0; 32],
             };
@@ -1255,7 +1259,7 @@ pub mod test {
                 // Create a proof for the current value of k.
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
-                assert!(info.next_key.is_some());
+                assert_eq!(info.next_key, k);
                 assert!(
                     CurrentTest::verify_key_value_proof(
                         hasher.inner(),
@@ -1519,7 +1523,7 @@ pub mod test {
             // Exclusion proof should fail if we blow away the next_key setting in proof info.
             let mut corrupt_info = info.clone();
             if let ExclusionProofInfo::KeyValue(ref mut kv_info) = corrupt_info {
-                kv_info.next_key = None;
+                kv_info.next_key = Sha256::fill(0x02);
             }
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
@@ -1603,7 +1607,7 @@ pub mod test {
             let ExclusionProofInfo::KeyValue(ref kv_info) = info else {
                 panic!("expected KeyValue variant");
             };
-            assert_eq!(kv_info.next_key, Some(key_exists_2));
+            assert_eq!(kv_info.next_key, key_exists_2);
             assert!(!CurrentTest::verify_exclusion_proof(
                 hasher.inner(),
                 &proof,
