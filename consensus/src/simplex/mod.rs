@@ -3408,11 +3408,31 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_1k() {
+    fn test_1k_bls_threshold_min_pk() {
         run_1k(bls_threshold_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_threshold_min_sig() {
         run_1k(bls_threshold_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_pk() {
         run_1k(bls_multisig_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_sig() {
         run_1k(bls_multisig_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_ed25519() {
         run_1k(ed25519_fixture);
     }
 
