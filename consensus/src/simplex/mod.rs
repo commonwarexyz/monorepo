@@ -149,6 +149,8 @@
 //!
 //! ### [signing_scheme::ed25519]
 //!
+//! Supported out-of-the-box by most HSMs...
+//!
 //! Maintains an ordered collection of individual Ed25519 signatures and accompanying voter indices. Certificates
 //! remain compatible with commodity validator tooling but grow linearly with the quorum size and do not yield a
 //! randomness beacon.
