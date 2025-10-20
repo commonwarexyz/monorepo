@@ -435,7 +435,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
             let voter_config = Config {
-                me: private_key.clone(),
+                me: private_key.public_key(),
                 participants: validators.clone().into(),
                 scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -718,7 +718,7 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
 
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
