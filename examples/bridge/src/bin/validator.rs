@@ -231,7 +231,7 @@ fn main() {
         let engine = Engine::new(
             context.with_label("engine"),
             simplex::Config {
-                crypto: signer.clone(),
+                me: signer.public_key(),
                 participants: validators.clone().into(),
                 scheme,
                 blocker: oracle,
