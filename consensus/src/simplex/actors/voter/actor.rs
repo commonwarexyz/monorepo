@@ -14,7 +14,7 @@ use crate::{
     types::{Epoch, Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
-use commonware_cryptography::{Digest, PublicKey, Signer};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -361,17 +361,17 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    C: Signer,
+    P: PublicKey,
     S: Scheme,
-    B: Blocker<PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
-    crypto: C,
-    participants: Participants<C::PublicKey>,
+    me: P,
+    participants: Participants<P>,
     scheme: S,
     blocker: B,
     automaton: A,
@@ -397,7 +397,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<E, C::PublicKey, S, D>>,
+    views: BTreeMap<View, Round<E, P, S, D>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -412,16 +412,16 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Signer,
+        P: PublicKey,
         S: Scheme,
-        B: Blocker<PublicKey = C::PublicKey>,
+        B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, C, S, B, D, A, R, F>
+    > Actor<E, P, S, B, D, A, R, F>
 {
-    pub fn new(context: E, cfg: Config<C, S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<P, S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -473,7 +473,7 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                crypto: cfg.crypto,
+                me: cfg.me,
                 participants: cfg.participants.into(),
                 scheme: cfg.scheme,
                 blocker: cfg.blocker,
@@ -517,7 +517,7 @@ impl<
         )
     }
 
-    fn round_mut(&mut self, view: View) -> &mut Round<E, C::PublicKey, S, D> {
+    fn round_mut(&mut self, view: View) -> &mut Round<E, P, S, D> {
         self.views.entry(view).or_insert_with(|| {
             Round::new(
                 &self.context,
@@ -617,7 +617,7 @@ impl<
             let Some((leader, _)) = &round.leader else {
                 return None;
             };
-            if *leader != self.crypto.public_key() {
+            if *leader != self.me {
                 return None;
             }
 
@@ -683,7 +683,7 @@ impl<
 
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<C::PublicKey, S, D>,
+        batcher: &mut batcher::Mailbox<P, S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
@@ -834,7 +834,7 @@ impl<
                 );
                 return None;
             };
-            if *leader == self.crypto.public_key() {
+            if *leader == self.me {
                 return None;
             }
 
@@ -964,7 +964,7 @@ impl<
         let Ok(elapsed) = self.context.current().duration_since(round.start) else {
             return None;
         };
-        Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
+        Some((*leader == self.me, elapsed.as_secs_f64()))
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
@@ -1311,7 +1311,7 @@ impl<
 
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<C::PublicKey, S, D>,
+        batcher: &mut batcher::Mailbox<P, S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
@@ -1531,11 +1531,11 @@ impl<
 
     pub fn start(
         mut self,
-        batcher: batcher::Mailbox<C::PublicKey, S, D>,
+        batcher: batcher::Mailbox<P, S, D>,
         resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
+        pending_sender: impl Sender<PublicKey = P>,
+        recovered_sender: impl Sender<PublicKey = P>,
+        recovered_receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -1552,11 +1552,11 @@ impl<
 
     async fn run(
         mut self,
-        mut batcher: batcher::Mailbox<C::PublicKey, S, D>,
+        mut batcher: batcher::Mailbox<P, S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
+        pending_sender: impl Sender<PublicKey = P>,
+        recovered_sender: impl Sender<PublicKey = P>,
+        recovered_receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);
@@ -1604,8 +1604,7 @@ impl<
                     Voter::Notarize(notarize) => {
                         // Handle notarize
                         let public_key_index = notarize.signer();
-                        let me = self.participants[public_key_index as usize]
-                            == self.crypto.public_key();
+                        let me = self.participants[public_key_index as usize] == self.me;
                         let proposal = notarize.proposal.clone();
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
@@ -1634,8 +1633,7 @@ impl<
                     Voter::Nullify(nullify) => {
                         // Handle nullify
                         let public_key_index = nullify.signer();
-                        let me = self.participants[public_key_index as usize]
-                            == self.crypto.public_key();
+                        let me = self.participants[public_key_index as usize] == self.me;
                         self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
 
@@ -1659,8 +1657,7 @@ impl<
                     Voter::Finalize(finalize) => {
                         // Handle finalize
                         let public_key_index = finalize.signer();
-                        let me = self.participants[public_key_index as usize]
-                            == self.crypto.public_key();
+                        let me = self.participants[public_key_index as usize] == self.me;
                         self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
 
@@ -1976,7 +1973,7 @@ impl<
                     .await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
-                if !is_active && leader != &self.crypto.public_key() {
+                if !is_active && leader != &self.me {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
                     round.leader_deadline = Some(self.context.current());

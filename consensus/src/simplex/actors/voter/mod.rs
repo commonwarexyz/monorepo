@@ -10,7 +10,7 @@ use crate::{
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{Digest, Signer};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::set::Set;
@@ -18,7 +18,7 @@ pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
-    C: Signer,
+    P: PublicKey,
     S: Scheme,
     B: Blocker,
     D: Digest,
@@ -26,8 +26,8 @@ pub struct Config<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    pub crypto: C,
-    pub participants: Set<C::PublicKey>,
+    pub me: P,
+    pub participants: Set<P>,
     pub scheme: S,
     pub blocker: B,
     pub automaton: A,
@@ -66,7 +66,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256,
+        Hasher as _, Sha256, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -173,7 +173,7 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                crypto: scheme,
+                me: scheme.public_key(),
                 participants: validators.clone().into(),
                 scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -435,7 +435,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
             let voter_config = Config {
-                crypto: private_key.clone(),
+                me: private_key.clone(),
                 participants: validators.clone().into(),
                 scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -742,7 +742,7 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                crypto: schemes[0].clone(),
+                me: validators[0].clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker: oracle.control(validators[0].clone()),

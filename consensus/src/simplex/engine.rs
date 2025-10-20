@@ -4,7 +4,7 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{simplex::signing_scheme::Scheme, Automaton, Relay, Reporter};
-use commonware_cryptography::{Digest, Signer};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -15,9 +15,9 @@ use tracing::debug;
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    C: Signer,
+    P: PublicKey,
     S: Scheme,
-    B: Blocker<PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -25,29 +25,29 @@ pub struct Engine<
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, C, S, B, D, A, R, F>,
+    voter: voter::Actor<E, P, S, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, C::PublicKey, S, B, D, F>,
-    batcher_mailbox: batcher::Mailbox<C::PublicKey, S, D>,
+    batcher: batcher::Actor<E, P, S, B, D, F>,
+    batcher_mailbox: batcher::Mailbox<P, S, D>,
 
-    resolver: resolver::Actor<E, C::PublicKey, S, B, D>,
+    resolver: resolver::Actor<E, P, S, B, D>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Signer,
+        P: PublicKey,
         S: Scheme,
-        B: Blocker<PublicKey = C::PublicKey>,
+        B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, C, S, B, D, A, R, F>
+    > Engine<E, P, S, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<P, S, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -71,7 +71,7 @@ impl<
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
             voter::Config {
-                crypto: cfg.crypto.clone(),
+                me: cfg.me.clone(),
                 participants: cfg.participants.clone(),
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
@@ -97,7 +97,7 @@ impl<
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
-                crypto: cfg.crypto.public_key(),
+                me: cfg.me,
                 participants: cfg.participants,
                 scheme: cfg.scheme,
                 mailbox_size: cfg.mailbox_size,
@@ -131,18 +131,9 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
         mut self,
-        pending_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-        recovered_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-        resolver_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
+        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -153,18 +144,9 @@ impl<
 
     async fn run(
         self,
-        pending_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-        recovered_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
-        resolver_network: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
+        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
