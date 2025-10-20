@@ -156,7 +156,7 @@ pub enum Error {
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
     #[error("channel already registered: {0}")]
-    ChannelAlreadyRegistered(u32),
+    ChannelAlreadyRegistered(u64),
     #[error("send_frame failed")]
     SendFrameFailed,
     #[error("recv_frame failed")]

@@ -21,12 +21,12 @@ use tracing::{error, info};
 
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE";
 
-const PENDING_CHANNEL: u32 = 0;
-const RECOVERED_CHANNEL: u32 = 1;
-const RESOLVER_CHANNEL: u32 = 2;
-const BROADCASTER_CHANNEL: u32 = 3;
-const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
-const DKG_CHANNEL: u32 = 5;
+const PENDING_CHANNEL: u64 = 0;
+const RECOVERED_CHANNEL: u64 = 1;
+const RESOLVER_CHANNEL: u64 = 2;
+const BROADCASTER_CHANNEL: u64 = 3;
+const BACKFILL_BY_DIGEST_CHANNEL: u64 = 4;
+const DKG_CHANNEL: u64 = 5;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;

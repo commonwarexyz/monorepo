@@ -189,7 +189,7 @@ where
                         debug!(epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
                     };
-                    if epoch as u64 >= latest_epoch {
+                    if epoch >= latest_epoch {
                         // The sender is operating in a newer epoch or the current, ignore. We cannot block them,
                         // since they may be validly ahead.
                         debug!(epoch, ?from, "received backup message from current or future epoch");
@@ -199,7 +199,7 @@ where
                     // Fetch the finalization certificate for the last block within the subchannel's epoch.
                     // If the node is state synced, marshal may not have the finalization locally, and the
                     // peer will need to fetch it from another node on the network.
-                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch as u64);
+                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
                     let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
                         debug!(epoch, ?from, "missing finalization for old epoch");
                         continue;
@@ -342,9 +342,9 @@ where
         );
 
         // Create epoch-specific subchannels
-        let pending_sc = pending_mux.register(epoch as u32).await.unwrap();
-        let recovered_sc = recovered_mux.register(epoch as u32).await.unwrap();
-        let resolver_sc = resolver_mux.register(epoch as u32).await.unwrap();
+        let pending_sc = pending_mux.register(epoch).await.unwrap();
+        let recovered_sc = recovered_mux.register(epoch).await.unwrap();
+        let resolver_sc = resolver_mux.register(epoch).await.unwrap();
 
         engine.start(pending_sc, recovered_sc, resolver_sc)
     }
