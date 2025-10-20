@@ -4,7 +4,7 @@ use crate::{
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };
-use commonware_cryptography::{Digest, Signer};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::set::Set;
@@ -13,22 +13,30 @@ use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    C: Signer,
+    P: PublicKey,
     S: Scheme,
-    B: Blocker<PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Cryptographic primitives.
-    pub crypto: C,
+    /// Identity of the participant.
+    pub me: P,
 
     /// List of validators for the consensus engine, this is static for the
     /// lifetime of the engine (i.e. the epoch).
-    pub participants: Set<C::PublicKey>,
+    pub participants: Set<P>,
 
     /// Signing scheme for the consensus engine.
+    ///
+    /// Consensus messages can be signed with a cryptosystem that differs from the static
+    /// participant identity keys exposed in `participants`. For example, we can authenticate peers
+    /// on the network with [commonware_cryptography::ed25519] keys while signing votes with shares distributed
+    /// via [commonware_cryptography::bls12381::dkg] (which change each epoch). The scheme implementation is
+    /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
+    /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
+    /// the wrong validator.
     pub scheme: S,
 
     /// Blocker for the network.
@@ -106,14 +114,14 @@ pub struct Config<
 }
 
 impl<
-        C: Signer,
+        P: PublicKey,
         S: Scheme,
-        B: Blocker<PublicKey = C::PublicKey>,
+        B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<C, S, B, D, A, R, F>
+    > Config<P, S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

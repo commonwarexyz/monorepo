@@ -1,16 +1,8 @@
-//! Simplex-like BFT agreement with pluggable signature schemes and scheme-dependent certificate formats.
+//! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
 //! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
-//! partially synchronous setting. Cryptography is abstracted behind the [`Scheme`] trait, letting deployments
-//! plug in different vote/certificate schemes. The following signing schemes are currently implemented:
-//!
-//! * **BLS12-381 threshold signatures** – `2f+1` shares from a `3f+1` quorum to generate both a bias-resistant
-//!   beacon (for leader election and post-facto execution randomness) and succinct consensus certificates (any
-//!   certificate can be verified with just the static public key of the consensus instance) for each view with
-//!   zero message overhead (natively integrated).
-//! * **Ed25519 quorum signatures** – traditional individual signatures collected into a vector, retaining the
-//!   same interface but without succinct certificate aggregation or randomness seed.
+//! partially synchronous setting.
 //!
 //! # Features
 //!
@@ -19,74 +11,11 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Lazy Message Verification
-//! * Flexible Block Format
-//! * Scheme-dependent consensus certificates for notarization, nullification, and finality
-//! * Embedded VRF for leader election and post-facto randomness (exposed by the BLS threshold scheme)
+//! * Application-Defined Block Format
+//! * Pluggable Hashing and Cryptography
+//! * Embedded VRF (via [signing_scheme::bls12381_threshold])
 //!
 //! # Design
-//!
-//! ## Architecture
-//!
-//! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
-//! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
-//! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
-//! fetching artifacts from previous views required to verify proposed blocks in the latest view.
-//!
-//! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
-//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
-//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
-//!
-//! ```txt
-//!                            +------------+          +++++++++++++++
-//!                            |            +--------->+             +
-//!                            |  Batcher   |          +    Peers    +
-//!                            |            |<---------+             +
-//!                            +-------+----+          +++++++++++++++
-//!                                |   ^
-//!                                |   |
-//!                                |   |
-//!                                |   |
-//!                                v   |
-//! +---------------+           +---------+            +++++++++++++++
-//! |               |<----------+         +----------->+             +
-//! |  Application  |           |  Voter  |            +    Peers    +
-//! |               +---------->|         |<-----------+             +
-//! +---------------+           +--+------+            +++++++++++++++
-//!                                |   ^
-//!                                |   |
-//!                                |   |
-//!                                |   |
-//!                                v   |
-//!                            +-------+----+          +++++++++++++++
-//!                            |            +--------->+             +
-//!                            |  Resolver  |          +    Peers    +
-//!                            |            |<---------+             +
-//!                            +------------+          +++++++++++++++
-//! ```
-//!
-//! ## Joining Consensus
-//!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
-//!
-//! ## Persistence
-//!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
-//!
-//! ## Batched Verification
-//!
-//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
-//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
-//! will perform repeated bisections over collected messages to find the offending message (and block the
-//! peer(s) that sent it via [commonware_p2p::Blocker]).
-//!
-//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
-//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
 //! ## Protocol Description
 //!
@@ -128,32 +57,16 @@
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
 //!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! #### Embedded VRF (BLS Threshold Scheme)
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
+//! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
+//! the protocol._
 //!
-//! When the BLS threshold signing scheme is in use, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial
-//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
-//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
-//! whether or not a block was notarized in said view `v`.
+//! ### Joining Consensus
 //!
-//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
-//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
-//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
-//! is used as a seed in `v`).
-//!
-//! #### Consensus Certificates
-//!
-//! Every view produces `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` evidence (i.e. consensus certificates) whose
-//! concrete representation is dictated by the active signing scheme. These certificates are produced as soon as `2f+1` vote messages
-//! (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are collected and they can be used to secure interoperability between different
-//! consensus instances and user interactions with an infrastructure provider.
-//!
-//! * With **BLS12-381 threshold signatures**, each broadcast vote carries a partial signature for a static group public key (derived
-//!   from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)). Once a
-//!   quorum (`2f+1`) is collected, these partials aggregate into a succinct certificate that can be verified using only the committee
-//!   public key. Because the public key is static, any of these certificates can be verified by an external process without following
-//!   the consensus instance and/or tracking the current set of participants (as is typically required to operate a lite client).
-//! * With **Ed25519 quorum signatures**, certificates consist of the individual signatures from the quorum. While larger, they preserve
-//!   the same interface and can be validated against the ordered participant set exported by the scheme.
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
+//! latest view and begin participating in consensus (assuming it can verify blocks).
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -166,6 +79,116 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//!
+//! ## Architecture
+//!
+//! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
+//! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
+//! is responsible for directing participation in the current view. The `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in the latest view. Lastly, the `Application`
+//! is responsible for proposing new blocks and indicating whether some block is valid.
+//!
+//! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
+//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
+//! `Application` verifies a proposed block or the `Resolver` fetches a notarization.
+//!
+//! ```txt
+//!                            +------------+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Batcher   |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +-------+----+          +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
+//! +---------------+           +---------+            +++++++++++++++
+//! |               |<----------+         +----------->+             +
+//! |  Application  |           |  Voter  |            +    Peers    +
+//! |               +---------->|         |<-----------+             +
+//! +---------------+           +--+------+            +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
+//!                            +-------+----+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Resolver  |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +------------+          +++++++++++++++
+//! ```
+//!
+//! ### Batched Verification
+//!
+//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
+//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
+//! will perform repeated bisections over collected messages to find the offending message (and block the
+//! peer(s) that sent it via [commonware_p2p::Blocker]).
+//!
+//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
+//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//!
+//! ## Pluggable Hashing and Cryptography
+//!
+//! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
+//! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
+//! provide their own without modifying any consensus logic). The following [Scheme]s are supported out-of-the-box:
+//!
+//! ### [signing_scheme::ed25519]
+//!
+//! [commonware_cryptography::ed25519] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
+//! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
+//! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
+//!
+//! ### [signing_scheme::bls12381_multisig]
+//!
+//! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
+//! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
+//! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
+//! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
+//!
+//! ### [signing_scheme::bls12381_threshold]
+//!
+//! Last but not least, [signing_scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
+//! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
+//! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
+//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
+//!
+//! #### Embedded VRF
+//!
+//! Every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial signature over the view `v`). After `2f+1`
+//! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `part(v)` is
+//! only over the view `v`, the seed derived for a given view `v` is the same regardless of whether or not a block was notarized in said
+//! view `v`.
+//!
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
+//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
+//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
+//! is used as a seed in `v`).
+//!
+//! #### Succinct Certificates
+//!
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
+//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
+//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
+//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
+//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
+//! to operate a lite client).
+//!
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
+//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
+//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//!
+//! ## Persistence
+//!
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
+//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! on restart (especially in the case of unclean shutdown).
 
 pub mod signing_scheme;
 pub mod types;
@@ -235,7 +258,9 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture, Fixture},
+            mocks::fixtures::{
+                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
+            },
             signing_scheme::seed_namespace,
         },
         types::Round,
@@ -426,7 +451,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -597,6 +622,8 @@ mod tests {
     fn test_all_online() {
         all_online(bls_threshold_fixture::<MinPk, _>);
         all_online(bls_threshold_fixture::<MinSig, _>);
+        all_online(bls_multisig_fixture::<MinPk, _>);
+        all_online(bls_multisig_fixture::<MinSig, _>);
         all_online(ed25519_fixture);
     }
 
@@ -687,7 +714,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     blocker,
                     participants: validators.clone().into(),
                     scheme: signing.clone(),
@@ -755,6 +782,8 @@ mod tests {
     fn test_observer() {
         observer(bls_threshold_fixture::<MinPk, _>);
         observer(bls_threshold_fixture::<MinSig, _>);
+        observer(bls_multisig_fixture::<MinPk, _>);
+        observer(bls_multisig_fixture::<MinSig, _>);
         observer(ed25519_fixture);
     }
 
@@ -843,7 +872,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx].clone(),
                         blocker,
@@ -941,6 +970,8 @@ mod tests {
     fn test_unclean_shutdown() {
         unclean_shutdown(bls_threshold_fixture::<MinPk, _>);
         unclean_shutdown(bls_threshold_fixture::<MinSig, _>);
+        unclean_shutdown(bls_multisig_fixture::<MinPk, _>);
+        unclean_shutdown(bls_multisig_fixture::<MinSig, _>);
         unclean_shutdown(ed25519_fixture);
     }
 
@@ -1024,7 +1055,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1146,7 +1177,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
-                crypto: scheme,
+                me: validator.clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
@@ -1194,6 +1225,8 @@ mod tests {
     fn test_backfill() {
         backfill(bls_threshold_fixture::<MinPk, _>);
         backfill(bls_threshold_fixture::<MinSig, _>);
+        backfill(bls_multisig_fixture::<MinPk, _>);
+        backfill(bls_multisig_fixture::<MinSig, _>);
         backfill(ed25519_fixture);
     }
 
@@ -1279,7 +1312,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1449,6 +1482,8 @@ mod tests {
     fn test_one_offline() {
         one_offline(bls_threshold_fixture::<MinPk, _>);
         one_offline(bls_threshold_fixture::<MinSig, _>);
+        one_offline(bls_multisig_fixture::<MinPk, _>);
+        one_offline(bls_multisig_fixture::<MinSig, _>);
         one_offline(ed25519_fixture);
     }
 
@@ -1531,7 +1566,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1624,6 +1659,8 @@ mod tests {
     fn test_slow_validator() {
         slow_validator(bls_threshold_fixture::<MinPk, _>);
         slow_validator(bls_threshold_fixture::<MinSig, _>);
+        slow_validator(bls_multisig_fixture::<MinPk, _>);
+        slow_validator(bls_multisig_fixture::<MinSig, _>);
         slow_validator(ed25519_fixture);
     }
 
@@ -1696,7 +1733,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -1825,6 +1862,8 @@ mod tests {
     fn test_all_recovery() {
         all_recovery(bls_threshold_fixture::<MinPk, _>);
         all_recovery(bls_threshold_fixture::<MinSig, _>);
+        all_recovery(bls_multisig_fixture::<MinPk, _>);
+        all_recovery(bls_multisig_fixture::<MinSig, _>);
         all_recovery(ed25519_fixture);
     }
 
@@ -1897,7 +1936,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -2019,6 +2058,8 @@ mod tests {
     fn test_partition() {
         partition(bls_threshold_fixture::<MinPk, _>);
         partition(bls_threshold_fixture::<MinSig, _>);
+        partition(bls_multisig_fixture::<MinPk, _>);
+        partition(bls_multisig_fixture::<MinSig, _>);
         partition(ed25519_fixture);
     }
 
@@ -2094,7 +2135,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -2166,6 +2207,8 @@ mod tests {
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links(0, bls_threshold_fixture::<MinPk, _>);
         slow_and_lossy_links(0, bls_threshold_fixture::<MinSig, _>);
+        slow_and_lossy_links(0, bls_multisig_fixture::<MinPk, _>);
+        slow_and_lossy_links(0, bls_multisig_fixture::<MinSig, _>);
         slow_and_lossy_links(0, ed25519_fixture);
     }
 
@@ -2175,22 +2218,42 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let pk_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
-            let pk_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
-            assert_eq!(pk_state_1, pk_state_2);
+            let ts_pk_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
+            let ts_pk_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
+            assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
-            let sig_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
-            let sig_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
-            assert_eq!(sig_state_1, sig_state_2);
+            let ts_sig_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
+            let ts_sig_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
+            assert_eq!(ts_sig_state_1, ts_sig_state_2);
+
+            let ms_pk_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
+            let ms_pk_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
+            assert_eq!(ms_pk_state_1, ms_pk_state_2);
+
+            let ms_sig_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
+            let ms_sig_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
+            assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
             let ed_state_1 = slow_and_lossy_links(seed, ed25519_fixture);
             let ed_state_2 = slow_and_lossy_links(seed, ed25519_fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
+            let states = [
+                ("threshold-minpk", ts_pk_state_1),
+                ("threshold-minsig", ts_sig_state_1),
+                ("multisig-minpk", ms_pk_state_1),
+                ("multisig-minsig", ms_sig_state_1),
+                ("ed25519", ed_state_1),
+            ];
+
             // Sanity check that different types can't be identical
-            assert_ne!(pk_state_1, sig_state_1);
-            assert_ne!(pk_state_1, ed_state_1);
-            assert_ne!(sig_state_1, ed_state_1);
+            for pair in states.windows(2) {
+                assert_ne!(
+                    pair[0].1, pair[1].1,
+                    "state {} equals state {}",
+                    pair[0].0, pair[0].0
+                );
+            }
         }
     }
 
@@ -2281,7 +2344,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         blocker,
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
@@ -2370,6 +2433,8 @@ mod tests {
         for seed in 0..5 {
             conflicter(seed, bls_threshold_fixture::<MinPk, _>);
             conflicter(seed, bls_threshold_fixture::<MinSig, _>);
+            conflicter(seed, bls_multisig_fixture::<MinPk, _>);
+            conflicter(seed, bls_multisig_fixture::<MinSig, _>);
             conflicter(seed, ed25519_fixture);
         }
     }
@@ -2458,7 +2523,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -2535,6 +2600,8 @@ mod tests {
         for seed in 0..5 {
             invalid(seed, bls_threshold_fixture::<MinPk, _>);
             invalid(seed, bls_threshold_fixture::<MinSig, _>);
+            invalid(seed, bls_multisig_fixture::<MinPk, _>);
+            invalid(seed, bls_multisig_fixture::<MinSig, _>);
             invalid(seed, ed25519_fixture);
         }
     }
@@ -2626,7 +2693,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -2699,6 +2766,8 @@ mod tests {
         for seed in 0..5 {
             impersonator(seed, bls_threshold_fixture::<MinPk, _>);
             impersonator(seed, bls_threshold_fixture::<MinSig, _>);
+            impersonator(seed, bls_multisig_fixture::<MinPk, _>);
+            impersonator(seed, bls_multisig_fixture::<MinSig, _>);
             impersonator(seed, ed25519_fixture);
         }
     }
@@ -2789,7 +2858,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -2862,6 +2931,8 @@ mod tests {
         for seed in 0..5 {
             reconfigurer(seed, bls_threshold_fixture::<MinPk, _>);
             reconfigurer(seed, bls_threshold_fixture::<MinSig, _>);
+            reconfigurer(seed, bls_multisig_fixture::<MinPk, _>);
+            reconfigurer(seed, bls_multisig_fixture::<MinSig, _>);
             reconfigurer(seed, ed25519_fixture);
         }
     }
@@ -2949,7 +3020,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -3035,6 +3106,8 @@ mod tests {
         for seed in 0..5 {
             nuller(seed, bls_threshold_fixture::<MinPk, _>);
             nuller(seed, bls_threshold_fixture::<MinSig, _>);
+            nuller(seed, bls_multisig_fixture::<MinPk, _>);
+            nuller(seed, bls_multisig_fixture::<MinSig, _>);
             nuller(seed, ed25519_fixture);
         }
     }
@@ -3123,7 +3196,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -3191,6 +3264,8 @@ mod tests {
         for seed in 0..5 {
             outdated(seed, bls_threshold_fixture::<MinPk, _>);
             outdated(seed, bls_threshold_fixture::<MinSig, _>);
+            outdated(seed, bls_multisig_fixture::<MinPk, _>);
+            outdated(seed, bls_multisig_fixture::<MinSig, _>);
             outdated(seed, ed25519_fixture);
         }
     }
@@ -3265,7 +3340,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -3333,9 +3408,31 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_1k() {
+    fn test_1k_bls_threshold_min_pk() {
         run_1k(bls_threshold_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_threshold_min_sig() {
         run_1k(bls_threshold_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_pk() {
+        run_1k(bls_multisig_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_sig() {
+        run_1k(bls_multisig_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_ed25519() {
         run_1k(ed25519_fixture);
     }
 
@@ -3362,7 +3459,7 @@ mod tests {
             network.start();
 
             // Register a single participant
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -3396,7 +3493,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(validators[0].clone());
             let cfg = config::Config {
-                crypto: schemes[0].clone(),
+                me: validators[0].clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
@@ -3478,6 +3575,8 @@ mod tests {
     fn test_children_shutdown_on_engine_abort() {
         children_shutdown_on_engine_abort(bls_threshold_fixture::<MinPk, _>);
         children_shutdown_on_engine_abort(bls_threshold_fixture::<MinSig, _>);
+        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinPk, _>);
+        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinSig, _>);
         children_shutdown_on_engine_abort(ed25519_fixture);
     }
 
@@ -3554,7 +3653,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,

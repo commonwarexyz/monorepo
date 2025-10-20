@@ -1,9 +1,4 @@
-//! BLS12-381 threshold implementation of the signing scheme abstraction.
-//!
-//! Validators contribute partial signatures over both the consensus message and the
-//! per-view seed that feeds leader selection and downstream randomness. Once a quorum
-//! is collected, the partials are aggregated into a certificate under the shared BLS
-//! public identity.
+//! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
 
 use crate::{
     simplex::{
@@ -141,7 +136,7 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
-/// Combined vote/seed signature pair emitted by the BLS scheme.
+/// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
@@ -938,7 +933,7 @@ mod tests {
     }
 
     fn seed_codec_roundtrip<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let (schemes, _, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -977,7 +972,7 @@ mod tests {
     }
 
     fn seed_verify<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let (schemes, _, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -1023,7 +1018,7 @@ mod tests {
     }
 
     fn seedable<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(3, 5);
+        let (schemes, _, _) = setup_signers::<V>(4, 5);
         let proposal = sample_proposal(0, 1, 0);
 
         let notarizes: Vec<_> = schemes
@@ -1053,7 +1048,7 @@ mod tests {
     }
 
     fn scheme_clone_and_verifier<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(3, 31);
+        let (schemes, participants, polynomial) = setup_signers::<V>(4, 31);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 9);
 

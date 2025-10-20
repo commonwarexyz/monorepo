@@ -1,7 +1,4 @@
-//! Ed25519 quorum signature implementation of the signing scheme abstraction.
-//!
-//! This module batches ordinary Ed25519 signatures from a quorum of participants
-//! and packages them as certificates that satisfy the generic consensus interface.
+//! Ed25519 implementation of the [`Scheme`] trait for `simplex`.
 
 use crate::{
     simplex::{
@@ -20,9 +17,6 @@ use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
-///
-/// The scheme keeps the participant ordering plus (optionally) the local private
-/// key so it can produce votes as well as batch-verify signatures from peers.
 #[derive(Clone, Debug)]
 pub struct Scheme {
     /// Participant set (sorted) used for signer indexing and batch verification.
@@ -56,10 +50,50 @@ impl Scheme {
             signer: None,
         }
     }
+
+    /// Stage a certificate for batch verification.
+    fn batch_verify_certificate<'a, D: Digest>(
+        &self,
+        batch: &mut Batch,
+        namespace: &[u8],
+        context: VoteContext<'a, D>,
+        certificate: &'a Certificate,
+    ) -> bool {
+        // If the certificate does not meet the quorum, return false.
+        if certificate.signers.len() < self.participants.quorum() as usize {
+            return false;
+        }
+        if certificate.signers.len() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate
+            .signers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+
+        // Add the certificate to the batch.
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.get(*signer) else {
+                return false;
+            };
+
+            batch.add(
+                Some(namespace.as_ref()),
+                message.as_ref(),
+                public_key,
+                signature,
+            );
+        }
+
+        true
+    }
 }
 
-/// Multi-signature certificate formed by collecting Ed25519 signatures plus
-/// their signer indices sorted in ascending order.
+/// Certificate formed by collecting Ed25519 signatures plus their signer indices sorted in ascending order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     /// Indices of the validators that contributed signatures (ascending order).
@@ -226,8 +260,8 @@ impl signing_scheme::Scheme for Scheme {
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
+        // Collect the signers and signatures.
         let mut entries = Vec::new();
-
         for Vote { signer, signature } in votes {
             if signer as usize >= self.participants.len() {
                 return None;
@@ -235,11 +269,11 @@ impl signing_scheme::Scheme for Scheme {
 
             entries.push((signer, signature));
         }
-
         if entries.len() < self.participants.quorum() as usize {
             return None;
         }
 
+        // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
 
@@ -256,24 +290,9 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        if certificate.signers.len() < self.participants.quorum() as usize {
-            return false;
-        }
-
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-
         let mut batch = Batch::new();
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(*signer) else {
-                return false;
-            };
-
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+        if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
+            return false;
         }
 
         batch.verify(rng)
@@ -291,25 +310,9 @@ impl signing_scheme::Scheme for Scheme {
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         let mut batch = Batch::new();
-
         for (context, certificate) in certificates {
-            if certificate.signers.len() < self.participants.quorum() as usize {
+            if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
                 return false;
-            }
-
-            let (namespace, message) = vote_namespace_and_message(namespace, context);
-
-            for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-                let Some(public_key) = self.participants.get(*signer) else {
-                    return false;
-                };
-
-                batch.add(
-                    Some(namespace.as_ref()),
-                    message.as_ref(),
-                    public_key,
-                    signature,
-                );
             }
         }
 
@@ -537,24 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = schemes(3);
-        let proposal = sample_proposal(0, 11, 6);
-
-        let vote = schemes[0]
-            .sign_vote(
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .unwrap();
-
-        let votes = vec![vote.clone(), vote];
-        assert!(schemes[0].assemble_certificate(votes).is_none());
-    }
-
-    #[test]
     fn test_assemble_certificate_rejects_out_of_range_signer() {
         let (schemes, _) = schemes(4);
         let proposal = sample_proposal(0, 13, 7);
@@ -654,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, participants) = schemes(3);
+        let (schemes, participants) = schemes(4);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
 
@@ -744,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate() {
-        let (schemes, participants) = schemes(3);
+        let (schemes, participants) = schemes(4);
         let proposal = sample_proposal(0, 21, 11);
 
         let votes: Vec<_> = schemes
@@ -851,6 +836,78 @@ mod tests {
                 proposal: &proposal,
             },
             &invalid,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_duplicate_signers() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 25, 13);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signers[1] = certificate.signers[0];
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_mismatched_signature_count() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 27, 14);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signatures.pop();
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
         ));
     }
 

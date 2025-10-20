@@ -248,7 +248,7 @@ where
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
-                crypto: self.signer.clone(),
+                me: self.signer.public_key(),
                 participants,
                 scheme,
                 blocker: self.oracle.clone(),
