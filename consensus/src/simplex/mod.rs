@@ -451,7 +451,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -714,7 +714,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     blocker,
                     participants: validators.clone().into(),
                     scheme: signing.clone(),
@@ -872,7 +872,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx].clone(),
                         blocker,
@@ -1055,7 +1055,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1177,7 +1177,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
-                crypto: scheme,
+                me: validator.clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
@@ -1312,7 +1312,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1566,7 +1566,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
@@ -1733,7 +1733,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -1936,7 +1936,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -2135,7 +2135,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -2344,7 +2344,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         blocker,
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
@@ -2523,7 +2523,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -2693,7 +2693,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -2858,7 +2858,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -3020,7 +3020,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -3196,7 +3196,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
                         participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
@@ -3340,7 +3340,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
@@ -3439,7 +3439,7 @@ mod tests {
             network.start();
 
             // Register a single participant
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -3473,7 +3473,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(validators[0].clone());
             let cfg = config::Config {
-                crypto: schemes[0].clone(),
+                me: validators[0].clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
@@ -3633,7 +3633,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,

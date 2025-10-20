@@ -13,7 +13,7 @@ pub use ingress::Message;
 use std::time::Duration;
 
 pub struct Config<P: PublicKey, S: Scheme, B: Blocker> {
-    pub crypto: P,
+    pub me: P,
     pub participants: Set<P>,
     pub scheme: S,
 
