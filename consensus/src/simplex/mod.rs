@@ -141,11 +141,11 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //!
-//! ## Pluggable Cryptography
+//! ## Pluggable Hashing and Cryptography
 //!
-//! Cryptography is abstracted via the [Scheme] trait, allowing deployments to select a scheme that best matches
-//! their requirements (or to provide their own without modifying any consensus logic). The following schemes are
-//! already supported:
+//! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
+//! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
+//! provide their own without modifying any consensus logic). The following [Scheme]s are already supported:
 //!
 //! ### [signing_scheme::ed25519]
 //!
