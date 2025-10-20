@@ -3,6 +3,7 @@
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
+mod utils;
 
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
