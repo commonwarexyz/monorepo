@@ -25,18 +25,10 @@ pub struct U64([u8; u64::SIZE + 1]);
 
 impl U64 {
     pub const fn new(prefix: u8, value: u64) -> Self {
-        let mut arr = [0; u64::SIZE + 1];
-        arr[0] = prefix;
-
         // TODO: #![feature(const_index)]
         // https://github.com/rust-lang/rust/issues/143775
-        let mut i = 0;
-        let bytes = value.to_be_bytes();
-        while i < u64::SIZE {
-            arr[i + 1] = bytes[i];
-            i += 1;
-        }
-        Self(arr)
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_be_bytes();
+        Self([prefix, b0, b1, b2, b3, b4, b5, b6, b7])
     }
 
     pub fn prefix(&self) -> u8 {
