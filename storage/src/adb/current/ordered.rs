@@ -363,14 +363,13 @@ impl<
 
     /// Return the root of the db.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing root"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
         let ops = &self.any.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, ops, height);
@@ -404,24 +403,27 @@ impl<
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        };
 
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
-        assert!(start_loc < leaves, "start_loc is invalid");
+        if start_loc >= leaves {
+            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+        }
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
@@ -487,18 +489,18 @@ impl<
     /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
     /// not currently assigned any value.
     ///
-    /// # Warning
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
         let op = self.any.get_key_loc(&key).await?;
         let Some((value, next_key, loc)) = op else {
             return Err(Error::KeyNotFound);
@@ -528,21 +530,20 @@ impl<
     }
 
     /// Generate and return a proof that the specified `key` does not exist in the db, along with
-    /// the other [KeyValueProofInfo] required to verify the proof. Returns [Error::KeyExists] if
-    /// exclusion can't be proven because the key exists in the db.
+    /// the other [KeyValueProofInfo] required to verify the proof.
     ///
-    /// # Panic
+    /// # Errors
     ///
-    /// Panics if there are uncommitted operations.
+    /// Returns [Error::KeyExists] if the key exists in the db.
+    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
     pub async fn exclusion_proof(
         &self,
         hasher: &mut H,
         key: &K,
     ) -> Result<(Proof<H::Digest>, ExclusionProofInfo<K, V, N>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
+        if self.status.is_dirty() {
+            return Err(Error::UncommittedOperations);
+        }
         if self.op_count() == 0 {
             return Ok((Proof::default(), ExclusionProofInfo::DbEmpty));
         }
