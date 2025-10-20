@@ -222,7 +222,7 @@ impl NetworkScheme for Lookup {
             }
 
             // Second registration: register shuffled subsets
-            for index in 0..PEER_SUBSET_NUMBER {
+            for index in PEER_SUBSET_NUMBER..(PEER_SUBSET_NUMBER * 2) {
                 let mut peers = peer_list.clone();
                 peers.shuffle(&mut context);
                 let subset = peers[..3].to_vec();
@@ -342,20 +342,22 @@ pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                             (Recipients::One(recipient_pk), vec![idx as u8])
                         }
                         RecipientMode::Some => {
-                            let num_recipients = context.gen_range(1..peers.len() - 1);
-                            let mut recipients_set = HashSet::new();
-                            let mut indices = Vec::new();
+                            let mut available: Vec<_> = (0..peers.len())
+                                .filter(|&i| i != sender_idx )
+                                .collect();
 
-                            for _ in 0..num_recipients {
-                                let idx = context.gen::<usize>() % peers.len();
-                                if idx != sender_idx && recipients_set.insert(peers[idx].public_key.clone()) {
-                                    indices.push(idx as u8);
-                                }
-                            }
-
-                            if recipients_set.is_empty() {
+                            if available.is_empty() {
                                 continue;
                             }
+
+                            available.shuffle(&mut context);
+                            let num_recipients = context.gen_range(1..=available.len());
+                            let selected = &available[..num_recipients];
+
+                            let recipients_set: HashSet<_> = selected.iter()
+                                .map(|&idx| peers[idx].public_key.clone())
+                                .collect();
+                            let indices: Vec<_> = selected.iter().map(|&idx| idx as u8).collect();
                             (Recipients::Some(recipients_set.into_iter().collect()), indices)
                         }
                     };
