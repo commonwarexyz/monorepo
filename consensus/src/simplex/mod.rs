@@ -17,6 +17,69 @@
 //!
 //! # Design
 //!
+//! ## Protocol Description
+//!
+//! ### Specification for View `v`
+//!
+//! Upon entering view `v`:
+//! * Determine leader `l` for view `v`
+//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
+//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
+//! * If leader `l`, broadcast `notarize(c,v)`
+//!   * If can't propose container in view `v` because missing notarization/nullification for a
+//!     previous view `v_m`, request `v_m`
+//!
+//! Upon receiving first `notarize(c,v)` from `l`:
+//! * Cancel `t_l`
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
+//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!
+//! Upon receiving `2f+1` `notarize(c,v)`:
+//! * Cancel `t_a`
+//! * Mark `c` as notarized
+//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
+//! * Enter `v+1`
+//!
+//! Upon receiving `2f+1` `nullify(v)`:
+//! * Broadcast `nullification(v)`
+//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
+//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
+//!       instead.
+//! * Enter `v+1`
+//!
+//! Upon receiving `2f+1` `finalize(c,v)`:
+//! * Mark `c` as finalized (and recursively finalize its parents)
+//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
+//!
+//! Upon `t_l` or `t_a` firing:
+//! * Broadcast `nullify(v)`
+//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
+//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
+//! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
+//! the protocol._
+//!
+//! ### Joining Consensus
+//!
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
+//! latest view and begin participating in consensus (assuming it can verify blocks).
+//!
+//! ### Deviations from Simplex Consensus
+//!
+//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
+//!   a set of all notarizations/nullifications for all historical blocks.
+//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
+//!   either a "block" or a "dummy block", respectively.
+//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
+//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
+//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
+//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//!
 //! ## Architecture
 //!
 //! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
@@ -66,77 +129,6 @@
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
-//!
-//! ## Joining Consensus
-//!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
-//!
-//! ## Persistence
-//!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
-//!
-//! ## Protocol Description
-//!
-//! ### Specification for View `v`
-//!
-//! Upon entering view `v`:
-//! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
-//! * If leader `l`, broadcast `notarize(c,v)`
-//!   * If can't propose container in view `v` because missing notarization/nullification for a
-//!     previous view `v_m`, request `v_m`
-//!
-//! Upon receiving first `notarize(c,v)` from `l`:
-//! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
-//!
-//! Upon receiving `2f+1` `notarize(c,v)`:
-//! * Cancel `t_a`
-//! * Mark `c` as notarized
-//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
-//! * Enter `v+1`
-//!
-//! Upon receiving `2f+1` `nullify(v)`:
-//! * Broadcast `nullification(v)`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
-//! * Enter `v+1`
-//!
-//! Upon receiving `2f+1` `finalize(c,v)`:
-//! * Mark `c` as finalized (and recursively finalize its parents)
-//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
-//!
-//! Upon `t_l` or `t_a` firing:
-//! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
-//!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
-//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
-//! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
-//! the protocol._
-//!
-//! ### Deviations from Simplex Consensus
-//!
-//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
-//!   a set of all notarizations/nullifications for all historical blocks.
-//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
-//!   either a "block" or a "dummy block", respectively.
-//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
-//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
-//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -196,6 +188,15 @@
 //! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
 //! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
 //! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//!
+//! ## Persistence
+//!
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
+//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! on restart (especially in the case of unclean shutdown).
+//!
 
 pub mod signing_scheme;
 pub mod types;
