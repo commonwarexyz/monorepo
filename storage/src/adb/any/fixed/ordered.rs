@@ -389,27 +389,6 @@ impl<
         Ok(self.get_key_loc(key).await?.map(|(v, _, _)| v))
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-        if loc >= self.op_count() {
-            return Err(Error::LocationOutOfBounds(loc, self.op_count()));
-        }
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        Ok(self.log.read(*loc).await?.into_value())
-    }
-
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
     pub async fn get_all(&self, key: &K) -> Result<Option<(V, K)>, Error> {
         Ok(self

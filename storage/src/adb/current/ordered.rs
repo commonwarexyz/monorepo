@@ -211,13 +211,6 @@ impl<
         self.any.get(key).await
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        self.any.get_loc(loc).await
-    }
-
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
