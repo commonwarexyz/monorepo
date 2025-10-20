@@ -21,7 +21,7 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Identity of the validator.
+    /// Identity of the participant.
     pub me: P,
 
     /// List of validators for the consensus engine, this is static for the
