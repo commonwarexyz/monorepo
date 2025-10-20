@@ -258,7 +258,7 @@ impl NetworkScheme for Lookup {
     }
 }
 
-pub async fn fuzz<N: NetworkScheme>(input: FuzzInput) {
+pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
     let n = input.peers;
     let seed = input.seed;
 

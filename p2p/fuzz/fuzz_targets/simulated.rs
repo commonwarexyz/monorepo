@@ -12,7 +12,7 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -98,7 +98,7 @@ fn fuzz(input: FuzzInput) {
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();
-        let mut registered_peer_channels = std::collections::HashSet::new();
+        let mut registered_peer_channels = HashSet::new();
         let mut expected: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
 
         for op in input.operations.into_iter() {
