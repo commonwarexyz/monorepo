@@ -250,6 +250,20 @@ impl<const N: usize> BitMap<N> {
         bit
     }
 
+    /// Shortens the bitmap, keeping the first `len` bits and dropping the rest.
+    ///
+    /// If `len` is greater or equal to the bitmap's current length, this has no effect.
+    pub fn truncate(&mut self, len: u64) {
+        if len >= self.len() {
+            return;
+        }
+
+        let needed_chunks = Self::num_chunks_at_size(len).get();
+        self.chunks.truncate(needed_chunks);
+        self.next_bit = len % Self::CHUNK_SIZE_BITS;
+        self.clear_trailing_bits();
+    }
+
     /// Flips the given bit.
     ///
     /// # Panics
@@ -1015,6 +1029,48 @@ mod tests {
         }
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_truncate() {
+        let bv: BitMap<4> = BitMap::ones(128);
+
+        // Truncating to a shorter length preserves prefix
+        // and clears any trailing bits.
+        let mut truncated = bv.clone();
+        truncated.truncate(65);
+        assert_eq!(truncated.len(), 65);
+        assert_eq!(truncated.chunks_len(), 3);
+        assert_eq!(truncated.count_ones(), 65);
+        assert_eq!(truncated.next_bit, 1);
+        assert_eq!(truncated.get_chunk(2), &[1, 0, 0, 0]);
+
+        // Truncating at chunk boundary size preserves invariants.
+        let mut truncated = bv.clone();
+        truncated.truncate(64);
+        assert_eq!(truncated.len(), 64);
+        assert_eq!(truncated.chunks_len(), 3);
+        assert_eq!(truncated.count_ones(), 64);
+        assert_eq!(truncated.next_bit, 0);
+
+        // Truncating to the current length is a no-op.
+        let mut truncated = bv.clone();
+        truncated.truncate(bv.len());
+        assert_eq!(truncated.len(), bv.len());
+        assert_eq!(truncated, bv);
+
+        // Truncating beyond the current length is a no-op.
+        let mut truncated = bv.clone();
+        truncated.truncate(bv.len() + 10);
+        assert_eq!(truncated.len(), bv.len());
+        assert_eq!(truncated, bv);
+
+        // Truncating to zero empties the bitmap but preserves invariants.
+        let mut truncated = bv.clone();
+        truncated.truncate(0);
+        assert!(truncated.is_empty());
+        assert_eq!(truncated.chunks_len(), 1);
+        assert_eq!(truncated.get_chunk(0), &[0, 0, 0, 0]);
     }
 
     #[test]
