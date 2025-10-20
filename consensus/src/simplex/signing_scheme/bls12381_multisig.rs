@@ -1,8 +1,4 @@
-//! BLS12-381 multisignature implementation of the signing scheme abstraction.
-//!
-//! Validators author plain BLS signatures which are then aggregated into a single
-//! certificate signature. The certificate retains signer indices so verifiers can
-//! reconstruct which public keys contributed to the aggregate.
+//! BLS12-381 multi-signature implementation of the [`Scheme`] trait for `simplex`.
 
 use crate::{
     simplex::{
@@ -28,10 +24,7 @@ use commonware_utils::quorum_from_slice;
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
-/// BLS multisignature implementation of the [`Scheme`] trait.
-///
-/// The scheme keeps the participant ordering plus (optionally) the local private
-/// key so it can produce votes as well as batch-verify signatures from peers.
+/// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme<V: Variant> {
     /// Participant set used for signer indexing and batch verification.
@@ -78,7 +71,7 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
-/// Multisignature certificate: aggregate signature plus contributing signer indices.
+/// Certificate formed from a collection of signers and an aggregated BLS12-381 signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
     /// Indices of the validators that contributed signatures (ascending order).

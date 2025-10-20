@@ -1,9 +1,4 @@
-//! BLS12-381 threshold implementation of the signing scheme abstraction.
-//!
-//! Validators contribute partial signatures over both the consensus message and the
-//! per-view seed that feeds leader selection and downstream randomness. Once a quorum
-//! is collected, the partials are aggregated into a certificate under the shared BLS
-//! public identity.
+//! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
 
 use crate::{
     simplex::{
@@ -141,7 +136,7 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
-/// Combined vote/seed signature pair emitted by the BLS scheme.
+/// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
