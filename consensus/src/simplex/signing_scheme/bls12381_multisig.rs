@@ -275,24 +275,24 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        // Ensure signers are valid.
+        // If the certificate does not meet the quorum, return false.
         if certificate.signers.len() < self.quorum as usize {
-            return false;
-        }
-        if certificate
-            .signers
-            .iter()
-            .any(|signer| (*signer as usize) >= self.participants.len())
-        {
             return false;
         }
 
         // Collect the public keys.
+        let mut last_signer = None;
         let mut publics = Vec::with_capacity(certificate.signers.len());
         for signer in &certificate.signers {
             let Some(public_key) = self.participant(*signer) else {
                 return false;
             };
+            if let Some(last_signer) = last_signer {
+                if last_signer >= *signer {
+                    return false;
+                }
+            }
+            last_signer = Some(*signer);
 
             publics.push(*public_key);
         }
@@ -953,6 +953,47 @@ mod tests {
     fn test_verify_certificate_rejects_sub_quorum() {
         verify_certificate_rejects_sub_quorum::<MinPk>();
         verify_certificate_rejects_sub_quorum::<MinSig>();
+    }
+
+    fn verify_certificate_rejects_duplicate_signers<V: Variant>() {
+        let (schemes, participants) = signing_schemes::<V>(4);
+        let proposal = sample_proposal(0, 19, 10);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signers[1] = certificate.signers[0];
+
+        let verifier = Scheme::<V>::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_duplicate_signers() {
+        verify_certificate_rejects_duplicate_signers::<MinPk>();
+        verify_certificate_rejects_duplicate_signers::<MinSig>();
     }
 
     fn verify_certificate_rejects_unknown_signer<V: Variant>() {

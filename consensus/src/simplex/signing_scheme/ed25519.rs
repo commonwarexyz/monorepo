@@ -56,6 +56,47 @@ impl Scheme {
             signer: None,
         }
     }
+
+    /// Stage a certificate for batch verification.
+    fn batch_verify_certificate<'a, D: Digest>(
+        &self,
+        batch: &mut Batch,
+        namespace: &[u8],
+        context: VoteContext<'a, D>,
+        certificate: &'a Certificate,
+    ) -> bool {
+        // If the certificate does not meet the quorum, return false.
+        if certificate.signers.len() < self.participants.quorum() as usize {
+            return false;
+        }
+        if certificate.signers.len() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate
+            .signers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+
+        // Add the certificate to the batch.
+        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.get(*signer) else {
+                return false;
+            };
+
+            batch.add(
+                Some(namespace.as_ref()),
+                message.as_ref(),
+                public_key,
+                signature,
+            );
+        }
+
+        true
+    }
 }
 
 /// Multi-signature certificate formed by collecting Ed25519 signatures plus
@@ -256,24 +297,9 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        if certificate.signers.len() < self.participants.quorum() as usize {
-            return false;
-        }
-
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
-
         let mut batch = Batch::new();
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(*signer) else {
-                return false;
-            };
-
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+        if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
+            return false;
         }
 
         batch.verify(rng)
@@ -291,25 +317,9 @@ impl signing_scheme::Scheme for Scheme {
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {
         let mut batch = Batch::new();
-
         for (context, certificate) in certificates {
-            if certificate.signers.len() < self.participants.quorum() as usize {
+            if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
                 return false;
-            }
-
-            let (namespace, message) = vote_namespace_and_message(namespace, context);
-
-            for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-                let Some(public_key) = self.participants.get(*signer) else {
-                    return false;
-                };
-
-                batch.add(
-                    Some(namespace.as_ref()),
-                    message.as_ref(),
-                    public_key,
-                    signature,
-                );
             }
         }
 
@@ -833,6 +843,78 @@ mod tests {
                 proposal: &proposal,
             },
             &invalid,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_duplicate_signers() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 25, 13);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signers[1] = certificate.signers[0];
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_mismatched_signature_count() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 27, 14);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+        certificate.signatures.pop();
+
+        let verifier = Scheme::verifier(participants);
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
         ));
     }
 
