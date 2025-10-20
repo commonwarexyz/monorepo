@@ -512,7 +512,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
         if data.blobs.is_empty() {
-            // No data blobs → journal is empty or fully pruned.
+            // No data blobs -- journal is empty or fully pruned.
             // The locations journal is the only source of truth.
             let size = locations.size().await?;
 
@@ -530,7 +530,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         // === Handle non-empty data journal case ===
         let (data_oldest_pos, data_size) = {
-            // Data exists → count items
+            // Data exists -- count items
             let first_section = *data.blobs.first_key_value().unwrap().0;
             let last_section = *data.blobs.last_key_value().unwrap().0;
             let oldest_pos = first_section * items_per_section;
@@ -553,7 +553,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         let locations_size = locations.size().await?;
         if locations_size > data_size {
-            // Locations ahead of data → should never happen (violates write ordering)
+            // Locations ahead of data -- should never happen (violates write ordering)
             return Err(Error::Corruption(format!(
                 "locations ahead of data: locations_size={locations_size} > data_size={data_size}"
             )));
@@ -567,13 +567,13 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // We prune data before locations so we should never need to catch data up to locations.
         match locations.oldest_retained_pos().await? {
             Some(oldest_retained_pos) if oldest_retained_pos > data_oldest_pos => {
-                // Locations pruned ahead of data → should never happen (violates write ordering)
+                // Locations pruned ahead of data -- should never happen (violates write ordering)
                 return Err(Error::Corruption(format!(
                     "locations pruned ahead of data: locations_oldest={oldest_retained_pos} > data_oldest={data_oldest_pos}"
                 )));
             }
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
-                // Locations behind on pruning → prune to catch up
+                // Locations behind on pruning -- prune to catch up
                 locations.prune(data_oldest_pos).await?;
             }
             None if data_oldest_pos < data_size => {
@@ -632,17 +632,17 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let (start_section, resume_offset, skip_first) =
             if let Some(oldest) = locations.oldest_retained_pos().await? {
                 if oldest < locations_size {
-                    // Locations has items → resume from last indexed position
+                    // Locations has items -- resume from last indexed position
                     let last_loc = locations.read(locations_size - 1).await?;
                     (last_loc.section, last_loc.offset, true)
                 } else {
-                    // Locations fully pruned but data has items → start from first data section
+                    // Locations fully pruned but data has items -- start from first data section
                     // SAFETY: data.blobs is non-empty (checked above)
                     let first_section = *data.blobs.first_key_value().unwrap().0;
                     (first_section, 0, false)
                 }
             } else {
-                // Locations empty → start from first data section
+                // Locations empty -- start from first data section
                 // SAFETY: data.blobs is non-empty (checked above)
                 let first_section = *data.blobs.first_key_value().unwrap().0;
                 (first_section, 0, false)
