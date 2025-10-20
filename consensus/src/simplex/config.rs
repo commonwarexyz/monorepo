@@ -29,6 +29,14 @@ pub struct Config<
     pub participants: Set<C::PublicKey>,
 
     /// Signing scheme for the consensus engine.
+    ///
+    /// Consensus messages can be signed with a cryptosystem that differs from the static
+    /// participant identity keys exposed in `participants`. For example, we can authenticate peers
+    /// on the network with [commonware_cryptography::ed25519] keys while signing votes with shares distributed
+    /// via [commonware_cryptography::bls12381::dkg] (which change each epoch). The scheme implementation is
+    /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
+    /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
+    /// the wrong validator.
     pub scheme: S,
 
     /// Blocker for the network.
