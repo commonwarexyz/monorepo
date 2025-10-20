@@ -194,10 +194,44 @@ impl<E: Element, P: PublicKey> Write for RoundInfo<E, P> {
     }
 }
 
+enum AckOrReveal<P: PublicKey> {
+    Ack(PlayerAck<P>),
+    Reveal(Scalar),
+}
+
 pub struct DealerLog<E, P: PublicKey> {
     pub_msg: DealerPubMsg<E>,
-    acks: BTreeMap<P, PlayerAck<P>>,
-    reveals: BTreeMap<P, Scalar>,
+    results: Vec<AckOrReveal<P>>,
+}
+
+impl<E, P: PublicKey> DealerLog<E, P> {
+    fn ack_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|x| matches!(x, AckOrReveal::Ack(_)))
+            .count()
+    }
+
+    fn reveal_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|x| matches!(x, AckOrReveal::Reveal(_)))
+            .count()
+    }
+
+    fn result_count(&self) -> usize {
+        self.results.len()
+    }
+
+    fn zip_players<'a, 'b>(
+        &'a self,
+        players: &'b Set<P>,
+    ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
+        if self.results.len() != players.len() {
+            return None;
+        }
+        Some(players.iter().zip(self.results.iter()))
+    }
 }
 
 fn select<E: Element, P: PublicKey>(
@@ -207,32 +241,30 @@ fn select<E: Element, P: PublicKey>(
     let required_commitments = round_info.required_commitments() as usize;
     let mut out = Vec::with_capacity(required_commitments);
     let transcript = transcript_for_round(round_info);
-    'outer: for (dealer, log) in logs {
+    for (dealer, log) in logs {
         if out.len() >= required_commitments {
             break;
         }
         if let None = round_info.dealers.position(dealer) {
             continue;
         }
-        if log.reveals.len() > round_info.max_reveals() as usize {
-            continue 'outer;
-        }
-        for player in round_info.players.iter() {
-            // Each player must either have acked, or been revealed.
-            //
-            // Not present in either: bad news.
-            // Present in both: bad news.
-            if log.acks.contains_key(player) == log.reveals.contains_key(player) {
-                continue 'outer;
-            }
-        }
+        let Some(results_iter) = log.zip_players(&round_info.players) else {
+            continue;
+        };
         let transcript = transcript_for_dealer(&transcript, dealer, &log.pub_msg);
-        for (player, ack) in &log.acks {
-            if !transcript.verify(player, &ack.sig) {
-                continue 'outer;
-            }
+        let (acks_good, reveal_count) = results_iter.fold(
+            (true, 0u32),
+            |(acks_good, reveal_count), (player, result)| match result {
+                AckOrReveal::Ack(ack) => (
+                    acks_good && transcript.verify(player, &ack.sig),
+                    reveal_count,
+                ),
+                AckOrReveal::Reveal(_) => (acks_good, reveal_count + 1),
+            },
+        );
+        if acks_good && reveal_count <= round_info.max_reveals() {
+            out.push(dealer.clone());
         }
-        out.push(dealer.clone());
     }
     if out.len() >= required_commitments {
         out.truncate(required_commitments);
@@ -371,12 +403,15 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
                     .get(&dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
                     .unwrap_or_else(|| {
-                        logs.get(&dealer)
-                            .expect("select takes dealer from log")
-                            .reveals
-                            .get(&self.me.public_key())
-                            .expect("select checks that dealer revealed")
-                            .clone()
+                        match logs
+                            .get(&dealer)
+                            .and_then(|log| log.results.get(self.index as usize))
+                        {
+                            Some(AckOrReveal::Reveal(share)) => share.clone(),
+                            _ => {
+                                panic!("select didn't check dealer reveal, or we're not a player?")
+                            }
+                        }
                     });
                 (
                     index,
@@ -427,8 +462,7 @@ pub struct Dealer<E, P: PublicKey> {
     share: Scalar,
     round_info: RoundInfo<E, P>,
     pub_msg: DealerPubMsg<E>,
-    reveals: BTreeMap<P, Scalar>,
-    acks: BTreeMap<P, PlayerAck<P>>,
+    results: Vec<AckOrReveal<P>>,
     transcript: Transcript,
 }
 
@@ -447,6 +481,11 @@ impl<E: Element, P: PublicKey> Dealer<E, P> {
             .enumerate()
             .map(|(i, pk)| (pk.clone(), my_poly.evaluate(i as u32).value))
             .collect::<BTreeMap<_, _>>();
+        let results = reveals
+            .values()
+            .cloned()
+            .map(AckOrReveal::Reveal)
+            .collect::<Vec<_>>();
         let priv_msgs = reveals
             .iter()
             .map(|(pk, share)| {
@@ -468,25 +507,24 @@ impl<E: Element, P: PublicKey> Dealer<E, P> {
             share,
             round_info,
             pub_msg: pub_msg.clone(),
-            reveals,
-            acks: BTreeMap::new(),
+            results,
             transcript,
         };
         Ok((this, pub_msg, priv_msgs))
     }
 
-    pub fn receive_player_ack(&mut self, player: P, ack: PlayerAck<P>) {
+    pub fn receive_player_ack(&mut self, player: P, ack: PlayerAck<P>) -> Result<(), Error> {
+        let index = self.round_info.player_index(&player)?;
         if self.transcript.verify(&player, &ack.sig) {
-            self.reveals.remove(&player);
-            self.acks.insert(player, ack);
+            self.results[index as usize] = AckOrReveal::Ack(ack);
         }
+        Ok(())
     }
 
     pub fn finalize(self) -> DealerLog<E, P> {
         DealerLog {
             pub_msg: self.pub_msg,
-            acks: self.acks,
-            reveals: self.reveals,
+            results: self.results,
         }
     }
 }
