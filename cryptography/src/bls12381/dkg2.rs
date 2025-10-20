@@ -11,32 +11,24 @@ use crate::{
     PrivateKey, PublicKey,
 };
 use commonware_codec::{Encode, EncodeSize, Write};
+use commonware_utils::set::Set;
 use rand_core::CryptoRngCore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
-/// Assign indices to the unique elements of a collection, in order.
-fn assign_indices<T: Ord>(data: impl Iterator<Item = T>) -> BTreeMap<T, u32> {
-    let set = data.collect::<BTreeSet<_>>();
-    set.into_iter()
-        .enumerate()
-        .map(|(i, x)| (x, u32::try_from(i).expect("failed to convert index to u32")))
-        .collect()
-}
-
 pub struct Output<E, P> {
     round: u32,
-    players: BTreeMap<P, u32>,
+    players: Set<P>,
     group_commitment: Poly<E>,
     faults: u32,
 }
 
 impl<E: Element, P: PublicKey> Output<E, P> {
     fn share_commitment(&self, player: &P) -> Option<E> {
-        let &index = self.players.get(player)?;
-        Some(self.group_commitment.evaluate(index).value)
+        let index = self.players.position(player)?;
+        Some(self.group_commitment.evaluate(index as u32).value)
     }
 }
 
@@ -77,8 +69,8 @@ pub enum Error {
 pub struct RoundInfo<E, P: PublicKey> {
     round: u32,
     previous: Option<Output<E, P>>,
-    dealers: BTreeMap<P, u32>,
-    players: BTreeMap<P, u32>,
+    dealers: Set<P>,
+    players: Set<P>,
     faults: u32,
 }
 
@@ -115,15 +107,15 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
 
     fn player_index(&self, player: &P) -> Result<u32, Error> {
         self.players
-            .get(player)
-            .copied()
+            .position(player)
+            .map(|x| x as u32)
             .ok_or(Error::UnknownPlayer)
     }
 
     fn dealer_index(&self, dealer: &P) -> Result<u32, Error> {
         self.dealers
-            .get(dealer)
-            .copied()
+            .position(dealer)
+            .map(|x| x as u32)
             .ok_or(Error::UnknownPlayer)
     }
 
@@ -147,17 +139,22 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
 impl<E, P: PublicKey> RoundInfo<E, P> {
     pub fn new(
         previous: Option<Output<E, P>>,
-        dealers: &[P],
-        players: &[P],
+        dealers: Set<P>,
+        players: Set<P>,
         faults: u32,
     ) -> Result<Self, Error> {
+        assert!(dealers.len() <= u32::MAX as usize);
+        assert!(players.len() <= u32::MAX as usize);
         let round = if let Some(previous) = previous.as_ref() {
             previous.round + 1
         } else {
             0
         };
         if let Some(previous) = previous.as_ref() {
-            if dealers.iter().any(|d| !previous.players.contains_key(d)) {
+            if dealers
+                .iter()
+                .any(|d| previous.players.position(d).is_none())
+            {
                 return Err(Error::UnknownDealer);
             }
             if dealers.len() < (2 * faults + 1) as usize {
@@ -170,8 +167,8 @@ impl<E, P: PublicKey> RoundInfo<E, P> {
         Ok(Self {
             round,
             previous,
-            dealers: assign_indices(dealers.iter().cloned()),
-            players: assign_indices(players.iter().cloned()),
+            dealers,
+            players,
             faults,
         })
     }
@@ -214,13 +211,13 @@ fn select<E: Element, P: PublicKey>(
         if out.len() >= required_commitments {
             break;
         }
-        if !round_info.dealers.contains_key(dealer) {
+        if let None = round_info.dealers.position(dealer) {
             continue;
         }
         if log.reveals.len() > round_info.max_reveals() as usize {
             continue 'outer;
         }
-        for player in round_info.players.keys() {
+        for player in round_info.players.iter() {
             // Each player must either have acked, or been revealed.
             //
             // Not present in either: bad news.
@@ -447,7 +444,8 @@ impl<E: Element, P: PublicKey> Dealer<E, P> {
         let reveals = round_info
             .players
             .iter()
-            .map(|(pk, &i)| (pk.clone(), my_poly.evaluate(i).value))
+            .enumerate()
+            .map(|(i, pk)| (pk.clone(), my_poly.evaluate(i as u32).value))
             .collect::<BTreeMap<_, _>>();
         let priv_msgs = reveals
             .iter()
