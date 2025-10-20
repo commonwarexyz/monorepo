@@ -353,6 +353,31 @@ where
             .map(|_| ())
     }
 
+    /// Updates the value associated with the given key in the store, inserting a default value
+    /// if the key does not already exist.
+    ///
+    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
+    /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
+    /// if the store is closed without committing.
+    pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        let mut value = self.get(&key).await?.unwrap_or_default();
+        update(&mut value);
+
+        let new_loc = self.log_size;
+        if let Some(old_loc) = self.get_key_loc(&key).await? {
+            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
+        } else {
+            self.snapshot.insert(&key, new_loc);
+        };
+
+        self.apply_op(Operation::Update(key, value))
+            .await
+            .map(|_| ())
+    }
+
     /// Deletes the value associated with the given key in the store. If the key has no value,
     /// the operation is a no-op.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {

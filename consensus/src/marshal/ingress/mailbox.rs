@@ -1,9 +1,12 @@
 use crate::{
-    threshold_simplex::types::{Activity, Finalization, Notarization},
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Activity, Finalization, Notarization},
+    },
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::Digest;
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
@@ -50,7 +53,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<S: Scheme, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -97,24 +100,24 @@ pub(crate) enum Message<V: Variant, B: Block> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<V, B::Commitment>,
+        notarization: Notarization<S, B::Commitment>,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<V, B::Commitment>,
+        finalization: Finalization<S, B::Commitment>,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block> {
-    sender: mpsc::Sender<Message<V, B>>,
+pub struct Mailbox<S: Scheme, B: Block> {
+    sender: mpsc::Sender<Message<S, B>>,
 }
 
-impl<V: Variant, B: Block> Mailbox<V, B> {
+impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
     }
 
@@ -226,8 +229,8 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 }
 
-impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
-    type Activity = Activity<V, B::Commitment>;
+impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
+    type Activity = Activity<S, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {

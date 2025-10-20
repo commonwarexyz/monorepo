@@ -1,15 +1,17 @@
 use super::{
     ingress::{Mailbox, Message},
-    supervisor::Supervisor,
     Config,
 };
-use crate::types::{
-    block::BlockFormat,
-    inbound::{self, Inbound},
-    outbound::Outbound,
+use crate::{
+    types::{
+        block::BlockFormat,
+        inbound::{self, Inbound},
+        outbound::Outbound,
+    },
+    Scheme,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
+use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         poly,
@@ -20,29 +22,29 @@ use commonware_cryptography::{
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use tracing::{debug, info};
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
     namespace: Vec<u8>,
     public: <MinSig as Variant>::Public,
-    other_public: <MinSig as Variant>::Public,
+    other_certificate_verifier: Scheme,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new<P: PublicKey>(
         context: R,
         config: Config<H, Si, St, P>,
-    ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {
+    ) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -50,11 +52,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 indexer: config.indexer,
                 namespace: config.namespace,
                 public: *poly::public::<MinSig>(&config.identity),
-                other_public: config.other_public,
+                other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
                 hasher: config.hasher,
                 mailbox,
             },
-            Supervisor::new(config.identity, config.participants, config.share),
+            Scheme::new(config.participants.as_ref(), &config.identity, config.share),
             Mailbox::new(sender),
         )
     }
@@ -84,7 +86,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             // Fetch a certificate from the indexer for the other network
                             let msg =
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
-                                    network: self.other_public,
+                                    network: *self.other_certificate_verifier.identity(),
                                 })
                                 .encode();
                             indexer_sender
@@ -108,7 +110,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(&self.namespace, &self.other_public),
+                                finalization.verify(
+                                    &mut self.context,
+                                    &self.other_certificate_verifier,
+                                    &self.namespace
+                                ),
                                 "indexer is corrupt"
                             );
 
@@ -181,7 +187,11 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result = finalization.verify(&self.namespace, &self.other_public);
+                            let result = finalization.verify(
+                                &mut self.context,
+                                &self.other_certificate_verifier,
+                                &self.namespace,
+                            );
                             let _ = response.send(result);
                         }
                     }
@@ -190,10 +200,16 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            info!(view, payload = ?notarization.proposal.payload, signature=?notarization.proposal_signature, seed=?notarization.seed_signature, "notarized");
+                            let proposal_signature = notarization.certificate.vote_signature;
+                            let seed_signature = notarization.certificate.seed_signature;
+
+                            info!(view, payload = ?notarization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
+                            let proposal_signature = finalization.certificate.vote_signature;
+                            let seed_signature = finalization.certificate.seed_signature;
+
+                            info!(view, payload = ?finalization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "finalized");
 
                             // Post finalization
                             let msg =
@@ -218,7 +234,10 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             debug!(view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
-                            info!(view, signature=?nullification.view_signature, seed=?nullification.seed_signature, "nullified");
+                            let round_signature = nullification.certificate.vote_signature;
+                            let seed_signature = nullification.certificate.seed_signature;
+
+                            info!(view, signature=?round_signature, seed=?seed_signature, "nullified");
                         }
                         _ => {}
                     }
