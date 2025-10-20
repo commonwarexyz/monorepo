@@ -174,10 +174,10 @@
 //!
 //! #### Embedded VRF
 //!
-//! When the [signing_scheme::bls12381_threshold] is employed, every `notarize(c,v)` or `nullify(v)` message includes a `part(v)`
-//! message (a partial signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
-//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
-//! whether or not a block was notarized in said view `v`.
+//! Every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial signature over the view `v`). After `2f+1`
+//! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `part(v)` is
+//! only over the view `v`, the seed derived for a given view `v` is the same regardless of whether or not a block was notarized in said
+//! view `v`.
 //!
 //! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
 //! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
@@ -186,7 +186,16 @@
 //!
 //! #### Succinct Certificates
 //!
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
+//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
+//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
+//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
+//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
+//! to operate a lite client).
 //!
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
+//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
+//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
 
 pub mod signing_scheme;
 pub mod types;
