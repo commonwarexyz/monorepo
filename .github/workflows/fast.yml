@@ -4,6 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
@@ -32,19 +33,21 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Lint
-      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
+    - name: Install just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
     - name: Fmt
-      run: cargo +${{ env.NIGHTLY_VERSION }} fmt --all -- --check
+      run: just check-fmt +${{ env.NIGHTLY_VERSION }}
+    - name: Lint
+      run: just clippy ${{ matrix.flags }}
     - name: Check docs
-      run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
-      env:
-        RUSTDOCFLAGS: "-D warnings"
+      run: just check-docs ${{ matrix.flags }}
 
   Tests:
     name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
@@ -76,24 +79,62 @@ jobs:
             flags: "--no-default-features"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Install nextest
-      uses: taiki-e/install-action@cargo-nextest
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run tests
-      run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+    - name: Run doc tests
+      run: just test-docs ${{ matrix.flags }}
+
+  Tests-Subset:
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\")"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+          - os: windows-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+          - os: macos-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/external"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.104
+    - name: Run subset tests
+      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+    - name: Run subset doc tests
+      run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: Tests
+    needs: [Tests, Tests-Subset]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
             echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          if [ "${{ needs.Tests-Subset.result }}" != "success" ]; then
+            echo "Tests-Subset failed or were cancelled"
             exit 1
           fi
           echo "All tests passed successfully!"
@@ -103,7 +144,7 @@ jobs:
     timeout-minutes: 20
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Get Rust version
@@ -111,21 +152,29 @@ jobs:
       run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Install cargo-udeps
-      uses: taiki-e/install-action@v2
+    - name: Install just & cargo-udeps
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
+        tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
+      run: just udeps +${{ env.NIGHTLY_VERSION }}
 
   Lock:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+    # The ubuntu runner normally has ~20GB of available disk space, which
+    # is insufficient for building the entire workspace. To allow the full
+    # build to complete, we clear out unnecessary pre-installed packages
+    # and toolchains.
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+      with:
+        large-packages: false
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -143,7 +192,7 @@ jobs:
     timeout-minutes: 10
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Add WASM target
@@ -163,18 +212,12 @@ jobs:
 
   no_std:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Add minimal no_std target
-      run: rustup target add thumbv7em-none-eabihf
-    - name: Install ARM bare-metal toolchain (required to compile C from x86 worker)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-arm-none-eabi
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
@@ -183,7 +226,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install miri
@@ -191,7 +234,11 @@ jobs:
         rustup toolchain install ${{ env.NIGHTLY_VERSION }} --component miri
         rustup override set ${{ env.NIGHTLY_VERSION }}
         cargo miri setup
+    - name: Install just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
     - name: Run miri tests for storage::index
       run: |
         cd storage
-        MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
+        just miri index::

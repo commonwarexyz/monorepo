@@ -27,7 +27,7 @@ impl Write for Data {
 }
 
 impl Read for Data {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();

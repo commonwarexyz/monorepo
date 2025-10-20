@@ -5,7 +5,7 @@ use commonware_runtime::{
 };
 use commonware_storage::mmr::{
     mem::{Config as MemConfig, Mmr},
-    StandardHasher,
+    Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -23,9 +23,9 @@ enum Strategy {
 /// returns start diminishing.
 const THREADS: usize = 8;
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_LEAVES: [usize; 1] = [100_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
 
 /// Benchmark the performance of randomly updating leaves in an MMR.
@@ -57,10 +57,11 @@ fn bench_update(c: &mut Criterion) {
                                             .unwrap();
                                     Mmr::<Sha256>::init(MemConfig {
                                         nodes: vec![],
-                                        pruned_to_pos: 0,
+                                        pruned_to_pos: Position::new(0),
                                         pinned_nodes: vec![],
                                         pool: Some(pool),
                                     })
+                                    .unwrap()
                                 }
                                 _ => Mmr::<Sha256>::new(),
                             };
@@ -93,16 +94,16 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (pos, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, pos, &element);
+                                        mmr.update_leaf(&mut h, pos, &element).unwrap();
                                     }
                                 }
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates
                                     let updates: Vec<(
-                                        u64,
+                                        Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    mmr.update_leaf_batched(&mut h, &updates);
+                                    mmr.update_leaf_batched(&mut h, &updates).unwrap();
                                 }
                             }
                             mmr.sync(&mut h);

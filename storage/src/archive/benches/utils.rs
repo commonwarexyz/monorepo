@@ -136,6 +136,20 @@ impl ArchiveTrait for Archive {
         }
     }
 
+    fn first_index(&self) -> Option<u64> {
+        match self {
+            Archive::Immutable(a) => a.first_index(),
+            Archive::Prunable(a) => a.first_index(),
+        }
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        match self {
+            Archive::Immutable(a) => a.last_index(),
+            Archive::Prunable(a) => a.last_index(),
+        }
+    }
+
     async fn sync(&mut self) -> Result<(), commonware_storage::archive::Error> {
         match self {
             Archive::Immutable(a) => a.sync().await,

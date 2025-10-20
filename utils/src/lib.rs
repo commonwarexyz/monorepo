@@ -20,14 +20,22 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
-mod bitvec;
-pub use bitvec::{BitIterator, BitVec};
+pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]
-mod time;
+pub mod net;
+pub mod set;
 #[cfg(feature = "std")]
-pub use time::{parse_duration, SystemTimeExt};
+pub use net::IpAddrExt;
+#[cfg(feature = "std")]
+pub mod time;
+#[cfg(feature = "std")]
+pub use time::{DurationExt, SystemTimeExt};
+#[cfg(feature = "std")]
+pub mod rational;
+#[cfg(feature = "std")]
+pub use rational::BigRationalExt;
 #[cfg(feature = "std")]
 mod priority_set;
 #[cfg(feature = "std")]
@@ -36,6 +44,8 @@ pub use priority_set::PrioritySet;
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
+#[cfg(feature = "std")]
+pub mod concurrency;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
@@ -49,7 +59,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
 

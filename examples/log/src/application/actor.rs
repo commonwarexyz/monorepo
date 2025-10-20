@@ -1,53 +1,49 @@
 use super::{
     ingress::{Mailbox, Message},
-    supervisor::Supervisor,
-    Config,
+    reporter::Reporter,
+    Config, Scheme,
 };
-use commonware_cryptography::{Hasher, PublicKey, Signature};
-use commonware_runtime::{Handle, Spawner};
+use commonware_cryptography::Hasher;
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::marker::PhantomData;
 use tracing::info;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> {
-    context: R,
+pub struct Application<R: Rng + Spawner, H: Hasher> {
+    context: ContextCell<R>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
-
-    _phantom_p: PhantomData<P>,
-    _phantom_s: PhantomData<S>,
 }
 
-impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, S, H> {
+impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
-        config: Config<P, H>,
-    ) -> (Self, Supervisor<P, S, H::Digest>, Mailbox<H::Digest>) {
+        config: Config<H>,
+    ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 hasher: config.hasher,
                 mailbox,
-                _phantom_s: PhantomData,
-                _phantom_p: PhantomData,
             },
-            Supervisor::new(config.participants),
+            Scheme::new(config.participants, config.private_key),
+            Reporter::new(),
             Mailbox::new(sender),
         )
     }
 
     /// Run the application actor.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(mut self) {

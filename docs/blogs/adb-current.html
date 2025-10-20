@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Grafting Trees to Prove Current State</title>
     <meta name="description" content="While proving you had a lot of money at some time in the past might go over well at a party, what's often far more useful is proving how much money you have right now. In database terms, this comes down to proving the current state of a key in a database, which is what we take on in this third article from our series on applying the Merkle Mountain Range (MMR) for efficient data authentication.">
@@ -30,7 +30,7 @@
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@roberto_bayardo" />
 
-    <link rel="stylesheet" type="text/css" href="../style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -80,42 +80,41 @@
             <div class="date">July 9, 2025</div>
         </div>
         <p>While proving you had a lot of money at some time in the past might go over well at a party, what's often far more useful is proving how much money you have <i>right now</i>. In database terms, this comes down to proving the <i>current state</i> of a key in a database, which is what we take on in this third article from our series on applying the Merkle Mountain Range (MMR) for efficient data authentication.</p>
-        <p>Recall that our <a href="https://commonware.xyz/blogs/mmr.html">first article</a> described the basics of the MMR and what makes it special: updates are <i>fast</i> (compared to a more standard Merkle Tree) because they only append new data without modifying any historical data. Our <a href="https://commonware.xyz/blogs/adb-any.html">second article</a> described how one might use an MMR to authenticate the simplest database you need for state sync and interoperability, even though at first glance the MMR might appear inapplicable to the task. The idea here was to view a database as the result of applying a sequential list of operations, over which the MMR is then constructed. We called this structure <i>adb::any</i> because it allows for a compact proof (from an untrusted server, of course) that a specific key had taken on <i>any one</i> of its historical values at some point in its history.</p>
+        <p>Recall that our <a href="/blogs/mmr.html">first article</a> described the basics of the MMR and what makes it special: updates are <i>fast</i> (compared to a more standard Merkle Tree) because they only append new data without modifying any historical data. Our <a href="/blogs/adb-any.html">second article</a> described how one might use an MMR to authenticate the simplest database you need for state sync and interoperability, even though at first glance the MMR might appear inapplicable to the task. The idea here was to view a database as the result of applying a sequential list of operations, over which the MMR is then constructed. We called this structure <i>adb::any</i> because it allows for a compact proof (from an untrusted server, of course) that a specific key had taken on <i>any one</i> of its historical values at some point in its history.</p>
         <div class="image-container">
-            <img src="../imgs/adb-activity.png" alt="Log operations and status bits over the key named 'foo'.">
+            <img src="/imgs/adb-activity.png" alt="Log operations and status bits over the key named 'foo'.">
             <div class="image-caption">Figure 1: Log operations and status bits over a key named "foo". Only the last update of each key has a 1 for its activity status, indicating its current value (6).</div>
         </div>
         <h2>Authenticating Current Values</h2>
         <p>In this post, we show how to extend adb::any to prove that a key <i>currently</i> holds a specific value. If you recall from our second article, the adb::any already tracks an activity status for each operation in the log (figure 1), allowing it to serve only the most recent value (if any) associated with each key. Imagine then pulling out this information into a separate list (or bit vector), where each element is a single bit indicating the corresponding operation's activity status. Unfortunately, unlike the list of operations which changes only through appending new ones, the vector of activity bits requires historical updates. Specifically, each time a key's value is updated, the operation corresponding to its last update flips from active to inactive. Reflecting that state change therefore requires we modify a historical bit rather than simply appending a new bit corresponding to the latest update.</p>
         <p>If we wish to make authenticable claims over activity status, we'll (disappointingly) need to use a new data structure to handle these types of updates. Instead of replacing the MMR entirely, we keep the MMR over the operations log as is, and augment it with a <i>separate</i> Merkle tree of <i>identical</i> structure built over just the activity status bits. Conveniently, the only difference between an MMR and this kind of Merkle tree <a href="https://github.com/commonwarexyz/monorepo/blob/8174f10c6e17e762d1393ef38b2282cf70da024a/storage/src/mmr/mem.rs#L288-L333">is the ability to modify previous elements and recompute the digests of its ancestors in the tree</a>. By tying these two structures together with a root over the peaks of each (figure 2), a proof derived from only two paths (one to the operation and one to its corresponding activity state) delivers exactly the functionality we are looking for.</p>
         <div class="image-container">
-            <img src="../imgs/adb-naive.png" alt="A combined MMR + Merkle Tree (MT) of identical structure allows proving which value for a given key is current.">
+            <img src="/imgs/adb-naive.png" alt="A combined MMR + Merkle Tree (MT) of identical structure allows proving which value for a given key is current.">
             <div class="image-caption">Figure 2: A combined MMR + Merkle Tree (MT) of identical structure allows proving which value for a given key is current. In this figure the siblings along the two paths from root highlighted in red provide the necessary digests for proving “foo currently has value 6”.</div>
         </div>
         <h2>Making Updates Fast</h2>
         <p>We've taken a bit of a step backwards by introducing a Merkle tree, since updates are no longer purely append-only. But, we can limit the performance impact of this tweak by pinning the Merkle tree portion of the structure entirely in RAM (compared to the log of operations, the size of the activity status bit vector is quite compact). Furthermore, we can divide the bit vector into <i>chunks</i> over which we build the <a href="https://github.com/commonwarexyz/monorepo/blob/8174f10c6e17e762d1393ef38b2282cf70da024a/storage/src/mmr/bitmap.rs#L7">tree</a>. The bottom line is, with a suitable choice of N, this structure is small enough to keep entirely memory resident even over very large databases (and worth doing so to avoid random, small writes over disk). We won't review it here but both trees, like with the “single tree” adb::any, can be regularly pruned to keep their sizes in check.</p>
         <div class="image-container">
-            <img src="../imgs/adb-chunked.png" alt="The combined tree structure with the Merkle tree built over chunks of 4 bits each (N=2).">
+            <img src="/imgs/adb-chunked.png" alt="The combined tree structure with the Merkle tree built over chunks of 4 bits each (N=2).">
             <div class="image-caption">Figure 3: The combined tree structure with the Merkle tree built over chunks of 4 bits each (N=2).</div>
         </div>
         <h2>Making Proofs Small</h2>
         <p>As described above, a <i>current-value proof</i> would be up to 2x larger than an <i>any-value proof</i> because it requires digests from the path of the second tree (the one to the relevant activity status chunk). As long as the number of bits in each chunk is a power of 2, however, the structure of the Merkle tree over activity status remains <i>compatible</i> with the structure of the MMR over database operations. That is, for a chunk size of 2^N, the Merkle tree matches exactly that of the MMR with its bottom N levels removed (figure 3). Instead of maintaining two completely independent trees tied together at a new root, we can instead <i>graft</i> each leaf of the Merkle tree onto its corresponding internal node of the MMR (figure 4).</p>
         <div class="image-container">
-            <img src="../imgs/adb-current.png" alt="Grafting each Merkle tree leaf onto its corresponding node in the MMR.">
+            <img src="/imgs/adb-current.png" alt="Grafting each Merkle tree leaf onto its corresponding node in the MMR.">
             <div class="image-caption">Figure 4: Grafting each Merkle tree leaf onto its corresponding node in the MMR.</div>
         </div>
         <p>Generating a proof over this grafted structure produces a current-value proof that contains the same node digests as a corresponding any-value proof and a bitmap chunk containing an operation's activity bit. Our implementation defaults to a chunk size of 256 bits (the same size as most hash digests) so that a current-value proof includes <i>just one</i> extra digest-worth of data compared to an any-value proof of the same value.</p>
         <p><i>Our grafting technique draws inspiration from <a href="https://arxiv.org/abs/2501.05262">QMDB</a>'s novel “twig” abstraction but opts for smaller, configurable chunks (to minimize proof size) and, as noted previously, relies exclusively on RAM to store all unpruned chunks (to avoid random writes).</i></p>
         <h2>Marching Towards Production</h2>
-        <p><a href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/adb/current.rs">adb::current</a> is available today in the Commonware Library, along with several new storage extensions (that have delivered <a href="https://commonware.xyz/benchmarks.html">significant performance gains</a> over the past month). This includes a flexible <a href="https://github.com/commonwarexyz/monorepo/tree/main/runtime/src/utils/buffer">caching layer</a> that provides write-ahead and random-access caching through a shared <a href="https://github.com/commonwarexyz/monorepo/blob/main/runtime/src/utils/buffer/pool.rs">buffer pool</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/8174f10c6e17e762d1393ef38b2282cf70da024a/storage/src/mmr/mem.rs#L460">parallelized merkleization</a> via batched updates, and an <a href="https://github.com/commonwarexyz/monorepo/blob/main/runtime/src/storage/iouring.rs">io_uring storage implementation</a> (for operating systems that support it).</p>
+        <p><a href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/adb/current.rs">adb::current</a> is available today in the Commonware Library, along with several new storage extensions (that have delivered <a href="/benchmarks.html">significant performance gains</a> over the past month). This includes a flexible <a href="https://github.com/commonwarexyz/monorepo/tree/main/runtime/src/utils/buffer">caching layer</a> that provides write-ahead and random-access caching through a shared <a href="https://github.com/commonwarexyz/monorepo/blob/main/runtime/src/utils/buffer/pool.rs">buffer pool</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/8174f10c6e17e762d1393ef38b2282cf70da024a/storage/src/mmr/mem.rs#L460">parallelized merkleization</a> via batched updates, and an <a href="https://github.com/commonwarexyz/monorepo/blob/main/runtime/src/storage/iouring.rs">io_uring storage implementation</a> (for operating systems that support it).</p>
         <p>We remain on-schedule to release a production-ready version of <a href="https://docs.rs/commonware-storage">commonware-storage</a> later this year.</p>
     </div>
 
     </div>
 
     <div id="footer-placeholder"></div>
-    <script src="../shared.js"></script>
-    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>

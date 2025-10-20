@@ -1,20 +1,21 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
+use super::Position;
 use commonware_cryptography::Hasher as CHasher;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<H: CHasher>: Send + Sync {
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest;
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(&mut self, pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest;
+    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest;
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
     fn root<'a>(
         &mut self,
-        size: u64,
+        size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest;
 
@@ -42,7 +43,8 @@ impl<H: CHasher> Standard<H> {
         Self { hasher: H::new() }
     }
 
-    pub fn update_with_pos(&mut self, pos: u64) {
+    pub fn update_with_pos(&mut self, pos: Position) {
+        let pos = *pos;
         self.hasher.update(&pos.to_be_bytes());
     }
 
@@ -74,13 +76,13 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
         Standard { hasher: H::new() }
     }
 
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.update_with_pos(pos);
         self.update_with_element(element);
         self.finalize()
     }
 
-    fn node_digest(&mut self, pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest {
+    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest {
         self.update_with_pos(pos);
         self.update_with_digest(left);
         self.update_with_digest(right);
@@ -89,10 +91,10 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 
     fn root<'a>(
         &mut self,
-        size: u64,
+        size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.update_with_pos(size);
+        self.hasher.update(&size.to_be_bytes());
         for digest in peak_digests {
             self.update_with_digest(digest);
         }
@@ -108,6 +110,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmr::Position;
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -138,16 +141,16 @@ mod tests {
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
-        let out = mmr_hasher.leaf_digest(0, &digest1);
+        let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.leaf_digest(0, &digest1);
+        let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.leaf_digest(1, &digest1);
+        out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.leaf_digest(0, &digest2);
+        out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
@@ -159,28 +162,28 @@ mod tests {
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
 
-        let out = mmr_hasher.node_digest(0, &d1, &d2);
+        let out = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.node_digest(0, &d1, &d2);
+        let mut out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.node_digest(1, &d1, &d2);
+        out2 = mmr_hasher.node_digest(Position::new(1), &d1, &d2);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.node_digest(0, &d3, &d2);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d3, &d2);
         assert_ne!(
             out, out2,
             "hash should change with different first input hash"
         );
 
-        out2 = mmr_hasher.node_digest(0, &d1, &d3);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d3);
         assert_ne!(
             out, out2,
             "hash should change with different second input hash"
         );
 
-        out2 = mmr_hasher.node_digest(0, &d2, &d1);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d2, &d1);
         assert_ne!(
             out, out2,
             "hash should change when swapping order of inputs"
@@ -196,7 +199,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(0, empty_vec.iter());
+        let empty_out = mmr_hasher.root(Position::new(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -204,22 +207,22 @@ mod tests {
         );
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(10, digests.iter());
+        let out = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(10, digests.iter());
+        let mut out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(11, digests.iter());
+        out2 = mmr_hasher.root(Position::new(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(10, digests.iter());
+        out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(10, digests.iter());
+        out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

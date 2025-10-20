@@ -254,6 +254,42 @@ impl RMap {
         self.ranges.iter()
     }
 
+    /// Retrieve the first index in the [RMap].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// assert_eq!(map.first_index(), None);
+    /// map.insert(3); map.insert(4); // Map: [3, 4]
+    /// assert_eq!(map.first_index(), Some(3));
+    /// map.insert(1); // Map: [1, 1], [3, 4]
+    /// assert_eq!(map.first_index(), Some(1));
+    /// ```
+    pub fn first_index(&self) -> Option<u64> {
+        self.ranges.first_key_value().map(|(&start, _)| start)
+    }
+
+    /// Retrieve the last index in the [RMap].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// assert_eq!(map.last_index(), None);
+    /// map.insert(1); map.insert(2); // Map: [1, 2]
+    /// assert_eq!(map.last_index(), Some(2));
+    /// map.insert(5); // Map: [1, 2], [5, 5]
+    /// assert_eq!(map.last_index(), Some(5));
+    /// ```
+    pub fn last_index(&self) -> Option<u64> {
+        self.ranges.last_key_value().map(|(_, &end)| end)
+    }
+
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
     ///

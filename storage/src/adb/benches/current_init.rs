@@ -42,7 +42,7 @@ const MULTI_THREADED: usize = 8;
 const CHUNK_SIZE: usize = 32;
 
 cfg_if::cfg_if! {
-    if #[cfg(test)] {
+    if #[cfg(not(full_bench))] {
         const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
         const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
     } else {

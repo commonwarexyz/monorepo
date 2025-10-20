@@ -4,17 +4,14 @@ use crate::authenticated::{
         actors::{peer, tracker::Metadata},
         types,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Metrics, Spawner};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use futures::channel::oneshot;
 
 /// Messages that can be sent to the tracker actor.
-pub enum Message<E: Spawner + Metrics, C: PublicKey> {
+pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     ///
@@ -67,10 +64,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
     Peers {
         /// The list of peers received.
-        peers: Vec<types::PeerInfo<C>>,
-
-        /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peers: Vec<types::Info<C>>,
     },
 
     // ---------- Used by dialer ----------
@@ -82,7 +76,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if the
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Dial {
@@ -90,7 +84,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<E, C>>>,
+        reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
     // ---------- Used by listener ----------
@@ -105,7 +99,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {
@@ -113,7 +107,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// The sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<E, C>>>,
+        reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
     // ---------- Used by reservation ----------
@@ -124,7 +118,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
+impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
     pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
         self.send(Message::Connect {
@@ -132,44 +126,38 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
             dialer,
             peer,
         })
-        .await
         .unwrap();
     }
 
     /// Send a `Construct` message to the tracker.
-    pub async fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Construct { public_key, peer })
-            .await
-            .unwrap();
+    pub fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
+        self.send(Message::Construct { public_key, peer }).unwrap();
     }
 
     /// Send a `BitVec` message to the tracker.
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).await.unwrap();
+    pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
+        self.send(Message::BitVec { bit_vec, peer }).unwrap();
     }
 
     /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Peers { peers, peer }).await.unwrap();
+    pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
+        self.send(Message::Peers { peers }).unwrap();
     }
 
     /// Send a `Block` message to the tracker.
     pub async fn dialable(&mut self) -> Vec<C> {
         let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender })
-            .await
-            .unwrap();
+        self.send(Message::Dialable { responder: sender }).unwrap();
         receiver.await.unwrap()
     }
 
     /// Send a `Dial` message to the tracker.
-    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<E, C>> {
+    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Dial {
             public_key,
             reservation: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
@@ -181,19 +169,17 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
             public_key,
             responder: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
 
     /// Send a `Listen` message to the tracker.
-    pub async fn listen(&mut self, public_key: C) -> Option<Reservation<E, C>> {
+    pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Listen {
             public_key,
             reservation: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
@@ -201,33 +187,19 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
 
 /// Allows releasing reservations
 #[derive(Clone)]
-pub struct Releaser<E: Spawner + Metrics, C: PublicKey> {
-    sender: mpsc::Sender<Message<E, C>>,
+pub struct Releaser<C: PublicKey> {
+    sender: UnboundedMailbox<Message<C>>,
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
+impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
-    /// Try to release a reservation.
-    ///
-    /// Returns `true` if the reservation was released, `false` if the mailbox is full.
-    pub fn try_release(&mut self, metadata: Metadata<C>) -> bool {
-        match self.sender.try_send(Message::Release { metadata }) {
-            Ok(()) => true,
-            Err(e) if e.is_full() => false,
-            Err(e) if e.is_disconnected() => true,
-            Err(_) => false,
-        }
-    }
-
     /// Release a reservation.
-    ///
-    /// This method will block if the mailbox is full.
-    pub async fn release(&mut self, metadata: Metadata<C>) {
-        let _ = self.sender.send(Message::Release { metadata }).await;
+    pub fn release(&mut self, metadata: Metadata<C>) {
+        let _ = self.sender.send(Message::Release { metadata });
     }
 }
 
@@ -236,12 +208,12 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner + Metrics, C: PublicKey> {
-    sender: mpsc::Sender<Message<E, C>>,
+pub struct Oracle<C: PublicKey> {
+    sender: UnboundedMailbox<Message<C>>,
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
-    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+impl<C: PublicKey> Oracle<C> {
+    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
@@ -257,14 +229,14 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&mut self, index: u64, peers: Vec<C>) {
-        let _ = self.sender.send(Message::Register { index, peers }).await;
+        let _ = self.sender.send(Message::Register { index, peers });
     }
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> crate::Blocker for Oracle<E, C> {
+impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     async fn block(&mut self, public_key: Self::PublicKey) {
-        let _ = self.sender.send(Message::Block { public_key }).await;
+        let _ = self.sender.send(Message::Block { public_key });
     }
 }

@@ -28,11 +28,7 @@ impl<P: PublicKey> Supervisor for Sequencers<P> {
     type Index = Epoch;
     type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
-    fn participants(&self, _: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
         Some(&self.participants)
     }
 

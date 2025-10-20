@@ -7,20 +7,25 @@ use super::{
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
+    SchemeProvider,
 };
 use crate::{
-    threshold_simplex::types::{Finalization, Notarization},
+    marshal::ingress::mailbox::Identifier as BlockID,
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Finalization, Notarization},
+    },
     types::Round,
-    Block, Reporter,
+    utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
@@ -28,7 +33,7 @@ use futures::{
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
@@ -56,42 +61,48 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    B: Block,
+    P: SchemeProvider<Scheme = S>,
+    S: Scheme,
+> {
     // ---------- Context ----------
-    context: E,
+    context: ContextCell<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<V, B>>,
+    mailbox: mpsc::Receiver<Message<S, B>>,
 
     // ---------- Configuration ----------
-    // Identity
-    identity: V::Public,
+    // Provider for epoch-specific signing schemes
+    scheme_provider: P,
+    // Epoch length (in blocks)
+    epoch_length: u64,
     // Mailbox size
     mailbox_size: usize,
     // Unique application namespace
     namespace: Vec<u8>,
-    /// Minimum number of views to retain temporary data after the application processes a block
+    // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: u64,
     // Maximum number of blocks to repair at once
     max_repair: u64,
-    // Codec configuration
-    codec_config: B::Cfg,
+    // Codec configuration for block type
+    block_codec_config: B::Cfg,
     // Partition prefix
     partition_prefix: String,
 
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
-
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, V>,
+    cache: cache::Manager<E, B, P, S>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
@@ -102,9 +113,15 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<
+        E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        P: SchemeProvider<Scheme = S>,
+        S: Scheme,
+    > Actor<E, B, P, S>
+{
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
+    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -116,7 +133,8 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
-            config.codec_config.clone(),
+            config.block_codec_config.clone(),
+            config.scheme_provider.clone(),
         )
         .await;
 
@@ -148,7 +166,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: (),
+                codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -182,7 +200,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                 freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: config.codec_config.clone(),
+                codec_config: config.block_codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -209,14 +227,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 mailbox,
-                identity: config.identity,
+                scheme_provider: config.scheme_provider,
+                epoch_length: config.epoch_length,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
-                codec_config: config.codec_config,
+                block_codec_config: config.block_codec_config,
+                partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -224,35 +244,34 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                 finalized_blocks,
                 finalized_height,
                 processed_height,
-                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
     }
 
     /// Start the actor.
-    pub fn start<R, P>(
+    pub fn start<R, K>(
         mut self,
         application: impl Reporter<Activity = B>,
-        buffer: buffered::Mailbox<P, B>,
+        buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
         R: Resolver<Key = handler::Request<B>>,
-        P: PublicKey,
+        K: PublicKey,
     {
-        self.context.spawn_ref()(self.run(application, buffer, resolver))
+        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, P>(
+    async fn run<R, K>(
         mut self,
         application: impl Reporter<Activity = B>,
-        mut buffer: buffered::Mailbox<P, B>,
+        mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
         R: Resolver<Key = handler::Request<B>>,
-        P: PublicKey,
+        K: PublicKey,
     {
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -266,9 +285,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             notifier_rx,
         )
         .await;
-        self.context
-            .with_label("finalizer")
-            .spawn(|_| finalizer.run());
+        finalizer.start();
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -297,6 +314,29 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                         return;
                     };
                     match message {
+                        Message::GetInfo { identifier, response } => {
+                            let info = match identifier {
+                                // TODO: Instead of pulling out the entire block, determine the
+                                // height directly from the archive by mapping the commitment to
+                                // the index, which is the same as the height.
+                                BlockID::Commitment(commitment) => self
+                                    .finalized_blocks
+                                    .get(ArchiveID::Key(&commitment))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| (b.height(), commitment)),
+                                BlockID::Height(height) => self
+                                    .finalizations_by_height
+                                    .get(ArchiveID::Index(height))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|f| (height, f.proposal.payload)),
+                                BlockID::Latest => self.get_latest().await,
+                            };
+                            let _ = response.send(info);
+                        }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;
                         }
@@ -337,10 +377,24 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
-                        Message::Get { commitment, response } => {
-                            // Check for block locally
-                            let result = self.find_block(&mut buffer, commitment).await;
-                            let _ = response.send(result);
+                        Message::GetBlock { identifier, response } => {
+                            match identifier {
+                                BlockID::Commitment(commitment) => {
+                                    let result = self.find_block(&mut buffer, commitment).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Height(height) => {
+                                    let result = self.get_finalized_block(height).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Latest => {
+                                    let block = match self.get_latest().await {
+                                        Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
+                                        None => None,
+                                    };
+                                    let _ = response.send(block);
+                                }
+                            }
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
@@ -523,7 +577,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             match key {
                                 Request::Block(commitment) => {
                                     // Parse block
-                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
+                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -542,8 +596,19 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
+                                    let epoch = utils::epoch(self.epoch_length, height);
+                                    let Some(scheme) = self.scheme_provider.scheme(epoch) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) =
+                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                            value,
+                                            &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
+                                        )
+                                    else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -551,7 +616,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&self.namespace, &self.identity)
+                                        || !finalization.verify(&mut self.context, &scheme, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -563,8 +628,18 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
                                 Request::Notarized { round } => {
+                                    let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) =
+                                        <(Notarization<S, B::Commitment>, B)>::decode_cfg(
+                                            value,
+                                            &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
+                                        )
+                                    else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -572,7 +647,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&self.namespace, &self.identity)
+                                        || !notarization.verify(&mut self.context, &scheme, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -635,7 +710,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: u64) -> Option<B> {
-        match self.finalized_blocks.get(Identifier::Index(height)).await {
+        match self.finalized_blocks.get(ArchiveID::Index(height)).await {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -645,10 +720,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    ) -> Option<Finalization<S, B::Commitment>> {
         match self
             .finalizations_by_height
-            .get(Identifier::Index(height))
+            .get(ArchiveID::Index(height))
             .await
         {
             Ok(finalization) => finalization,
@@ -665,7 +740,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<V, B::Commitment>>,
+        finalization: Option<Finalization<S, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
     ) {
         self.notify_subscribers(commitment, &block).await;
@@ -696,12 +771,33 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let _ = notifier.try_send(());
     }
 
+    /// Get the latest finalized block information (height and commitment tuple).
+    ///
+    /// Blocks are only finalized directly with a finalization or indirectly via a descendant
+    /// block's finalization. Thus, the highest known finalized block must itself have a direct
+    /// finalization.
+    ///
+    /// We return the height and commitment using the highest known finalization that we know the
+    /// block height for. While it's possible that we have a later finalization, if we do not have
+    /// the full block for that finalization, we do not know it's height and therefore it would not
+    /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
+    /// should have the associated block (in the `finalized_blocks` archive) for the information
+    /// returned.
+    async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
+        let height = self.finalizations_by_height.last_index()?;
+        let finalization = self
+            .get_finalization_by_height(height)
+            .await
+            .expect("finalization missing");
+        Some((height, finalization.proposal.payload))
+    }
+
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<P: PublicKey>(
+    async fn find_block<K: PublicKey>(
         &mut self,
-        buffer: &mut buffered::Mailbox<P, B>,
+        buffer: &mut buffered::Mailbox<K, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
         // Check buffer.
@@ -713,11 +809,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             return Some(block);
         }
         // Check finalized blocks.
-        match self
-            .finalized_blocks
-            .get(Identifier::Key(&commitment))
-            .await
-        {
+        match self.finalized_blocks.get(ArchiveID::Key(&commitment)).await {
             Ok(block) => block, // may be None
             Err(e) => panic!("failed to get block: {e}"),
         }

@@ -29,6 +29,8 @@
 //! in the SQE. The event loop maintains a `waiters` HashMap that maps each work ID to:
 //! - A oneshot sender for returning results to the caller
 //! - An optional buffer that must be kept alive for the duration of the operation
+//! - An optional timespec, if operation timeouts are enabled, that must be kept
+//!   alive for the duration of the operation
 //!
 //! ## Timeout Handling
 //!
@@ -39,12 +41,12 @@
 //!
 //! ## Deadlock Prevention
 //!
-//! The [Config::force_poll] option prevents deadlocks in scenarios where:
+//! The [Config::force_poll] interval prevents deadlocks in scenarios where:
 //! - Multiple tasks use the same io_uring instance
 //! - One task's completion depends on another task's submission
 //! - The event loop is blocked waiting for completions and can't process new submissions
 //!
-//! When enabled, the event loop uses a bounded wait time when waiting for completions,
+//! The event loop uses a bounded wait time when waiting for completions,
 //! ensuring forward progress even when no completions are immediately available.
 //!
 //! ## Shutdown Process
@@ -72,6 +74,20 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+
+/// Active operations keyed by their work id.
+///
+/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
+/// alive until the kernel finishes touching it, and when op_timeout is enabled,
+/// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
+type Waiters = HashMap<
+    u64,
+    (
+        oneshot::Sender<(i32, Option<StableBuf>)>,
+        Option<StableBuf>,
+        Option<Box<Timespec>>,
+    ),
+>;
 
 #[derive(Debug)]
 /// Tracks io_uring metrics.
@@ -115,25 +131,12 @@ pub struct Config {
     /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
-    /// completion before checking for new work to submit to the io_ring.
-    ///
-    /// If None, wait indefinitely. In this case, caller must ensure that operations
-    /// submitted to the io_uring complete so that they don't block the event loop
-    /// and cause a deadlock.
-    ///
-    /// To illustrate the possibility of deadlock when this field is None,
-    /// consider a common network pattern.
-    /// In one task, a client sends a message to the server and recvs a response.
-    /// In another task, the server recvs a message from the client and sends a response.
-    /// If the client submits its recv operation to the io_uring, and the
-    /// io_uring event loop begins to await its completion (i.e. it parks in
-    /// `submit_and_wait`) before the server submits its recv operation, there is a
-    /// deadlock. The client's recv can't complete until the server sends its message,
-    /// but the server can't send its message until the io_uring event loop wakes up
-    /// to process the completion of the client's recv operation.
-    /// Note that in this example, the server and client are both using the same
-    /// io_uring instance. If they aren't, this situation can't occur.
-    pub force_poll: Option<Duration>,
+    /// completion before checking for new work to submit to the io_ring. This
+    /// periodic wake-up prevents deadlocks where one task depends on completions
+    /// that won't arrive until another task submits additional work. Avoid
+    /// setting this to very low values, or the loop may burn CPU by waking
+    /// continuously even when no completions are available.
+    pub force_poll: Duration,
     /// If None, operations submitted to the io_uring will not time out.
     /// In this case, the caller should be careful to ensure that the
     /// operations submitted to the io_uring will eventually complete.
@@ -154,7 +157,7 @@ impl Default for Config {
             size: 128,
             io_poll: false,
             single_issuer: false,
-            force_poll: None,
+            force_poll: Duration::from_secs(1),
             op_timeout: None,
             shutdown_timeout: None,
         }
@@ -214,12 +217,7 @@ pub struct Op {
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
-#[allow(clippy::type_complexity)]
-fn handle_cqe(
-    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
-    cqe: CqueueEntry,
-    cfg: &Config,
-) {
+fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
     match work_id {
         TIMEOUT_WORK_ID => {
@@ -237,7 +235,7 @@ fn handle_cqe(
                 result
             };
 
-            let (result_sender, buffer) = waiters.remove(&work_id).expect("missing sender");
+            let (result_sender, buffer, _) = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send((result, buffer));
         }
     }
@@ -251,11 +249,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
     // and the buffer used for the operation.
-    #[allow(clippy::type_complexity)]
-    let mut waiters: std::collections::HashMap<
-        _,
-        (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>),
-    > = std::collections::HashMap::with_capacity(cfg.size as usize);
+    let mut waiters = Waiters::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -313,19 +307,22 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             }
             work = work.user_data(work_id);
 
-            // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buffer));
-
             // Submit the operation to the ring, with timeout if configured
-            if let Some(timeout) = &cfg.op_timeout {
+            let timespec = if let Some(timeout) = &cfg.op_timeout {
                 // Link the operation to the (following) timeout
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
 
+                // The timespec needs to be allocated on the heap and kept alive
+                // for the duration of the operation so that the pointer stays
+                // valid
+                let timespec = Box::new(
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos()),
+                );
+
                 // Create the timeout
-                let timeout = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let timeout = LinkTimeout::new(&timeout)
+                let timeout = LinkTimeout::new(&*timespec)
                     .build()
                     .user_data(TIMEOUT_WORK_ID);
 
@@ -335,6 +332,8 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     sq.push(&work).expect("unable to push to queue");
                     sq.push(&timeout).expect("unable to push timeout to queue");
                 }
+
+                Some(timespec)
             } else {
                 // No timeout, submit the operation normally
                 unsafe {
@@ -342,7 +341,12 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                         .push(&work)
                         .expect("unable to push to queue");
                 }
-            }
+
+                None
+            };
+
+            // We'll send the result of this operation to `sender`.
+            waiters.insert(work_id, (sender, buffer, timespec));
         }
 
         // Submit and wait for at least 1 item to be in the completion queue.
@@ -351,22 +355,18 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
         //
-        // When `force_poll` is enabled, we'll also timeout after the specified
-        // duration to process new work, ensuring we don't block indefinitely.
+        // Bound the wait so we periodically check for new work or shutdown,
+        // ensuring we don't block indefinitely (e.g. if in the meantime waiters
+        // has become 0).
         metrics.pending_operations.set(waiters.len() as _);
-        submit_and_wait(&mut ring, 1, cfg.force_poll).expect("unable to submit to ring");
+        submit_and_wait(&mut ring, 1, Some(cfg.force_poll)).expect("unable to submit to ring");
     }
 }
 
 /// Process `ring` completions until all pending operations are complete or
 /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
 /// indefinitely.
-#[allow(clippy::type_complexity)]
-fn drain(
-    ring: &mut IoUring,
-    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
-    cfg: &Config,
-) {
+fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
     // When op_timeout is set, each operation uses 2 SQ entries
     // (op + linked timeout).
     let pending = if cfg.op_timeout.is_some() {
@@ -505,27 +505,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_force_poll_enabled() {
-        // When force_poll is set, the event loop should wake up
-        // periodically to check for new work.
+    async fn test_force_poll_short_interval_prevents_deadlock() {
+        // With a short force_poll interval, the event loop should wake up
+        // frequently to check for new work, preventing the deadlock.
         let cfg = Config {
-            force_poll: Some(Duration::from_millis(10)),
+            force_poll: Duration::from_millis(10),
             ..Default::default()
         };
         recv_then_send(cfg, true).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_force_poll_disabled() {
-        // When force_poll is None, the event loop should block on recv
-        // and never wake up to check for new work, meaning it never sees the
-        // write operation which satisfies the read. This means it
-        // should hit the timeout and never complete.
+    async fn test_force_poll_long_interval_deadlock() {
+        // With a long force_poll interval, the event loop may block on recv
+        // long enough that the matching write isn't observed within our test
+        // timeout.
         let cfg = Config {
-            force_poll: None,
+            force_poll: Duration::from_secs(60),
             ..Default::default()
         };
-        // recv_then_send should block indefinitely.
+        // recv_then_send should block for 60 seconds (i.e. force_poll duration).
         // Set a timeout and make sure it doesn't complete.
         let timeout = tokio::time::timeout(Duration::from_secs(2), recv_then_send(cfg, false));
         assert!(
@@ -622,6 +621,9 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // Give the event loop a chance to enter the blocking submit and wait before shutdown
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);

@@ -3,58 +3,53 @@
 //! reject messages from an unexpected epoch.
 
 use crate::{
-    simplex::types::{Finalize, Notarize, Nullify, Voter},
-    types::{Epoch, View},
-    Supervisor, Viewable,
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Finalize, Notarize, Nullify, Voter},
+    },
+    types::Epoch,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Hasher, Signer};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<C: Signer, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
-    pub crypto: C,
-    pub supervisor: S,
+pub struct Config<S: Scheme> {
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Reconfigurer<
-    E: Spawner,
-    C: Signer,
-    H: Hasher,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-> {
-    context: E,
-    crypto: C,
-    supervisor: S,
+pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
+    context: ContextCell<E>,
+    scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
-    Reconfigurer<E, C, H, S>
-{
-    pub fn new(context: E, cfg: Config<C, S>) -> Self {
+impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
-            crypto: cfg.crypto,
-            supervisor: cfg.supervisor,
+            context: ContextCell::new(context),
+            scheme: cfg.scheme,
             namespace: cfg.namespace,
             _hasher: PhantomData,
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter_network))
+    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        spawn_cell!(self.context, self.run(pending_network).await)
     }
 
-    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = voter_network;
+    async fn run(self, pending_network: (impl Sender, impl Receiver)) {
+        let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<C::Signature, H::Digest>::decode_cfg(msg, &usize::MAX) {
+            let msg = match Voter::<S, H::Digest>::decode_cfg(
+                msg,
+                &self.scheme.certificate_codec_config(),
+            ) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -65,13 +60,6 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Get our index
-                    let view = notarize.view();
-                    let public_key_index = self
-                        .supervisor
-                        .is_participant(view, &self.crypto.public_key())
-                        .unwrap();
-
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = notarize.proposal.clone();
                     let old_round = proposal.round;
@@ -79,25 +67,11 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let n = Notarize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        proposal,
-                    );
-                    let msg = Voter::<C::Signature, H::Digest>::Notarize(n)
-                        .encode()
-                        .into();
+                    let n = Notarize::sign(&self.scheme, &self.namespace, proposal).unwrap();
+                    let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
-                    // Get our index
-                    let view = finalize.view();
-                    let public_key_index = self
-                        .supervisor
-                        .is_participant(view, &self.crypto.public_key())
-                        .unwrap();
-
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = finalize.proposal.clone();
                     let old_round = proposal.round;
@@ -105,37 +79,19 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let f = Finalize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        proposal,
-                    );
-                    let msg = Voter::<C::Signature, H::Digest>::Finalize(f)
-                        .encode()
-                        .into();
+                    let f = Finalize::sign(&self.scheme, &self.namespace, proposal).unwrap();
+                    let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Nullify(nullify) => {
-                    // Get our index
-                    let view = nullify.view();
-                    let public_key_index = self
-                        .supervisor
-                        .is_participant(view, &self.crypto.public_key())
-                        .unwrap();
-
                     // Re-sign nullify for the next epoch
                     let old_round = nullify.round;
                     let new_epoch: Epoch = old_round.epoch().saturating_add(1);
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        new_round,
-                    );
-                    let msg = Voter::<C::Signature, H::Digest>::Nullify(n).encode().into();
+                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
+                        .unwrap();
+                    let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

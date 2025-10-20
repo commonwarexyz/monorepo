@@ -1,34 +1,34 @@
-use crate::handlers::{
-    utils::{payload, ACK_NAMESPACE},
-    wire,
-};
+use crate::handlers::{wire, ACK_NAMESPACE};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{player::Output, Dealer, Player},
+        dkg::{
+            player::Output,
+            types::{Ack, Share},
+            Dealer, Player,
+        },
         primitives::{group, variant::MinSig},
     },
-    Signer, Verifier as _,
+    Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
-use commonware_utils::quorum;
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Spawner};
+use commonware_utils::{quorum, set::Set};
 use futures::{channel::mpsc, SinkExt};
 use rand_core::CryptoRngCore;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
 pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
-    context: E,
+    context: ContextCell<E>,
     crypto: C,
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
     t: u32,
-    contributors: Vec<C::PublicKey>,
-    contributors_ordered: HashMap<C::PublicKey, u32>,
+    contributors: Set<C::PublicKey>,
 
     corrupt: bool,
     lazy: bool,
@@ -44,27 +44,20 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         crypto: C,
         dkg_phase_timeout: Duration,
         arbiter: C::PublicKey,
-        mut contributors: Vec<C::PublicKey>,
+        contributors: Set<C::PublicKey>,
         corrupt: bool,
         lazy: bool,
         forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output<MinSig>)>) {
-        contributors.sort();
-        let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
-            .iter()
-            .enumerate()
-            .map(|(idx, pk)| (pk.clone(), idx as u32))
-            .collect();
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 crypto,
                 dkg_phase_timeout,
                 arbiter,
                 t: quorum(contributors.len() as u32),
                 contributors,
-                contributors_ordered,
 
                 corrupt,
                 lazy,
@@ -84,7 +77,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
     ) -> (u64, Option<Output<MinSig>>) {
         // Configure me
         let me = self.crypto.public_key();
-        let me_idx = *self.contributors_ordered.get(&me).unwrap();
+        let me_idx = self.contributors.position(&me).unwrap() as u32;
 
         // Wait for start message from arbiter
         let (public, round) = loop {
@@ -160,7 +153,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
             let previous = previous.map(|previous| previous.share.clone());
             let (dealer, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut self.context, previous, self.contributors.clone());
-            Some((dealer, commitment, shares, HashMap::new()))
+            Some((dealer, commitment, shares, Vec::new()))
         } else {
             None
         };
@@ -185,9 +178,14 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                         .share(me.clone(), commitment.clone(), share)
                         .unwrap();
                     dealer.ack(me.clone()).unwrap();
-                    let payload = payload(round, &me, commitment);
-                    let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
-                    acks.insert(me_idx, signature);
+                    acks.push(Ack::new::<_, MinSig>(
+                        ACK_NAMESPACE,
+                        &self.crypto,
+                        me_idx,
+                        round,
+                        &me,
+                        commitment,
+                    ));
                     continue;
                 }
 
@@ -196,7 +194,10 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
                     let signature = self.crypto.sign(None, b"fake");
-                    acks.insert(idx as u32, signature);
+                    acks.push(Ack {
+                        player: idx as u32,
+                        signature,
+                    });
                     warn!(round, ?player, "not sending share because forger");
                     continue;
                 }
@@ -219,10 +220,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                         Recipients::One(player.clone()),
                         wire::Dkg::<C::Signature> {
                             round,
-                            payload: wire::Payload::Share {
-                                commitment: commitment.clone(),
-                                share,
-                            },
+                            payload: wire::Payload::Share(Share::new(commitment.clone(), share)),
                         }
                         .encode()
                         .into(),
@@ -266,7 +264,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                     return (round, None);
                                 }
                                 match msg.payload {
-                                    wire::Payload::Ack{ public_key, signature } => {
+                                    wire::Payload::Ack(ack) => {
                                         // Skip if not dealing
                                         let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
@@ -278,7 +276,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                         }
 
                                         // Verify index matches
-                                        let Some(player) = self.contributors.get(public_key as usize) else {
+                                        let Some(player) = self.contributors.get(ack.player as usize) else {
                                             continue;
                                         };
                                         if player != &peer {
@@ -287,8 +285,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                         }
 
                                         // Verify signature on incoming ack
-                                        let payload = payload(round, &me, commitment);
-                                        if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
+                                        if !ack.verify::<MinSig, _>(ACK_NAMESPACE, &peer, round, &me, commitment) {
                                             warn!(round, ?peer, "received invalid ack signature");
                                             continue;
                                         }
@@ -298,9 +295,9 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                             warn!(round, error = ?e, "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(public_key, signature);
+                                        acks.push(ack);
                                     },
-                                    wire::Payload::Share{ commitment, share } => {
+                                    wire::Payload::Share(Share {  commitment, share }) => {
                                         // Store share
                                         if let Err(e) = player_obj.share(peer.clone(), commitment.clone(), share){
                                             warn!(round, error = ?e, "failed to store share");
@@ -308,17 +305,20 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                         }
 
                                         // Send ack
-                                        let payload = payload(round, &peer, &commitment);
-                                        let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
+                                        let ack = Ack::new::<C, MinSig>(
+                                            ACK_NAMESPACE,
+                                            &self.crypto,
+                                            me_idx,
+                                            round,
+                                            &peer,
+                                            &commitment
+                                        );
                                         sender
                                             .send(
                                                 Recipients::One(peer),
                                                 wire::Dkg {
                                                     round,
-                                                    payload: wire::Payload::Ack{
-                                                        public_key: me_idx,
-                                                        signature,
-                                                    },
+                                                    payload: wire::Payload::Ack(ack),
                                                 }
                                                 .encode()
                                                 .into(),
@@ -346,7 +346,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         if let Some((_, commitment, shares, acks)) = dealer_obj {
             let mut reveals = Vec::new();
             for idx in 0..self.contributors.len() as u32 {
-                if !acks.contains_key(&idx) {
+                if !acks.iter().any(|a| a.player == idx) {
                     reveals.push(shares[idx as usize].clone());
                 }
             }
@@ -443,7 +443,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        self.context.spawn_ref()(self.run(sender, receiver));
+        spawn_cell!(self.context, self.run(sender, receiver).await);
     }
 
     async fn run(

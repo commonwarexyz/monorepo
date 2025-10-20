@@ -930,6 +930,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0956a43b323ac1afaffc053ed5c4b7c1f1800bacd1683c353aabbb752515dd3"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -942,6 +943,18 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ac6a0c7b1a9e9a5186361f67dfa1b88213572f427fb9ab038efb2bd8c582dab"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
 ]
 
 [[package]]
@@ -1082,6 +1095,8 @@ dependencies = [
  "commonware-storage",
  "criterion",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "reed-solomon-simd",
  "thiserror 2.0.12",
 ]
@@ -1094,6 +1109,7 @@ dependencies = [
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
+ "rand_chacha 0.3.1",
 ]
 
 [[package]]
@@ -1188,6 +1204,7 @@ dependencies = [
  "blst",
  "bytes",
  "cfg-if",
+ "chacha20poly1305",
  "commonware-codec",
  "commonware-utils",
  "criterion",
@@ -1200,6 +1217,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.8",
  "thiserror 2.0.12",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -1338,10 +1356,41 @@ dependencies = [
  "either",
  "futures",
  "governor",
+ "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
  "prometheus-client",
  "rand 0.8.5",
  "rand_distr",
  "thiserror 2.0.12",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-reshare"
+version = "0.0.62"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1388,6 +1437,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "pin-project",
  "prometheus-client",
  "rand 0.8.5",
  "rayon",
@@ -1441,6 +1491,7 @@ name = "commonware-storage-fuzz"
 version = "0.0.62"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
@@ -1448,6 +1499,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -1463,8 +1515,8 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "futures",
- "hkdf",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "thiserror 2.0.12",
  "x25519-dalek",
  "zeroize",
@@ -1483,6 +1535,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1512,10 +1565,14 @@ name = "commonware-utils"
 version = "0.0.62"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "futures",
  "getrandom 0.2.15",
  "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
  "rand 0.8.5",
  "thiserror 2.0.12",
 ]
@@ -1549,6 +1606,7 @@ dependencies = [
  "governor",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "tracing",
  "tracing-subscriber",
@@ -2340,15 +2398,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hkdf"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
-dependencies = [
- "hmac",
-]
-
-[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3035,6 +3084,17 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 

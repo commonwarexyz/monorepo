@@ -543,7 +543,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             write_buffer: config.journal_write_buffer,
             buffer_pool: config.journal_buffer_pool,
         };
-        let mut journal = Journal::init(context.clone(), journal_config).await?;
+        let mut journal = Journal::init(context.with_label("journal"), journal_config).await?;
 
         // Open table blob
         let (table, table_len) = context

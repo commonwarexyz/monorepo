@@ -6,14 +6,21 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::{
+    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    Channel,
+};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
-use commonware_stream::public_key;
+use commonware_runtime::{
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner,
+};
+use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
+use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed in a stream.
@@ -24,14 +31,15 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: ContextCell<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
+    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -47,16 +55,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 address: cfg.dialable,
-                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                listener: listener_mailbox,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -69,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 cfg,
 
                 channels,
@@ -77,6 +86,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                listener,
             },
             oracle,
         )
@@ -111,7 +121,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        spawn_cell!(self.context, self.run().await)
     }
 
     async fn run(self) {
@@ -134,8 +144,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
 
         // Start listener
-        let stream_cfg = public_key::Config {
-            crypto: self.cfg.crypto,
+        let stream_cfg = StreamConfig {
+            signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
             max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
@@ -147,8 +157,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
-                allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
+                max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
+                allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
+                allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
             },
+            self.listener,
         );
         let mut listener_task =
             listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());

@@ -5,24 +5,21 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Finalization, Viewable};
+use commonware_consensus::{simplex::types::Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519,
+    ed25519::{self},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
-use commonware_stream::{
-    public_key::{Config, Connection, IncomingConnection},
-    Receiver, Sender,
-};
+use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
@@ -51,7 +48,7 @@ enum Message<D: Digest> {
     },
     GetFinalization {
         incoming: inbound::GetFinalization,
-        response: oneshot::Sender<Option<Finalization<MinSig, D>>>,
+        response: oneshot::Sender<Option<Finalization<Scheme, D>>>,
     },
 }
 
@@ -116,9 +113,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces: HashMap<G2, (G2, Vec<u8>)> = HashMap::new();
+    let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<MinSig, Sha256Digest>>> =
+    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -131,7 +128,7 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(public, (public, namespace));
+        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }
@@ -144,7 +141,7 @@ fn main() {
 
         // Start handler
         let mut hasher = Sha256::new();
-        context.with_label("handler").spawn(|_| async move {
+        context.with_label("handler").spawn(|mut ctx| async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
@@ -183,11 +180,11 @@ fn main() {
                         };
 
                         // Verify signature
-                        let Some((public, namespace)) = namespaces.get(&incoming.network) else {
+                        let Some((verifier, namespace)) = namespaces.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(namespace, public) {
+                        if !incoming.finalization.verify(&mut ctx, verifier, namespace) {
                             let _ = response.send(false);
                             continue;
                         }
@@ -223,8 +220,8 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let config = Config {
-            crypto: signer,
+        let config = StreamConfig {
+            signing_key: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
             max_message_size: 1024 * 1024,
             synchrony_bound: Duration::from_secs(1),
@@ -238,24 +235,21 @@ fn main() {
                 continue;
             };
 
-            // Handshake
-            let incoming =
-                match IncomingConnection::verify(&context, config.clone(), sink, stream).await {
-                    Ok(partial) => partial,
-                    Err(e) => {
-                        debug!(error = ?e, "failed to verify incoming handshake");
-                        continue;
-                    }
-                };
-            let peer = incoming.peer();
-            if !validators.contains(&peer) {
-                debug!(?peer, "unauthorized peer");
-                continue;
-            }
-            let stream = match Connection::upgrade_listener(context.clone(), incoming).await {
-                Ok(connection) => connection,
+            let (peer, mut sender, mut receiver) = match listen(
+                context.with_label("listener"),
+                |peer| {
+                    let out = validators.contains(&peer);
+                    async move { out }
+                },
+                config.clone(),
+                stream,
+                sink,
+            )
+            .await
+            {
+                Ok(x) => x,
                 Err(e) => {
-                    debug!(error = ?e, ?peer, "failed to upgrade connection");
+                    debug!(error = ?e, "failed to upgrade connection");
                     continue;
                 }
             };
@@ -265,11 +259,8 @@ fn main() {
             context.with_label("connection").spawn({
                 let mut handler = handler.clone();
                 move |_| async move {
-                    // Split stream
-                    let (mut sender, mut receiver) = stream.split();
-
                     // Handle messages
-                    while let Ok(msg) = receiver.receive().await {
+                    while let Ok(msg) = receiver.recv().await {
                         // Decode message
                         let msg = match Inbound::decode(msg) {
                             Ok(msg) => msg,
