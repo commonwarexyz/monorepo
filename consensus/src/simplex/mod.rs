@@ -149,13 +149,14 @@
 //! (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are collected and they can be used to secure interoperability between different
 //! consensus instances and user interactions with an infrastructure provider.
 //!
+//! * With **Ed25519 quorum signatures**, certificates consist of the individual signatures from the quorum. While larger, they preserve
+//!   the same interface and can be validated against the ordered participant set exported by the scheme.
+//! * With **BLS12-381 multisignature signatures**, certificates consist of the aggregated signature from the quorum.
 //! * With **BLS12-381 threshold signatures**, each broadcast vote carries a partial signature for a static group public key (derived
 //!   from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)). Once a
 //!   quorum (`2f+1`) is collected, these partials aggregate into a succinct certificate that can be verified using only the committee
 //!   public key. Because the public key is static, any of these certificates can be verified by an external process without following
 //!   the consensus instance and/or tracking the current set of participants (as is typically required to operate a lite client).
-//! * With **Ed25519 quorum signatures**, certificates consist of the individual signatures from the quorum. While larger, they preserve
-//!   the same interface and can be validated against the ordered participant set exported by the scheme.
 //!
 //! ### Deviations from Simplex Consensus
 //!
