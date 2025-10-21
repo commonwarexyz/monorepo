@@ -15,10 +15,17 @@ pub struct Signers {
 impl Signers {
     /// Builds [`Signers`] from an iterator of signer indices.
     ///
-    /// Panics if the sequence contains indices larger than the size of the participant set.
+    /// # Panics
+    ///
+    /// Panics if the sequence contains indices larger than the size of the participant set
+    /// or duplicates.
     pub fn from(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
         for signer in signers.into_iter() {
+            assert!(
+                !bitmap.get(signer as u64),
+                "duplicate signer index: {signer}",
+            );
             bitmap.set(signer as u64, true);
         }
 
@@ -80,6 +87,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "duplicate signer index: 0")]
     fn test_from_duplicate() {
         Signers::from(4, [0, 0, 1]);
     }
