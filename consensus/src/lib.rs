@@ -100,6 +100,17 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+
+            /// Determine whether a notarized payload is safe to finalize.
+            ///
+            /// Block-coding applications can override this to delay or prevent
+            /// finalization until they have reconstructed and validated the full
+            /// block (e.g., after receiving enough shards).
+            fn certify(
+                &mut self,
+                _context: Self::Context,
+                _payload: Self::Digest,
+            ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.

@@ -76,6 +76,10 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     requested_proposal_verify: bool,
     verified_proposal: bool,
 
+    // True if-and-only-if the proposal has been certified as safe to finalize by the automaton.
+    requested_proposal_certify: bool,
+    certified_proposal: bool,
+
     proposal: Option<Proposal<D>>,
 
     leader_deadline: Option<SystemTime>,
@@ -128,6 +132,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             requested_proposal_build: false,
             requested_proposal_verify: false,
             verified_proposal: false,
+
+            requested_proposal_certify: false,
+            certified_proposal: false,
 
             proposal: None,
 
@@ -869,12 +876,7 @@ impl<
         };
 
         // Ensure we have required notarizations
-        let mut cursor = match self.view {
-            0 => {
-                return None;
-            }
-            _ => self.view - 1,
-        };
+        let mut cursor = self.view.checked_sub(1)?;
         let parent_payload = loop {
             if cursor == proposal.parent {
                 // Check if first block
@@ -919,6 +921,33 @@ impl<
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
+        ))
+    }
+
+    async fn certify(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
+        let round = self.views.get_mut(&self.view)?;
+
+        // Request certification only once.
+        if round.requested_proposal_certify {
+            return None;
+        }
+        round.requested_proposal_certify = true;
+
+        // Ensure we have a proposal.
+        let proposal = round.proposal.clone()?;
+
+        // Get the context for the proposal.
+        let parent_view = proposal.parent;
+        let parent_payload = self.is_notarized(parent_view)?;
+        let context = Context {
+            round: proposal.round,
+            parent: (parent_view, *parent_payload),
+        };
+
+        // Request certification.
+        Some((
+            context.clone(),
+            self.automaton.certify(context, proposal.payload).await,
         ))
     }
 
@@ -1275,6 +1304,12 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
+        /*
+        if !round.certified_proposal {
+            // Ensure the proposal has been certified as safe to finalize
+            return None;
+        }
+        */
         if !round.broadcast_notarize {
             // Ensure we notarize before we finalize
             return None;
@@ -1710,6 +1745,8 @@ impl<
         let mut pending_propose = None;
         let mut pending_verify_context = None;
         let mut pending_verify = None;
+        let mut pending_certify_context = None;
+        let mut pending_certify = None;
         loop {
             // Reset pending set if we have moved to a new view
             if let Some(view) = pending_set {
@@ -1719,6 +1756,8 @@ impl<
                     pending_propose = None;
                     pending_verify_context = None;
                     pending_verify = None;
+                    pending_certify_context = None;
+                    pending_certify = None;
                 }
             }
 
@@ -1741,6 +1780,17 @@ impl<
             }
             let verify_wait = match &mut pending_verify {
                 Some(verify) => Either::Left(verify),
+                None => Either::Right(futures::future::pending()),
+            };
+
+            // Attempt to check certification of the proposal
+            if let Some((context, new_certify)) = self.certify().await {
+                pending_set = Some(self.view);
+                pending_certify_context = Some(context);
+                pending_certify = Some(new_certify);
+            }
+            let certify_wait = match &mut pending_certify {
+                Some(certify) => Either::Left(certify),
                 None => Either::Right(futures::future::pending()),
             };
 
@@ -1825,6 +1875,29 @@ impl<
                     if !self.verified(view).await {
                         continue;
                     }
+                },
+                certified = certify_wait => {
+                    // Clear certify waiter
+                    let context = pending_certify_context.take().unwrap();
+                    pending_certify = None;
+
+                    // Return early if the proposal is not certified
+                    match certified {
+                        Ok(false) => {
+                            debug!(round = ?context.round, "proposal is not certified");
+                            continue;
+                        }
+                        Err(err) => {
+                            debug!(?err, round = ?context.round, "failed to certify proposal");
+                            continue;
+                        }
+                        _ => {},
+                    };
+
+                    // Handle certification
+                    view = context.view();
+                    let round = self.views.get_mut(&context.view()).unwrap();
+                    round.certified_proposal = true;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
