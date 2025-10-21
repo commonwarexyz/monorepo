@@ -14,6 +14,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
 };
+use tracing::info;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -567,56 +568,51 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             "data journal expected to be non-empty"
         );
 
+        // Validate invariant that data journal size >= locations journal size.
         let locations_size = locations.size().await?;
         if locations_size > data_size {
-            // Locations ahead of data -- should never happen (violates write ordering)
             return Err(Error::Corruption(format!(
                 "locations ahead of data: locations_size={locations_size} > data_size={data_size}"
             )));
         }
-        // Apply any operations that are missing from the locations journal.
+
+        // Align pruning state. We always prune the data journal before the locations journal,
+        // so we validate that invariant and repair crash faults or detect corruption.
+        match locations.oldest_retained_pos().await? {
+            Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
+                // Locations behind on pruning -- prune to catch up
+                info!("crash repair: pruning locations journal to {data_oldest_pos}");
+                locations.prune(data_oldest_pos).await?;
+            }
+            Some(oldest_retained_pos) if oldest_retained_pos > data_oldest_pos => {
+                return Err(Error::Corruption(format!(
+                    "locations oldest pos ({oldest_retained_pos}) > data oldest pos ({data_oldest_pos})"
+                )));
+            }
+            Some(_) => {
+                // Both journals are pruned to the same position.
+            }
+            None if data_oldest_pos > 0 => {
+                if locations_size == data_oldest_pos {
+                    // We crashed after rewinding the locations journal to the oldest retained
+                    // position but before rewinding the data journal.
+                    info!("crash repair: rebuilding locations from data (rewind crash)");
+                } else {
+                    return Err(Error::Corruption(
+                        "locations journal unexpectedly empty".to_string(),
+                    ));
+                }
+            }
+            None => {
+                // Both journals are empty/fully pruned.
+            }
+        }
+
+        // Rebuild missing locations (position spaces are aligned).
         if locations_size < data_size {
             Self::add_missing_locations(data, locations, locations_size).await?;
         }
 
-        // Prune the locations journal to match the data journal if necessary.
-        // We prune data before locations so we should never need to catch data up to locations.
-        match locations.oldest_retained_pos().await? {
-            Some(oldest_retained_pos) if oldest_retained_pos > data_oldest_pos => {
-                // Locations pruned ahead of data -- should never happen (violates write ordering)
-                return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations_oldest={oldest_retained_pos} > data_oldest={data_oldest_pos}"
-                )));
-            }
-            Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
-                // Locations behind on pruning -- prune to catch up
-                locations.prune(data_oldest_pos).await?;
-            }
-            None if data_oldest_pos < data_size => {
-                // The locations journal returned `None` from oldest_retained_pos(), which means
-                // it's fully pruned (all items have been pruned, so oldest_retained_pos == size).
-                //
-                // However, the data journal still has un-pruned items.
-                //
-                // Example:
-                //   - Size: 100 (both journals agree we have 100 total items)
-                //   - Data oldest: 20 (data has items 20-99)
-                //   - Locations oldest: 100 (locations has pruned everything)
-                //
-                // This violates our invariant: data is always pruned BEFORE locations.
-                // If the data journal has items 20-99, the locations journal should too.
-                return Err(Error::Corruption(format!(
-                    "locations pruned ahead of data: locations fully pruned (oldest_retained_pos={data_size}) but data_oldest={data_oldest_pos}"
-                )));
-            }
-            _ => {
-                // Pruning is consistent
-            }
-        }
-
-        locations.sync().await?;
-
-        // After repair, the locations journal and data journal should be consistent.
         assert_eq!(locations.size().await?, data_size);
         // Oldest retained position is always Some because the data journal is non-empty.
         assert_eq!(
@@ -624,6 +620,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             Some(data_oldest_pos)
         );
 
+        locations.sync().await?;
         Ok((data_oldest_pos, data_size))
     }
 
@@ -808,6 +805,54 @@ mod tests {
             position_to_section(position, oldest_retained_pos, items_per_section),
             expected_section
         );
+    }
+
+    /// Test that complete locations partition loss after pruning is detected as unrecoverable.
+    ///
+    /// When the locations partition is completely lost and the data has been pruned, we cannot
+    /// rebuild the index with correct position alignment (would require creating placeholder blobs).
+    /// This is a genuine external failure that should be detected and reported clearly.
+    #[test]
+    fn test_variable_locations_partition_loss_after_prune_unrecoverable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "locations_loss_after_prune".to_string(),
+                locations_partition: "locations_loss_after_prune_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Phase 1: Create journal with data and prune ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 40 items across 4 sections (0-3)
+            for i in 0..40u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            // Prune to position 20 (removes sections 0-1, keeps sections 2-3)
+            journal.prune(20).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(20));
+            assert_eq!(journal.size().await.unwrap(), 40);
+
+            journal.close().await.unwrap();
+
+            // === Phase 2: Simulate complete locations partition loss ===
+            context
+                .remove(&cfg.locations_partition, None)
+                .await
+                .expect("Failed to remove locations partition");
+
+            // === Phase 3: Verify this is detected as unrecoverable ===
+            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
     }
 
     /// Test that init repairs state when data is pruned/lost but locations survives.
@@ -1148,8 +1193,7 @@ mod tests {
             // === Verify: Init should detect corruption and error ===
             let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
 
-            // Should fail due to corruption detected during replay
-            assert!(result.is_err(), "Init should fail on corrupted data");
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1248,13 +1292,7 @@ mod tests {
 
             // === Verify corruption detected ===
             let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
-            match result {
-                Err(e) => {
-                    let err_msg = format!("{}", e);
-                    assert!(err_msg.contains("locations pruned ahead"));
-                }
-                Ok(_) => panic!("Should detect locations journal ahead corruption"),
-            }
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -1433,11 +1471,7 @@ mod tests {
 
             // All items should be readable - locations rebuilt correctly across all sections
             for i in 0..25u64 {
-                assert_eq!(
-                    variable.read(i).await.unwrap(),
-                    i * 100,
-                    "Failed to read position {i}"
-                );
+                assert_eq!(variable.read(i).await.unwrap(), i * 100);
             }
 
             // Verify locations journal fully rebuilt
