@@ -3753,6 +3753,187 @@ mod tests {
         });
     }
 
+    fn always_reports_own_activity<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = 10;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+                let validator = scheme.public_key();
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Verify that all nodes tracked their own activity
+            for (idx, reporter) in reporters.iter().enumerate() {
+                let validator = &validators[idx];
+
+                // Each node should have tracked its own notarize votes
+                let notarizes = reporter.notarizes.lock().unwrap();
+                let own_notarize_count: usize = notarizes
+                    .values()
+                    .map(|notarizes| {
+                        notarizes
+                            .values()
+                            .filter(|signers| signers.contains(validator))
+                            .count()
+                    })
+                    .sum();
+                assert!(own_notarize_count > 0);
+
+                // Each node should have tracked its own finalize votes
+                let finalizes = reporter.finalizes.lock().unwrap();
+                let own_finalize_count: usize = finalizes
+                    .values()
+                    .map(|finalizes| {
+                        finalizes
+                            .values()
+                            .filter(|signers| signers.contains(validator))
+                            .count()
+                    })
+                    .sum();
+                assert!(own_finalize_count > 0);
+
+                // For non-attributable schemes, verify no peer activity is tracked
+                if !reporter.is_attributable() {
+                    for (_, notarizes) in notarizes.iter() {
+                        for (_, signers) in notarizes.iter() {
+                            // Should only contain own signature
+                            assert_eq!(signers.len(), 1);
+                            assert!(signers.contains(validator));
+                        }
+                    }
+
+                    for (_, finalizes) in finalizes.iter() {
+                        for (_, signers) in finalizes.iter() {
+                            // Should only contain own signature
+                            assert_eq!(signers.len(), 1);
+                            assert!(signers.contains(validator));
+                        }
+                    }
+                }
+
+                // All schemes should track certificates
+                let notarizations = reporter.notarizations.lock().unwrap();
+                assert!(!notarizations.is_empty());
+
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(!finalizations.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_always_reports_own_activity() {
+        for seed in 0..5 {
+            always_reports_own_activity(seed, bls_threshold_fixture::<MinPk, _>);
+            always_reports_own_activity(seed, bls_threshold_fixture::<MinSig, _>);
+            always_reports_own_activity(seed, bls_multisig_fixture::<MinPk, _>);
+            always_reports_own_activity(seed, bls_multisig_fixture::<MinSig, _>);
+            always_reports_own_activity(seed, ed25519_fixture);
+        }
+    }
+
     #[test_traced]
     fn test_tle() {
         tle::<MinPk>();
