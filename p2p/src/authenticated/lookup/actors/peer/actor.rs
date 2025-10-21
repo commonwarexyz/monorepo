@@ -165,7 +165,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let cfg = (..=msg.len()).into();
+                    let cfg = msg.len();
                     let msg = match types::Message::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {

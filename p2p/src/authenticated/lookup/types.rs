@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -53,14 +53,14 @@ impl Write for Message {
 }
 
 impl Read for Message {
-    type Cfg = RangeCfg<usize>;
+    type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
             PING_MESSAGE_PREFIX => Ok(Message::Ping),
             DATA_MESSAGE_PREFIX => {
-                let data = Data::read_cfg(buf, range)?;
+                let data = Data::read_cfg(buf, &(..=*max).into())?;
                 Ok(Message::Data(data))
             }
             _ => Err(Error::Invalid(
