@@ -163,10 +163,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .recv()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg_len = msg.len();
 
                     // Parse the message
-                    let msg = match types::Message::decode_cfg(msg, &(..=msg_len).into()) {
+                    let cfg = (..=msg.len()).into();
+                    let msg = match types::Message::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");

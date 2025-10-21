@@ -182,10 +182,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .recv()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg_len = msg.len();
 
                     // Parse the message
-                    let cfg = types::Config { max_length: msg_len, max_peers: self.peer_gossip_max_count };
+                    let cfg = types::Config { max_length: msg.len(), max_peers: self.peer_gossip_max_count };
                     let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {
