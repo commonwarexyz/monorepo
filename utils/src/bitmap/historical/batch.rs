@@ -419,8 +419,7 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             // projected_pruned_chunks starts at base_pruned_chunks (= current_pruned)
             assert!(
                 chunk_idx >= current_pruned,
-                "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={})",
-                current_pruned
+                "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={current_pruned})",
             );
 
             let bitmap_idx = chunk_idx - current_pruned;
