@@ -2500,73 +2500,71 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
+
+                // Byzantine node (idx 0) uses empty namespace to produce invalid signatures
+                let engine_namespace = if idx_scheme == 0 {
+                    vec![]
+                } else {
+                    namespace.clone()
+                };
+
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
+                    namespace: namespace.clone(), // Reporter always uses correct namespace
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: engine_namespace,
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                if idx_scheme == 0 {
-                    let cfg = mocks::invalid::Config {
-                        scheme: signing_schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
-                    };
-
-                    let engine: mocks::invalid::Invalid<_, _, Sha256> =
-                        mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(pending);
-                } else {
-                    reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
-                        relay: relay.clone(),
-                        participant: validator.clone(),
-                        propose_latency: (10.0, 5.0),
-                        verify_latency: (10.0, 5.0),
-                    };
-                    let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
-                        application_cfg,
-                    );
-                    actor.start();
-                    let blocker = oracle.control(scheme.public_key());
-                    let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
-                        scheme: signing_schemes[idx_scheme].clone(),
-                        blocker,
-                        automaton: application.clone(),
-                        relay: application.clone(),
-                        reporter: reporter.clone(),
-                        partition: validator.to_string(),
-                        mailbox_size: 1024,
-                        epoch: 333,
-                        namespace: namespace.clone(),
-                        leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
-                        skip_timeout,
-                        max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
-                }
+                engine.start(pending, recovered, resolver);
             }
 
-            // Wait for all engines to finish
+            // Wait for honest engines to finish (skip byzantine node at index 0)
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -2576,10 +2574,9 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check reporters for correct activity
+            // Check honest reporters (reporters[1..]) for correct activity
             let mut invalid_count = 0;
-            let byz = &validators[0];
-            for reporter in reporters.iter() {
+            for reporter in reporters.iter().skip(1) {
                 // Ensure no faults
                 {
                     let faults = reporter.faults.lock().unwrap();
@@ -2594,14 +2591,25 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(invalid_count, n - 1);
 
-            // Ensure invalid is blocked
+            // For attributable schemes, honest nodes see peer invalid sigs
+            if reporters[0].is_attributable() {
+                assert_eq!(invalid_count, n - 1);
+            } else {
+                // For non-attributable schemes, peer activities aren't reported
+                // but the byzantine node can still see its own invalid activity
+                assert_eq!(invalid_count, 0);
+                let invalid = reporters[0].invalid.lock().unwrap();
+                assert!(*invalid > 0);
+            }
+
+            // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();
             assert!(!blocked.is_empty());
             for (a, b) in blocked {
-                assert_ne!(&a, byz);
-                assert_eq!(&b, byz);
+                if a != validators[0] {
+                    assert_eq!(b, validators[0]);
+                }
             }
         });
     }
