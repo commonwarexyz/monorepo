@@ -16,29 +16,38 @@ use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+use super::primitives::group::Share;
+
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
 #[derive(Clone)]
 pub struct Output<V: Variant, P> {
     round: u32,
     players: Set<P>,
-    group_commitment: Public<V>,
+    public: Public<V>,
 }
 
 impl<V: Variant, P: PublicKey> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
         let index = self.players.position(player)?;
-        Some(self.group_commitment.evaluate(index as u32).value)
+        Some(self.public.evaluate(index as u32).value)
     }
 
     fn quorum(&self) -> u32 {
         quorum(self.players.len() as u32)
     }
+
+    /// Get the public polynomial associated with this output.
+    ///
+    /// This is useful to verify partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
+    pub fn public(&self) -> &Public<V> {
+        &self.public
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.players.encode_size() + self.group_commitment.encode_size()
+        self.round.encode_size() + self.players.encode_size() + self.public.encode_size()
     }
 }
 
@@ -46,7 +55,7 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.round.write(buf);
         self.players.write(buf);
-        self.group_commitment.write(buf);
+        self.public.write(buf);
     }
 }
 
@@ -276,7 +285,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             let weights =
                 poly::compute_weights(indices).expect("should be able to compute weights");
             let public = recover_public_with_weights::<V>(
-                &previous.group_commitment,
+                &previous.public,
                 &commitments,
                 &weights,
                 quorum(previous.players.len() as u32),
@@ -294,7 +303,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         let output = Output {
             round: round_info.round + 1,
             players: round_info.players,
-            group_commitment: public,
+            public,
         };
         Ok(Self { output, weights })
     }
@@ -416,7 +425,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-    ) -> Result<(Output<V, S::PublicKey>, Scalar), Error> {
+    ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.round_info, logs)?;
         let dealings = selected
             .iter()
@@ -443,15 +452,19 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             .collect::<Vec<_>>();
         let ObserveInner { output, weights } =
             ObserveInner::<V, S::PublicKey>::reckon(self.round_info, selected)?;
-        let share: Scalar = if let Some(weights) = weights {
+        let private = if let Some(weights) = weights {
             poly::Private::recover_with_weights(&weights, dealings.iter())
                 .expect("should be able to recover share")
         } else {
-            let mut share = Scalar::zero();
+            let mut out = Scalar::zero();
             for s in dealings {
-                share.add(&s.value);
+                out.add(&s.value);
             }
-            share
+            out
+        };
+        let share = Share {
+            index: self.index,
+            private,
         };
         Ok((output, share))
     }
