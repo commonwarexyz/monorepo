@@ -15,22 +15,10 @@ pub struct Signers {
 impl Signers {
     /// Builds [`Signers`] from an iterator of signer indices.
     ///
-    /// The caller must provide indices in strictly increasing order with no duplicates.
-    /// Panics if the sequence violates that contract or contains indices outside the
-    /// participant set.
+    /// Panics if the sequence contains indices larger than the size of the participant set.
     pub fn from(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
-        let mut last = None;
-
         for signer in signers.into_iter() {
-            assert!(
-                (signer as usize) < participants,
-                "Signer index out of bounds"
-            );
-            if let Some(last) = last {
-                assert!(signer > last, "Signer indices must be strictly increasing");
-            }
-            last = Some(signer);
             bitmap.set(signer as u64, true);
         }
 
@@ -86,19 +74,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Signer index out of bounds")]
+    #[should_panic(expected = "bit 4 out of bounds (len: 4)")]
     fn test_from_out_of_bounds() {
         Signers::from(4, [0, 4]);
     }
 
     #[test]
-    #[should_panic(expected = "Signer indices must be strictly increasing")]
     fn test_from_duplicate() {
         Signers::from(4, [0, 0, 1]);
     }
 
     #[test]
-    #[should_panic(expected = "Signer indices must be strictly increasing")]
     fn test_from_not_increasing() {
         Signers::from(4, [2, 1]);
     }
