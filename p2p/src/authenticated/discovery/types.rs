@@ -1,5 +1,5 @@
 use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt,
     Write,
@@ -101,7 +101,7 @@ impl<C: PublicKey> Read for Payload<C> {
         match payload_type {
             BIT_VEC_PREFIX => {
                 let index = UInt::read(buf)?.into();
-                let bits = Bytes::read_cfg(buf, &(..=*max_length).into())?;
+                let bits = Vec::<u8>::read_range(buf, ..=*max_length)?;
                 Ok(Payload::BitVec(BitVec { index, bits }))
             }
             PEERS_PREFIX => {
@@ -129,12 +129,13 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: Bytes,
+    pub bits: Vec<u8>,
 }
 
 impl BitVec {
-    pub fn consume(mut self, max: u64) -> Option<BitMap> {
-        BitMap::decode_cfg(&mut self.bits, &max).ok()
+    pub fn consume(self, max_length: u64) -> Option<BitMap> {
+        // TODO: improve this
+        BitMap::decode_cfg(&mut self.bits.as_slice(), &max_length).ok()
     }
 }
 
@@ -156,7 +157,7 @@ impl Read for BitVec {
 
     fn read_cfg(buf: &mut impl Buf, max: &usize) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
-        let bits = Bytes::read_cfg(buf, &(..=*max).into())?;
+        let bits = Vec::<u8>::read_range(buf, ..=*max)?;
         Ok(Self { index, bits })
     }
 }
