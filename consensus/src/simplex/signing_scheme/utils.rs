@@ -6,8 +6,7 @@ use commonware_utils::bitmap::BitMap;
 
 /// Bitmap wrapper that tracks which validators signed a certificate.
 ///
-/// Construct instances with [`SignersBitMap::from_signers`] to ensure the encoded form
-/// remains minimal. Internally it stores bits in 1-byte chunks for compact encoding.
+/// Internally it stores bits in 1-byte chunks for compact encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignersBitMap {
     bitmap: BitMap<1>,
