@@ -4,21 +4,17 @@ mod mocks;
 use crate::mocks::{check_invariants, extract_simplex_state};
 use commonware_consensus::{
     simplex::{
-        config::Config,
-        mocks::{
-            application, relay,
-            reporter::{self, Reporter},
-        },
+        config,
+        mocks::{application, fixtures::ed25519_fixture, relay, reporter},
         Engine,
     },
     Monitor,
 };
-use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
-    sha256::Digest as Sha256Digest,
-    PrivateKeyExt as _, Sha256, Signer as _,
+use commonware_cryptography::{Sha256, Signer as _};
+use commonware_p2p::simulated::{
+    helpers::{Action, PartitionStrategy},
+    Config as NetworkConfig, Link, Network, Oracle, Receiver, Sender,
 };
-use commonware_p2p::simulated::{helpers::{link_peers, simplex_register_peers, Action, PartitionStrategy}, Config as NetworkConfig, Link, Network, Oracle, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef,
     deterministic::{self},
@@ -30,7 +26,7 @@ use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{simplex_fuzzer::Fuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE};
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     panic,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -38,9 +34,6 @@ use std::{
     },
     time::Duration,
 };
-use std::collections::HashMap;
-use commonware_consensus::simplex::config;
-use commonware_consensus::simplex::mocks::fixtures::ed25519_fixture;
 
 const VALID_PANICS: [&str; 3] = [
     "invalid payload:",
@@ -102,65 +95,81 @@ fn fuzzer(input: FuzzInput) {
         network.start();
 
         // Register participants
-        let (mut schemes, validators, mut signing_schemes, _) = ed25519_fixture(&mut context, n);
+        let (mut ed25519_keys, validators, mut signing_schemes, _) = ed25519_fixture(&mut context, n);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
         let partition = input.partition.clone();
-        let scheme = schemes.remove(0);
+        let ed25519_key = ed25519_keys.remove(0);
+        let scheme = signing_schemes.remove(0);
 
         // Link all validators
         // The first validator is byzantine.
         let link = Link {
-            latency: Duration::from_millis(0),
-            jitter: Duration::from_millis(0),
+            latency: Duration::from_millis(10),
+            jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
-        link_peers(
-            &mut oracle,
-            &validators,
-            Action::Link(link),
-            input.partition.create(),
-        )
-        .await;
+        // Link all validators based on partition strategy
+        for (i1, v1) in validators.iter().enumerate() {
+            for (i2, v2) in validators.iter().enumerate() {
+                if v2 == v1 {
+                    continue;
+                }
+                
+                // Apply partition strategy if any
+                if let Some(restrict) = input.partition.create() {
+                    if !restrict(validators.len(), i1, i2) {
+                        continue;
+                    }
+                }
+                
+                oracle.add_link(v1.clone(), v2.clone(), link.clone()).await.unwrap();
+            }
+        }
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
 
         // Start a consensus engine for the fuzzing actor (first validator).
-        let context = context.with_label(&format!("validator-{validator}"));
-        let validator = scheme.public_key();
+        let validator = ed25519_key.public_key();
+        let fuzzer_context = context.with_label(&format!("validator-{validator}"));
         let reporter_config = reporter::Config {
             namespace: namespace.clone(),
             participants: validators.clone().into(),
-            scheme: signing_schemes[0].clone(),
+            scheme: scheme.clone(),
         };
-        let reporter =
-            Reporter::new(context.with_label("reporter"), reporter_config);
+        let reporter = reporter::Reporter::new(fuzzer_context.with_label("reporter"), reporter_config);
+        reporters.push(reporter.clone());
 
-        let (voter, recovered, resolver) = registrations
+        let (pending, _recovered, _resolver) = registrations
             .remove(&validator)
             .expect("validator should be registered");
         let actor = Fuzzer::new(
-            context.with_label("fuzzing_actor"),
+            fuzzer_context.with_label("fuzzing_actor"),
+            ed25519_key,
             scheme,
             reporter,
             namespace.clone(),
             input,
         );
-        actor.start(voter);
+        actor.start(pending);
 
         // Start regular consensus engines for the remaining validators.
-        for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-            let validator = scheme.public_key();
-            let context = context.with_label(&format!("validator-{validator}"));
-            let reporter_config = commonware_consensus::simplex::mocks::reporter::Config {
+        for (idx_key, ed25519_key) in ed25519_keys.into_iter().enumerate() {
+            let validator = ed25519_key.public_key();
+            let validator_context = context.with_label(&format!("validator-{validator}"));
+            let idx_scheme = idx_key; // We already removed the first scheme, so indices align
+            let reporter_config = reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[idx_scheme].clone(),
             };
-            let reporter =
-                commonware_consensus::simplex::mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let reporter = reporter::Reporter::new(
+                validator_context.with_label("reporter"),
+                reporter_config,
+            );
+            reporters.push(reporter.clone());
             let (pending, recovered, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
@@ -169,13 +178,15 @@ fn fuzzer(input: FuzzInput) {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 participant: validator.clone(),
-                propose_latency: (0.01, 0.3),
-                verify_latency: (0.01, 0.3),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
             };
-            let (actor, application) =
-                application::Application::new(context.with_label("application"), application_cfg);
+            let (actor, application) = application::Application::new(
+                validator_context.with_label("application"),
+                application_cfg,
+            );
             actor.start();
-
+            let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
                 me: validator.clone(),
                 blocker,
@@ -192,8 +203,8 @@ fn fuzzer(input: FuzzInput) {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
-                skip_timeout,
+                activity_timeout: 10,
+                skip_timeout: 5,
                 max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
@@ -201,7 +212,7 @@ fn fuzzer(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let engine = Engine::new(context.with_label("engine"), cfg);
+            let engine = Engine::new(validator_context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
         }
 
@@ -211,11 +222,15 @@ fn fuzzer(input: FuzzInput) {
                 let mut finalizers = Vec::new();
                 for reporter in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
-                        }
-                    }));
+                    finalizers.push(
+                        context
+                            .with_label("finalizer")
+                            .spawn(move |_| async move {
+                                while latest < required_containers {
+                                    latest = monitor.next().await.expect("event missing");
+                                }
+                            }),
+                    );
                 }
                 join_all(finalizers).await;
             }

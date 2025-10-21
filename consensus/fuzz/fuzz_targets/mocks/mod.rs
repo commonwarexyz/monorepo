@@ -1,7 +1,6 @@
 use arbitrary::Arbitrary;
-use commonware_cryptography::{
-    bls12381::primitives::variant::MinPk, ed25519::PublicKey, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
+use rand::{CryptoRng, Rng};
 use commonware_p2p::simulated::helpers::PartitionStrategy;
 use commonware_utils::{quorum, NZUsize};
 use std::{
@@ -9,10 +8,8 @@ use std::{
     num::NonZeroUsize,
     time::Duration,
 };
-use commonware_consensus::aggregation::mocks::Reporter;
 
 pub mod simplex_fuzzer;
-pub mod threshold_simplex_fuzzer;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -256,14 +253,21 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
+// Removed extract_threshold_simplex_state as we're ignoring threshold_simplex
+
 #[allow(dead_code)]
-pub fn extract_threshold_simplex_state(
-    reporter: Vec<Reporter<PublicKey, MinPk>>,
-) -> Vec<ReplicaState> {
-    reporter
+pub fn extract_simplex_state<E, P, S>(
+    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, P, S, Sha256Digest>>,
+) -> Vec<ReplicaState>
+where
+    E: Rng + CryptoRng,
+    P: commonware_cryptography::PublicKey,
+    S: commonware_consensus::simplex::signing_scheme::Scheme,
+{
+    reporters
         .iter()
         .map(|reporter| {
-            let notarizations = reporter.into().notarizes.lock().unwrap();
+            let notarizations = reporter.notarizations.lock().unwrap();
             let notarization_data = notarizations
                 .iter()
                 .map(|(&view, cert)| {
@@ -271,26 +275,26 @@ pub fn extract_threshold_simplex_state(
                         view,
                         Notarization {
                             payload: cert.proposal.payload,
-                            signature_count: None, // Threshold signatures don't have count
+                            signature_count: None, // Ed25519 doesn't expose signature count directly
                         },
                     )
                 })
                 .collect();
 
-            let nullifications = reporter.into().lock().unwrap();
+            let nullifications = reporter.nullifications.lock().unwrap();
             let nullification_data = nullifications
                 .iter()
                 .map(|(&view, _cert)| {
                     (
                         view,
                         Nullification {
-                            signature_count: None, // Threshold signatures don't have count
+                            signature_count: None, // Ed25519 doesn't expose signature count directly
                         },
                     )
                 })
                 .collect();
 
-            let finalizations = reporter.into().finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock().unwrap();
             let finalization_data = finalizations
                 .iter()
                 .map(|(&view, cert)| {
@@ -298,60 +302,7 @@ pub fn extract_threshold_simplex_state(
                         view,
                         Finalization {
                             payload: cert.proposal.payload,
-                            signature_count: None, // Threshold signatures don't have count
-                        },
-                    )
-                })
-                .collect();
-
-            (notarization_data, nullification_data, finalization_data)
-        })
-        .collect()
-}
-
-#[allow(dead_code)]
-pub fn extract_simplex_state(
-    reporter: Vec<Reporter<PublicKey, Sha256Digest>>,
-) -> Vec<ReplicaState> {
-    reporter
-        .iter()
-        .map(|reporter| {
-            let notarizations = reporter.into().notarizations.lock().unwrap();
-            let notarization_data = notarizations
-                .iter()
-                .map(|(&view, cert)| {
-                    (
-                        view,
-                        Notarization {
-                            payload: cert.proposal.payload,
-                            signature_count: Some(cert.signatures.len()),
-                        },
-                    )
-                })
-                .collect();
-
-            let nullifications = reporter.into().nullifications.lock().unwrap();
-            let nullification_data = nullifications
-                .iter()
-                .map(|(&view, cert)| {
-                    (
-                        view,
-                        Nullification {
-                            signature_count: Some(cert.signatures.len()),
-                        },
-                    )
-                })
-                .collect();
-
-            let finalizations = reporter.into().finalizations.lock().unwrap();
-            let finalization_data = finalizations
-                .iter()
-                .map(|(&view, cert)| {
-                    (
-                        view,
-                        Finalization {
-                            payload: cert.proposal.payload,
-                            signature_count: Some(cert.signatures.len()),
+                            signature_count: None, // Ed25519 doesn't expose signature count directly
                         },
                     )
                 })
