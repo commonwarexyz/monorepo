@@ -67,6 +67,8 @@ pub trait Contiguous {
     /// - If `min_position > size()`, the prune is capped to `size()` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
+    /// - This operation is not atomic, but implementations guarantee the journal is left in a
+    ///   recoverable state if a crash occurs during pruning
     ///
     /// # Errors
     ///
@@ -86,11 +88,12 @@ pub trait Contiguous {
     /// - If `size > current_size()`, returns [Error::InvalidRewind]
     /// - If `size == current_size()`, this is a no-op
     /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned data)
+    /// - This operation is not atomic, but implementations guarantee the journal is left in a
+    ///   recoverable state if a crash occurs during rewinding
     ///
     /// # Warnings
     ///
     /// - This operation is not guaranteed to survive restarts until `sync()` is called
-    /// - This operation is not atomic, but implementations should leave the journal in a consistent state
     ///
     /// # Errors
     ///
