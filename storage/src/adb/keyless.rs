@@ -610,15 +610,19 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
+    ///   number of operations.
     pub async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
+        if op_count > self.op_count() {
+            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
+        }
         if start_loc >= op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
@@ -1180,6 +1184,14 @@ mod test {
                 db.append(v).await.unwrap();
             }
             db.commit(None).await.unwrap();
+
+            // Test that historical proof fails with op_count > number of operations
+            assert!(matches!(
+                db.historical_proof(db.op_count() + 1, Location::new_unchecked(5), NZU64!(10))
+                    .await,
+                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+            ));
+
             let root = db.root(&mut hasher);
 
             // Test proof generation for various ranges
@@ -1514,7 +1526,7 @@ mod test {
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
                     if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
             );
 
@@ -1542,7 +1554,7 @@ mod test {
             let beyond = Location::new_unchecked(*new_last_commit + 1);
             let result = db.prune(beyond).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc)) 
+                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
                     if prune_loc == beyond && commit_loc == new_last_commit)
             );
 
