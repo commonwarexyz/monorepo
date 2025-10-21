@@ -3,7 +3,7 @@ use crate::{
         dkg::ops::recover_public_with_weights,
         primitives::{
             group::{Element, Scalar},
-            poly::{self, new_with_constant, Eval, Poly},
+            poly::{self, new_with_constant, Eval, Poly, Weight},
             variant::Variant,
         },
     },
@@ -18,6 +18,7 @@ use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
+#[derive(Clone)]
 pub struct Output<E, P> {
     round: u32,
     players: Set<P>,
@@ -63,6 +64,7 @@ pub enum Error {
     InsufficientDealers(usize),
 }
 
+#[derive(Clone)]
 pub struct RoundInfo<E, P: PublicKey> {
     round: u32,
     previous: Option<Output<E, P>>,
@@ -212,9 +214,9 @@ impl<E, P: PublicKey> DealerLog<E, P> {
 }
 
 fn select<E: Element, P: PublicKey>(
-    logs: BTreeMap<P, DealerLog<E, P>>,
     round_info: &RoundInfo<E, P>,
-) -> Option<Vec<(P, DealerLog<E, P>)>> {
+    logs: BTreeMap<P, DealerLog<E, P>>,
+) -> Result<Vec<(P, DealerLog<E, P>)>, Error> {
     let required_commitments = round_info.required_commitments() as usize;
     let transcript = transcript_for_round(round_info);
     let out = logs
@@ -240,9 +242,70 @@ fn select<E: Element, P: PublicKey>(
         .take(required_commitments)
         .collect::<Vec<_>>();
     if out.len() < required_commitments {
-        return None;
+        return Err(Error::DkgFailed);
     }
-    Some(out)
+    Ok(out)
+}
+
+struct ObserveInner<V: Variant, P: PublicKey> {
+    output: Output<V::Public, P>,
+    weights: Option<BTreeMap<u32, Weight>>,
+}
+
+impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
+    fn reckon(
+        round_info: RoundInfo<V::Public, P>,
+        selected: Vec<(P, DealerLog<V::Public, P>)>,
+    ) -> Result<Self, Error> {
+        let commitments = selected
+            .iter()
+            .filter_map(|(dealer, log)| {
+                let index = round_info.dealer_index(dealer).ok()?;
+                Some((index, log.pub_msg.commitment.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let indices = selected
+            .into_iter()
+            .map(|(dealer, _log)| {
+                round_info
+                    .dealer_index(&dealer)
+                    .expect("select checks that dealer exists, via our signature")
+            })
+            .collect::<Vec<_>>();
+        let (public, weights) = if let Some(previous) = round_info.previous {
+            let weights =
+                poly::compute_weights(indices).expect("should be able to compute weights");
+            let public = recover_public_with_weights::<V>(
+                &previous.group_commitment,
+                &commitments,
+                &weights,
+                quorum(previous.players.len() as u32),
+                1,
+            )
+            .expect("should be able to recover group");
+            (public, Some(weights))
+        } else {
+            let mut public = Poly::zero();
+            for c in commitments.values() {
+                public.add(c);
+            }
+            (public, None)
+        };
+        let output = Output {
+            round: round_info.round + 1,
+            players: round_info.players,
+            group_commitment: public,
+        };
+        Ok(Self { output, weights })
+    }
+}
+
+pub fn observe<V: Variant, P: PublicKey>(
+    round_info: RoundInfo<V::Public, P>,
+    logs: BTreeMap<P, DealerLog<V::Public, P>>,
+) -> Result<Output<V::Public, P>, Error> {
+    let selected = select(&round_info, logs)?;
+    ObserveInner::<V, P>::reckon(round_info, selected).map(|x| x.output)
 }
 
 #[derive(Clone)]
@@ -353,17 +416,10 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V::Public, S::PublicKey>>,
-    ) -> Result<(Scalar, Output<V::Public, S::PublicKey>), Error> {
-        let selected = select(logs, &self.round_info).ok_or(Error::DkgFailed)?;
-        let commitments = selected
+    ) -> Result<(Output<V::Public, S::PublicKey>, Scalar), Error> {
+        let selected = select(&self.round_info, logs)?;
+        let dealings = selected
             .iter()
-            .filter_map(|(dealer, log)| {
-                let index = self.round_info.dealer_index(dealer).ok()?;
-                Some((index, log.pub_msg.commitment.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let (indices, dealings) = selected
-            .into_iter()
             .map(|(dealer, log)| {
                 let index = self
                     .round_info
@@ -379,47 +435,25 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
                             panic!("select didn't check dealer reveal, or we're not a player?")
                         }
                     });
-                (
+                Eval {
                     index,
-                    Eval {
-                        index,
-                        value: share,
-                    },
-                )
+                    value: share,
+                }
             })
-            .collect::<(Vec<_>, Vec<_>)>();
-        let (public, share) = if let Some(previous) = self.round_info.previous {
-            let weights =
-                poly::compute_weights(indices).expect("should be able to compute weights");
-            let public = recover_public_with_weights::<V>(
-                &previous.group_commitment,
-                &commitments,
-                &weights,
-                quorum(previous.players.len() as u32),
-                1,
-            )
-            .expect("should be able to recover group");
-            let share = poly::Private::recover_with_weights(&weights, dealings.iter())
-                .expect("should be able to recover share");
-            (public, share)
+            .collect::<Vec<_>>();
+        let ObserveInner { output, weights } =
+            ObserveInner::<V, S::PublicKey>::reckon(self.round_info, selected)?;
+        let share: Scalar = if let Some(weights) = weights {
+            poly::Private::recover_with_weights(&weights, dealings.iter())
+                .expect("should be able to recover share")
         } else {
-            let mut public = Poly::zero();
             let mut share = Scalar::zero();
-            for c in commitments.values() {
-                public.add(c);
-            }
             for s in dealings {
                 share.add(&s.value);
             }
-            (public, share)
+            share
         };
-
-        let output = Output {
-            round: self.round_info.round + 1,
-            players: self.round_info.players,
-            group_commitment: public,
-        };
-        Ok((share, output))
+        Ok((output, share))
     }
 }
 
