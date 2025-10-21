@@ -26,6 +26,10 @@ impl Signers {
                 !bitmap.get(signer as u64),
                 "duplicate signer index: {signer}",
             );
+            // We opt to not assert order here because some signing schemes allow
+            // for commutative aggregation of signatures (and signing is unnecessary
+            // overhead).
+
             bitmap.set(signer as u64, true);
         }
 
