@@ -437,20 +437,31 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         self.data.get(location.section, location.offset).await
     }
 
-    /// Sync all pending writes to storage.
+    /// Sync only the data journal to storage, without syncing the locations index.
     ///
-    /// This syncs both the data journal and the locations journal.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    /// This is faster than `sync()` and can be used to ensure data durability without
+    /// the overhead of syncing the locations index.
+    ///
+    /// We call `sync` when appending to a section, so the locations journal will eventually be
+    /// synced as well, maintaining the invariant that all non-final sections are fully synced.
+    /// In other words, the journal will remain in a consistent, recoverable state even if a crash
+    /// occurs after calling this method but before calling `sync`.
+    pub async fn sync_data(&mut self) -> Result<(), Error> {
         // Sync only the current (final) section of the data journal.
-        //
-        // Invariant #1 guarantees that all non-final sections are already synced:
-        // when append() fills a section (size becomes a multiple of items_per_section),
-        // it immediately syncs that section. Therefore, only the current section can
-        // contain unsynced data from recent appends or rewind operations.
+        // All non-final sections are already synced per Invariant #1.
         let section = self.current_section();
         if self.data.blobs.contains_key(&section) {
             self.data.sync(section).await?;
         }
+        Ok(())
+    }
+
+    /// Sync all pending writes to storage.
+    ///
+    /// This syncs both the data journal and the locations journal.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        // Sync data journal
+        self.sync_data().await?;
 
         // Sync locations journal
         self.locations.sync().await?;
@@ -1464,6 +1475,50 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that locations index is rebuilt from data after sync_data + crash.
+    #[test]
+    fn test_variable_sync_data_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "sync_data_recovery".to_string(),
+                locations_partition: "sync_data_recovery_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append items across a section boundary
+            for i in 0..15u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            // Sync data only (locations lags behind)
+            journal.sync_data().await.unwrap();
+
+            // Simulate a crash
+            drop(journal);
+
+            let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Data should be intact and locations rebuilt
+            assert_eq!(journal.size().await.unwrap(), 15);
+            for i in 0..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
         });
     }
 }
