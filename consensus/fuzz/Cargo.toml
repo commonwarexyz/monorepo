@@ -27,8 +27,15 @@ path = ".."
 features = ["fuzz"]
 
 [[bin]]
-name = "simplex_messages"
-path = "fuzz_targets/simplex_messages.rs"
+name = "simplex_ed25519"
+path = "fuzz_targets/simplex_ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_minpk"
+path = "fuzz_targets/simplex_bls12381_minpk.rs"
 test = false
 doc = false
 bench = false
