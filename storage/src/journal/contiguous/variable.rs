@@ -608,7 +608,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             }
         }
 
-        // Rebuild missing locations (position spaces are aligned).
+        // Rebuild missing locations entries that are missing from the locations journal
+        // because we crashed after writing to the data journal but before writing to the locations journal,
+        // or after rewinding the locations journal but before rewinding the data journal.
         if locations_size < data_size {
             Self::add_missing_locations(data, locations, locations_size).await?;
         }
