@@ -4,7 +4,6 @@ use crate::authenticated::discovery::{
     metrics,
     types::{self, Info},
 };
-use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::SystemTimeExt;
@@ -255,23 +254,22 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ///
     /// Returns `None` if the bit vector is malformed.
     pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
-        let index = bit_vec.index;
-        let Some(set) = self.sets.get(&index) else {
+        let Some(set) = self.sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
-            debug!(index, "requested peer set not found");
+            debug!(index = bit_vec.index, "requested peer set not found");
             return Some(vec![]);
         };
 
         // Parse BitMap
         let Some(bit_map) = bit_vec.extract(set.len() as u64) else {
-            debug!(index, "failed to parse bit map");
+            debug!(index = bit_vec.index, "failed to parse bit map");
             return None;
         };
 
         // Ensure that the bit vector is the same size as the peer set
         if bit_map.len() != set.len() as u64 {
             debug!(
-                index,
+                index = bit_vec.index,
                 expected = set.len(),
                 actual = bit_map.len(),
                 "bit vector length mismatch"
