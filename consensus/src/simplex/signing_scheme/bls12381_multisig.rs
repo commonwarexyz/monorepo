@@ -241,7 +241,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         entries.sort_by_key(|(signer, _)| *signer);
 
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let signers = SignersBitMap::from_signers(self.participants.len(), signers)?;
+        let signers = SignersBitMap::from_signers(self.participants.len(), signers);
         let signature = aggregate_signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
@@ -926,7 +926,7 @@ mod tests {
         let mut truncated = certificate.clone();
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
-        truncated.signers = SignersBitMap::from_signers(participants.len(), signers).unwrap();
+        truncated.signers = SignersBitMap::from_signers(participants.len(), signers);
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -970,7 +970,7 @@ mod tests {
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
         signers.push(participants.len() as u32);
-        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers).unwrap();
+        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers);
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -1021,8 +1021,7 @@ mod tests {
 
         // Certificate with no signers is rejected.
         let empty = Certificate::<V> {
-            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>())
-                .unwrap(),
+            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>()),
             signature: certificate.signature,
         };
         assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants.len()).is_err());
@@ -1031,7 +1030,7 @@ mod tests {
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
         signers.push(participants.len() as u32);
         let extended = Certificate::<V> {
-            signers: SignersBitMap::from_signers(participants.len() + 1, signers).unwrap(),
+            signers: SignersBitMap::from_signers(participants.len() + 1, signers),
             signature: certificate.signature,
         };
         assert!(Certificate::<V>::decode_cfg(extended.encode(), &participants.len()).is_err());

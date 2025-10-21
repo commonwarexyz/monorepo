@@ -16,29 +16,25 @@ impl SignersBitMap {
     /// Builds a bitmap from an iterator of signer indices.
     ///
     /// The caller must provide indices in strictly increasing order with no duplicates.
-    /// Returns `None` if the sequence violates that contract or contains indices outside
-    /// the participant set.
-    pub fn from_signers(
-        participants: usize,
-        signers: impl IntoIterator<Item = u32>,
-    ) -> Option<Self> {
+    /// Panics if the sequence violates that contract or contains indices outside the
+    /// participant set.
+    pub fn from_signers(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
         let mut last = None;
 
         for signer in signers.into_iter() {
-            if signer as usize >= participants {
-                return None;
-            }
+            assert!(
+                (signer as usize) < participants,
+                "Signer index out of bounds"
+            );
             if let Some(last) = last {
-                if signer <= last {
-                    return None;
-                }
+                assert!(signer > last, "Signer indices must be strictly increasing");
             }
             last = Some(signer);
             bitmap.set(signer as u64, true);
         }
 
-        Some(SignersBitMap { bitmap })
+        SignersBitMap { bitmap }
     }
 
     /// Returns how many validators are marked as signers.
@@ -83,24 +79,33 @@ mod tests {
 
     #[test]
     fn test_from_signers() {
-        let signers = SignersBitMap::from_signers(6, [0, 3, 5]).unwrap();
+        let signers = SignersBitMap::from_signers(6, [0, 3, 5]);
         let collected: Vec<_> = signers.iter().collect();
         assert_eq!(collected, vec![0, 3, 5]);
         assert_eq!(signers.count(), 3);
     }
 
     #[test]
-    fn test_from_signers_validation() {
-        // Out of bounds
-        assert!(SignersBitMap::from_signers(4, [0, 4]).is_none());
-        // Not strictly increasing
-        assert!(SignersBitMap::from_signers(4, [0, 0, 1]).is_none());
-        assert!(SignersBitMap::from_signers(4, [2, 1]).is_none());
+    #[should_panic(expected = "Signer index out of bounds")]
+    fn test_from_signers_out_of_bounds() {
+        SignersBitMap::from_signers(4, [0, 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Signer indices must be strictly increasing")]
+    fn test_from_signers_duplicate() {
+        SignersBitMap::from_signers(4, [0, 0, 1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Signer indices must be strictly increasing")]
+    fn test_from_signers_not_increasing() {
+        SignersBitMap::from_signers(4, [2, 1]);
     }
 
     #[test]
     fn test_codec_round_trip() {
-        let signers = SignersBitMap::from_signers(9, [1, 6]).unwrap();
+        let signers = SignersBitMap::from_signers(9, [1, 6]);
         let encoded = signers.encode();
         let decoded = SignersBitMap::decode_cfg(encoded, &9).unwrap();
         assert_eq!(decoded, signers);
@@ -108,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_decode_respects_participant_limit() {
-        let signers = SignersBitMap::from_signers(8, [0, 3, 7]).unwrap();
+        let signers = SignersBitMap::from_signers(8, [0, 3, 7]);
         let encoded = signers.encode();
         // Fewer participants than highest signer should fail.
         assert!(SignersBitMap::decode_cfg(encoded.clone(), &2).is_err());

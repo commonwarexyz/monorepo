@@ -251,7 +251,7 @@ impl signing_scheme::Scheme for Scheme {
         entries.sort_by_key(|(signer, _)| *signer);
 
         let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
-        let signers = SignersBitMap::from_signers(self.participants.len(), signer)?;
+        let signers = SignersBitMap::from_signers(self.participants.len(), signer);
 
         Some(Certificate {
             signers,
@@ -558,6 +558,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Signer indices must be strictly increasing")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
         let (schemes, _) = schemes(4);
         let proposal = sample_proposal(0, 25, 13);
@@ -579,8 +580,7 @@ mod tests {
 
         votes.push(votes.last().unwrap().clone());
 
-        let certificate = schemes[0].assemble_certificate(votes);
-        assert!(certificate.is_none());
+        schemes[0].assemble_certificate(votes);
     }
 
     #[test]
@@ -722,15 +722,14 @@ mod tests {
 
         // Certificate with no signers is rejected.
         let empty = Certificate {
-            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>())
-                .unwrap(),
+            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>()),
             signatures: Vec::new(),
         };
         assert!(Certificate::decode_cfg(empty.encode(), &participants.len()).is_err());
 
         // Certificate with mismatched signature count is rejected.
         let mismatched = Certificate {
-            signers: SignersBitMap::from_signers(participants.len(), [0u32, 1]).unwrap(),
+            signers: SignersBitMap::from_signers(participants.len(), [0u32, 1]),
             signatures: vec![certificate.signatures[0].clone()],
         };
         assert!(Certificate::decode_cfg(mismatched.encode(), &participants.len()).is_err());
@@ -741,7 +740,7 @@ mod tests {
         let mut signatures = certificate.signatures.clone();
         signatures.push(certificate.signatures[0].clone());
         let extended = Certificate {
-            signers: SignersBitMap::from_signers(participants.len() + 1, signers).unwrap(),
+            signers: SignersBitMap::from_signers(participants.len() + 1, signers),
             signatures,
         };
         assert!(Certificate::decode_cfg(extended.encode(), &participants.len()).is_err());
@@ -809,7 +808,7 @@ mod tests {
         let mut truncated = certificate.clone();
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
-        truncated.signers = SignersBitMap::from_signers(participants.len(), signers).unwrap();
+        truncated.signers = SignersBitMap::from_signers(participants.len(), signers);
         truncated.signatures.pop();
 
         let verifier = Scheme::verifier(participants);
@@ -849,7 +848,7 @@ mod tests {
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
         signers.push(participants.len() as u32);
-        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers).unwrap();
+        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers);
         certificate
             .signatures
             .push(certificate.signatures[0].clone());
