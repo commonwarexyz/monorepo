@@ -11,7 +11,7 @@ use crate::{
     PrivateKey, PublicKey,
 };
 use commonware_codec::{Encode, EncodeSize, Write};
-use commonware_utils::set::Set;
+use commonware_utils::{max_faults, quorum, set::Set};
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -22,7 +22,6 @@ pub struct Output<E, P> {
     round: u32,
     players: Set<P>,
     group_commitment: Poly<E>,
-    faults: u32,
 }
 
 impl<E: Element, P: PublicKey> Output<E, P> {
@@ -30,14 +29,15 @@ impl<E: Element, P: PublicKey> Output<E, P> {
         let index = self.players.position(player)?;
         Some(self.group_commitment.evaluate(index as u32).value)
     }
+
+    fn quorum(&self) -> u32 {
+        quorum(self.players.len() as u32)
+    }
 }
 
 impl<E: Element, P: PublicKey> EncodeSize for Output<E, P> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + self.players.encode_size()
-            + self.group_commitment.encode_size()
-            + self.faults.encode_size()
+        self.round.encode_size() + self.players.encode_size() + self.group_commitment.encode_size()
     }
 }
 
@@ -46,7 +46,6 @@ impl<E: Element, P: PublicKey> Write for Output<E, P> {
         self.round.write(buf);
         self.players.write(buf);
         self.group_commitment.write(buf);
-        self.faults.write(buf);
     }
 }
 
@@ -60,8 +59,6 @@ pub enum Error {
     UnknownDealer,
     #[error("dkg failed for some reason")]
     DkgFailed,
-    #[error("not enough players: {0}")]
-    InsufficientPlayers(usize),
     #[error("not enough dealers: {0}")]
     InsufficientDealers(usize),
 }
@@ -71,7 +68,6 @@ pub struct RoundInfo<E, P: PublicKey> {
     previous: Option<Output<E, P>>,
     dealers: Set<P>,
     players: Set<P>,
-    faults: u32,
 }
 
 impl<E: Element, P: PublicKey> RoundInfo<E, P> {
@@ -94,15 +90,21 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     }
 
     fn degree(&self) -> u32 {
-        2 * self.faults
+        quorum(self.players.len() as u32).saturating_sub(1)
     }
 
     fn required_commitments(&self) -> u32 {
-        2 * self.faults + 1
+        let dealer_quorum = quorum(self.dealers.len() as u32);
+        let prev_quorum = self
+            .previous
+            .as_ref()
+            .map(Output::quorum)
+            .unwrap_or(u32::MIN);
+        dealer_quorum.max(prev_quorum)
     }
 
     fn max_reveals(&self) -> u32 {
-        self.faults
+        max_faults(self.players.len() as u32)
     }
 
     fn player_index(&self, player: &P) -> Result<u32, Error> {
@@ -136,12 +138,11 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     }
 }
 
-impl<E, P: PublicKey> RoundInfo<E, P> {
+impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     pub fn new(
         previous: Option<Output<E, P>>,
         dealers: Set<P>,
         players: Set<P>,
-        faults: u32,
     ) -> Result<Self, Error> {
         assert!(dealers.len() <= u32::MAX as usize);
         assert!(players.len() <= u32::MAX as usize);
@@ -157,19 +158,15 @@ impl<E, P: PublicKey> RoundInfo<E, P> {
             {
                 return Err(Error::UnknownDealer);
             }
-            if dealers.len() < (2 * faults + 1) as usize {
+            if dealers.len() < previous.quorum() as usize {
                 return Err(Error::InsufficientDealers(dealers.len()));
             }
-        }
-        if players.len() < (3 * faults + 1) as usize {
-            return Err(Error::InsufficientPlayers(players.len()));
         }
         Ok(Self {
             round,
             previous,
             dealers,
             players,
-            faults,
         })
     }
 }
@@ -180,7 +177,6 @@ impl<E: Element, P: PublicKey> EncodeSize for RoundInfo<E, P> {
             + self.previous.encode_size()
             + self.dealers.encode_size()
             + self.players.encode_size()
-            + self.faults.encode_size()
     }
 }
 
@@ -190,7 +186,6 @@ impl<E: Element, P: PublicKey> Write for RoundInfo<E, P> {
         self.previous.write(buf);
         self.dealers.write(buf);
         self.players.write(buf);
-        self.faults.write(buf);
     }
 }
 
@@ -400,7 +395,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
                 &previous.group_commitment,
                 &commitments,
                 &weights,
-                2 * previous.faults + 1,
+                quorum(previous.players.len() as u32),
                 1,
             )
             .expect("should be able to recover group");
@@ -423,7 +418,6 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             round: self.round_info.round + 1,
             players: self.round_info.players,
             group_commitment: public,
-            faults: self.round_info.faults,
         };
         Ok((share, output))
     }
