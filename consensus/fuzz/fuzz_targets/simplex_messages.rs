@@ -10,9 +10,9 @@ use commonware_consensus::{
     },
     Monitor,
 };
-use commonware_cryptography::{Sha256, Signer as _};
+use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256, Signer as _};
 use commonware_p2p::simulated::{
-    helpers::{Action, PartitionStrategy},
+    helpers::{link_peers, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network, Oracle, Receiver, Sender,
 };
 use commonware_runtime::{
@@ -77,7 +77,7 @@ async fn register_validators<P: commonware_cryptography::PublicKey>(
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
-    let required_containers = 30;
+    let required_containers = 200;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -95,80 +95,65 @@ fn fuzzer(input: FuzzInput) {
         network.start();
 
         // Register participants
-        let (mut ed25519_keys, validators, mut signing_schemes, _) = ed25519_fixture(&mut context, n);
+        let (mut schemes, validators, mut signing_schemes, _) = ed25519_fixture(&mut context, n);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
-        let partition = input.partition.clone();
-        let ed25519_key = ed25519_keys.remove(0);
-        let scheme = signing_schemes.remove(0);
-
-        // Link all validators
+        // Link validators.
         // The first validator is byzantine.
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
-        // Link all validators based on partition strategy
-        for (i1, v1) in validators.iter().enumerate() {
-            for (i2, v2) in validators.iter().enumerate() {
-                if v2 == v1 {
-                    continue;
-                }
-                
-                // Apply partition strategy if any
-                if let Some(restrict) = input.partition.create() {
-                    if !restrict(validators.len(), i1, i2) {
-                        continue;
-                    }
-                }
-                
-                oracle.add_link(v1.clone(), v2.clone(), link.clone()).await.unwrap();
-            }
-        }
+
+        link_peers(
+            &mut oracle,
+            &validators,
+            Action::Link(link),
+            input.partition.create(),
+        )
+        .await;
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
 
         // Start a consensus engine for the fuzzing actor (first validator).
-        let validator = ed25519_key.public_key();
-        let fuzzer_context = context.with_label(&format!("validator-{validator}"));
+        let ed25519_key = schemes.remove(0);
+        let scheme = signing_schemes.remove(0);
+        let validator = validators[0].clone(); // Don't remove from validators list
+        let context = context.with_label(&format!("validator-{}", ed25519_key.public_key()));
         let reporter_config = reporter::Config {
             namespace: namespace.clone(),
             participants: validators.clone().into(),
             scheme: scheme.clone(),
         };
-        let reporter = reporter::Reporter::new(fuzzer_context.with_label("reporter"), reporter_config);
-        reporters.push(reporter.clone());
+        let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
 
         let (pending, _recovered, _resolver) = registrations
             .remove(&validator)
             .expect("validator should be registered");
-        let actor = Fuzzer::new(
-            fuzzer_context.with_label("fuzzing_actor"),
+        let actor = Fuzzer::<_, _, Sha256Digest>::new(
+            context.with_label("fuzzing_actor"),
             ed25519_key,
             scheme,
             reporter,
             namespace.clone(),
-            input,
+            input.clone(),
         );
         actor.start(pending);
 
         // Start regular consensus engines for the remaining validators.
-        for (idx_key, ed25519_key) in ed25519_keys.into_iter().enumerate() {
-            let validator = ed25519_key.public_key();
-            let validator_context = context.with_label(&format!("validator-{validator}"));
+        for (idx_key, scheme) in schemes.into_iter().enumerate() {
+            let validator = scheme.public_key();
+            let context = context.with_label(&format!("validator-{}", scheme.public_key()));
             let idx_scheme = idx_key; // We already removed the first scheme, so indices align
             let reporter_config = reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
                 scheme: signing_schemes[idx_scheme].clone(),
             };
-            let reporter = reporter::Reporter::new(
-                validator_context.with_label("reporter"),
-                reporter_config,
-            );
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             reporters.push(reporter.clone());
             let (pending, recovered, resolver) = registrations
                 .remove(&validator)
@@ -181,10 +166,8 @@ fn fuzzer(input: FuzzInput) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
-            let (actor, application) = application::Application::new(
-                validator_context.with_label("application"),
-                application_cfg,
-            );
+            let (actor, application) =
+                application::Application::new(context.with_label("application"), application_cfg);
             actor.start();
             let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
@@ -212,25 +195,21 @@ fn fuzzer(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let engine = Engine::new(validator_context.with_label("engine"), cfg);
+            let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
         }
 
-        match partition {
+        match input.partition {
             PartitionStrategy::Connected => {
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
                 for reporter in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(
-                        context
-                            .with_label("finalizer")
-                            .spawn(move |_| async move {
-                                while latest < required_containers {
-                                    latest = monitor.next().await.expect("event missing");
-                                }
-                            }),
-                    );
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
                 }
                 join_all(finalizers).await;
             }
@@ -245,7 +224,7 @@ fn fuzzer(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    // Set up custom panic hook
+    // Set up a custom panic hook
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(|panic_info| {
         let panic_message = format!("{panic_info}");
@@ -272,12 +251,12 @@ fuzz_target!(|input: FuzzInput| {
     // Restore original hook
     panic::set_hook(original_hook);
 
-    // If we caught a panic and it should be ignored, continue
+    // If we caught a panic, and it should be ignored, continue
     if result.is_err() && SHOULD_IGNORE_PANIC.load(Ordering::SeqCst) {
         return;
     }
 
-    // If we caught a panic and it shouldn't be ignored, re-panic
+    // If we caught a panic, and it shouldn't be ignored, re-panic
     if result.is_err() {
         panic!("Unexpected panic occurred");
     }

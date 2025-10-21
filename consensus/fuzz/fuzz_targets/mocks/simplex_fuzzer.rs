@@ -162,56 +162,26 @@ where
         // Process message based on type
         match msg {
             Voter::Notarize(notarize) => {
-                // Get our index from our public key
-                let validator = self.private_key.public_key();
-                let public_key_index = self.reporter.participants
-                    .index(&validator)
-                    .unwrap_or(0);
-
                 // Notarize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&notarize.proposal, mutation);
-                let msg = Notarize::sign(
-                    &self.scheme,
-                    &self.namespace,
-                    mutated_proposal,
-                );
+                let msg = Notarize::sign(&self.scheme, &self.namespace, mutated_proposal);
                 if let Some(notarize) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Notarize(notarize)
-                        .encode()
-                        .into();
+                    let msg = Voter::<S, Sha256Digest>::Notarize(notarize).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
             Voter::Finalize(finalize) => {
-                // Get our index from our public key
-                let validator = self.private_key.public_key();
-                let public_key_index = self.reporter.participants
-                    .index(&validator)
-                    .unwrap_or(0);
-
                 // Finalize random digest
                 let mutation = self.get_mutation();
                 let mutated_proposal = self.mutate_proposal(&finalize.proposal, mutation);
-                let msg = Finalize::sign(
-                    &self.scheme,
-                    &self.namespace,
-                    mutated_proposal,
-                );
+                let msg = Finalize::sign(&self.scheme, &self.namespace, mutated_proposal);
                 if let Some(finalize) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Finalize(finalize)
-                        .encode()
-                        .into();
+                    let msg = Voter::<S, Sha256Digest>::Finalize(finalize).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
             Voter::Nullify(nullify) => {
-                // Get our index from our public key
-                let validator = self.private_key.public_key();
-                let public_key_index = self.reporter.participants
-                    .index(&validator)
-                    .unwrap_or(0);
-
                 // Nullify random view
                 let mutated_view = self.random_view(nullify.view());
                 let msg = Nullify::<S>::sign::<Sha256Digest>(
@@ -220,14 +190,12 @@ where
                     Round::new(0, mutated_view),
                 );
                 if let Some(nullify) = msg {
-                    let msg = Voter::<S, Sha256Digest>::Nullify(nullify)
-                        .encode()
-                        .into();
+                    let msg = Voter::<S, Sha256Digest>::Nullify(nullify).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }
             _ => {
-                // Send random message
+                // Send a random message
                 let malformed_bytes = self.random_bytes();
                 sender
                     .send(Recipients::All, malformed_bytes.into(), true)
@@ -283,31 +251,19 @@ where
 
         // Check if we're a participant
         let validator = self.private_key.public_key();
-        if let Some(public_key_index) = self.reporter.participants.index(&validator) {
+        if self.reporter.participants.index(&validator).is_some() {
             let message = self.random_message();
 
             match message {
                 Message::Notarize => {
-                    if let Some(msg) = Notarize::sign(
-                        &self.scheme,
-                        &self.namespace,
-                        proposal,
-                    ) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Notarize(msg)
-                            .encode()
-                            .into();
+                    if let Some(msg) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
+                        let encoded_msg = Voter::<S, Sha256Digest>::Notarize(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }
                 Message::Finalize => {
-                    if let Some(msg) = Finalize::sign(
-                        &self.scheme,
-                        &self.namespace,
-                        proposal,
-                    ) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Finalize(msg)
-                            .encode()
-                            .into();
+                    if let Some(msg) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
+                        let encoded_msg = Voter::<S, Sha256Digest>::Finalize(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }
@@ -317,9 +273,7 @@ where
                         &self.namespace,
                         Round::new(0, real_view),
                     ) {
-                        let encoded_msg = Voter::<S, Sha256Digest>::Nullify(msg)
-                            .encode()
-                            .into();
+                        let encoded_msg = Voter::<S, Sha256Digest>::Nullify(msg).encode().into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
                     }
                 }

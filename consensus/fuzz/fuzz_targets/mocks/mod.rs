@@ -1,8 +1,8 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use rand::{CryptoRng, Rng};
 use commonware_p2p::simulated::helpers::PartitionStrategy;
 use commonware_utils::{quorum, NZUsize};
+use rand::{CryptoRng, Rng};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
@@ -31,7 +31,7 @@ pub enum Message {
     Random,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 pub struct FuzzInput {
     pub seed: u64, // Seed for rng
     pub partition: PartitionStrategy,
