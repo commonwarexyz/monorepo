@@ -30,7 +30,7 @@ use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
+    future::{self, Either},
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{
@@ -55,6 +55,29 @@ enum Action {
     Block,
     /// Process the message.
     Process,
+}
+
+/// Pending item for a request to the automaton.
+struct Pending<D: Digest, R> {
+    context: Context<D>,
+    receiver: oneshot::Receiver<R>,
+}
+
+impl<D: Digest, R> Pending<D, R> {
+    /// Get the context for the pending item.
+    fn ctx(slot: &Option<Self>) -> Option<Context<D>> {
+        slot.as_ref().map(|i| i.context.clone())
+    }
+
+    /// Get the waiter for the pending item.
+    fn waiter(
+        slot: &mut Option<Self>,
+    ) -> Either<&mut oneshot::Receiver<R>, future::Pending<Result<R, oneshot::Canceled>>> {
+        match slot {
+            Some(item) => Either::Left(&mut item.receiver),
+            None => Either::Right(future::pending()),
+        }
+    }
 }
 
 struct Round<E: Clock, S: Scheme, D: Digest> {
@@ -610,10 +633,7 @@ impl<
     }
 
     #[allow(clippy::question_mark)]
-    async fn propose(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
+    async fn propose(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> Option<Pending<D, D>> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -656,7 +676,8 @@ impl<
             round: Rnd::new(self.epoch, self.view),
             parent: (parent_view, parent_payload),
         };
-        Some((context.clone(), self.automaton.propose(context).await))
+        let receiver = self.automaton.propose(context.clone()).await;
+        Some(Pending { context, receiver })
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -820,7 +841,7 @@ impl<
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> Option<Pending<D, bool>> {
         // Get round
         let proposal = {
             // Get view or exit
@@ -918,13 +939,11 @@ impl<
         let payload = proposal.payload;
         let round = self.views.get_mut(&context.view()).unwrap();
         round.requested_proposal_verify = true;
-        Some((
-            context.clone(),
-            self.automaton.verify(context, payload).await,
-        ))
+        let receiver = self.automaton.verify(context.clone(), payload).await;
+        Some(Pending { context, receiver })
     }
 
-    async fn certify(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
+    async fn certify(&mut self) -> Option<Pending<D, bool>> {
         let round = self.views.get_mut(&self.view)?;
 
         // Request certification only once.
@@ -945,10 +964,11 @@ impl<
         };
 
         // Request certification.
-        Some((
-            context.clone(),
-            self.automaton.certify(context, proposal.payload).await,
-        ))
+        let receiver = self
+            .automaton
+            .certify(context.clone(), proposal.payload)
+            .await;
+        Some(Pending { context, receiver })
     }
 
     async fn verified(&mut self, view: View) -> bool {
@@ -1740,59 +1760,41 @@ impl<
         let mut shutdown = self.context.stopped();
 
         // Process messages
-        let mut pending_set = None;
-        let mut pending_propose_context = None;
-        let mut pending_propose = None;
-        let mut pending_verify_context = None;
-        let mut pending_verify = None;
-        let mut pending_certify_context = None;
-        let mut pending_certify = None;
+        let mut prev_view: View = self.view;
+        let mut pending_propose: Option<Pending<D, D>> = None;
+        let mut pending_verify: Option<Pending<D, bool>> = None;
+        let mut pending_certify: Option<Pending<D, bool>> = None;
         loop {
-            // Reset pending set if we have moved to a new view
-            if let Some(view) = pending_set {
-                if view != self.view {
-                    pending_set = None;
-                    pending_propose_context = None;
-                    pending_propose = None;
-                    pending_verify_context = None;
-                    pending_verify = None;
-                    pending_certify_context = None;
-                    pending_certify = None;
-                }
+            // Drop any pending items if we have moved to a new view
+            if prev_view != self.view {
+                pending_propose = None;
+                pending_verify = None;
+                pending_certify = None;
+                prev_view = self.view;
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
-                pending_set = Some(self.view);
-                pending_propose_context = Some(context);
-                pending_propose = Some(new_propose);
+            if let Some(item) = self.propose(&mut resolver).await {
+                pending_propose = Some(item);
             }
-            let propose_wait = match &mut pending_propose {
-                Some(propose) => Either::Left(propose),
-                None => Either::Right(futures::future::pending()),
-            };
+            let propose_ctx = Pending::ctx(&pending_propose);
 
             // Attempt to verify current view
-            if let Some((context, new_verify)) = self.peer_proposal().await {
-                pending_set = Some(self.view);
-                pending_verify_context = Some(context);
-                pending_verify = Some(new_verify);
+            if let Some(item) = self.peer_proposal().await {
+                pending_verify = Some(item);
             }
-            let verify_wait = match &mut pending_verify {
-                Some(verify) => Either::Left(verify),
-                None => Either::Right(futures::future::pending()),
-            };
+            let verify_ctx = Pending::ctx(&pending_verify);
 
             // Attempt to check certification of the proposal
-            if let Some((context, new_certify)) = self.certify().await {
-                pending_set = Some(self.view);
-                pending_certify_context = Some(context);
-                pending_certify = Some(new_certify);
+            if let Some(item) = self.certify().await {
+                pending_certify = Some(item);
             }
-            let certify_wait = match &mut pending_certify {
-                Some(certify) => Either::Left(certify),
-                None => Either::Right(futures::future::pending()),
-            };
+            let certify_ctx = Pending::ctx(&pending_certify);
+
+            // Prepare waiters
+            let propose_wait = Pending::waiter(&mut pending_propose);
+            let verify_wait = Pending::waiter(&mut pending_verify);
+            let certify_wait = Pending::waiter(&mut pending_certify);
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -1815,8 +1817,9 @@ impl<
                     view = self.view;
                 },
                 proposed = propose_wait => {
+                    // Use captured context
+                    let context = propose_ctx.expect("missing propose context");
                     // Clear propose waiter
-                    let context = pending_propose_context.take().unwrap();
                     pending_propose = None;
 
                     // Try to use result
@@ -1852,8 +1855,9 @@ impl<
                     self.relay.broadcast(proposed).await;
                 },
                 verified = verify_wait => {
+                    // Use captured context
+                    let context = verify_ctx.expect("missing verify context");
                     // Clear verify waiter
-                    let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
 
                     // Try to use result
@@ -1877,8 +1881,9 @@ impl<
                     }
                 },
                 certified = certify_wait => {
+                    // Use captured context
+                    let context = certify_ctx.expect("missing certify context");
                     // Clear certify waiter
-                    let context = pending_certify_context.take().unwrap();
                     pending_certify = None;
 
                     // Return early if the proposal is not certified
