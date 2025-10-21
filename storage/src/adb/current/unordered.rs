@@ -349,8 +349,8 @@ impl<
         // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
         // all the information we need.
 
-        // Handle empty bitmap
-        if self.status.is_empty() {
+        // Handle empty/fully pruned bitmap
+        if self.status.len() == self.status.pruned_bits() {
             return Ok(mmr_root);
         }
 
