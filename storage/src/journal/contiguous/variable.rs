@@ -666,7 +666,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 (first_section, 0, false)
             };
 
-        // Replay data journal from start position through the end and index ALL items.
+        // Replay data journal from start position through the end and index all items.
         // The data journal is the source of truth, so we consume the entire stream.
         // (replay streams from start_section onwards through all subsequent sections)
         let stream = data
