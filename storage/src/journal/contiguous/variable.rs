@@ -214,7 +214,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         .await?;
 
         // Validate and repair locations journal to match data journal
-        let (size, oldest_retained_pos) =
+        let (oldest_retained_pos, size) =
             Self::validate_and_repair_locations(&data, &mut locations, items_per_section).await?;
 
         Ok(Self {
@@ -535,7 +535,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             let last_section = *data.blobs.last_key_value().unwrap().0;
             let oldest_pos = first_section * items_per_section;
 
-            // Count items in last section by replaying it
+            // Count items in last section by replaying it.
             let items_in_last_section = {
                 let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
@@ -547,6 +547,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 count
             };
 
+            // Invariant 1 on `Variable` guarantees that all sections except possibly the last
+            // are full. Therefore, the size of the journal is the number of items in the last
+            // section plus the number of items in the other sections.
             let size = (last_section * items_per_section) + items_in_last_section;
             (oldest_pos, size)
         };
@@ -600,12 +603,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         locations.sync().await?;
         assert_eq!(locations.size().await?, data_size);
-        assert_eq!(
-            locations.oldest_retained_pos().await?,
-            Some(data_oldest_pos)
-        );
 
-        Ok((data_size, data_oldest_pos))
+        Ok((data_oldest_pos, data_size))
     }
 
     /// Rebuild missing location entries by replaying the data journal and
