@@ -858,7 +858,8 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            mailbox.bit_vec(types::BitVec::new(0, BitMap::ones(2)), peer_mailbox.clone());
+            let invalid_bit_vec = types::BitVec::new(0, BitMap::ones(2));
+            mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone());
             assert!(matches!(
                 peer_receiver.next().await,
                 Some(peer::Message::Kill)
