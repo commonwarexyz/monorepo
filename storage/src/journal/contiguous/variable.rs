@@ -531,7 +531,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // before writing to it.
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == Some(0));
-
         if data_empty {
             // Journal never had any elements or is fully pruned.
             // The locations journal is the only source of truth.
