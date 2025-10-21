@@ -259,24 +259,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             return Err(Error::InvalidRewind(size));
         }
 
-        // Special case: rewind to empty
-        if size == 0 {
-            // Rewind locations first to maintain crash-safety invariant
-            self.locations.rewind(0).await?;
-            let first_section = self.oldest_retained_pos / self.items_per_section;
-            self.data.rewind(first_section, 0).await?;
-            self.size = 0;
-            return Ok(());
-        }
-
         // Read the location of the first item to discard (at position 'size').
         let discard_location = self.locations.read(size).await?;
 
-        // Rewind locations journal FIRST (opposite order from append!)
-        // This ensures crash-safety: if we crash after locations.rewind() but before
-        // data.rewind(), init() will see locations behind data and repair it by
-        // appending missing location entries. If we did data first, locations would
-        // be ahead (unrecoverable corruption).
+        // Rewind locations first to maintain crash-safety invariant.
         self.locations.rewind(size).await?;
         self.data
             .rewind_to_offset(discard_location.section, discard_location.offset)
