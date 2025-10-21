@@ -53,14 +53,14 @@ impl Write for Message {
 }
 
 impl Read for Message {
-    type Cfg = usize;
+    type Cfg = usize; // max_length
 
-    fn read_cfg(buf: &mut impl Buf, max: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
             PING_MESSAGE_PREFIX => Ok(Message::Ping),
             DATA_MESSAGE_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=*max).into())?;
+                let data = Data::read_cfg(buf, &(..=*max_length).into())?;
                 Ok(Message::Data(data))
             }
             _ => Err(Error::Invalid(

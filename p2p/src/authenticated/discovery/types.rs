@@ -46,18 +46,6 @@ const DATA_PREFIX: u8 = 2;
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
-/// Configuration when deserializing messages.
-///
-/// This is used to limit the size of the messages received from peers.
-#[derive(Clone)]
-pub struct Config {
-    /// The maximum length of a message to read.
-    pub max_length: usize,
-
-    /// The maximum number of peers that can be sent in a `Peers` message.
-    pub max_peers: usize,
-}
-
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
@@ -103,22 +91,25 @@ impl<C: PublicKey> Write for Payload<C> {
 }
 
 impl<C: PublicKey> Read for Payload<C> {
-    type Cfg = Config;
+    type Cfg = (usize, usize); // (max_length, max_peers)
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_length, max_peers): &Self::Cfg,
+    ) -> Result<Self, CodecError> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
                 let index = UInt::read(buf)?.into();
-                let bits = Bytes::read_cfg(buf, &(..=cfg.max_length).into())?;
+                let bits = Bytes::read_cfg(buf, &(..=*max_length).into())?;
                 Ok(Payload::BitVec(BitVec { index, bits }))
             }
             PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_range(buf, ..=cfg.max_peers)?;
+                let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
                 Ok(Payload::Peers(peers))
             }
             DATA_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=cfg.max_length).into())?;
+                let data = Data::read_cfg(buf, &(..=*max_length).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(CodecError::Invalid(
@@ -402,18 +393,13 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = Config {
-            max_length: 100,
-            max_peers: 10,
-        };
-
         // Test BitVec
         let original = BitVec {
             index: 1234,
             bits: BitMap::ones(100).encode().into(),
         };
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &(100, 10)) {
             Ok(Payload::<secp256r1::PublicKey>::BitVec(b)) => b,
             _ => panic!(),
         };
@@ -422,7 +408,7 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &(100, 10)) {
             Ok(Payload::<secp256r1::PublicKey>::Peers(p)) => p,
             _ => panic!(),
         };
@@ -439,7 +425,7 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = Payload::<secp256r1::PublicKey>::Data(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &(100, 10)) {
             Ok(Payload::<secp256r1::PublicKey>::Data(d)) => d,
             _ => panic!(),
         };
@@ -448,12 +434,8 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = Config {
-            max_length: 100,
-            max_peers: 10,
-        };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
+        let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &(100, 10));
         assert!(result.is_err());
     }
 
