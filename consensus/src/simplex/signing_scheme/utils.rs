@@ -27,7 +27,7 @@ impl Signers {
                 "duplicate signer index: {signer}",
             );
             // We opt to not assert order here because some signing schemes allow
-            // for commutative aggregation of signatures (and signing is unnecessary
+            // for commutative aggregation of signatures (and sorting is unnecessary
             // overhead).
 
             bitmap.set(signer as u64, true);
