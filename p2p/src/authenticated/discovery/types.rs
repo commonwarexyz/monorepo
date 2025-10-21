@@ -118,7 +118,7 @@ impl<C: PublicKey> Read for Payload<C> {
             DATA_PREFIX => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..).into())?;
+                let data = Data::read_cfg(buf, &(..=100).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(CodecError::Invalid(
