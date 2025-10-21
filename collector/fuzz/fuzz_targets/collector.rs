@@ -286,7 +286,10 @@ struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let operations = u.arbitrary()?;
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CollectorOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(FuzzInput { seed, operations })
     }
 }
@@ -309,7 +312,7 @@ fn fuzz(input: FuzzInput) {
         }
         assert!(!peers.is_empty(), "no peers");
 
-        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
+        for op in input.operations {
             match op {
                 CollectorOperation::SendRequest {
                     peer_idx,
