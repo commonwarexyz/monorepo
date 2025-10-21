@@ -24,7 +24,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-pub const CHANNEL: u32 = 0;
+pub const CHANNEL: u64 = 0;
 const HEIGHT_OFFSET: u16 = 2;
 
 enum Event<I> {

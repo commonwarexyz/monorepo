@@ -28,7 +28,7 @@ use std::{
 use tracing::debug;
 
 /// The channel to use for all messages
-const DEFAULT_CHANNEL: u32 = 0;
+const DEFAULT_CHANNEL: u64 = 0;
 
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;

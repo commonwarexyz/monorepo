@@ -396,6 +396,10 @@ impl<
                                 }
                             }
                         }
+                        Message::GetFinalization { height, response } => {
+                            let finalization = self.get_finalization_by_height(height).await;
+                            let _ = response.send(finalization);
+                        }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
