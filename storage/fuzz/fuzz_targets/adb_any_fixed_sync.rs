@@ -85,9 +85,19 @@ impl<'a> Arbitrary<'a> for Operation {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Operation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let ops = (0..num_ops)
+            .map(|_| Operation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { ops })
+    }
 }
 
 const PAGE_SIZE: usize = 128;
@@ -161,7 +171,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut sync_id = 0;
 
-        for op in input.ops.iter().take(MAX_OPERATIONS) {
+        for op in &input.ops {
             match op {
                 Operation::Update { key, value } => {
                     db.update(Key::new(*key), Value::new(*value))
