@@ -441,8 +441,14 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ///
     /// This syncs both the data journal and the locations journal.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync all sections in the data journal
-        for &section in self.data.blobs.keys() {
+        // Sync only the current (final) section of the data journal.
+        //
+        // Invariant #1 guarantees that all non-final sections are already synced:
+        // when append() fills a section (size becomes a multiple of items_per_section),
+        // it immediately syncs that section. Therefore, only the current section can
+        // contain unsynced data from recent appends or rewind operations.
+        let section = self.current_section();
+        if self.data.blobs.contains_key(&section) {
             self.data.sync(section).await?;
         }
 
