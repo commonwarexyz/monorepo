@@ -21,7 +21,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -190,7 +190,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            info!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();
@@ -301,6 +301,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
         PrivateKeyExt as _, Signer,
     };
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
     use commonware_stream::{dial, listen, Config as StreamConfig};
     use commonware_utils::NZU32;
@@ -356,7 +357,7 @@ mod tests {
         Bytes::from(payload)
     }
 
-    #[test]
+    #[test_traced]
     #[should_panic]
     fn test_malformed_data_length_panics() {
         let executor = deterministic::Runner::default();
@@ -369,9 +370,12 @@ mod tests {
             let (actor, _control_mailbox, _relay) = Actor::new(context.clone(), cfg);
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
-            context
-                .clone()
-                .spawn(move |_| async move { while tracker_rx.next().await.is_some() {} });
+            context.clone().spawn(move |_| async move {
+                loop {
+                    let result = tracker_rx.next().await.unwrap();
+                    println!("got tracker");
+                }
+            });
 
             let (router_mailbox, mut router_rx) = Mailbox::new(4);
             context
@@ -379,9 +383,12 @@ mod tests {
                 .spawn(move |_| async move { while router_rx.next().await.is_some() {} });
             let messenger = Messenger::new(router_mailbox);
             let (channels, mut channel_rx) = test_channels(messenger);
-            context
-                .clone()
-                .spawn(move |_| async move { while channel_rx.recv().await.is_ok() {} });
+            context.clone().spawn(move |_| async move {
+                loop {
+                    let result = channel_rx.recv().await.unwrap();
+                    println!("got channels");
+                }
+            });
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();

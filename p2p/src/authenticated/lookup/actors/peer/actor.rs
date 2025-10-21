@@ -168,7 +168,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     let msg = match types::Message::decode_cfg(msg, &(..).into()) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            info!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();
