@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, Scheme, SchemeProvider},
+    application::{Block, EpochSchemeProvider, SchemeProvider},
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
@@ -10,6 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
+        signing_scheme::Scheme,
         types::{Context, Voter},
     },
     types::Epoch,
@@ -33,19 +34,20 @@ use std::{collections::HashMap, time::Duration};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A>
+pub struct Config<B, V, C, H, A, S>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    S: Scheme,
 {
     pub oracle: B,
     pub signer: C,
     pub application: A,
-    pub scheme_provider: SchemeProvider<V>,
-    pub marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
+    pub scheme_provider: SchemeProvider<S, C>,
+    pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
@@ -55,7 +57,7 @@ where
     pub partition_prefix: String,
 }
 
-pub struct Actor<E, B, V, C, H, A>
+pub struct Actor<E, B, V, C, H, A, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -63,6 +65,8 @@ where
     C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    S: Scheme,
+    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -70,8 +74,8 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
-    scheme_provider: SchemeProvider<V>,
+    marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    scheme_provider: SchemeProvider<S, C>,
 
     namespace: Vec<u8>,
     muxer_size: usize,
@@ -79,7 +83,7 @@ where
     pool_ref: PoolRef,
 }
 
-impl<E, B, V, C, H, A> Actor<E, B, V, C, H, A>
+impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -87,8 +91,10 @@ where
     C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    S: Scheme,
+    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub fn new(context: E, config: Config<B, V, C, H, A>) -> (Self, Mailbox<V, C::PublicKey>) {
+    pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
@@ -208,7 +214,7 @@ where
                     );
 
                     // Forward the finalization to the sender. This operation is best-effort.
-                    let message = Voter::<Scheme<V>, H::Digest>::Finalization(finalization);
+                    let message = Voter::<S, H::Digest>::Finalization(finalization);
                     if let Err(err) = recovered_global_sender.send(
                         epoch,
                         Recipients::One(from),
@@ -234,11 +240,7 @@ where
                             }
 
                             // Register the new signing scheme with the scheme provider.
-                            let scheme = if let Some(share) = transition.share {
-                                Scheme::<V>::new(transition.participants.as_ref(), &transition.poly, share)
-                            } else {
-                                Scheme::<V>::verifier(transition.participants.as_ref(), &transition.poly)
-                            };
+                            let scheme = self.scheme_provider.scheme_for_epoch(&transition);
                             assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
 
                             // Enter the new epoch.
@@ -279,7 +281,7 @@ where
         &mut self,
         epoch: Epoch,
         participants: Set<C::PublicKey>,
-        scheme: Scheme<V>,
+        scheme: S,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,

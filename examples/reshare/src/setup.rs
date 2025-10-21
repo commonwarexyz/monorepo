@@ -20,7 +20,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use tracing::{error, info};
 
@@ -33,10 +33,10 @@ pub struct ParticipantConfig {
     #[serde(with = "serde_peer_map")]
     pub bootstrappers: HashMap<PublicKey, SocketAddr>,
     /// The group polynomial.
-    pub raw_polynomial: String,
-    /// The validator's p2p private key.
+    pub raw_polynomial: Option<String>,
+    /// The validator's ed25519 signing key.
     #[serde(with = "serde_hex")]
-    pub p2p_key: PrivateKey,
+    pub signing_key: PrivateKey,
     /// The validator's share, if active in the first epoch.
     #[serde(with = "serde_hex")]
     pub share: Option<Share>,
@@ -44,9 +44,22 @@ pub struct ParticipantConfig {
 
 impl ParticipantConfig {
     /// Get the polynomial commitment for the DKG.
-    pub fn polynomial(&self, threshold: u32) -> Public<MinSig> {
-        let bytes = from_hex(&self.raw_polynomial).expect("invalid hex string");
-        Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &(threshold as usize)).unwrap()
+    pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
+        self.raw_polynomial.as_ref().map(|raw| {
+            let bytes = from_hex(raw).expect("invalid hex string");
+            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &(threshold as usize)).unwrap()
+        })
+    }
+
+    /// Update the participant config using the provided closure, then write it back to disk.
+    pub fn update_and_write(mut self, path: &Path, f: impl FnOnce(&mut Self)) {
+        f(&mut self);
+
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&self).expect("failed to serialize participant config"),
+        )
+        .unwrap();
     }
 }
 
@@ -86,12 +99,14 @@ pub fn run(args: super::SetupArgs) {
 
     fs::create_dir_all(&args.datadir).unwrap();
 
-    let (polynomial, identities) =
-        generate_identities(args.num_peers, args.num_participants_per_epoch);
-    let configs = generate_configs(&args, &polynomial, &identities);
+    let (polynomial, identities) = generate_identities(
+        args.with_dkg,
+        args.num_peers,
+        args.num_participants_per_epoch,
+    );
+    let configs = generate_configs(&args, polynomial.as_ref(), &identities);
 
-    println!("\nTo start the validators, run the following command:");
-    let mprocs_cmd = configs
+    let mprocs_validator_cmd = configs
         .into_iter()
         .fold(vec!["mprocs".to_string()], |mut acc, cfg| {
             acc.push(format!(
@@ -102,24 +117,46 @@ pub fn run(args: super::SetupArgs) {
             acc
         })
         .join(" ");
-    println!("\n{mprocs_cmd}");
+
+    if args.with_dkg {
+        println!("\nThe network is configured to use DKG to distribute initial shares.");
+        let mprocs_dkg_cmd = mprocs_validator_cmd.replace("validator", "dkg");
+        println!("\nTo start the DKG process, run the following command:");
+        println!("\n{mprocs_dkg_cmd}");
+        println!("\nOnce the DKG process completes, exit the DKG processes and start the validators with the following command:");
+    } else {
+        println!("\nThe network is configured with a trusted threshold setup.");
+        println!("\nTo start the validators, run the following command:");
+    }
+
+    println!("\n{mprocs_validator_cmd}");
 }
 
 /// Generate shares, ed25519 private keys, and a commitment for a given number of participants.
+#[allow(clippy::type_complexity)]
 fn generate_identities(
+    is_dkg: bool,
     num_peers: u32,
     num_participants_per_epoch: u32,
-) -> (Public<MinSig>, Vec<(PrivateKey, Option<Share>)>) {
+) -> (Option<Public<MinSig>>, Vec<(PrivateKey, Option<Share>)>) {
     // Generate consensus key
     let threshold = quorum(num_participants_per_epoch);
-    let (polynomial, shares) =
-        ops::generate_shares::<_, MinSig>(&mut OsRng, None, num_participants_per_epoch, threshold);
+    let (polynomial, shares) = if is_dkg {
+        (None, Vec::new())
+    } else {
+        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(
+            &mut OsRng,
+            None,
+            num_participants_per_epoch,
+            threshold,
+        );
+        info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
+        (Some(polynomial), shares)
+    };
 
     // Assign shares to peers (those not participating in the first epoch get no share.)
     let mut shares = shares.into_iter().map(Some).collect::<Vec<_>>();
     shares.resize(num_peers as usize, None);
-
-    info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
 
     // Generate p2p private keys
     let mut peer_signers = (0..num_peers)
@@ -136,7 +173,7 @@ fn generate_identities(
 /// Generates all [ParticipantConfig] files from the provided identities.
 fn generate_configs(
     args: &super::SetupArgs,
-    polynomial: &Public<MinSig>,
+    polynomial: Option<&Public<MinSig>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
     let bootstrappers = identities
@@ -158,8 +195,8 @@ fn generate_configs(
         let participant_config = ParticipantConfig {
             port: args.base_port + index as u16,
             bootstrappers: bootstrappers.clone(),
-            raw_polynomial: hex(polynomial.encode().as_ref()),
-            p2p_key: signer.clone(),
+            raw_polynomial: polynomial.map(|polynomial| hex(polynomial.encode().as_ref())),
+            signing_key: signer.clone(),
             share: share.clone(),
         };
         let config_file = File::create(&config_path).unwrap();
@@ -169,18 +206,35 @@ fn generate_configs(
     }
     info!("wrote participant configurations");
 
-    let peers = PeerConfig {
-        num_participants_per_epoch: args.num_participants_per_epoch,
-        active: identities
-            .iter()
-            .filter(|(_, share)| share.is_some())
-            .map(|(signer, _)| signer.public_key())
-            .collect(),
-        inactive: identities
-            .iter()
-            .filter(|(_, share)| share.is_none())
-            .map(|(signer, _)| signer.public_key())
-            .collect(),
+    let peers = if args.with_dkg {
+        PeerConfig {
+            num_participants_per_epoch: args.num_participants_per_epoch,
+            active: identities
+                .iter()
+                .map(|(signer, _)| signer.public_key())
+                .take(args.num_participants_per_epoch as usize)
+                .collect(),
+            inactive: identities
+                .iter()
+                .map(|(signer, _)| signer.public_key())
+                .skip(args.num_participants_per_epoch as usize)
+                .take((args.num_peers - args.num_participants_per_epoch) as usize)
+                .collect(),
+        }
+    } else {
+        PeerConfig {
+            num_participants_per_epoch: args.num_participants_per_epoch,
+            active: identities
+                .iter()
+                .filter(|(_, share)| share.is_some())
+                .map(|(signer, _)| signer.public_key())
+                .collect(),
+            inactive: identities
+                .iter()
+                .filter(|(_, share)| share.is_none())
+                .map(|(signer, _)| signer.public_key())
+                .collect(),
+        }
     };
     let peers_file = File::create(args.datadir.join("peers.json")).unwrap();
     serde_json::to_writer_pretty(peers_file, &peers).unwrap();

@@ -2,9 +2,10 @@ use super::{Mailbox, Message};
 use crate::{
     dkg::{manager::RoundResult, DealOutcome, DkgManager},
     orchestrator::{self, EpochTransition},
+    setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{varint::UInt, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
@@ -20,7 +21,7 @@ use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    quorum,
+    hex, quorum,
     sequence::{FixedBytes, U64},
     set::Set,
 };
@@ -33,12 +34,14 @@ use rand::{
     SeedableRng,
 };
 use rand_core::CryptoRngCore;
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 use tracing::info;
 
 const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
 
 pub struct Config<C> {
+    pub is_dkg: bool,
+    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
     pub num_participants_per_epoch: usize,
@@ -56,6 +59,8 @@ where
     V: Variant,
 {
     context: ContextCell<E>,
+    is_dkg: bool,
+    participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
@@ -112,6 +117,8 @@ where
         (
             Self {
                 context,
+                is_dkg: config.is_dkg,
+                participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
                 signer: config.signer,
@@ -128,7 +135,7 @@ where
     /// Start the DKG actor.
     pub fn start(
         mut self,
-        initial_public: Public<V>,
+        initial_public: Option<Public<V>>,
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
@@ -157,7 +164,7 @@ where
 
     async fn run(
         mut self,
-        initial_public: Public<V>,
+        initial_public: Option<Public<V>>,
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
@@ -186,12 +193,17 @@ where
                 (0, initial_public, initial_share)
             };
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let (active_participants, inactive_participants) = Self::select_participants(
+        let (active_participants, mut inactive_participants) = Self::select_participants(
             current_epoch,
             self.num_participants_per_epoch,
             active_participants,
             inactive_participants,
         );
+
+        // If we're performing DKG, dealers == players.
+        if self.is_dkg {
+            inactive_participants = active_participants.clone();
+        }
 
         // Inform the orchestrator of the epoch transition
         let active_participants = Set::from_iter(active_participants);
@@ -301,9 +313,12 @@ where
                                     next_participants,
                                     RoundResult::Output(Output { public, share }),
                                     success,
-                                ) => (next_participants, public, Some(share), success),
+                                ) => (next_participants, Some(public), Some(share), success),
                                 (next_participants, RoundResult::Polynomial(public), success) => {
-                                    (next_participants, public, None, success)
+                                    (next_participants, Some(public), None, success)
+                                }
+                                (next_participants, RoundResult::None, success) => {
+                                    (next_participants, None, None, success)
                                 }
                             };
 
@@ -340,15 +355,44 @@ where
                                 .expect("metadata must sync");
                         }
 
-                        // Pseudorandomly select some random players to receive shares for the next epoch.
-                        let next_players = Set::from_iter(
-                            Self::choose_from_all(
-                                &all_participants,
-                                self.num_participants_per_epoch,
-                                next_epoch,
+                        // If the DKG succeeded, exit.
+                        if self.is_dkg && next_public.is_some() {
+                            // Dump the share and group polynomial to disk.
+                            let self_idx = all_participants
+                                .position(&self.signer.public_key())
+                                .expect("self must be a participant");
+
+                            if let Some((path, config)) = self.participant_config.take() {
+                                config.update_and_write(path.as_path(), |config| {
+                                    config.raw_polynomial =
+                                        next_public.map(|p| hex(p.encode().as_ref()));
+                                    config.share = next_share;
+                                });
+                            }
+
+                            info!(
+                                participant = self_idx,
+                                "dkg completed successfully, persisted outcome."
+                            );
+
+                            break;
+                        }
+
+                        let next_players = if self.is_dkg {
+                            // Use the same set of participants for DKG - if we enter a new epoch,
+                            // the DKG failed, and we do not want to change the set of participants.
+                            next_participants.clone()
+                        } else {
+                            // Pseudorandomly select some random players to receive shares for the next epoch.
+                            Set::from_iter(
+                                Self::choose_from_all(
+                                    &all_participants,
+                                    self.num_participants_per_epoch,
+                                    next_epoch,
+                                )
+                                .into_iter(),
                             )
-                            .into_iter(),
-                        );
+                        };
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
@@ -387,6 +431,19 @@ where
                     info!(epoch, relative_height, "finalized block");
                 }
             }
+        }
+
+        // If the initial DKG was just performed, keep running until forcible exit.
+        if self.is_dkg {
+            // Close the mailbox to prevent accepting any new messages.
+            drop(self.mailbox);
+
+            // Keep running until killed to keep the orchestrator mailbox alive, allowing
+            // peers that may have gone offline to catch up.
+            //
+            // The initial DKG process will never be exited automatically, assuming coordination
+            // between participants is manual.
+            futures::future::pending::<()>().await;
         }
 
         info!("mailbox closed, exiting.");
@@ -468,7 +525,7 @@ where
 #[derive(Clone)]
 struct EpochState<V: Variant> {
     epoch: u64,
-    public: Public<V>,
+    public: Option<Public<V>>,
     share: Option<Share>,
 }
 
@@ -495,7 +552,7 @@ impl<V: Variant> Read for EpochState<V> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             epoch: UInt::read(buf)?.into(),
-            public: Public::<V>::read_cfg(buf, cfg)?,
+            public: Option::<Public<V>>::read_cfg(buf, cfg)?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })
     }
