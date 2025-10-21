@@ -47,11 +47,6 @@ impl SignersBitMap {
         self.bitmap.count_ones() as usize
     }
 
-    /// Returns `true` when no signers are recorded.
-    pub fn is_empty(&self) -> bool {
-        self.count() == 0
-    }
-
     /// Iterates over signer indices in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.bitmap
@@ -93,7 +88,6 @@ mod tests {
         let collected: Vec<_> = signers.iter().collect();
         assert_eq!(collected, vec![0, 3, 5]);
         assert_eq!(signers.count(), 3);
-        assert!(!signers.is_empty());
     }
 
     #[test]

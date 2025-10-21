@@ -100,7 +100,7 @@ impl<V: Variant> Read for Certificate<V> {
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
         let signers = SignersBitMap::read_cfg(reader, participants)?;
 
-        if signers.is_empty() {
+        if signers.count() == 0 {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::bls12381_multisig::Certificate",
                 "Certificate contains no signers",
