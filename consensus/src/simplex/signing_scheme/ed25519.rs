@@ -2,7 +2,7 @@
 
 use crate::{
     simplex::{
-        signing_scheme::{self, vote_namespace_and_message},
+        signing_scheme::{self, utils::SignersBitMap, vote_namespace_and_message},
         types::{Participants, Vote, VoteContext, VoteVerification},
     },
     types::Round,
@@ -60,24 +60,17 @@ impl Scheme {
         certificate: &'a Certificate,
     ) -> bool {
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.len() < self.participants.quorum() as usize {
+        if certificate.signers.count() < self.participants.quorum() as usize {
             return false;
         }
-        if certificate.signers.len() != certificate.signatures.len() {
-            return false;
-        }
-        if certificate
-            .signers
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        {
+        if certificate.signers.count() != certificate.signatures.len() {
             return false;
         }
 
         // Add the certificate to the batch.
         let (namespace, message) = vote_namespace_and_message(namespace, context);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(*signer) else {
+            let Some(public_key) = self.participants.get(signer) else {
                 return false;
             };
 
@@ -96,9 +89,9 @@ impl Scheme {
 /// Certificate formed by collecting Ed25519 signatures plus their signer indices sorted in ascending order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
-    /// Indices of the validators that contributed signatures (ascending order).
-    pub signers: Vec<u32>,
-    /// Ed25519 signatures emitted by the respective validators.
+    /// Bitmap of validator indices that contributed signatures.
+    pub signers: SignersBitMap,
+    /// Ed25519 signatures emitted by the respective validators ordered by signer index.
     pub signatures: Vec<Ed25519Signature>,
 }
 
@@ -119,7 +112,7 @@ impl Read for Certificate {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = Vec::<u32>::read_range(reader, ..=*participants)?;
+        let signers = SignersBitMap::read_cfg(reader, participants)?;
 
         if signers.is_empty() {
             return Err(Error::Invalid(
@@ -130,37 +123,17 @@ impl Read for Certificate {
 
         let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
 
-        if signers.len() != signatures.len() {
+        if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::ed25519::Certificate",
                 "Signers and signatures counts differ",
             ));
         }
 
-        if signers.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::ed25519::Certificate",
-                "Signatures are not sorted by public key index",
-            ));
-        }
-
-        let certificate = Self {
+        Ok(Self {
             signers,
             signatures,
-        };
-
-        if certificate
-            .signers
-            .iter()
-            .any(|signer| (*signer as usize) >= *participants)
-        {
-            return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::ed25519::Certificate",
-                "Signer index exceeds participant set",
-            ));
-        }
-
-        Ok(certificate)
+        })
     }
 }
 
@@ -275,7 +248,9 @@ impl signing_scheme::Scheme for Scheme {
 
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
-        let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+
+        let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
+        let signers = SignersBitMap::from_signers(self.participants.len(), signer)?;
 
         Some(Certificate {
             signers,
@@ -465,7 +440,22 @@ mod tests {
         assert!(verification.invalid_signers.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
+        // Invalid signer index should be detected.
         votes[0].signer = 999;
+        let verification = scheme.verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes.clone(),
+        );
+        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.verified.len(), quorum - 1);
+
+        // Invalid signature should be detected.
+        votes[0].signer = 0;
+        votes[0].signature = votes[1].signature.clone();
         let verification = scheme.verify_votes(
             &mut thread_rng(),
             NAMESPACE,
@@ -474,7 +464,7 @@ mod tests {
             },
             votes,
         );
-        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.invalid_signers, vec![0]);
         assert_eq!(verification.verified.len(), quorum - 1);
     }
 
@@ -513,7 +503,10 @@ mod tests {
         let certificate = schemes[0]
             .assemble_certificate(votes)
             .expect("assemble certificate");
-        assert_eq!(certificate.signers, vec![0, 1, 2]);
+        assert_eq!(
+            certificate.signers.iter().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -561,6 +554,32 @@ mod tests {
         votes[0].signer = 42;
 
         assert!(schemes[0].assemble_certificate(votes).is_none());
+    }
+
+    #[test]
+    fn test_assemble_certificate_rejects_duplicate_signers() {
+        let (schemes, _) = schemes(4);
+        let proposal = sample_proposal(0, 25, 13);
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        votes.push(votes.last().unwrap().clone());
+
+        let certificate = schemes[0].assemble_certificate(votes);
+        assert!(certificate.is_none());
     }
 
     #[test]
@@ -670,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_certificate_decode_checks_sorted_unique_signers() {
+    fn test_certificate_decode_validation() {
         let (schemes, participants) = schemes(4);
         let proposal = sample_proposal(0, 19, 10);
 
@@ -700,31 +719,31 @@ mod tests {
             Certificate::read_cfg(&mut cursor, &participants.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
 
-        // Duplicate signer indices fail to decode.
-        let duplicate = Certificate {
-            signers: vec![0, 0],
-            signatures: vec![
-                certificate.signatures[0].clone(),
-                certificate.signatures[0].clone(),
-            ],
+        // Certificate with no signers is rejected.
+        let empty = Certificate {
+            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>())
+                .unwrap(),
+            signatures: Vec::new(),
         };
-        let mut dup_bytes = Vec::new();
-        duplicate.write(&mut dup_bytes);
-        let mut dup_slice = dup_bytes.as_slice();
-        assert!(Certificate::read_cfg(&mut dup_slice, &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(empty.encode(), &participants.len()).is_err());
 
-        // Unsorted signer indices fail to decode.
-        let unsorted = Certificate {
-            signers: vec![1, 0],
-            signatures: vec![
-                certificate.signatures[1].clone(),
-                certificate.signatures[0].clone(),
-            ],
+        // Certificate with mismatched signature count is rejected.
+        let mismatched = Certificate {
+            signers: SignersBitMap::from_signers(participants.len(), [0u32, 1]).unwrap(),
+            signatures: vec![certificate.signatures[0].clone()],
         };
-        let mut unsorted_bytes = Vec::new();
-        unsorted.write(&mut unsorted_bytes);
-        let mut unsorted_slice = unsorted_bytes.as_slice();
-        assert!(Certificate::read_cfg(&mut unsorted_slice, &participants.len()).is_err());
+        assert!(Certificate::decode_cfg(mismatched.encode(), &participants.len()).is_err());
+
+        // Certificate containing more signers than the participant set is rejected.
+        let mut signers = certificate.signers.iter().collect::<Vec<_>>();
+        signers.push(participants.len() as u32);
+        let mut signatures = certificate.signatures.clone();
+        signatures.push(certificate.signatures[0].clone());
+        let extended = Certificate {
+            signers: SignersBitMap::from_signers(participants.len() + 1, signers).unwrap(),
+            signatures,
+        };
+        assert!(Certificate::decode_cfg(extended.encode(), &participants.len()).is_err());
     }
 
     #[test]
@@ -787,7 +806,9 @@ mod tests {
             .expect("assemble certificate");
 
         let mut truncated = certificate.clone();
-        truncated.signers.pop();
+        let mut signers: Vec<u32> = truncated.signers.iter().collect();
+        signers.pop();
+        truncated.signers = SignersBitMap::from_signers(participants.len(), signers).unwrap();
         truncated.signatures.pop();
 
         let verifier = Scheme::verifier(participants);
@@ -821,48 +842,16 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
-
-        let mut invalid = certificate.clone();
-        invalid.signers[0] = participants.len() as u32;
-
-        let verifier = Scheme::verifier(participants);
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            VoteContext::Finalize {
-                proposal: &proposal,
-            },
-            &invalid,
-        ));
-    }
-
-    #[test]
-    fn test_verify_certificate_rejects_duplicate_signers() {
-        let (schemes, participants) = schemes(4);
-        let proposal = sample_proposal(0, 25, 13);
-
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        VoteContext::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
         let mut certificate = schemes[0]
             .assemble_certificate(votes)
             .expect("assemble certificate");
-        certificate.signers[1] = certificate.signers[0];
+
+        let mut signers: Vec<u32> = certificate.signers.iter().collect();
+        signers.push(participants.len() as u32);
+        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers).unwrap();
+        certificate
+            .signatures
+            .push(certificate.signatures[0].clone());
 
         let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(

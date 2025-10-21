@@ -6,9 +6,8 @@ use commonware_utils::bitmap::BitMap;
 
 /// Bitmap wrapper that tracks which validators signed a certificate.
 ///
-/// Construct instances with [`SignersBitMap::from_signers`] to ensure indices stay sorted and
-/// the encoded form remains minimal. Internally it stores bits in 1-byte chunks for the most
-/// compact encoding.
+/// Construct instances with [`SignersBitMap::from_signers`] to ensure the encoded form
+/// remains minimal. Internally it stores bits in 1-byte chunks for compact encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignersBitMap {
     bitmap: BitMap<1>,
@@ -18,8 +17,9 @@ impl SignersBitMap {
     /// Builds a bitmap from an iterator of signer indices.
     ///
     /// The caller must provide indices in strictly increasing order with no duplicates.
-    /// Returns `None` if the sequence violates that contract or contains indices outside the
-    /// participant set. The resulting bitmap is truncated to the highest signer index.
+    /// Returns `None` if the sequence violates that contract or contains indices outside
+    /// the participant set. The resulting bitmap is truncated to the highest signer index
+    /// to minimize encoding size and ensure a canonical representation.
     pub fn from_signers(
         participants: usize,
         signers: impl IntoIterator<Item = u32>,
