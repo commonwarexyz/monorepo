@@ -740,6 +740,7 @@ impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V>
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
+    use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
@@ -810,7 +811,7 @@ mod tests {
     /// When the locations partition is completely lost and the data has been pruned, we cannot
     /// rebuild the index with correct position alignment (would require creating placeholder blobs).
     /// This is a genuine external failure that should be detected and reported clearly.
-    #[test]
+    #[test_traced]
     fn test_variable_locations_partition_loss_after_prune_unrecoverable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -860,7 +861,7 @@ mod tests {
     /// 2. External data partition loss
     ///
     /// In both cases, we repair by pruning locations to match.
-    #[test]
+    #[test_traced]
     fn test_variable_repair_data_locations_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -923,7 +924,7 @@ mod tests {
     /// Test that init rejects when partition and locations_partition are the same.
     ///
     /// This prevents blob name collisions between data and locations journals.
-    #[test]
+    #[test_traced]
     fn test_variable_reject_same_partitions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -948,7 +949,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -976,7 +977,7 @@ mod tests {
     }
 
     /// Test multiple sequential prunes with Variable-specific guarantees.
-    #[test]
+    #[test_traced]
     fn test_variable_multiple_sequential_prunes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1065,7 +1066,7 @@ mod tests {
     }
 
     /// Test that pruning all data and re-initializing preserves positions.
-    #[test]
+    #[test_traced]
     fn test_variable_prune_all_then_reinit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1150,7 +1151,7 @@ mod tests {
     ///
     /// Verifies that replay errors (e.g., checksum failures, truncated data) are
     /// properly propagated during init() rather than being silently ignored.
-    #[test]
+    #[test_traced]
     fn test_variable_init_detects_last_section_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1196,7 +1197,7 @@ mod tests {
     }
 
     /// Test recovery from crash after data journal pruned but before locations journal.
-    #[test]
+    #[test_traced]
     fn test_variable_recovery_prune_crash_locations_behind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1258,7 +1259,7 @@ mod tests {
     ///
     /// Simulates an impossible state (locations journal pruned more than data journal) which
     /// should never happen due to write ordering. Verifies that init() returns corruption error.
-    #[test]
+    #[test_traced]
     fn test_variable_recovery_locations_ahead_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1295,7 +1296,7 @@ mod tests {
     }
 
     /// Test recovery from crash after appending to data journal but before appending to locations journal.
-    #[test]
+    #[test_traced]
     fn test_variable_recovery_append_crash_locations_behind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1351,7 +1352,7 @@ mod tests {
     }
 
     /// Test recovery from multiple prune operations with crash.
-    #[test]
+    #[test_traced]
     fn test_variable_recovery_multiple_prunes_crash() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1419,7 +1420,7 @@ mod tests {
     /// This creates a situation where locations journal has been rewound but data journal still
     /// contains items across multiple sections. Verifies that init() correctly rebuilds the
     /// locations index across all sections to match the data journal.
-    #[test]
+    #[test_traced]
     fn test_variable_recovery_rewind_crash_multi_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1479,7 +1480,7 @@ mod tests {
     }
 
     /// Test that locations index is rebuilt from data after sync_data + crash.
-    #[test]
+    #[test_traced]
     fn test_variable_sync_data_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -61,11 +61,12 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Contiguous
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
+    use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
 
-    #[test]
+    #[test_traced]
     fn test_fixed_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
