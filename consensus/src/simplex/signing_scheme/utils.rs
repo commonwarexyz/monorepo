@@ -67,6 +67,9 @@ impl Read for Signers {
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
         let bitmap = BitMap::read_cfg(reader, &(*participants as u64))?;
+        if bitmap.len() != *participants as u64 {
+            return Err(Error::Invalid("Signers", "Invalid number of participants"));
+        }
         Ok(Self { bitmap })
     }
 }
@@ -113,11 +116,11 @@ mod tests {
     fn test_decode_respects_participant_limit() {
         let signers = Signers::from(8, [0, 3, 7]);
         let encoded = signers.encode();
-        // Fewer participants than expected should fail.
+        // More participants than expected should fail.
         assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
         // Exact participant bound succeeds.
         assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
-        // More participants than expected should succeed.
-        assert!(Signers::decode_cfg(encoded, &10).is_ok());
+        // Less participants than expected should fail.
+        assert!(Signers::decode_cfg(encoded.clone(), &10).is_err());
     }
 }
