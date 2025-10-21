@@ -113,11 +113,11 @@ mod tests {
     fn test_decode_respects_participant_limit() {
         let signers = Signers::from(8, [0, 3, 7]);
         let encoded = signers.encode();
-        // Fewer participants than highest signer should fail.
+        // Fewer participants than expected should fail.
         assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
         // Exact participant bound succeeds.
         assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
-        // As well as higher participant bound.
+        // More participants than expected should succeed.
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 }
