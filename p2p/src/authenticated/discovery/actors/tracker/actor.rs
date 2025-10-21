@@ -226,7 +226,7 @@ mod tests {
             discovery::{
                 actors::{peer, tracker},
                 config::Bootstrapper,
-                types,
+                types::{self, BitMap},
             },
             Mailbox,
         },
@@ -239,7 +239,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, NZU32};
+    use commonware_utils::NZU32;
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -484,10 +484,7 @@ mod tests {
 
             // Peer lets us know it received a bit vector
             mailbox.bit_vec(
-                types::BitVec {
-                    index: 99,
-                    bits: BitMap::<1>::ones(1).encode().into(),
-                },
+                types::BitVec::new(99, BitMap::ones(1)),
                 peer_mailbox_pk1.clone(),
             );
 
@@ -624,18 +621,12 @@ mod tests {
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
             // Act as if pk1 received a bit vector where pk2 is not known.
-            let mut bv = BitMap::<1>::zeroes(set1.len() as u64);
+            let mut bv = BitMap::zeroes(set1.len() as u64);
             let idx_tracker_in_set1 = set1.iter().position(|p| p == &tracker_pk).unwrap();
             let idx_pk1_in_set1 = set1.iter().position(|p| p == &pk1).unwrap();
             bv.set(idx_tracker_in_set1 as u64, true);
             bv.set(idx_pk1_in_set1 as u64, true);
-            mailbox.bit_vec(
-                types::BitVec {
-                    index: 1,
-                    bits: bv.encode().into(),
-                },
-                peer_mailbox_s1.clone(),
-            );
+            mailbox.bit_vec(types::BitVec::new(1, bv), peer_mailbox_s1.clone());
             match peer_receiver_s1.next().await {
                 Some(peer::Message::Peers(received_peers_info)) => {
                     assert_eq!(received_peers_info.len(), 1);
@@ -707,7 +698,7 @@ mod tests {
 
             let mut sorted_set0_peers = peer_set_0_peers.clone();
             sorted_set0_peers.sort();
-            let mut knowledge_for_set0 = BitMap::<1>::zeroes(sorted_set0_peers.len() as u64);
+            let mut knowledge_for_set0 = BitMap::zeroes(sorted_set0_peers.len() as u64);
             let idx_tracker_in_set0 = sorted_set0_peers
                 .iter()
                 .position(|p| p == &tracker_pk)
@@ -717,10 +708,7 @@ mod tests {
             knowledge_for_set0.set(idx_pk1_in_set0 as u64, true);
 
             mailbox.bit_vec(
-                types::BitVec {
-                    index: 0,
-                    bits: knowledge_for_set0.encode().into(),
-                },
+                types::BitVec::new(0, knowledge_for_set0),
                 peer_mailbox_s1.clone(),
             );
 
@@ -874,13 +862,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            mailbox.bit_vec(
-                types::BitVec {
-                    index: 0,
-                    bits: BitMap::<1>::ones(2).encode().into(),
-                },
-                peer_mailbox.clone(),
-            );
+            mailbox.bit_vec(types::BitVec::new(0, BitMap::ones(2)), peer_mailbox.clone());
             assert!(matches!(
                 peer_receiver.next().await,
                 Some(peer::Message::Kill)
@@ -928,7 +910,7 @@ mod tests {
                 _ => panic!("Expected BitVec for set 0"),
             };
             assert_eq!(bit_vec0.index, 0);
-            let bit_vec0_bits = bit_vec0.consume(set0_peers.len() as u64).unwrap();
+            let bit_vec0_bits = bit_vec0.extract(set0_peers.len() as u64).unwrap();
             assert_eq!(bit_vec0_bits.len(), set0_peers.len() as u64);
             let tracker_idx_s0 = set0_peers.iter().position(|p| p == &tracker_pk).unwrap();
             assert!(
@@ -955,7 +937,7 @@ mod tests {
                 Some(peer::Message::BitVec(bv)) => bv,
                 _ => panic!("Expected updated BitVec for set 0"),
             };
-            let bit_vec0_updated_bits = bit_vec0_updated.consume(set0_peers.len() as u64).unwrap();
+            let bit_vec0_updated_bits = bit_vec0_updated.extract(set0_peers.len() as u64).unwrap();
             let peer1_idx_s0 = set0_peers.iter().position(|p| p == &peer1_pk).unwrap();
             assert!(bit_vec0_updated_bits.get(tracker_idx_s0 as u64));
             assert!(
@@ -965,13 +947,10 @@ mod tests {
 
             // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
             // Tracker should respond with Info for peer1_pk (as it just learned it)
-            let mut peer1_knowledge_s0 = BitMap::<1>::zeroes(set0_peers.len() as u64);
+            let mut peer1_knowledge_s0 = BitMap::zeroes(set0_peers.len() as u64);
             peer1_knowledge_s0.set(tracker_idx_s0 as u64, true); // Peer1 knows tracker
             mailbox.bit_vec(
-                types::BitVec {
-                    index: 0,
-                    bits: peer1_knowledge_s0.encode().into(),
-                },
+                types::BitVec::new(0, peer1_knowledge_s0),
                 peer_mailbox1.clone(),
             );
 

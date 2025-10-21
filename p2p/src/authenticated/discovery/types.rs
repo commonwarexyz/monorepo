@@ -44,7 +44,7 @@ const PEERS_PREFIX: u8 = 1;
 const DATA_PREFIX: u8 = 2;
 
 // Use chunk size of 1 to minimize encoded size.
-type BitMap = commonware_utils::bitmap::BitMap<1>;
+pub type BitMap = commonware_utils::bitmap::BitMap<1>;
 
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
@@ -133,7 +133,14 @@ pub struct BitVec {
 }
 
 impl BitVec {
-    pub fn consume(self, max_length: u64) -> Option<BitMap> {
+    pub fn new(index: u64, bit_map: BitMap) -> Self {
+        Self {
+            index,
+            bits: bit_map.encode().into(),
+        }
+    }
+
+    pub fn extract(&self, max_length: u64) -> Option<BitMap> {
         BitMap::decode_cfg(&self.bits[..], &max_length).ok()
     }
 }
@@ -360,10 +367,7 @@ mod tests {
 
     #[test]
     fn test_bit_vec_codec() {
-        let original = BitVec {
-            index: 1234,
-            bits: BitMap::ones(71).encode().into(),
-        };
+        let original = BitVec::new(1234, BitMap::ones(71));
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
 
@@ -394,10 +398,7 @@ mod tests {
     fn test_payload_codec() {
         // Config for the codec
         // Test BitVec
-        let original = BitVec {
-            index: 1234,
-            bits: BitMap::ones(100).encode().into(),
-        };
+        let original = BitVec::new(1234, BitMap::ones(100));
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &(100, 10)) {
             Ok(Payload::<secp256r1::PublicKey>::BitVec(b)) => b,

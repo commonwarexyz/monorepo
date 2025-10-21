@@ -234,10 +234,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns a [types::BitVec] for a random peer set.
     pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
         let (&index, set) = self.sets.iter().choose(&mut self.context)?;
-        Some(types::BitVec {
-            index,
-            bits: set.knowledge().encode().into(),
-        })
+        Some(types::BitVec::new(index, set.knowledge()))
     }
 
     /// Attempt to block a peer, updating the metrics accordingly.
@@ -266,7 +263,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         };
 
         // Parse BitMap
-        let Some(bit_map) = bit_vec.consume(set.len() as u64) else {
+        let Some(bit_map) = bit_vec.extract(set.len() as u64) else {
             debug!(index, "failed to parse bit map");
             return None;
         };
