@@ -86,7 +86,7 @@ impl Scheme {
     }
 }
 
-/// Certificate formed by collecting Ed25519 signatures plus their signer indices sorted in ascending order.
+/// Certificate formed by collecting Ed25519 signatures plus their signer indices.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.

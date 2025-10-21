@@ -2,13 +2,13 @@
 
 use crate::{
     simplex::{
-        signing_scheme::{self, vote_namespace_and_message},
+        signing_scheme::{self, utils::SignersBitMap, vote_namespace_and_message},
         types::{Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Private,
@@ -71,11 +71,12 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
-/// Certificate formed from a collection of signers and an aggregated BLS12-381 signature.
+/// Certificate formed by an aggregated BLS12-381 signature plus the signers that
+/// contributed to it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
-    /// Indices of the validators that contributed signatures (ascending order).
-    pub signers: Vec<u32>,
+    /// Bitmap of validator indices that contributed signatures.
+    pub signers: SignersBitMap,
     /// Aggregated BLS signature covering all votes in this certificate.
     pub signature: V::Signature,
 }
@@ -97,29 +98,12 @@ impl<V: Variant> Read for Certificate<V> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = Vec::<u32>::read_range(reader, ..=*participants)?;
+        let signers = SignersBitMap::read_cfg(reader, participants)?;
 
         if signers.is_empty() {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::bls12381_multisig::Certificate",
                 "Certificate contains no signers",
-            ));
-        }
-
-        if signers.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::bls12381_multisig::Certificate",
-                "Signers are not strictly increasing",
-            ));
-        }
-
-        if signers
-            .iter()
-            .any(|signer| (*signer as usize) >= *participants)
-        {
-            return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::bls12381_multisig::Certificate",
-                "Signer index exceeds participant set",
             ));
         }
 
@@ -255,7 +239,9 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
         // Sort the signers and aggregate the signatures.
         entries.sort_by_key(|(signer, _)| *signer);
+
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let signers = SignersBitMap::from_signers(self.participants.len(), signers)?;
         let signature = aggregate_signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
@@ -269,23 +255,16 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         certificate: &Self::Certificate,
     ) -> bool {
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.len() < self.quorum as usize {
+        if certificate.signers.count() < self.quorum as usize {
             return false;
         }
 
         // Collect the public keys.
-        let mut last_signer = None;
-        let mut publics = Vec::with_capacity(certificate.signers.len());
-        for signer in &certificate.signers {
-            let Some(public_key) = self.participant(*signer) else {
+        let mut publics = Vec::with_capacity(certificate.signers.count());
+        for signer in certificate.signers.iter() {
+            let Some(public_key) = self.participant(signer) else {
                 return false;
             };
-            if let Some(last_signer) = last_signer {
-                if last_signer >= *signer {
-                    return false;
-                }
-            }
-            last_signer = Some(*signer);
 
             publics.push(*public_key);
         }
@@ -324,7 +303,7 @@ mod tests {
         },
         types::Round,
     };
-    use commonware_codec::{Decode, Encode, Write};
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element},
@@ -486,7 +465,22 @@ mod tests {
         assert!(verification.invalid_signers.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
+        // Invalid signer index should be detected.
         votes[0].signer = 999;
+        let verification = schemes[0].verify_votes(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            votes.clone(),
+        );
+        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.verified.len(), quorum - 1);
+
+        // Invalid signature should be detected.
+        votes[0].signer = 0;
+        votes[0].signature = votes[1].signature;
         let verification = schemes[0].verify_votes(
             &mut thread_rng(),
             NAMESPACE,
@@ -495,7 +489,7 @@ mod tests {
             },
             votes,
         );
-        assert_eq!(verification.invalid_signers, vec![999]);
+        assert_eq!(verification.invalid_signers, vec![0]);
         assert_eq!(verification.verified.len(), quorum - 1);
     }
 
@@ -539,10 +533,11 @@ mod tests {
         let certificate = schemes[0]
             .assemble_certificate(votes)
             .expect("assemble certificate");
-        assert_eq!(certificate.signers.len(), 3);
-        let mut sorted = certificate.signers.clone();
-        sorted.sort();
-        assert_eq!(certificate.signers, sorted);
+        assert_eq!(certificate.signers.count(), 3);
+        assert_eq!(
+            certificate.signers.iter().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -929,7 +924,9 @@ mod tests {
             .expect("assemble certificate");
 
         let mut truncated = certificate.clone();
-        truncated.signers.pop();
+        let mut signers: Vec<u32> = truncated.signers.iter().collect();
+        signers.pop();
+        truncated.signers = SignersBitMap::from_signers(participants.len(), signers).unwrap();
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -946,47 +943,6 @@ mod tests {
     fn test_verify_certificate_rejects_sub_quorum() {
         verify_certificate_rejects_sub_quorum::<MinPk>();
         verify_certificate_rejects_sub_quorum::<MinSig>();
-    }
-
-    fn verify_certificate_rejects_duplicate_signers<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
-        let proposal = sample_proposal(0, 19, 10);
-
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(quorum(schemes.len() as u32) as usize)
-            .map(|scheme| {
-                scheme
-                    .sign_vote(
-                        NAMESPACE,
-                        VoteContext::Finalize {
-                            proposal: &proposal,
-                        },
-                    )
-                    .unwrap()
-            })
-            .collect();
-
-        let mut certificate = schemes[0]
-            .assemble_certificate(votes)
-            .expect("assemble certificate");
-        certificate.signers[1] = certificate.signers[0];
-
-        let verifier = Scheme::<V>::verifier(participants);
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            VoteContext::Finalize {
-                proposal: &proposal,
-            },
-            &certificate,
-        ));
-    }
-
-    #[test]
-    fn test_verify_certificate_rejects_duplicate_signers() {
-        verify_certificate_rejects_duplicate_signers::<MinPk>();
-        verify_certificate_rejects_duplicate_signers::<MinSig>();
     }
 
     fn verify_certificate_rejects_unknown_signer<V: Variant>() {
@@ -1008,12 +964,13 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
+        let mut certificate = schemes[0]
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let mut invalid = certificate.clone();
-        invalid.signers[0] = participants.len() as u32;
+        let mut signers: Vec<u32> = certificate.signers.iter().collect();
+        signers.push(participants.len() as u32);
+        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers).unwrap();
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -1022,7 +979,7 @@ mod tests {
             VoteContext::Finalize {
                 proposal: &proposal,
             },
-            &invalid,
+            &certificate,
         ));
     }
 
@@ -1055,29 +1012,29 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
+        // Well-formed certificate decodes successfully.
         let encoded = certificate.encode();
         let mut cursor = &encoded[..];
         let decoded = Certificate::<V>::read_cfg(&mut cursor, &participants.len())
             .expect("decode certificate");
         assert_eq!(decoded, certificate);
 
-        let duplicate = Certificate::<V> {
-            signers: vec![0, 0],
+        // Certificate with no signers is rejected.
+        let empty = Certificate::<V> {
+            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>())
+                .unwrap(),
             signature: certificate.signature,
         };
-        let mut dup_bytes = Vec::new();
-        duplicate.write(&mut dup_bytes);
-        let mut dup_slice = dup_bytes.as_slice();
-        assert!(Certificate::<V>::read_cfg(&mut dup_slice, &participants.len()).is_err());
+        assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants.len()).is_err());
 
-        let unsorted = Certificate::<V> {
-            signers: vec![1, 0],
+        // Certificate containing more signers than the participant set is rejected.
+        let mut signers = certificate.signers.iter().collect::<Vec<_>>();
+        signers.push(participants.len() as u32);
+        let extended = Certificate::<V> {
+            signers: SignersBitMap::from_signers(participants.len() + 1, signers).unwrap(),
             signature: certificate.signature,
         };
-        let mut unsorted_bytes = Vec::new();
-        unsorted.write(&mut unsorted_bytes);
-        let mut unsorted_slice = unsorted_bytes.as_slice();
-        assert!(Certificate::<V>::read_cfg(&mut unsorted_slice, &participants.len()).is_err());
+        assert!(Certificate::<V>::decode_cfg(extended.encode(), &participants.len()).is_err());
     }
 
     #[test]
