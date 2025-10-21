@@ -7,6 +7,7 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
     Mailbox,
 };
+use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::channel::oneshot;
 
@@ -55,7 +56,8 @@ pub enum Message<C: PublicKey> {
     /// The tracker will construct a [types::Payload::Peers] message in response.
     BitVec {
         /// The bit vector received.
-        bit_vec: types::BitVec,
+        index: u64,
+        bits: Bytes,
 
         /// The mailbox of the peer actor.
         peer: Mailbox<peer::Message<C>>,
@@ -135,8 +137,8 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `BitVec` message to the tracker.
-    pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).unwrap();
+    pub fn bit_vec(&mut self, index: u64, bits: Bytes, peer: Mailbox<peer::Message<C>>) {
+        self.send(Message::BitVec { index, bits, peer }).unwrap();
     }
 
     /// Send a `Peers` message to the tracker.

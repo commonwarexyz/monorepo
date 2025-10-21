@@ -4,9 +4,11 @@ use crate::authenticated::discovery::{
     metrics,
     types::{self, Info},
 };
+use bytes::Bytes;
+use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{bitmap::BitMap, SystemTimeExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -256,27 +258,32 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
-        let Some(set) = self.sets.get(&bit_vec.index) else {
+    pub fn infos(&self, index: u64, mut bits: Bytes) -> Option<Vec<types::Info<C>>> {
+        let Some(set) = self.sets.get(&index) else {
             // Don't consider unknown indices as errors, just ignore them.
-            debug!(index = bit_vec.index, "requested peer set not found");
+            debug!(index, "requested peer set not found");
             return Some(vec![]);
         };
 
+        // Parse BitMap
+        let Ok(bit_map) = BitMap::<1>::decode_cfg(&mut bits, &(set.len() as u64)) else {
+            debug!(index, "failed to parse bit map");
+            return None;
+        };
+
         // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.len() as u64 {
+        if bit_map.len() != set.len() as u64 {
             debug!(
-                index = bit_vec.index,
+                index,
                 expected = set.len(),
-                actual = bit_vec.bits.len(),
+                actual = bit_map.len(),
                 "bit vector length mismatch"
             );
             return None;
         }
 
         // Compile peers to send
-        let peers: Vec<_> = bit_vec
-            .bits
+        let peers: Vec<_> = bit_map
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {

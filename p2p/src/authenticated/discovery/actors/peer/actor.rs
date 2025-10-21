@@ -59,7 +59,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 info_verifier: cfg.info_verifier,
                 codec_config: types::Config {
-                    max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
                 },
                 control: control_receiver,
@@ -147,7 +146,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             };
                             let (metric, payload) = match msg {
                                 Message::BitVec(bit_vec) =>
-                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
+                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec((bit_vec.index, bit_vec.bits.encode().into()))),
                                 Message::Peers(peers) =>
                                     (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
                                 Message::Kill => {
@@ -234,9 +233,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
 
 
                     match msg {
-                        types::Payload::BitVec(bit_vec) => {
+                        types::Payload::BitVec((index, bits)) => {
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone());
+                            tracker.bit_vec(index, bits, self.mailbox.clone());
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid

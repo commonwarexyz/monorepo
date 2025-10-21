@@ -28,7 +28,6 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
-    pub max_peer_set_size: u64,
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,

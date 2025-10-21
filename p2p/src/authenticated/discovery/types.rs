@@ -1,5 +1,5 @@
 use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
 };
@@ -52,9 +52,6 @@ type BitMap = commonware_utils::bitmap::BitMap<1>;
 pub struct Config {
     /// The maximum number of peers that can be sent in a `Peers` message.
     pub max_peers: usize,
-
-    /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bit_vec: u64,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -63,7 +60,7 @@ pub enum Payload<C: PublicKey> {
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
-    BitVec(BitVec),
+    BitVec((u64, Bytes)),
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
@@ -109,8 +106,9 @@ impl<C: PublicKey> Read for Payload<C> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
-                Ok(Payload::BitVec(bit_vec))
+                let index = UInt::read(buf)?.into();
+                let bits = Bytes::read_cfg(buf, &(..=*max_data_size).into())?;
+                Ok(Payload::BitVec((index, bits)))
             }
             PEERS_PREFIX => {
                 let peers = Vec::<Info<C>>::read_range(buf, ..=cfg.max_peers)?;
@@ -395,16 +393,10 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = Config {
-            max_peers: 10,
-            max_bit_vec: 1024,
-        };
+        let cfg = Config { max_peers: 10 };
 
         // Test BitVec
-        let original = BitVec {
-            index: 1234,
-            bits: BitMap::ones(100),
-        };
+        let original = (1234, BitMap::ones(100).encode().into());
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
         let encoded_len = encoded.len();
         let decoded =
@@ -449,10 +441,7 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = Config {
-            max_peers: 10,
-            max_bit_vec: 1024,
-        };
+        let cfg = Config { max_peers: 10 };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let encoded_len = invalid_payload.len();
         let result = Payload::<secp256r1::PublicKey>::decode_cfg(
