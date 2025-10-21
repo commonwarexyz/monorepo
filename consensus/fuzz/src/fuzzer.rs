@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use crate::{FuzzInput, Message, Mutation, DEFAULT_TIMEOUT};
+use crate::{
+    types::{FuzzInput, Message, Mutation},
+    DEFAULT_TIMEOUT,
+};
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Encode, Read};

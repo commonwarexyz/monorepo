@@ -1,6 +1,5 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{check_invariants, extract_simplex_state};
 use commonware_consensus::{
     simplex::{
         config,
@@ -8,6 +7,13 @@ use commonware_consensus::{
         Engine,
     },
     Monitor,
+};
+use commonware_consensus_fuzz::{
+    fuzzer::Fuzzer,
+    invariants::{check_invariants, extract_simplex_state},
+    types::FuzzInput,
+    utils::register_validators,
+    PAGE_CACHE_SIZE, PAGE_SIZE,
 };
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256, Signer as _};
 use commonware_p2p::simulated::{
@@ -23,7 +29,6 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{future::join_all, StreamExt};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
-use commonware_consensus_fuzz::{fuzzer::Fuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE, utils::register_validators};
 use std::{
     panic,
     sync::{

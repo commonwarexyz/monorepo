@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use commonware_p2p::simulated::{Oracle, Receiver, Sender};
+use std::collections::HashMap;
 
 pub async fn register_validators<P: commonware_cryptography::PublicKey>(
     oracle: &mut Oracle<P>,
