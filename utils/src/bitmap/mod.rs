@@ -30,7 +30,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 ///
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
