@@ -2,7 +2,7 @@
 
 use crate::{
     simplex::{
-        signing_scheme::{self, utils::SignersBitMap, vote_namespace_and_message},
+        signing_scheme::{self, utils::Signers, vote_namespace_and_message},
         types::{Vote, VoteContext, VoteVerification},
     },
     types::Round,
@@ -76,7 +76,7 @@ impl<V: Variant> Scheme<V> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
     /// Bitmap of validator indices that contributed signatures.
-    pub signers: SignersBitMap,
+    pub signers: Signers,
     /// Aggregated BLS signature covering all votes in this certificate.
     pub signature: V::Signature,
 }
@@ -98,8 +98,7 @@ impl<V: Variant> Read for Certificate<V> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = SignersBitMap::read_cfg(reader, participants)?;
-
+        let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::bls12381_multisig::Certificate",
@@ -237,11 +236,9 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
             return None;
         }
 
-        // Sort the signers and aggregate the signatures.
-        entries.sort_by_key(|(signer, _)| *signer);
-
+        // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let signers = SignersBitMap::from_signers(self.participants.len(), signers);
+        let signers = Signers::from(self.participants.len(), signers);
         let signature = aggregate_signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
@@ -926,7 +923,7 @@ mod tests {
         let mut truncated = certificate.clone();
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
-        truncated.signers = SignersBitMap::from_signers(participants.len(), signers);
+        truncated.signers = Signers::from(participants.len(), signers);
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -970,7 +967,7 @@ mod tests {
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
         signers.push(participants.len() as u32);
-        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers);
+        certificate.signers = Signers::from(participants.len() + 1, signers);
 
         let verifier = Scheme::<V>::verifier(participants);
         assert!(!verifier.verify_certificate(
@@ -1021,7 +1018,7 @@ mod tests {
 
         // Certificate with no signers is rejected.
         let empty = Certificate::<V> {
-            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>()),
+            signers: Signers::from(participants.len(), std::iter::empty::<u32>()),
             signature: certificate.signature,
         };
         assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants.len()).is_err());
@@ -1030,7 +1027,7 @@ mod tests {
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
         signers.push(participants.len() as u32);
         let extended = Certificate::<V> {
-            signers: SignersBitMap::from_signers(participants.len() + 1, signers),
+            signers: Signers::from(participants.len() + 1, signers),
             signature: certificate.signature,
         };
         assert!(Certificate::<V>::decode_cfg(extended.encode(), &participants.len()).is_err());

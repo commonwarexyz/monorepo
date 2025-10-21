@@ -2,7 +2,7 @@
 
 use crate::{
     simplex::{
-        signing_scheme::{self, utils::SignersBitMap, vote_namespace_and_message},
+        signing_scheme::{self, utils::Signers, vote_namespace_and_message},
         types::{Participants, Vote, VoteContext, VoteVerification},
     },
     types::Round,
@@ -63,6 +63,7 @@ impl Scheme {
         if certificate.signers.count() != certificate.signatures.len() {
             return false;
         }
+
         // If the certificate does not meet the quorum, return false.
         if certificate.signers.count() < self.participants.quorum() as usize {
             return false;
@@ -91,7 +92,7 @@ impl Scheme {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.
-    pub signers: SignersBitMap,
+    pub signers: Signers,
     /// Ed25519 signatures emitted by the respective validators ordered by signer index.
     pub signatures: Vec<Ed25519Signature>,
 }
@@ -113,8 +114,7 @@ impl Read for Certificate {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = SignersBitMap::read_cfg(reader, participants)?;
-
+        let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::ed25519::Certificate",
@@ -123,7 +123,6 @@ impl Read for Certificate {
         }
 
         let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
-
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::ed25519::Certificate",
@@ -249,9 +248,8 @@ impl signing_scheme::Scheme for Scheme {
 
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
-
         let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
-        let signers = SignersBitMap::from_signers(self.participants.len(), signer);
+        let signers = Signers::from(self.participants.len(), signer);
 
         Some(Certificate {
             signers,
@@ -722,14 +720,14 @@ mod tests {
 
         // Certificate with no signers is rejected.
         let empty = Certificate {
-            signers: SignersBitMap::from_signers(participants.len(), std::iter::empty::<u32>()),
+            signers: Signers::from(participants.len(), std::iter::empty::<u32>()),
             signatures: Vec::new(),
         };
         assert!(Certificate::decode_cfg(empty.encode(), &participants.len()).is_err());
 
         // Certificate with mismatched signature count is rejected.
         let mismatched = Certificate {
-            signers: SignersBitMap::from_signers(participants.len(), [0u32, 1]),
+            signers: Signers::from(participants.len(), [0u32, 1]),
             signatures: vec![certificate.signatures[0].clone()],
         };
         assert!(Certificate::decode_cfg(mismatched.encode(), &participants.len()).is_err());
@@ -740,7 +738,7 @@ mod tests {
         let mut signatures = certificate.signatures.clone();
         signatures.push(certificate.signatures[0].clone());
         let extended = Certificate {
-            signers: SignersBitMap::from_signers(participants.len() + 1, signers),
+            signers: Signers::from(participants.len() + 1, signers),
             signatures,
         };
         assert!(Certificate::decode_cfg(extended.encode(), &participants.len()).is_err());
@@ -808,7 +806,7 @@ mod tests {
         let mut truncated = certificate.clone();
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
-        truncated.signers = SignersBitMap::from_signers(participants.len(), signers);
+        truncated.signers = Signers::from(participants.len(), signers);
         truncated.signatures.pop();
 
         let verifier = Scheme::verifier(participants);
@@ -848,7 +846,7 @@ mod tests {
 
         let mut signers: Vec<u32> = certificate.signers.iter().collect();
         signers.push(participants.len() as u32);
-        certificate.signers = SignersBitMap::from_signers(participants.len() + 1, signers);
+        certificate.signers = Signers::from(participants.len() + 1, signers);
         certificate
             .signatures
             .push(certificate.signatures[0].clone());

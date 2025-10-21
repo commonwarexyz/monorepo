@@ -6,19 +6,19 @@ use commonware_utils::bitmap::BitMap;
 
 /// Bitmap wrapper that tracks which validators signed a certificate.
 ///
-/// Internally it stores bits in 1-byte chunks for compact encoding.
+/// Internally, it stores bits in 1-byte chunks for compact encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignersBitMap {
+pub struct Signers {
     bitmap: BitMap<1>,
 }
 
-impl SignersBitMap {
-    /// Builds a bitmap from an iterator of signer indices.
+impl Signers {
+    /// Builds [`Signers`] from an iterator of signer indices.
     ///
     /// The caller must provide indices in strictly increasing order with no duplicates.
     /// Panics if the sequence violates that contract or contains indices outside the
     /// participant set.
-    pub fn from_signers(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
+    pub fn from(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
         let mut last = None;
 
@@ -34,7 +34,7 @@ impl SignersBitMap {
             bitmap.set(signer as u64, true);
         }
 
-        SignersBitMap { bitmap }
+        Self { bitmap }
     }
 
     /// Returns how many validators are marked as signers.
@@ -51,24 +51,24 @@ impl SignersBitMap {
     }
 }
 
-impl Write for SignersBitMap {
+impl Write for Signers {
     fn write(&self, writer: &mut impl BufMut) {
         self.bitmap.write(writer);
     }
 }
 
-impl EncodeSize for SignersBitMap {
+impl EncodeSize for Signers {
     fn encode_size(&self) -> usize {
         self.bitmap.encode_size()
     }
 }
 
-impl Read for SignersBitMap {
+impl Read for Signers {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
         let bitmap = BitMap::read_cfg(reader, &(*participants as u64))?;
-        Ok(SignersBitMap { bitmap })
+        Ok(Self { bitmap })
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_from_signers() {
-        let signers = SignersBitMap::from_signers(6, [0, 3, 5]);
+        let signers = Signers::from(6, [0, 3, 5]);
         let collected: Vec<_> = signers.iter().collect();
         assert_eq!(collected, vec![0, 3, 5]);
         assert_eq!(signers.count(), 3);
@@ -87,39 +87,39 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Signer index out of bounds")]
-    fn test_from_signers_out_of_bounds() {
-        SignersBitMap::from_signers(4, [0, 4]);
+    fn test_from_out_of_bounds() {
+        Signers::from(4, [0, 4]);
     }
 
     #[test]
     #[should_panic(expected = "Signer indices must be strictly increasing")]
-    fn test_from_signers_duplicate() {
-        SignersBitMap::from_signers(4, [0, 0, 1]);
+    fn test_from_duplicate() {
+        Signers::from(4, [0, 0, 1]);
     }
 
     #[test]
     #[should_panic(expected = "Signer indices must be strictly increasing")]
-    fn test_from_signers_not_increasing() {
-        SignersBitMap::from_signers(4, [2, 1]);
+    fn test_from_not_increasing() {
+        Signers::from(4, [2, 1]);
     }
 
     #[test]
     fn test_codec_round_trip() {
-        let signers = SignersBitMap::from_signers(9, [1, 6]);
+        let signers = Signers::from(9, [1, 6]);
         let encoded = signers.encode();
-        let decoded = SignersBitMap::decode_cfg(encoded, &9).unwrap();
+        let decoded = Signers::decode_cfg(encoded, &9).unwrap();
         assert_eq!(decoded, signers);
     }
 
     #[test]
     fn test_decode_respects_participant_limit() {
-        let signers = SignersBitMap::from_signers(8, [0, 3, 7]);
+        let signers = Signers::from(8, [0, 3, 7]);
         let encoded = signers.encode();
         // Fewer participants than highest signer should fail.
-        assert!(SignersBitMap::decode_cfg(encoded.clone(), &2).is_err());
+        assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
         // Exact participant bound succeeds.
-        assert!(SignersBitMap::decode_cfg(encoded.clone(), &8).is_ok());
+        assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
         // As well as higher participant bound.
-        assert!(SignersBitMap::decode_cfg(encoded, &10).is_ok());
+        assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 }
