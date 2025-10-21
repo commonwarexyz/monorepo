@@ -651,18 +651,8 @@ impl<
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if info.next_key <= info.key {
-                    // This proof corresponds to the "cycle-around" span.
-                    if *key >= info.next_key && *key <= info.key {
-                        // `key` falls outside of the span.
-                        return false;
-                    }
-                } else {
-                    // This is a normal span, verify excluded key is in its range.
-                    if *key <= info.key || *key >= info.next_key {
-                        // `key` falls outside of the span.
-                        return false;
-                    }
+                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
+                    return false;
                 }
 
                 let element = Operation::Update(OrderedKeyData {

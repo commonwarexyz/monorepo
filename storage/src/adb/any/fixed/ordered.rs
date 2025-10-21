@@ -397,6 +397,23 @@ impl<
             .map(|(v, next_key, _)| (v, next_key)))
     }
 
+    /// Whether the span defined by `span_start` and `span_end` contains `key`.
+    pub fn span_contains(span_start: &K, span_end: &K, key: &K) -> bool {
+        if span_start >= span_end {
+            // cyclic span case
+            if key >= span_start || key < span_end {
+                return true;
+            }
+        } else {
+            // normal span case
+            if key >= span_start && key < span_end {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Find the span produced by the provided `iter` that contains `key`, if any.
     async fn find_span(
         log: &Journal<E, Operation<K, V>>,
@@ -406,16 +423,8 @@ impl<
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(log, loc).await?;
-            if data.key >= data.next_key {
-                // cyclic span case
-                if *key >= data.key || *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
-            } else {
-                // normal span case
-                if *key >= data.key && *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
+            if Self::span_contains(&data.key, &data.next_key, key) {
+                return Ok(Some((loc, data)));
             }
         }
 
