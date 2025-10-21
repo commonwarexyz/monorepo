@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Signer indices must be strictly increasing")]
+    #[should_panic(expected = "duplicate signer index: 2")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
         let (schemes, _) = schemes(4);
         let proposal = sample_proposal(0, 25, 13);
