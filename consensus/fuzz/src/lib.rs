@@ -9,7 +9,8 @@ use std::{
     time::Duration,
 };
 
-pub mod simplex_fuzzer;
+pub mod fuzzer;
+pub mod utils;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);

@@ -1,7 +1,6 @@
 #![no_main]
 
-mod mocks;
-use crate::mocks::{check_invariants, extract_simplex_state};
+use commonware_consensus_fuzz::{check_invariants, extract_simplex_state};
 use commonware_consensus::{
     simplex::{
         config,
@@ -13,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256, Signer as _};
 use commonware_p2p::simulated::{
     helpers::{link_peers, Action, PartitionStrategy},
-    Config as NetworkConfig, Link, Network, Oracle, Receiver, Sender,
+    Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
     buffer::PoolRef,
@@ -24,9 +23,8 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{future::join_all, StreamExt};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
-use mocks::{simplex_fuzzer::Fuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE};
+use commonware_consensus_fuzz::{fuzzer::Fuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE, utils::register_validators};
 use std::{
-    collections::HashMap,
     panic,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -42,38 +40,6 @@ const VALID_PANICS: [&str; 3] = [
 ];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
-
-async fn register_validators<P: commonware_cryptography::PublicKey>(
-    oracle: &mut Oracle<P>,
-    validators: &[P],
-) -> HashMap<
-    P,
-    (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-    ),
-> {
-    let mut registrations = HashMap::new();
-    for validator in validators.iter() {
-        let (pending_sender, pending_receiver) =
-            oracle.register(validator.clone(), 0).await.unwrap();
-        let (recovered_sender, recovered_receiver) =
-            oracle.register(validator.clone(), 1).await.unwrap();
-        let (resolver_sender, resolver_receiver) =
-            oracle.register(validator.clone(), 2).await.unwrap();
-        registrations.insert(
-            validator.clone(),
-            (
-                (pending_sender, pending_receiver),
-                (recovered_sender, recovered_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
-        );
-    }
-    registrations
-}
-
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
