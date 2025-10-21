@@ -538,7 +538,8 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < quorum as usize {
+                        // For non-attributable schemes, per-validator activities are not reported
+                        if reporter.is_attributable() && notarizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -577,7 +578,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < quorum as usize {
+                        // For non-attributable schemes, per-validator activities are not reported
+                        if reporter.is_attributable() && finalizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -1417,7 +1419,8 @@ mod tests {
                 assert!(!offline_views.is_empty());
 
                 // Ensure nullifies/nullification collected for offline node
-                {
+                // For non-attributable schemes, per-validator activities are not reported
+                if reporter.is_attributable() {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
@@ -2389,33 +2392,42 @@ mod tests {
             let byz = &validators[0];
             let mut count_conflicting = 0;
             for reporter in reporters.iter() {
-                // Ensure only faults for byz
-                {
-                    let faults = reporter.faults.lock().unwrap();
-                    assert_eq!(faults.len(), 1);
-                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
-                        for fault in faults.iter() {
-                            match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting += 1;
-                                }
-                                Activity::ConflictingFinalize(_) => {
-                                    count_conflicting += 1;
-                                }
-                                _ => panic!("unexpected fault: {fault:?}"),
-                            }
-                        }
-                    }
-                }
-
                 // Ensure no invalid signatures
                 {
                     let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
+
+                let faults = reporter.faults.lock().unwrap();
+                if !reporter.is_attributable() {
+                    // For non-attributable schemes, conflicts are not reported
+                    assert!(faults.is_empty());
+                    continue;
+                }
+
+                // Ensure only faults for byz (only for attributable schemes)
+                assert_eq!(faults.len(), 1);
+                let faulter = faults.get(byz).expect("byzantine party is not faulter");
+                for (_, faults) in faulter.iter() {
+                    for fault in faults.iter() {
+                        match fault {
+                            Activity::ConflictingNotarize(_) => {
+                                count_conflicting += 1;
+                            }
+                            Activity::ConflictingFinalize(_) => {
+                                count_conflicting += 1;
+                            }
+                            _ => panic!("unexpected fault: {fault:?}"),
+                        }
+                    }
+                }
             }
-            assert!(count_conflicting > 0);
+
+            if reporters[0].is_attributable() {
+                assert!(count_conflicting > 0);
+            } else {
+                assert_eq!(count_conflicting, 0);
+            }
 
             // Ensure conflicter is blocked
             let blocked = oracle.blocked().await.unwrap();
@@ -3065,30 +3077,39 @@ mod tests {
             let byz = &validators[0];
             let mut count_nullify_and_finalize = 0;
             for reporter in reporters.iter() {
-                // Ensure only faults for byz
-                {
-                    let faults = reporter.faults.lock().unwrap();
-                    assert_eq!(faults.len(), 1);
-                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
-                        for fault in faults.iter() {
-                            match fault {
-                                Activity::NullifyFinalize(_) => {
-                                    count_nullify_and_finalize += 1;
-                                }
-                                _ => panic!("unexpected fault: {fault:?}"),
-                            }
-                        }
-                    }
-                }
-
                 // Ensure no invalid signatures
                 {
                     let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
+
+                let faults = reporter.faults.lock().unwrap();
+                if !reporter.is_attributable() {
+                    // For non-attributable schemes, conflicts are not reported
+                    assert!(faults.is_empty());
+                    continue;
+                }
+
+                // Ensure only faults for byz (only for attributable schemes)
+                assert_eq!(faults.len(), 1);
+                let faulter = faults.get(byz).expect("byzantine party is not faulter");
+                for (_, faults) in faulter.iter() {
+                    for fault in faults.iter() {
+                        match fault {
+                            Activity::NullifyFinalize(_) => {
+                                count_nullify_and_finalize += 1;
+                            }
+                            _ => panic!("unexpected fault: {fault:?}"),
+                        }
+                    }
+                }
             }
-            assert!(count_nullify_and_finalize > 0);
+
+            if reporters[0].is_attributable() {
+                assert!(count_nullify_and_finalize > 0);
+            } else {
+                assert_eq!(count_nullify_and_finalize, 0);
+            }
 
             // Ensure nullifier is blocked
             let blocked = oracle.blocked().await.unwrap();
