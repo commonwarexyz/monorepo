@@ -473,6 +473,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
+            let bit_vec_unknown_index = types::BitVec::new(99, BitMap::ones(1));
 
             let _r1 = connect_to_peer(
                 &mut mailbox,
@@ -483,10 +484,7 @@ mod tests {
             .await;
 
             // Peer lets us know it received a bit vector
-            mailbox.bit_vec(
-                types::BitVec::new(99, BitMap::ones(1)),
-                peer_mailbox_pk1.clone(),
-            );
+            mailbox.bit_vec(bit_vec_unknown_index, peer_mailbox_pk1);
 
             // No message is sent back to the peer
             assert!(peer_receiver_pk1.try_next().is_err());
