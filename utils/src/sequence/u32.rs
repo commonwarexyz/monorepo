@@ -22,7 +22,7 @@ pub enum Error {
 pub struct U32([u8; u32::SIZE]);
 
 impl U32 {
-    pub fn new(value: u32) -> Self {
+    pub const fn new(value: u32) -> Self {
         Self(value.to_be_bytes())
     }
 }

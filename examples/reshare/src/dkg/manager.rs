@@ -223,7 +223,7 @@ where
             })
         };
 
-        let (s, r) = mux.register(epoch as u32).await.unwrap();
+        let (s, r) = mux.register(epoch).await.unwrap();
 
         let rate_limiter = RateLimiter::hashmap_with_clock(send_rate_limit, context.deref());
 

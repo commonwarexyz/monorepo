@@ -31,9 +31,9 @@ pub enum Error {
 ///
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Payload enum value
-/// - 5: Channel varint
+/// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
+pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
 /// Prefix byte used to identify a [Payload] with variant BitVec.
 const BIT_VEC_PREFIX: u8 = 0;
@@ -456,7 +456,7 @@ mod tests {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Payload::<secp256r1::PublicKey>::Data(Data {
-            channel: u32::MAX,
+            channel: u64::MAX,
             message,
         });
         assert_eq!(

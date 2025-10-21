@@ -61,7 +61,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     /// Unpack outbound `msg` and assert the underlying `channel` is registered.
     fn validate_outbound_msg<V>(
         msg: Option<Data>,
-        rate_limits: &HashMap<u32, V>,
+        rate_limits: &HashMap<u64, V>,
     ) -> Result<Data, Error> {
         let data = match msg {
             Some(data) => data,
