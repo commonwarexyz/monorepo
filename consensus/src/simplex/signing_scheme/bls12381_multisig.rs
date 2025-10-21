@@ -1,4 +1,9 @@
 //! BLS12-381 multi-signature implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! BLS multisig is an **attributable** scheme: individual signatures can be
+//! safely exposed as fault evidence without enabling forgery attacks.
+//! Certificates contain signer indices alongside an aggregated signature,
+//! enabling secure per-validator activity tracking and conflict detection.
 
 use crate::{
     simplex::{
@@ -279,6 +284,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
     fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
         None
+    }
+
+    fn is_attributable(&self) -> bool {
+        true
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {

@@ -1,4 +1,24 @@
 //! Signing scheme implementations for `simplex`.
+//!
+//! # Attributability and Fault Evidence
+//!
+//! Signing schemes differ in whether they can safely expose per-validator activities and
+//! Byzantine fault evidence:
+//!
+//! - **Attributable schemes** (Ed25519, BLS multisig): Individual signatures can be safely
+//!   exposed as fault evidence. Certificates contain signer indices alongside individual
+//!   or aggregated signatures, enabling secure per-validator activity tracking and
+//!   conflict detection.
+//!
+//! - **Non-attributable schemes** (BLS threshold): Exposing partial signatures as fault
+//!   evidence is not safe. With threshold signatures, any `t` valid partial signatures can
+//!   be used to forge a partial signature for any player, enabling equivocation attacks.
+//!   Per-validator activities and conflict evidence must not be reported to prevent this
+//!   attack vector, though peers can still be blocked locally.
+//!
+//! The `Scheme::is_attributable()` method signals whether fault evidence can be safely
+//! exposed, allowing the consensus engine to suppress per-validator activity reporting
+//! for schemes vulnerable to signature forgery attacks.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
@@ -115,6 +135,20 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Extracts randomness seed, if provided by the scheme, derived from the certificate
     /// for the given round.
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+
+    /// Returns whether per-validator fault evidence can be safely exposed.
+    ///
+    /// Schemes where individual signatures can be safely reported as fault evidence should
+    /// return `true`. Threshold schemes that are vulnerable to signature forgery attacks
+    /// (where `t` partial signatures enable forging signatures for any player) should
+    /// return `false`.
+    ///
+    /// When `false`, the consensus engine will suppress per-validator activities
+    /// (`Notarize`, `Nullify`, `Finalize`) and conflict evidence (`ConflictingNotarize`,
+    /// `ConflictingFinalize`, `NullifyFinalize`).
+    ///
+    /// Local participation is always tracked regardless of this value.
+    fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

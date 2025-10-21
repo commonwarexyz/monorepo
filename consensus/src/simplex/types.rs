@@ -1741,30 +1741,58 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 /// Some activities issued by consensus are not verified. To determine if an activity has been verified,
 /// use the `verified` method.
 ///
-/// # Warning
+/// # Scheme-dependent Activity Reporting
 ///
-/// Certain signing schemes produce aggregated artifacts that do not expose every contributor.
-/// Unless the scheme provides attributable signatures, do not use unverified activities for
-/// incentives, an attacker may be able to synthesize contributions for offline participants.
+/// The consensus engine only reports per-validator activities (`Notarize`, `Nullify`, `Finalize`) and
+/// Byzantine fault evidence (`ConflictingNotarize`, `ConflictingFinalize`, `NullifyFinalize`) for
+/// **attributable** signing schemes that can safely expose individual signatures.
+///
+/// For **non-attributable** schemes like BLS threshold signatures, exposing these activities is not safe:
+/// with threshold cryptography, any `t` valid partial signatures can be used to forge a partial signature
+/// for any player, enabling equivocation attacks. Therefore:
+///
+/// - Per-validator activities from peers are suppressed (only local participation is tracked)
+/// - Byzantine fault evidence is not reported (though peers are still blocked locally)
+/// - Certificate-level activities (`Notarization`, `Nullification`, `Finalization`) are always reported
+///
+/// Use `Scheme::is_attributable()` to determine whether a scheme supports per-validator activity reporting.
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
-    /// A validator's notarize vote over a proposal
+    /// A validator's notarize vote over a proposal.
+    ///
+    /// Only reported for attributable schemes or for the local node's own votes.
     Notarize(Notarize<S, D>),
-    /// A recovered certificate for a notarization (scheme-specific)
+    /// A recovered certificate for a notarization (scheme-specific).
+    ///
+    /// Always reported regardless of scheme attributability.
     Notarization(Notarization<S, D>),
-    /// A validator's nullify vote used to skip the current view
+    /// A validator's nullify vote used to skip the current view.
+    ///
+    /// Only reported for attributable schemes or for the local node's own votes.
     Nullify(Nullify<S>),
-    /// A recovered certificate for a nullification (scheme-specific)
+    /// A recovered certificate for a nullification (scheme-specific).
+    ///
+    /// Always reported regardless of scheme attributability.
     Nullification(Nullification<S>),
-    /// A validator's finalize vote over a proposal
+    /// A validator's finalize vote over a proposal.
+    ///
+    /// Only reported for attributable schemes or for the local node's own votes.
     Finalize(Finalize<S, D>),
-    /// A recovered certificate for a finalization (scheme-specific)
+    /// A recovered certificate for a finalization (scheme-specific).
+    ///
+    /// Always reported regardless of scheme attributability.
     Finalization(Finalization<S, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior).
+    ///
+    /// Only reported for attributable schemes to prevent signature forgery attacks.
     ConflictingNotarize(ConflictingNotarize<S, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior).
+    ///
+    /// Only reported for attributable schemes to prevent signature forgery attacks.
     ConflictingFinalize(ConflictingFinalize<S, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
+    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
+    ///
+    /// Only reported for attributable schemes to prevent signature forgery attacks.
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 

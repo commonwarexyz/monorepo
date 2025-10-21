@@ -1,4 +1,12 @@
 //! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! BLS threshold is a **non-attributable** scheme: exposing partial signatures
+//! as fault evidence is not safe. With threshold signatures, any `t` valid
+//! partial signatures can be used to forge a partial signature for any player,
+//! enabling equivocation attacks. To prevent this, per-validator activities and
+//! conflict evidence must not be reported to external observers, though peers
+//! can still be blocked locally and local participation can be tracked
+//! internally.
 
 use crate::{
     simplex::{
@@ -550,6 +558,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
         Some(Seed::new(round, certificate.seed_signature))
+    }
+
+    fn is_attributable(&self) -> bool {
+        false
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}

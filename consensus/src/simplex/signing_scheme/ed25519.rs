@@ -1,4 +1,9 @@
 //! Ed25519 implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! Ed25519 is an **attributable** scheme: individual signatures can be safely
+//! exposed as fault evidence without enabling forgery attacks. Certificates
+//! contain both signer indices and individual signatures, enabling secure
+//! per-validator activity tracking and conflict detection.
 
 use crate::{
     simplex::{
@@ -295,6 +300,10 @@ impl signing_scheme::Scheme for Scheme {
 
     fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
         None
+    }
+
+    fn is_attributable(&self) -> bool {
+        true
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
