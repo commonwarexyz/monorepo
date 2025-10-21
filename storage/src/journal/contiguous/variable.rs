@@ -521,16 +521,16 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                     result?; // Propagate replay errors (corruption, etc.)
                     count += 1;
                 }
-                Some(count)
+                count
             }
-            None => None,
+            None => 0,
         };
 
         // Data journal is empty if there are no sections or if there is one section and it has no items.
         // The latter should only occur if a crash occured after opening a data journal blob but
         // before writing to it.
         let data_empty =
-            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == Some(0));
+            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
             // Journal never had any elements or is fully pruned.
             // The locations journal is the only source of truth.
@@ -559,7 +559,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             // Invariant 1 on `Variable` guarantees that all sections except possibly the last
             // are full. Therefore, the size of the journal is the number of items in the last
             // section plus the number of items in the other sections.
-            let size = (last_section * items_per_section) + items_in_last_section.unwrap_or(0);
+            let size = (last_section * items_per_section) + items_in_last_section;
             (oldest_pos, size)
         };
         assert_ne!(
