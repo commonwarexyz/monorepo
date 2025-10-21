@@ -352,12 +352,12 @@ mod tests {
     fn build_malformed_payload(channel: Channel) -> Bytes {
         let mut payload = vec![2u8]; // DATA_PREFIX from types::Payload
         UInt(channel).write(&mut payload);
-        u32::MAX.write(&mut payload);
+        UInt(u32::MAX).write(&mut payload);
         payload.extend_from_slice(&[0, 1, 2, 3, 4]);
         Bytes::from(payload)
     }
 
-    #[test_traced]
+    #[test_traced("debug")]
     #[should_panic]
     fn test_malformed_data_length_panics() {
         let executor = deterministic::Runner::default();
