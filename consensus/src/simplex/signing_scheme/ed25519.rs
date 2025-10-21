@@ -59,11 +59,12 @@ impl Scheme {
         context: VoteContext<'a, D>,
         certificate: &'a Certificate,
     ) -> bool {
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum() as usize {
+        // If the certificate signers and signatures counts differ, return false.
+        if certificate.signers.count() != certificate.signatures.len() {
             return false;
         }
-        if certificate.signers.count() != certificate.signatures.len() {
+        // If the certificate does not meet the quorum, return false.
+        if certificate.signers.count() < self.participants.quorum() as usize {
             return false;
         }
 
