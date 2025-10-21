@@ -134,8 +134,7 @@ pub struct BitVec {
 
 impl BitVec {
     pub fn consume(self, max_length: u64) -> Option<BitMap> {
-        // TODO: improve this
-        BitMap::decode_cfg(&mut self.bits.as_slice(), &max_length).ok()
+        BitMap::decode_cfg(&self.bits[..], &max_length).ok()
     }
 }
 
