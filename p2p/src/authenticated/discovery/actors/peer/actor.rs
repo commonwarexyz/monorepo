@@ -21,7 +21,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -185,9 +185,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .recv()
                         .await
                         .map_err(Error::ReceiveFailed)?;
+                    let msg_len = msg.len();
 
                     // Parse the message
-                    let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
+                    let msg = match types::Payload::decode_cfg(msg, &(msg_len, self.codec_config.clone())) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
@@ -358,8 +359,7 @@ mod tests {
     }
 
     #[test_traced("debug")]
-    #[should_panic]
-    fn test_malformed_data_length_panics() {
+    fn handle_malformed_data_length() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let local_signer = PrivateKey::from_seed(11);
