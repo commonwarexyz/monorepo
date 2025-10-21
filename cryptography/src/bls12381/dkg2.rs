@@ -3,7 +3,7 @@ use crate::{
         dkg::ops::recover_public_with_weights,
         primitives::{
             group::{Element, Scalar},
-            poly::{self, new_with_constant, Eval, Poly, Weight},
+            poly::{self, new_with_constant, Eval, Poly, Public, Weight},
             variant::Variant,
         },
     },
@@ -19,14 +19,14 @@ use thiserror::Error;
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
 #[derive(Clone)]
-pub struct Output<E, P> {
+pub struct Output<V: Variant, P> {
     round: u32,
     players: Set<P>,
-    group_commitment: Poly<E>,
+    group_commitment: Public<V>,
 }
 
-impl<E: Element, P: PublicKey> Output<E, P> {
-    fn share_commitment(&self, player: &P) -> Option<E> {
+impl<V: Variant, P: PublicKey> Output<V, P> {
+    fn share_commitment(&self, player: &P) -> Option<V::Public> {
         let index = self.players.position(player)?;
         Some(self.group_commitment.evaluate(index as u32).value)
     }
@@ -36,13 +36,13 @@ impl<E: Element, P: PublicKey> Output<E, P> {
     }
 }
 
-impl<E: Element, P: PublicKey> EncodeSize for Output<E, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.players.encode_size() + self.group_commitment.encode_size()
     }
 }
 
-impl<E: Element, P: PublicKey> Write for Output<E, P> {
+impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.round.write(buf);
         self.players.write(buf);
@@ -65,14 +65,14 @@ pub enum Error {
 }
 
 #[derive(Clone)]
-pub struct RoundInfo<E, P: PublicKey> {
+pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u32,
-    previous: Option<Output<E, P>>,
+    previous: Option<Output<V, P>>,
     dealers: Set<P>,
     players: Set<P>,
 }
 
-impl<E: Element, P: PublicKey> RoundInfo<E, P> {
+impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     /// Figure out what the dealer share should be.
     ///
     /// If there's no previous round, we need a random value, hence `rng`.
@@ -124,7 +124,7 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     }
 
     #[must_use]
-    fn check_dealer_commitment(&self, dealer: &P, commitment: &Poly<E>) -> bool {
+    fn check_dealer_commitment(&self, dealer: &P, commitment: &Public<V>) -> bool {
         if self.degree() != commitment.degree() {
             return false;
         }
@@ -140,9 +140,9 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     }
 }
 
-impl<E: Element, P: PublicKey> RoundInfo<E, P> {
+impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     pub fn new(
-        previous: Option<Output<E, P>>,
+        previous: Option<Output<V, P>>,
         dealers: Set<P>,
         players: Set<P>,
     ) -> Result<Self, Error> {
@@ -173,7 +173,7 @@ impl<E: Element, P: PublicKey> RoundInfo<E, P> {
     }
 }
 
-impl<E: Element, P: PublicKey> EncodeSize for RoundInfo<E, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for RoundInfo<V, P> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
             + self.previous.encode_size()
@@ -182,7 +182,7 @@ impl<E: Element, P: PublicKey> EncodeSize for RoundInfo<E, P> {
     }
 }
 
-impl<E: Element, P: PublicKey> Write for RoundInfo<E, P> {
+impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.round.write(buf);
         self.previous.write(buf);
@@ -196,12 +196,12 @@ enum AckOrReveal<P: PublicKey> {
     Reveal(Scalar),
 }
 
-pub struct DealerLog<E, P: PublicKey> {
-    pub_msg: DealerPubMsg<E>,
+pub struct DealerLog<V: Variant, P: PublicKey> {
+    pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<P>>,
 }
 
-impl<E, P: PublicKey> DealerLog<E, P> {
+impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     fn zip_players<'a, 'b>(
         &'a self,
         players: &'b Set<P>,
@@ -213,10 +213,10 @@ impl<E, P: PublicKey> DealerLog<E, P> {
     }
 }
 
-fn select<E: Element, P: PublicKey>(
-    round_info: &RoundInfo<E, P>,
-    logs: BTreeMap<P, DealerLog<E, P>>,
-) -> Result<Vec<(P, DealerLog<E, P>)>, Error> {
+fn select<V: Variant, P: PublicKey>(
+    round_info: &RoundInfo<V, P>,
+    logs: BTreeMap<P, DealerLog<V, P>>,
+) -> Result<Vec<(P, DealerLog<V, P>)>, Error> {
     let required_commitments = round_info.required_commitments() as usize;
     let transcript = transcript_for_round(round_info);
     let out = logs
@@ -248,14 +248,14 @@ fn select<E: Element, P: PublicKey>(
 }
 
 struct ObserveInner<V: Variant, P: PublicKey> {
-    output: Output<V::Public, P>,
+    output: Output<V, P>,
     weights: Option<BTreeMap<u32, Weight>>,
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon(
-        round_info: RoundInfo<V::Public, P>,
-        selected: Vec<(P, DealerLog<V::Public, P>)>,
+        round_info: RoundInfo<V, P>,
+        selected: Vec<(P, DealerLog<V, P>)>,
     ) -> Result<Self, Error> {
         let commitments = selected
             .iter()
@@ -301,25 +301,25 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 }
 
 pub fn observe<V: Variant, P: PublicKey>(
-    round_info: RoundInfo<V::Public, P>,
-    logs: BTreeMap<P, DealerLog<V::Public, P>>,
-) -> Result<Output<V::Public, P>, Error> {
+    round_info: RoundInfo<V, P>,
+    logs: BTreeMap<P, DealerLog<V, P>>,
+) -> Result<Output<V, P>, Error> {
     let selected = select(&round_info, logs)?;
     ObserveInner::<V, P>::reckon(round_info, selected).map(|x| x.output)
 }
 
 #[derive(Clone)]
-pub struct DealerPubMsg<E> {
-    commitment: Poly<E>,
+pub struct DealerPubMsg<V: Variant> {
+    commitment: Public<V>,
 }
 
-impl<E: Element> EncodeSize for DealerPubMsg<E> {
+impl<V: Variant> EncodeSize for DealerPubMsg<V> {
     fn encode_size(&self) -> usize {
         self.commitment.encode_size()
     }
 }
 
-impl<E: Element> Write for DealerPubMsg<E> {
+impl<V: Variant> Write for DealerPubMsg<V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commitment.write(buf);
     }
@@ -353,16 +353,16 @@ pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
 
-fn transcript_for_round<E: Element, P: PublicKey>(round_info: &RoundInfo<E, P>) -> Transcript {
+fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
     let mut transcript = Transcript::new(NAMESPACE);
     transcript.commit(round_info.encode());
     transcript
 }
 
-fn transcript_for_dealer<P: PublicKey, E: Element>(
+fn transcript_for_dealer<V: Variant, P: PublicKey>(
     transcript: &Transcript,
     dealer: &P,
-    pub_msg: &DealerPubMsg<E>,
+    pub_msg: &DealerPubMsg<V>,
 ) -> Transcript {
     let mut out = transcript.fork(b"dealer");
     out.commit(dealer.encode());
@@ -372,14 +372,14 @@ fn transcript_for_dealer<P: PublicKey, E: Element>(
 
 pub struct Player<V: Variant, S: PrivateKey> {
     me: S,
-    round_info: RoundInfo<V::Public, S::PublicKey>,
+    round_info: RoundInfo<V, S::PublicKey>,
     index: u32,
     transcript: Transcript,
-    view: BTreeMap<S::PublicKey, (DealerPubMsg<V::Public>, DealerPrivMsg)>,
+    view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
 }
 
 impl<V: Variant, S: PrivateKey> Player<V, S> {
-    pub fn new(round_info: RoundInfo<V::Public, S::PublicKey>, me: S) -> Result<Self, Error> {
+    pub fn new(round_info: RoundInfo<V, S::PublicKey>, me: S) -> Result<Self, Error> {
         Ok(Self {
             index: round_info.player_index(&me.public_key())?,
             me,
@@ -392,7 +392,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     pub fn dealer_message(
         &mut self,
         dealer: S::PublicKey,
-        pub_msg: DealerPubMsg<V::Public>,
+        pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
     ) -> Option<PlayerAck<S::PublicKey>> {
         self.round_info.dealer_index(&dealer).ok()?;
@@ -415,8 +415,8 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
 
     pub fn finalize(
         self,
-        logs: BTreeMap<S::PublicKey, DealerLog<V::Public, S::PublicKey>>,
-    ) -> Result<(Output<V::Public, S::PublicKey>, Scalar), Error> {
+        logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
+    ) -> Result<(Output<V, S::PublicKey>, Scalar), Error> {
         let selected = select(&self.round_info, logs)?;
         let dealings = selected
             .iter()
@@ -457,20 +457,20 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     }
 }
 
-pub struct Dealer<E, P: PublicKey> {
-    round_info: RoundInfo<E, P>,
-    pub_msg: DealerPubMsg<E>,
+pub struct Dealer<V: Variant, P: PublicKey> {
+    round_info: RoundInfo<V, P>,
+    pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<P>>,
     transcript: Transcript,
 }
 
-impl<E: Element, P: PublicKey> Dealer<E, P> {
+impl<V: Variant, P: PublicKey> Dealer<V, P> {
     pub fn start(
         mut rng: impl CryptoRngCore,
-        round_info: RoundInfo<E, P>,
+        round_info: RoundInfo<V, P>,
         me: P,
         share: Option<Scalar>,
-    ) -> Result<(Self, DealerPubMsg<E>, Vec<(P, DealerPrivMsg)>), Error> {
+    ) -> Result<(Self, DealerPubMsg<V>, Vec<(P, DealerPrivMsg)>), Error> {
         let share = round_info.dealer_share(&mut rng, share)?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
         let reveals = round_info
@@ -518,7 +518,7 @@ impl<E: Element, P: PublicKey> Dealer<E, P> {
         Ok(())
     }
 
-    pub fn finalize(self) -> DealerLog<E, P> {
+    pub fn finalize(self) -> DealerLog<V, P> {
         DealerLog {
             pub_msg: self.pub_msg,
             results: self.results,
