@@ -297,16 +297,17 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Append to data journal, get offset
         let (offset, _size) = self.data.append(section, item).await?;
 
-        // Append location to locations journal and verify it stays in sync
+        // Append location to locations journal
         let locations_pos = self.locations.append(Location { section, offset }).await?;
         assert_eq!(locations_pos, self.size);
 
-        // Return the current position and increment for next time
+        // Return the current position
         let position = self.size;
         self.size += 1;
 
-        // If we just filled a section, sync both journals together
+        // Maintain invariant that all full sections are synced.
         if self.size.is_multiple_of(self.items_per_section) {
+            // Maintain invariant that data journal size >= locations journal size.
             self.data.sync(section).await?;
             self.locations.sync().await?;
         }
@@ -357,14 +358,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Calculate section number
         let min_section = min_position / self.items_per_section;
 
-        // Prune data journal FIRST, then locations journal.
-        //
-        // This maintains crash-safety: if we crash after pruning data but before pruning
-        // the locations index, init() will detect that locations has entries for
-        // data that no longer exists and prune the locations journal to catch up.
+        // Maintain invariant that data journal oldest position >= locations journal oldest position.
         let pruned = self.data.prune(min_section).await?;
         if pruned {
-            // Update to the actual pruned position (section-aligned)
             self.oldest_retained_pos = min_section * self.items_per_section;
             self.locations.prune(self.oldest_retained_pos).await?;
         }
@@ -383,15 +379,14 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     pub async fn replay(
         &self,
         start_pos: u64,
-        buffer: NonZeroUsize,
+        buffer_size: NonZeroUsize,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<(u64, V), Error>> + Send + '_>>, Error> {
-        if start_pos > self.size {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-
-        // Check if position has been pruned
+        // Validate start position is within bounds.
         if start_pos < self.oldest_retained_pos {
             return Err(Error::ItemPruned(start_pos));
+        }
+        if start_pos > self.size {
+            return Err(Error::ItemOutOfRange(start_pos));
         }
 
         // If replaying at exactly size, return empty stream
@@ -403,7 +398,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let location = self.locations.read(start_pos).await?;
         let data_stream = self
             .data
-            .replay(location.section, location.offset, buffer)
+            .replay(location.section, location.offset, buffer_size)
             .await?;
 
         // Transform the stream to include position information
@@ -1283,9 +1278,6 @@ mod tests {
     }
 
     /// Test recovery from crash after appending to data journal but before appending to locations journal.
-    ///
-    /// Simulates a crash in the middle of append() where data journal was written but locations
-    /// journal was not. Verifies that init() rebuilds locations journal from data journal replay.
     #[test]
     fn test_variable_recovery_append_crash_locations_behind() {
         let executor = deterministic::Runner::default();
@@ -1342,9 +1334,6 @@ mod tests {
     }
 
     /// Test recovery from multiple prune operations with crash.
-    ///
-    /// Simulates multiple prune operations where data journal was pruned multiple times
-    /// but locations journal was only partially updated. Verifies correct recovery behavior.
     #[test]
     fn test_variable_recovery_multiple_prunes_crash() {
         let executor = deterministic::Runner::default();
