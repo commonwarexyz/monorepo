@@ -189,7 +189,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable data journal
-        let data = variable::Journal::init(
+        let mut data = variable::Journal::init(
             context.clone(),
             variable::Config {
                 partition: cfg.data_partition,
@@ -215,7 +215,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         // Validate and repair locations journal to match data journal
         let (oldest_retained_pos, size) =
-            Self::validate_and_repair_locations(&data, &mut locations, items_per_section).await?;
+            Self::repair_journals(&mut data, &mut locations, items_per_section).await?;
 
         Ok(Self {
             data,
@@ -497,22 +497,43 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)
     }
 
-    /// Repair the locations journal to match the data journal.
+    /// Repair the locations journal and data journal to be consistent in case a crash occured
+    /// on a previous run and left the journals in an inconsistent state.
     ///
     /// The data journal is the source of truth. This function scans it to determine
     /// what SHOULD be in the locations journal, then fixes any mismatches.
     ///
     /// # Returns
     ///
-    /// Returns `(oldest_retained_pos, size)`.
-    async fn validate_and_repair_locations(
-        data: &variable::Journal<E, V>,
+    /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
+    async fn repair_journals(
+        data: &mut variable::Journal<E, V>,
         locations: &mut fixed::Journal<E, Location>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        if data.blobs.is_empty() {
-            // No data blobs -- journal is empty or fully pruned.
+        let items_in_last_section = match data.blobs.last_key_value() {
+            Some((last_section, _)) => {
+                let stream = data.replay(*last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                futures::pin_mut!(stream);
+                let mut count = 0u64;
+                while let Some(result) = stream.next().await {
+                    result?; // Propagate replay errors (corruption, etc.)
+                    count += 1;
+                }
+                Some(count)
+            }
+            None => None,
+        };
+
+        // Data journal is empty if there are no sections or if there is one section and it has no items.
+        // The latter should only occur if a crash occured after opening a data journal blob but
+        // before writing to it.
+        let data_empty =
+            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == Some(0));
+
+        if data_empty {
+            // Journal never had any elements or is fully pruned.
             // The locations journal is the only source of truth.
             let size = locations.size().await?;
 
@@ -533,26 +554,19 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             // Data exists -- count items
             let first_section = *data.blobs.first_key_value().unwrap().0;
             let last_section = *data.blobs.last_key_value().unwrap().0;
-            let oldest_pos = first_section * items_per_section;
 
-            // Count items in last section by replaying it.
-            let items_in_last_section = {
-                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-                futures::pin_mut!(stream);
-                let mut count = 0u64;
-                while let Some(result) = stream.next().await {
-                    result?; // Propagate replay errors (corruption, etc.)
-                    count += 1;
-                }
-                count
-            };
+            let oldest_pos = first_section * items_per_section;
 
             // Invariant 1 on `Variable` guarantees that all sections except possibly the last
             // are full. Therefore, the size of the journal is the number of items in the last
             // section plus the number of items in the other sections.
-            let size = (last_section * items_per_section) + items_in_last_section;
+            let size = (last_section * items_per_section) + items_in_last_section.unwrap_or(0);
             (oldest_pos, size)
         };
+        assert_ne!(
+            data_oldest_pos, data_size,
+            "data journal expected to be non-empty"
+        );
 
         let locations_size = locations.size().await?;
         if locations_size > data_size {
@@ -602,7 +616,14 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         }
 
         locations.sync().await?;
+
+        // After repair, the locations journal and data journal should be consistent.
         assert_eq!(locations.size().await?, data_size);
+        // Oldest retained position is always Some because the data journal is non-empty.
+        assert_eq!(
+            locations.oldest_retained_pos().await?,
+            Some(data_oldest_pos)
+        );
 
         Ok((data_oldest_pos, data_size))
     }
