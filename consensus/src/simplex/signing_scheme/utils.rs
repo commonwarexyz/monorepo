@@ -18,8 +18,7 @@ impl SignersBitMap {
     ///
     /// The caller must provide indices in strictly increasing order with no duplicates.
     /// Returns `None` if the sequence violates that contract or contains indices outside
-    /// the participant set. The resulting bitmap is truncated to the highest signer index
-    /// to minimize encoding size and ensure a canonical representation.
+    /// the participant set.
     pub fn from_signers(
         participants: usize,
         signers: impl IntoIterator<Item = u32>,
@@ -39,9 +38,6 @@ impl SignersBitMap {
             last = Some(signer);
             bitmap.set(signer as u64, true);
         }
-
-        let len = last.map_or(0, |last| last as u64 + 1);
-        bitmap.truncate(len);
 
         Some(SignersBitMap { bitmap })
     }
@@ -82,14 +78,6 @@ impl Read for SignersBitMap {
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
         let bitmap = BitMap::read_cfg(reader, &(*participants as u64))?;
-
-        if !bitmap.is_empty() && !bitmap.get(bitmap.len() - 1) {
-            return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::utils::SignersBitMap",
-                "Signers bitmap is not compact",
-            ));
-        }
-
         Ok(SignersBitMap { bitmap })
     }
 }
@@ -118,23 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn test_from_signers_truncates() {
-        let signers = SignersBitMap::from_signers(12, [2, 7, 10]).unwrap();
-        assert_eq!(signers.count(), 3);
-        assert_eq!(signers.iter().collect::<Vec<_>>(), vec![2, 7, 10]);
-        assert_eq!(signers.bitmap.len(), 11);
-
-        let signers = SignersBitMap::from_signers(12, [2, 7]).unwrap();
-        assert_eq!(signers.count(), 2);
-        assert_eq!(signers.iter().collect::<Vec<_>>(), vec![2, 7]);
-        assert_eq!(signers.bitmap.len(), 8);
-
-        let signers = SignersBitMap::from_signers(12, []).unwrap();
-        assert!(signers.is_empty());
-        assert_eq!(signers.bitmap.len(), 0);
-    }
-
-    #[test]
     fn test_codec_round_trip() {
         let signers = SignersBitMap::from_signers(9, [1, 6]).unwrap();
         let encoded = signers.encode();
@@ -152,14 +123,5 @@ mod tests {
         assert!(SignersBitMap::decode_cfg(encoded.clone(), &8).is_ok());
         // As well as higher participant bound.
         assert!(SignersBitMap::decode_cfg(encoded, &10).is_ok());
-    }
-
-    #[test]
-    fn test_decode_rejects_non_compact() {
-        // Trailing zeros beyond highest signer
-        let mut bitmap = BitMap::<1>::zeroes(4);
-        bitmap.set(2, true);
-        let encoded = bitmap.encode();
-        assert!(SignersBitMap::decode_cfg(encoded, &4).is_err());
     }
 }
