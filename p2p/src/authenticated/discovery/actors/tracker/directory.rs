@@ -4,11 +4,10 @@ use crate::authenticated::discovery::{
     metrics,
     types::{self, Info},
 };
-use bytes::Bytes;
-use commonware_codec::Decode;
+use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -237,7 +236,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let (&index, set) = self.sets.iter().choose(&mut self.context)?;
         Some(types::BitVec {
             index,
-            bits: set.knowledge(),
+            bits: set.knowledge().encode().into(),
         })
     }
 
@@ -258,7 +257,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, index: u64, mut bits: Bytes) -> Option<Vec<types::Info<C>>> {
+    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
+        let index = bit_vec.index;
         let Some(set) = self.sets.get(&index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index, "requested peer set not found");
@@ -266,7 +266,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         };
 
         // Parse BitMap
-        let Ok(bit_map) = BitMap::<1>::decode_cfg(&mut bits, &(set.len() as u64)) else {
+        let Some(bit_map) = bit_vec.consume(set.len() as u64) else {
             debug!(index, "failed to parse bit map");
             return None;
         };

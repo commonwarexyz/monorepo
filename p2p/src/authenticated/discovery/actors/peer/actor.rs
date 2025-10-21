@@ -31,7 +31,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     allowed_peers_rate: Quota,
     info_verifier: InfoVerifier<C>,
 
-    codec_config: types::Config,
+    peer_gossip_max_count: usize,
 
     mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
@@ -58,9 +58,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 info_verifier: cfg.info_verifier,
-                codec_config: types::Config {
-                    max_peers: cfg.peer_gossip_max_count,
-                },
+                peer_gossip_max_count: cfg.peer_gossip_max_count,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -146,7 +144,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             };
                             let (metric, payload) = match msg {
                                 Message::BitVec(bit_vec) =>
-                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec((bit_vec.index, bit_vec.bits.encode().into()))),
+                                    (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
                                 Message::Peers(peers) =>
                                     (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
                                 Message::Kill => {
@@ -187,7 +185,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     let msg_len = msg.len();
 
                     // Parse the message
-                    let msg = match types::Payload::decode_cfg(msg, &(msg_len, self.codec_config.clone())) {
+                    let msg = match types::Payload::decode_cfg(msg, &types::Config { max_length: msg_len, max_peers: self.peer_gossip_max_count }) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
@@ -233,9 +231,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
 
 
                     match msg {
-                        types::Payload::BitVec((index, bits)) => {
+                        types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
-                            tracker.bit_vec(index, bits, self.mailbox.clone());
+                            tracker.bit_vec(bit_vec, self.mailbox.clone());
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
