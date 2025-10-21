@@ -705,10 +705,8 @@ mod tests {
             knowledge_for_set0.set(idx_tracker_in_set0 as u64, true);
             knowledge_for_set0.set(idx_pk1_in_set0 as u64, true);
 
-            mailbox.bit_vec(
-                types::BitVec::new(0, knowledge_for_set0),
-                peer_mailbox_s1.clone(),
-            );
+            let bit_vec_from_pk1 = types::BitVec::new(0, knowledge_for_set0);
+            mailbox.bit_vec(bit_vec_from_pk1, peer_mailbox_s1);
 
             match peer_receiver_s1.next().await {
                 Some(peer::Message::Peers(received_peers_info)) => {
