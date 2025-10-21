@@ -276,7 +276,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
     /// Append a new item to the journal, returning its position.
     ///
-    /// The position returned is a stable, monotonically increasing value starting from 0.
+    /// The position returned is a stable, consecutively increasing value starting from 0.
     /// This position is independent of section boundaries and remains constant even after
     /// pruning.
     ///
@@ -880,7 +880,7 @@ mod tests {
                 .await
                 .expect("Should repair locations to match empty data");
 
-            // Size should be preserved (monotonic counter)
+            // Size should be preserved
             assert_eq!(journal.size().await.unwrap(), 20);
 
             // But no items remain (both journals pruned)
@@ -894,7 +894,7 @@ mod tests {
                 ));
             }
 
-            // Can append new data starting at position 20 (monotonic!)
+            // Can append new data starting at position 20
             let pos = journal.append(999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
@@ -1047,7 +1047,7 @@ mod tests {
         });
     }
 
-    /// Test that pruning all data and re-initializing preserves monotonic positions.
+    /// Test that pruning all data and re-initializing preserves positions.
     #[test]
     fn test_variable_prune_all_then_reinit() {
         let executor = deterministic::Runner::default();
@@ -1092,12 +1092,12 @@ mod tests {
 
             journal.close().await.unwrap();
 
-            // === Phase 3: Re-init and verify monotonic position preserved ===
+            // === Phase 3: Re-init and verify position preserved ===
             let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
-            // Size should be preserved (monotonic counter), but no items remain
+            // Size should be preserved, but no items remain
             assert_eq!(journal.size().await.unwrap(), 100);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
@@ -1110,7 +1110,7 @@ mod tests {
             }
 
             // === Phase 4: Append new data ===
-            // Next append should get position 100 (monotonic!)
+            // Next append should get position 100
             journal.append(10000).await.unwrap();
             assert_eq!(journal.size().await.unwrap(), 101);
             // Now we have one item at position 100

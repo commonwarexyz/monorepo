@@ -20,7 +20,7 @@ pub(super) mod tests;
 
 /// Core trait for contiguous journals supporting sequential append operations.
 ///
-/// A contiguous journal maintains a monotonically increasing position counter where each
+/// A contiguous journal maintains a consecutively increasing position counter where each
 /// appended item receives a unique position starting from 0.
 pub trait Contiguous {
     /// The type of items stored in the journal.
@@ -28,7 +28,7 @@ pub trait Contiguous {
 
     /// Append a new item to the journal, returning its position.
     ///
-    /// Positions are monotonically increasing starting from 0. The position of each item
+    /// Positions are consecutively increasing starting from 0. The position of each item
     /// is stable across pruning (i.e., if item X has position 5, it will always have
     /// position 5 even if earlier items are pruned).
     ///

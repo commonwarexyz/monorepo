@@ -319,7 +319,7 @@ where
 
 /// Test pruning all items then appending new ones.
 ///
-/// Verifies that positions continue monotonically increasing even after
+/// Verifies that positions continue consecutively increasing even after
 /// pruning all retained items. Assumes items_per_section = 10.
 async fn test_prune_then_append<F, J>(factory: &F)
 where
