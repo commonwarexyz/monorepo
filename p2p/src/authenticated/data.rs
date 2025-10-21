@@ -31,6 +31,7 @@ impl Read for Data {
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
+        // TODO: will we try to allocate the amount it says?
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }

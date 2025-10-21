@@ -1,5 +1,5 @@
 use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
 };
@@ -63,7 +63,7 @@ pub enum Payload<C: PublicKey> {
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
-    BitVec(BitVec),
+    BitVec((u64, Bytes)),
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
@@ -108,7 +108,8 @@ impl<C: PublicKey> Read for Payload<C> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
+                let index = u64::read(buf)?;
+                let buf = Bytes::r
                 Ok(Payload::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
