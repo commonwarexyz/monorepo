@@ -185,7 +185,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     let msg_len = msg.len();
 
                     // Parse the message
-                    let msg = match types::Payload::decode_cfg(msg, &types::Config { max_length: msg_len, max_peers: self.peer_gossip_max_count }) {
+                    let cfg = types::Config { max_length: msg_len, max_peers: self.peer_gossip_max_count };
+                    let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
