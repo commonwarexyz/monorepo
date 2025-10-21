@@ -235,9 +235,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// # Crash Safety
     ///
     /// This method maintains crash-safety by rewinding the locations journal BEFORE
-    /// the data journal. This ensures that if a crash occurs mid-operation:
-    /// - Locations is at or behind data (recoverable via init repair)
-    /// - Never locations ahead of data (which would be unrecoverable corruption)
+    /// the data journal to maintain the invariants on `Variable`.
     ///
     /// The write ordering is opposite of append (which writes data first, then locations).
     ///
