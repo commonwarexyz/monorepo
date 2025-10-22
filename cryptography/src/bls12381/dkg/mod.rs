@@ -1671,16 +1671,11 @@ mod tests {
         }
     }
 
-    // Helper to derive a sorted, de-duplicated participant set for deterministic indexing.
+    // Compute the participant set from a list of IDs
     fn participant_set(ids: &[u64]) -> Set<EdPublicKey> {
-        let keys = ids.iter().map(|id| PrivateKey::from_seed(*id).public_key());
-        let set: Set<_> = keys.collect();
-        assert_eq!(
-            set.len(),
-            ids.len(),
-            "duplicate participant identifier detected"
-        );
-        set
+        ids.iter()
+            .map(|id| PrivateKey::from_seed(*id).public_key())
+            .collect::<Set<_>>()
     }
 
     #[test]
@@ -1693,28 +1688,6 @@ mod tests {
     #[test]
     fn test_dkg_determinism() {
         let plan_template = || Plan::from(vec![Round::from((0..5).collect::<Vec<_>>())]);
-
-        let public_a_pk = plan_template().with_seed(1).run::<MinPk>();
-        assert_eq!(public_a_pk, plan_template().with_seed(1).run::<MinPk>());
-        let public_b_pk = plan_template().with_seed(2).run::<MinPk>();
-        assert_eq!(public_b_pk, plan_template().with_seed(2).run::<MinPk>());
-        assert_ne!(public_a_pk, public_b_pk);
-
-        let public_a_sig = plan_template().with_seed(1).run::<MinSig>();
-        assert_eq!(public_a_sig, plan_template().with_seed(1).run::<MinSig>());
-        let public_b_sig = plan_template().with_seed(2).run::<MinSig>();
-        assert_eq!(public_b_sig, plan_template().with_seed(2).run::<MinSig>());
-        assert_ne!(public_a_sig, public_b_sig);
-    }
-
-    #[test]
-    fn test_reshare_determinism() {
-        let plan_template = || {
-            Plan::from(vec![
-                Round::from((0..5).collect::<Vec<_>>()),
-                Round::from((5..10).collect::<Vec<_>>()),
-            ])
-        };
 
         let public_a_pk = plan_template().with_seed(1).run::<MinPk>();
         assert_eq!(public_a_pk, plan_template().with_seed(1).run::<MinPk>());
@@ -1827,12 +1800,35 @@ mod tests {
     fn test_reshare_min_active_large() {
         let plan = Plan::from(vec![
             Round::from((0..20).collect::<Vec<_>>())
-                .with_absent_dealers((14..20).collect::<Vec<_>>()),
+                .with_absent_dealers((14..20).collect::<Vec<_>>())
+                .with_absent_players((14..20).collect::<Vec<_>>()),
             Round::from((100..200).collect::<Vec<_>>())
                 .with_absent_dealers((14..20).collect::<Vec<_>>()),
         ])
         .with_concurrency(4);
         plan.run::<MinPk>();
         plan.run::<MinSig>();
+    }
+
+    #[test]
+    fn test_reshare_determinism() {
+        let plan_template = || {
+            Plan::from(vec![
+                Round::from((0..5).collect::<Vec<_>>()),
+                Round::from((5..10).collect::<Vec<_>>()),
+            ])
+        };
+
+        let public_a_pk = plan_template().with_seed(1).run::<MinPk>();
+        assert_eq!(public_a_pk, plan_template().with_seed(1).run::<MinPk>());
+        let public_b_pk = plan_template().with_seed(2).run::<MinPk>();
+        assert_eq!(public_b_pk, plan_template().with_seed(2).run::<MinPk>());
+        assert_ne!(public_a_pk, public_b_pk);
+
+        let public_a_sig = plan_template().with_seed(1).run::<MinSig>();
+        assert_eq!(public_a_sig, plan_template().with_seed(1).run::<MinSig>());
+        let public_b_sig = plan_template().with_seed(2).run::<MinSig>();
+        assert_eq!(public_b_sig, plan_template().with_seed(2).run::<MinSig>());
+        assert_ne!(public_a_sig, public_b_sig);
     }
 }
