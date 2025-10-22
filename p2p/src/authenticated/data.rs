@@ -7,7 +7,7 @@ pub struct Data {
     /// A unique identifier for the channel the message is sent on.
     ///
     /// This is used to route the message to the correct handler.
-    pub channel: u32,
+    pub channel: u64,
 
     /// The payload of the message.
     pub message: Bytes,
@@ -27,7 +27,7 @@ impl Write for Data {
 }
 
 impl Read for Data {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();

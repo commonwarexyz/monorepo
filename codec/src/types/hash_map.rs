@@ -92,7 +92,7 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
 
 // Read implementation for HashMap
 impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> {
-    type Cfg = (RangeCfg, (K::Cfg, V::Cfg));
+    type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
@@ -123,14 +123,14 @@ mod tests {
     // Manual round trip test function for HashMap with non-default configs
     fn round_trip_hash<K, V, KCfg, VCfg>(
         map: &HashMap<K, V>,
-        range_cfg: RangeCfg,
+        range_cfg: RangeCfg<usize>,
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
         K: Write + EncodeSize + Read<Cfg = KCfg> + Clone + Ord + Hash + Eq + PartialEq + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + Clone + PartialEq + Debug,
-        HashMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + Decode<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
+        HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+            + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + PartialEq
             + Write
             + EncodeSize,

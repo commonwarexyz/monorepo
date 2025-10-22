@@ -4,6 +4,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
@@ -15,8 +17,8 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Aborter},
-    Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    utils::{signal::Stopper, supervision::Tree, Panicker},
+    Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -32,6 +34,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -39,7 +42,7 @@ use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
 #[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
+const IOURING_NETWORK_FORCE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 struct Metrics {
@@ -128,7 +131,7 @@ impl Config {
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
-            catch_panics: true,
+            catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
@@ -211,11 +214,11 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    cfg: Config,
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
+    panicker: Panicker,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -256,6 +259,9 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
+
+        // Initialize panicker
+        let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
         // Collect process metrics.
         //
@@ -318,11 +324,11 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            cfg: self.cfg,
             registry: Mutex::new(registry),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
+            panicker,
         });
 
         // Get metrics
@@ -334,12 +340,12 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
-            spawned: false,
             executor: executor.clone(),
             network,
-            children: Arc::new(Mutex::new(Vec::new())),
+            tree: Tree::root(),
+            execution: Execution::default(),
         };
-        let output = executor.runtime.block_on(f(context));
+        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
 
         output
@@ -367,11 +373,26 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<Aborter>>>,
+    tree: Arc<Tree>,
+    execution: Execution,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        let (child, _) = Tree::child(&self.tree);
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+
+            tree: child,
+            execution: Execution::default(),
+        }
+    }
 }
 
 impl Context {
@@ -381,147 +402,72 @@ impl Context {
     }
 }
 
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            spawned: false,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            children: self.children.clone(),
-        }
-    }
-}
-
 impl crate::Spawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
+        let (_, metric) = spawn_metrics!(self);
 
-        // Set up the task
-        let catch_panics = self.executor.cfg.catch_panics;
-        let executor = self.executor.clone();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
-
-        let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, catch_panics, children);
+        // Track supervision before resetting configuration
+        let parent = Arc::clone(&self.tree);
+        let past = self.execution;
+        self.execution = Execution::default();
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
 
         // Spawn the task
-        executor.runtime.spawn(f);
-        handle
-    }
-
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
-
-        // Set up the task
         let executor = self.executor.clone();
+        let future = f(self);
+        let (f, handle) = Handle::init(
+            future,
+            metric,
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
 
-        move |f: F| {
-            let (f, handle) = Handle::init_future(
-                f,
-                metric,
-                executor.cfg.catch_panics,
-                // Give spawned task its own empty children list
-                Arc::new(Mutex::new(Vec::new())),
-            );
-
-            // Spawn the task
-            executor.runtime.spawn(f);
-            handle
-        }
-    }
-
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Store parent's children list
-        let parent_children = self.children.clone();
-
-        // Spawn the child
-        let child_handle = self.spawn(f);
-
-        // Register this child with the parent
-        if let Some(aborter) = child_handle.aborter() {
-            parent_children.lock().unwrap().push(aborter);
-        }
-
-        child_handle
-    }
-
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.cfg.catch_panics);
-
-        // Spawn the blocking task
-        if dedicated {
-            std::thread::spawn(f);
+        if matches!(past, Execution::Dedicated) {
+            thread::spawn({
+                // Ensure the task can access the tokio runtime
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
+            });
+        } else if matches!(past, Execution::Shared(true)) {
+            executor.runtime.spawn_blocking({
+                // Ensure the task can access the tokio runtime
+                let handle = executor.runtime.handle().clone();
+                move || {
+                    handle.block_on(f);
+                }
+            });
         } else {
-            executor.runtime.spawn_blocking(f);
+            executor.runtime.spawn(f);
         }
+
+        // Register the task on the parent
+        if let Some(aborter) = handle.aborter() {
+            parent.register(aborter);
+        }
+
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, executor.cfg.catch_panics);
-
-            // Spawn the blocking task
-            if dedicated {
-                std::thread::spawn(f);
-            } else {
-                executor.runtime.spawn_blocking(f);
-            }
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
@@ -567,11 +513,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            children: self.children.clone(),
+            ..self.clone()
         }
     }
 
@@ -620,6 +562,22 @@ impl Clock for Context {
         };
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
+    }
+}
+
+#[cfg(feature = "external")]
+impl Pacer for Context {
+    fn pace<'a, F, T>(
+        &'a self,
+        _latency: Duration,
+        future: F,
+    ) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        // Execute the future immediately
+        future
     }
 }
 

@@ -1,15 +1,18 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{self, Eval},
-        variant::{MinSig, Variant},
+    bls12381::{
+        dkg::types::{Ack, Share},
+        primitives::{
+            group,
+            poly::{self, Eval},
+            variant::{MinSig, Variant},
+        },
     },
     Signature,
 };
 use commonware_utils::quorum;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
 /// typically sent over a dedicated DKG communication channel.
@@ -63,24 +66,13 @@ pub enum Payload<S: Signature> {
     ///
     /// Contains the dealer's public commitment to their polynomial and the specific
     /// share calculated for the receiving player.
-    Share {
-        /// The dealer's public commitment (coefficients of the polynomial).
-        commitment: poly::Public<MinSig>,
-        /// The secret share evaluated for the recipient player.
-        share: group::Share,
-    },
+    Share(Share<MinSig>),
 
     /// Message sent by a player node back to the dealer node.
     ///
     /// Acknowledges the receipt and verification of a [Payload::Share] message.
     /// Includes a signature to authenticate the acknowledgment.
-    Ack {
-        /// The public key identifier of the player sending the acknowledgment.
-        public_key: u32,
-        /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
-        /// This confirms the player received and validated the correct share.
-        signature: S,
-    },
+    Ack(Ack<S>),
 
     /// Message sent by a dealer node to the arbiter.
     ///
@@ -90,8 +82,8 @@ pub enum Payload<S: Signature> {
     Commitment {
         /// The dealer's public commitment.
         commitment: poly::Public<MinSig>,
-        /// A map of player public key identifiers to their corresponding acknowledgment signatures.
-        acks: HashMap<u32, S>,
+        /// A list of received [Ack]s.
+        acks: Vec<Ack<S>>,
         /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
         reveals: Vec<group::Share>,
     },
@@ -101,10 +93,10 @@ pub enum Payload<S: Signature> {
     /// Contains the final aggregated commitments and revealed shares from all participating dealers.
     Success {
         /// A map of dealer public key identifiers to their final public commitments.
-        commitments: HashMap<u32, poly::Public<MinSig>>,
+        commitments: BTreeMap<u32, poly::Public<MinSig>>,
         /// A map of player public key identifiers to their corresponding revealed shares,
         /// aggregated from all dealers' [Payload::Commitment] messages.
-        reveals: HashMap<u32, group::Share>,
+        reveals: BTreeMap<u32, group::Share>,
     },
 
     /// Message broadcast by the arbiter to all player nodes if the DKG round fails or is aborted.
@@ -118,18 +110,13 @@ impl<S: Signature> Write for Payload<S> {
                 buf.put_u8(0);
                 group.write(buf);
             }
-            Payload::Share { commitment, share } => {
+            Payload::Share(share) => {
                 buf.put_u8(1);
-                commitment.write(buf);
                 share.write(buf);
             }
-            Payload::Ack {
-                public_key,
-                signature,
-            } => {
+            Payload::Ack(ack) => {
                 buf.put_u8(2);
-                UInt(*public_key).write(buf);
-                signature.write(buf);
+                ack.write(buf);
             }
             Payload::Commitment {
                 commitment,
@@ -166,17 +153,11 @@ impl<S: Signature> Read for Payload<S> {
             0 => Payload::Start {
                 group: Option::<poly::Public<MinSig>>::read_cfg(buf, &t)?,
             },
-            1 => Payload::Share {
-                commitment: poly::Public::<MinSig>::read_cfg(buf, &t)?,
-                share: group::Share::read(buf)?,
-            },
-            2 => Payload::Ack {
-                public_key: UInt::read(buf)?.into(),
-                signature: S::read(buf)?,
-            },
+            1 => Payload::Share(Share::read_cfg(buf, &(*p as u32))?),
+            2 => Payload::Ack(Ack::read(buf)?),
             3 => {
                 let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
-                let acks = HashMap::<u32, S>::read_range(buf, ..=*p)?;
+                let acks = Vec::<Ack<S>>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
                 Payload::Commitment {
@@ -186,11 +167,11 @@ impl<S: Signature> Read for Payload<S> {
                 }
             }
             4 => {
-                let commitments = HashMap::<u32, poly::Public<MinSig>>::read_cfg(
+                let commitments = BTreeMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
                     &((..=*p).into(), ((), t)),
                 )?;
-                let reveals = HashMap::<u32, group::Share>::read_range(buf, ..=*p)?;
+                let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {
                     commitments,
                     reveals,
@@ -206,11 +187,8 @@ impl<S: Signature> EncodeSize for Payload<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Payload::Start { group } => group.encode_size(),
-            Payload::Share { commitment, share } => commitment.encode_size() + share.encode_size(),
-            Payload::Ack {
-                public_key,
-                signature,
-            } => UInt(*public_key).encode_size() + signature.encode_size(),
+            Payload::Share(share) => share.encode_size(),
+            Payload::Ack(ack) => ack.encode_size(),
             Payload::Commitment {
                 commitment,
                 acks,
@@ -264,6 +242,7 @@ impl EncodeSize for Vrf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::ACK_NAMESPACE;
     use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
     use commonware_cryptography::{
         bls12381::primitives::{
@@ -271,10 +250,11 @@ mod tests {
             poly,
             variant::Variant,
         },
-        ed25519::Signature,
+        ed25519::{PrivateKey, Signature},
+        PrivateKeyExt, Signer,
     };
-    use rand::thread_rng;
-    use std::collections::HashMap;
+    use rand::{thread_rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
 
     const N: usize = 11;
     const T: usize = 8;
@@ -324,10 +304,7 @@ mod tests {
     fn test_dkg_share_codec() {
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Share {
-                commitment: new_poly(),
-                share: new_share(42),
-            },
+            payload: Payload::Share(Share::new(new_poly(), new_share(42))),
         };
         let encoded = original.encode();
         let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
@@ -336,12 +313,20 @@ mod tests {
 
     #[test]
     fn test_dkg_ack_codec() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xdead);
+        let poly = new_poly();
+        let signer = PrivateKey::from_rng(&mut rng);
+
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Ack {
-                public_key: 1,
-                signature: new_signature(123),
-            },
+            payload: Payload::Ack(Ack::new::<_, MinSig>(
+                ACK_NAMESPACE,
+                &signer,
+                1337,
+                42,
+                &signer.public_key(),
+                &poly,
+            )),
         };
         let encoded = original.encode();
         let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
@@ -351,8 +336,10 @@ mod tests {
     #[test]
     fn test_dkg_commitment_codec() {
         let commitment = new_poly();
-        let mut acks = HashMap::<u32, Signature>::new();
-        acks.insert(1, new_signature(123));
+        let acks = vec![Ack {
+            player: 1,
+            signature: new_signature(1),
+        }];
         let num_reveals = N - acks.len();
         let reveals_vec = vec![new_share(4321); num_reveals];
 
@@ -371,9 +358,9 @@ mod tests {
 
     #[test]
     fn test_dkg_success_codec() {
-        let mut commitments = HashMap::<u32, poly::Public<MinSig>>::new();
+        let mut commitments = BTreeMap::<u32, poly::Public<MinSig>>::new();
         commitments.insert(1, new_poly());
-        let mut reveals = HashMap::<u32, group::Share>::new();
+        let mut reveals = BTreeMap::<u32, group::Share>::new();
         reveals.insert(1, new_share(123));
 
         let original: Dkg<Signature> = Dkg {

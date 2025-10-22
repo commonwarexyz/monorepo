@@ -49,7 +49,7 @@ impl Write for FuzzRequest {
 }
 
 impl Read for FuzzRequest {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let data = Vec::read_range(buf, *cfg)?;
@@ -91,7 +91,7 @@ impl Write for FuzzResponse {
 }
 
 impl Read for FuzzResponse {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let result = Vec::read_range(buf, *cfg)?;
@@ -286,7 +286,10 @@ struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let operations = u.arbitrary()?;
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CollectorOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(FuzzInput { seed, operations })
     }
 }
@@ -309,7 +312,7 @@ fn fuzz(input: FuzzInput) {
         }
         assert!(!peers.is_empty(), "no peers");
 
-        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
+        for op in input.operations {
             match op {
                 CollectorOperation::SendRequest {
                     peer_idx,

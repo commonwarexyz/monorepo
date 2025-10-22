@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::current::{Config, Current},
-    mmr::{hasher::Hasher as MmrHasher, StandardHasher as Standard},
+    mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher as Standard},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -30,9 +30,21 @@ enum CurrentOperation {
     KeyValueProof { key: RawKey },
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 100;
+
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<CurrentOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CurrentOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { operations })
+    }
 }
 
 const PAGE_SIZE: usize = 88;
@@ -64,9 +76,9 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = 0;
+        let mut last_committed_op_count = Location::new(0).unwrap();
 
-        for op in data.operations.iter().take(100) {
+        for op in &data.operations {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
@@ -151,13 +163,15 @@ fn fuzz(data: FuzzInput) {
                         }
 
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
-                        let adjusted_start = *start_loc % current_op_count;
-                        let adjusted_max_ops = (*max_ops % 50).max(1);
+
+                        // Adjust start_loc and max_ops to be within valid range
+                        let start_loc = Location::new(start_loc % *current_op_count).unwrap();
+                        let max_ops = (*max_ops % 50).max(1);
 
                         let oldest_loc = db.inactivity_floor_loc();
-                        if adjusted_start >= oldest_loc {
+                        if start_loc >= oldest_loc {
                             let (proof, ops, chunks) = db
-                                .range_proof(hasher.inner(), adjusted_start, NZU64!(adjusted_max_ops))
+                                .range_proof(hasher.inner(), start_loc, NZU64!(max_ops))
                                 .await
                                 .expect("Range proof should not fail");
 
@@ -165,12 +179,12 @@ fn fuzz(data: FuzzInput) {
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                                     &mut hasher,
                                     &proof,
-                                    adjusted_start,
+                                    start_loc,
                                     &ops,
                                     &chunks,
                                     &current_root
                                 ),
-                                "Range proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}"
+                                "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
                         }
                     }
@@ -192,7 +206,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
                                 hasher.inner(),
                                 &proof,
-                                &info,
+                                info.clone(),
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");

@@ -24,11 +24,12 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     buffer::PoolRef,
+    spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
 use commonware_utils::futures::Pool as FuturesPool;
@@ -77,7 +78,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: E,
+    context: ContextCell<E>,
     crypto: C,
     automaton: A,
     relay: R,
@@ -225,10 +226,11 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
+        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
-            context,
+            context: ContextCell::new(context),
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
@@ -271,7 +273,7 @@ impl<
     ///   - Nodes
     ///   - Acks
     pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(chunk_network, ack_network))
+        spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
     }
 
     /// Inner run loop called by `start`.
@@ -527,7 +529,7 @@ impl<
             let Some(validators) = self.validators.participants(self.epoch) else {
                 return Err(Error::UnknownValidators(self.epoch));
             };
-            let mut recipients = validators.clone();
+            let mut recipients = validators.to_vec();
             if self
                 .validators
                 .is_participant(self.epoch, &tip.chunk.sequencer)
@@ -801,7 +803,7 @@ impl<
         // Send the node to all validators
         node_sender
             .send(
-                Recipients::Some(validators.clone()),
+                Recipients::Some(validators.to_vec()),
                 node,
                 self.priority_proposals,
             )
@@ -971,10 +973,12 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal =
-            Journal::<_, Node<C::PublicKey, V, D>>::init(self.context.with_label("journal"), cfg)
-                .await
-                .expect("unable to init journal");
+        let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
+            self.context.with_label("journal").into(),
+            cfg,
+        )
+        .await
+        .expect("unable to init journal");
 
         // Replay journal
         {

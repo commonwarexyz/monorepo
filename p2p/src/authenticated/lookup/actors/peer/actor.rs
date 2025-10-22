@@ -15,7 +15,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -37,7 +37,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
@@ -53,7 +53,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
-            Mailbox::new(control_sender),
+            control_sender,
             Relay::new(low_sender, high_sender),
         )
     }
@@ -61,7 +61,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     /// Unpack outbound `msg` and assert the underlying `channel` is registered.
     fn validate_outbound_msg<V>(
         msg: Option<Data>,
-        rate_limits: &HashMap<u32, V>,
+        rate_limits: &HashMap<u64, V>,
     ) -> Result<Data, Error> {
         let data = match msg {
             Some(data) => data,
@@ -165,10 +165,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let msg = match types::Message::decode_cfg(msg, &(..).into()) {
+                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            info!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();

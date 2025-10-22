@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Commonware: the Anti-Framework</title>
     <meta name="description" content="Today’s blockchain stack is designed to be a jack of all trades, but master of none.">
@@ -30,7 +30,7 @@
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@_patrickogrady" />
 
-    <link rel="stylesheet" type="text/css" href="../style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -85,7 +85,7 @@
         <h2>Outgrowing the Virtual Machine</h2>
         <p>Increasingly, the best builders spend their time working against the general-purpose abstractions provided by today’s blockchain stacks.</p>
         <div class="image-container">
-            <img src="../imgs/kernel-vs-blockchain.png" alt="Blockchain stacks are modeled after the kernel">
+            <img src="/imgs/kernel-vs-blockchain.png" alt="Blockchain stacks are modeled after the kernel">
         </div>
         <p>Whether <a href="https://eips.ethereum.org/EIPS/eip-4337">incorporating sidecars and relayers</a> to augment them or <a href="https://github.com/celestiaorg/celestia-core/blob/v0.34.x-celestia/README.md">breaking them altogether with a fork</a>, using these interfaces to transform a crypto app into a great app rapidly veers off the “happy path” with only a few moderate feature requests:</p>
         <ul>
@@ -107,15 +107,15 @@
         </ul>
         <p>Much of what leading developers are building today isn’t unlocked with “more framework,” it is solved with less. Instead of building around more of the same blockspace, they want to ship insightful customizations that make sense for their users (and don’t for yours).</p>
         <h2>Drop the Framework. It's Cleaner.</h2>
-        <p><a href="https://commonware.xyz/blogs/introducing-commonware.html">We think</a> blockchain applications should be designed differently. Rather than prioritizing standardization and balanced performance across all applications, specialization should be our guide. We think the best developers can build better blockchain applications when they can pick-and-choose the right primitives for the right functions.</p>
+        <p><a href="/blogs/introducing-commonware.html">We think</a> blockchain applications should be designed differently. Rather than prioritizing standardization and balanced performance across all applications, specialization should be our guide. We think the best developers can build better blockchain applications when they can pick-and-choose the right primitives for the right functions.</p>
         <p>Over the last few months, <a href="https://github.com/commonwarexyz/monorepo">we built a new type of “blockchain stack”</a> designed from the ground up for those who aren’t getting what they need from the frameworks available today. This stack has no explicit layers. No specific security assumption. It is <a href="https://usa.visa.com/solutions/crypto/monolithic-vs-modular-blockchain.html">neither monolithic nor modular</a>. There is no hardcoded block format, state layout, definition of finality, mempool policy, execution rules, nor fee metering.</p>
         <p>What we do provide is an open collection of “state-of-the-art” primitives that, while designed to work well together, can be rearranged, augmented, and even rebuilt (without forking everything). We call this growing collection of primitives “commonware”.</p>
         <div class="image-container">
-            <img src="../imgs/commonware-primitives.png" alt="Assemble commonware however you want">
+            <img src="/imgs/commonware-primitives.png" alt="Assemble commonware however you want">
         </div>
         <p>Just like there are no specific features an application must have, there is no specific set of primitives that must be used to create an application. You can build from scratch or even inject these primitives into an existing blockchain.</p>
         <h2>Commonware: Now Including Consensus</h2>
-        <p>How far along are we? In early August, we released <a href="https://commonware.xyz/blogs/introducing-commonware.html">p2p::authenticated</a> to provide authenticated and encrypted communication directly between public keys. In late August, we released <a href="https://commonware.xyz/blogs/commonware-cryptography.html">cryptography::bls12381</a> (with DKG and Resharing Support) to unlock verifiable randomness, connectivity, and trusted access for users. In late September, we released <a href="https://commonware.xyz/blogs/commonware-runtime.html">runtime::deterministic</a> to provide a foundation to deterministically test and optimize any primitive (internal or external). Today, we are excited to share our biggest release yet: <a href="https://docs.rs/commonware-consensus">consensus::simplex</a> (our first consensus primitive).</p>
+        <p>How far along are we? In early August, we released <a href="/blogs/introducing-commonware.html">p2p::authenticated</a> to provide authenticated and encrypted communication directly between public keys. In late August, we released <a href="/blogs/commonware-cryptography.html">cryptography::bls12381</a> (with DKG and Resharing Support) to unlock verifiable randomness, connectivity, and trusted access for users. In late September, we released <a href="/blogs/commonware-runtime.html">runtime::deterministic</a> to provide a foundation to deterministically test and optimize any primitive (internal or external). Today, we are excited to share our biggest release yet: <a href="https://docs.rs/commonware-consensus">consensus::simplex</a> (our first consensus primitive).</p>
         <p>consensus::simplex provides Byzantine Fault Tolerant (BFT) agreement via a new construction inspired by <a href="https://eprint.iacr.org/2023/463">Simplex Consensus</a>. Unlike other “off-the-shelf” consensus implementations, consensus::simplex is refreshingly minimal. It delivers simple agreement over opaque “blobs”. Functions that have historically motivated developers to create forks, like block broadcast and state sync, are abstracted as interfaces that can be externally implemented. Here are a few nice features:</p>
         <ul>
             <li>
@@ -135,7 +135,7 @@
         <p>You can see what it looks like to build with consensus::simplex in <a href="https://docs.rs/commonware-log">examples::log</a>, p2p::authenticated in <a href="https://docs.rs/commonware-chat">examples::chat</a>, and cryptography::bls12381 in <a href="https://docs.rs/commonware-vrf">examples::vrf</a>.</p>
         <h2>Accelerating Development: $9M Fundraise</h2>
         <div class="image-container">
-            <img src="../imgs/commonware-raise.png" alt="$9M Fundraise">
+            <img src="/imgs/commonware-raise.png" alt="$9M Fundraise">
         </div>
         <p>We’re excited to share that <a href="https://www.haun.co/">Haun Ventures</a> and <a href="https://www.dragonfly.xyz/">Dragonfly Capital</a> are co-leading a $9M investment in Commonware to accelerate our work and to equip us to better support the developers who leverage it.</p>
         <p>We are also fortunate to have the support of an experienced group of friends, mentors, and builders pushing the limit of what’s possible onchain:</p>
@@ -193,8 +193,7 @@
     </div>
 
     <div id="footer-placeholder"></div>
-    <script src="../shared.js"></script>
-    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>

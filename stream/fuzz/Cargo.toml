@@ -17,7 +17,7 @@ commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
 libfuzzer-sys = { workspace = true }
-chacha20poly1305 = { workspace = true }
+chacha20poly1305 = { workspace = true, default-features = false, features = ["std", "getrandom"] }
 rand_core = { workspace = true }
 
 [[bin]]

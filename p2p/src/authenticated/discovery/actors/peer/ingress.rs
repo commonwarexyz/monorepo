@@ -7,8 +7,8 @@ pub enum Message<C: PublicKey> {
     /// Send a bit vector to the peer.
     BitVec(types::BitVec),
 
-    /// Send a list of [types::PeerInfo] to the peer.
-    Peers(Vec<types::PeerInfo<C>>),
+    /// Send a list of [types::Info] to the peer.
+    Peers(Vec<types::Info<C>>),
 
     /// Kill the peer actor.
     Kill,
@@ -19,7 +19,7 @@ impl<C: PublicKey> Mailbox<Message<C>> {
         let _ = self.send(Message::BitVec(bit_vec)).await;
     }
 
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>) {
+    pub async fn peers(&mut self, peers: Vec<types::Info<C>>) {
         let _ = self.send(Message::Peers(peers)).await;
     }
 

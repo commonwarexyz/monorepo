@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Benchmarks</title>
     <meta name="description" content="Benchmarks for the Commonware Library.">
@@ -27,7 +27,7 @@
     <meta property="twitter:creator" content="@commonwarexyz" />
     <meta property="twitter:creator:id" content="@commonwarexyz" />
 
-    <link rel="stylesheet" type="text/css" href="style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -155,7 +155,7 @@
 
         function setupBenchmark() {
             // Set Chart.js default font family
-            Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
+            Chart.defaults.global.defaultFontFamily = 'monospace';
             Chart.defaults.global.defaultFontColor = "#000";
 
             // Build cases
@@ -214,7 +214,7 @@
                 function renderGraph(parent, name, dataset) {
                     // Create a <details> wrapper for each individual graph.
                     const graphDetails = document.createElement('details');
-                    graphDetails.className = 'benchmark-graph-details';
+                    graphDetails.className = 'benchmark-graph-details collapsible';
                     parent.appendChild(graphDetails);
 
                     // Listen for "toggle" events on each details to update button state
@@ -351,7 +351,7 @@
                 function renderBenchSet(testName, benchSet, main) {
                     // Setup the <details> element for the benchmark set
                     const detailsElem = document.createElement('details');
-                    detailsElem.className = 'benchmark-set';
+                    detailsElem.className = 'benchmark-set collapsible';
                     main.appendChild(detailsElem);
 
                     // Listen to "toggle" so button updates if a single set is opened/closed
@@ -372,7 +372,7 @@
                     Array.from(benchSet.keys()).sort().forEach(moduleName => {
                         const functionMap = benchSet.get(moduleName);
                         const moduleDetails = document.createElement('details');
-                        moduleDetails.className = 'benchmark-module';
+                        moduleDetails.className = 'benchmark-module collapsible';
                         moduleContainer.appendChild(moduleDetails);
                         moduleDetails.addEventListener('toggle', updateExpandButton);
 
@@ -389,7 +389,7 @@
                         Array.from(functionMap.keys()).sort().forEach(funcName => {
                             const paramsMap = functionMap.get(funcName);
                             const functionDetails = document.createElement('details');
-                            functionDetails.className = 'benchmark-function';
+                            functionDetails.className = 'benchmark-function collapsible';
                             functionContainer.appendChild(functionDetails);
                             functionDetails.addEventListener('toggle', updateExpandButton);
 
@@ -426,8 +426,7 @@
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
-    <script src="shared.js"></script>
-    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>

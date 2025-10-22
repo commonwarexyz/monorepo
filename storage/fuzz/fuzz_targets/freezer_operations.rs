@@ -16,9 +16,21 @@ enum Op {
     Destroy,
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 64;
+
+#[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Op>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let ops = (0..num_ops)
+            .map(|_| Op::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { ops })
+    }
 }
 
 fn vec_to_key(v: &[u8]) -> FixedBytes<32> {
@@ -54,7 +66,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut expected_state: HashMap<FixedBytes<32>, i32> = HashMap::new();
 
-        for op in input.ops.into_iter().take(64) {
+        for op in input.ops {
             match op {
                 Op::Put { key, value } => {
                     let k = vec_to_key(&key);

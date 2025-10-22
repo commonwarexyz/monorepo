@@ -13,11 +13,12 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
@@ -50,7 +51,7 @@ pub struct Engine<
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
-    context: E,
+    context: ContextCell<E>,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -106,6 +107,8 @@ impl<
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+
+        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
             context.with_label("fetcher"),
@@ -115,7 +118,7 @@ impl<
         );
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 coordinator: cfg.coordinator,
@@ -139,7 +142,7 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.

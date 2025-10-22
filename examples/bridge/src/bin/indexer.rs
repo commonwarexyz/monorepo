@@ -5,10 +5,10 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Finalization, Viewable};
+use commonware_consensus::{simplex::types::Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
@@ -48,7 +48,7 @@ enum Message<D: Digest> {
     },
     GetFinalization {
         incoming: inbound::GetFinalization,
-        response: oneshot::Sender<Option<Finalization<MinSig, D>>>,
+        response: oneshot::Sender<Option<Finalization<Scheme, D>>>,
     },
 }
 
@@ -113,9 +113,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces: HashMap<G2, (G2, Vec<u8>)> = HashMap::new();
+    let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<MinSig, Sha256Digest>>> =
+    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -128,7 +128,7 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(public, (public, namespace));
+        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }
@@ -141,7 +141,7 @@ fn main() {
 
         // Start handler
         let mut hasher = Sha256::new();
-        context.with_label("handler").spawn(|_| async move {
+        context.with_label("handler").spawn(|mut ctx| async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
@@ -180,11 +180,11 @@ fn main() {
                         };
 
                         // Verify signature
-                        let Some((public, namespace)) = namespaces.get(&incoming.network) else {
+                        let Some((verifier, namespace)) = namespaces.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(namespace, public) {
+                        if !incoming.finalization.verify(&mut ctx, verifier, namespace) {
                             let _ = response.send(false);
                             continue;
                         }
@@ -236,7 +236,7 @@ fn main() {
             };
 
             let (peer, mut sender, mut receiver) = match listen(
-                context.clone(),
+                context.with_label("listener"),
                 |peer| {
                     let out = validators.contains(&peer);
                     async move { out }

@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: E,
+    context: ContextCell<E>,
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
@@ -34,7 +34,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
@@ -47,12 +47,12 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            Mailbox::new(control_sender.clone()),
+            control_sender.clone(),
             Messenger::new(control_sender),
         )
     }
@@ -89,7 +89,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(routing))
+        spawn_cell!(self.context, self.run(routing).await)
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

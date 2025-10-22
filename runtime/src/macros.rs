@@ -11,21 +11,12 @@
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks
-    ($ctx:ident, future) => {
+    ($ctx:ident) => {
         $crate::spawn_metrics!(
-            $crate::telemetry::metrics::task::Label::future($ctx.name.clone()),
-            @make $ctx
-        )
-    };
-
-    // Handle blocking tasks
-    ($ctx:ident, blocking, $dedicated:expr) => {
-        $crate::spawn_metrics!(
-            if $dedicated {
-                $crate::telemetry::metrics::task::Label::blocking_dedicated($ctx.name.clone())
-            } else {
-                $crate::telemetry::metrics::task::Label::blocking_shared($ctx.name.clone())
-            },
+            $crate::telemetry::metrics::task::Label::task(
+                $ctx.name.clone(),
+                $ctx.execution,
+            ),
             @make $ctx
         )
     };

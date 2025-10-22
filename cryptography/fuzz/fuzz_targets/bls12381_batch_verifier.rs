@@ -24,10 +24,26 @@ enum BatchOperation {
     VerifyBls12381,
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 32;
+
+#[derive(Debug)]
 struct FuzzInput {
     rng_seed: u64,
     operations: Vec<BatchOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let rng_seed = u.arbitrary()?;
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| BatchOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput {
+            rng_seed,
+            operations,
+        })
+    }
 }
 
 fn fuzz(input: FuzzInput) {
@@ -35,7 +51,7 @@ fn fuzz(input: FuzzInput) {
     let mut bls12381_batch = BlsBatch::new();
     let mut expected_bls12381_result = true;
 
-    for op in input.operations.into_iter().take(32) {
+    for op in input.operations {
         match op {
             BatchOperation::AddBls12381 {
                 private_key_seed,

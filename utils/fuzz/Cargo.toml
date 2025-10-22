@@ -32,8 +32,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "bitvec"
-path = "fuzz_targets/bitvec.rs"
+name = "bitmap"
+path = "fuzz_targets/bitmap.rs"
 test = false
 doc = false
 bench = false
@@ -62,6 +62,13 @@ bench = false
 [[bin]]
 name = "futures"
 path = "fuzz_targets/futures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "historical_bitmap"
+path = "fuzz_targets/historical_bitmap.rs"
 test = false
 doc = false
 bench = false

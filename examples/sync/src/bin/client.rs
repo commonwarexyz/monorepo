@@ -12,7 +12,7 @@ use commonware_storage::{adb::sync, mmr::StandardHasher};
 use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
-use commonware_utils::parse_duration;
+use commonware_utils::DurationExt;
 use futures::channel::mpsc;
 use rand::Rng;
 use std::{
@@ -111,8 +111,11 @@ where
     info!("starting Any database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver =
-            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
+        let resolver = Resolver::<any::Operation, Digest>::connect(
+            context.with_label("resolver"),
+            config.server,
+        )
+        .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -136,7 +139,7 @@ where
 
         let sync_config =
             sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.clone(),
+                context: context.with_label("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -169,8 +172,11 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver =
-            Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
+        let resolver = Resolver::<immutable::Operation, Key>::connect(
+            context.with_label("resolver"),
+            config.server,
+        )
+        .await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -194,7 +200,7 @@ where
 
         let sync_config =
             sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
-                context: context.clone(),
+                context: context.with_label("sync"),
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
@@ -328,10 +334,10 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid metrics port: {e}"))?;
 
     let target_update_interval =
-        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
+        Duration::parse(matches.get_one::<String>("target-update-interval").unwrap())
             .map_err(|e| format!("Invalid target update interval: {e}"))?;
 
-    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
+    let sync_interval = Duration::parse(matches.get_one::<String>("sync-interval").unwrap())
         .map_err(|e| format!("Invalid sync interval: {e}"))?;
 
     let max_outstanding_requests = matches

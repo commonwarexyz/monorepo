@@ -437,6 +437,12 @@ pub struct Share {
     pub private: Private,
 }
 
+impl AsRef<Private> for Share {
+    fn as_ref(&self) -> &Private {
+        &self.private
+    }
+}
+
 impl Share {
     /// Returns the public key corresponding to the share.
     ///

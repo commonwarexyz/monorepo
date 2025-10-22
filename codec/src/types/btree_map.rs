@@ -91,7 +91,7 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
 }
 
 impl<K: Read + Clone + Ord + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
-    type Cfg = (RangeCfg, (K::Cfg, V::Cfg));
+    type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
@@ -122,14 +122,14 @@ mod tests {
     // Manual round trip test function for BTreeMap with non-default configs
     fn round_trip_btree<K, V, KCfg, VCfg>(
         map: &BTreeMap<K, V>,
-        range_cfg: RangeCfg,
+        range_cfg: RangeCfg<usize>,
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
         K: Write + EncodeSize + Read<Cfg = KCfg> + Clone + Ord + Eq + PartialEq + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + Clone + PartialEq + Debug,
-        BTreeMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + Decode<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
+        BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+            + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + PartialEq
             + Write
             + EncodeSize,
