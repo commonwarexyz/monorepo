@@ -7,7 +7,7 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Reconfiguration + Reshare with threshold consensus::simplex</title>
-    <meta name="description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without touching the brakes; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks. In many modern blockchains, reconfiguring the committee still means injecting out-of-band key material, with each validator responsible for the secure generation and safekeeping of their own signing keys. Some validators may have done their due diligence, but some may have not, hindering the security properties of the network at large. What if there was a way to enforce validators to refresh their key material on a rolling basis?">
+    <meta name="description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without pausing; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks.">
     <meta name="author" content="Ben Clabby">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -16,7 +16,7 @@
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/reshare.png" />
     <meta property="og:title" content="Reconfiguration + Reshare with threshold consensus::simplex" />
-    <meta property="og:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without touching the brakes; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks. In many modern blockchains, reconfiguring the committee still means injecting out-of-band key material, with each validator responsible for the secure generation and safekeeping of their own signing keys. Some validators may have done their due diligence, but some may have not, hindering the security properties of the network at large. What if there was a way to enforce validators to refresh their key material on a rolling basis?" />
+    <meta property="og:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without pausing; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks." />
     <meta property="article:author" content="https://x.com/vex_0x" />
     <meta property="article:published_time" content="2025-10-15T00:00:00Z" />
     <meta property="article:modified_time" content="2025-10-15T00:00:00Z" />
@@ -25,7 +25,7 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/reshare.html" />
     <meta property="twitter:title" content="Reconfiguration + Reshare with threshold consensus::simplex" />
-    <meta property="twitter:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without touching the brakes; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks. In many modern blockchains, reconfiguring the committee still means injecting out-of-band key material, with each validator responsible for the secure generation and safekeeping of their own signing keys. Some validators may have done their due diligence, but some may have not, hindering the security properties of the network at large. What if there was a way to enforce validators to refresh their key material on a rolling basis?" />
+    <meta property="twitter:description" content="An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee (adding and removing validators), and in turn, refreshing secret key material amongst active participants. Networks need to expand and contract the committee without pausing; Validator committees are rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on Proof of Authority networks." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/reshare.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@vex_0x" />
@@ -82,9 +82,9 @@
         <p>
             An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee
             (adding and removing validators), and in turn, refreshing secret key material amongst active participants.
-            Networks need to expand and contract the committee without touching the brakes; Validator committees are
-            rarely static in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the
-            authorities on Proof of Authority networks.
+            Networks need to expand and contract the committee without pausing; Validator committees are rarely static
+            in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on
+            Proof of Authority networks.
         </p>
         <p>
             In many modern blockchains, reconfiguring the committee still means injecting out-of-band key material,
@@ -126,9 +126,9 @@
         </p>
         <p>
             <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>examples/vrf</code></a>
-            showcases a continuous key reshare process to generate randomness, but with one flaw: participants trust a
+            showcases a continuous key reshare process to generate randomness, but with one caveat: participants trust a
             central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>"
-            to track commitments, acknowledgements, and reveals.
+            to ensure all participants see the same commitments, acknowledgements, and reveals.
         </p>
 
         <h2>Epoching</h2>
@@ -177,6 +177,23 @@
             </ol>
         </p>
 
+        <h2>Bootstrapping a Threshold Committee</h2>
+        <p>
+            To bootstrap the initial threshold committee, the example offers two paths: a trusted setup, where a central
+            party creates and distributes the shares, or a DKG ceremony, where all participants jointly generate the
+            initial shares without any single point of trust.
+        </p>
+        <p>
+            The trusted setup is more simple, but the DKG ceremony is more secure. The DKG ceremony is facilitated
+            amongst a known set of participants using ED25519 <code>consensus::simplex</code> to agree on the DKG
+            transcript.
+        </p>
+        <img src="/imgs/dkg_bootstrap.png" alt="DKG bootstrap" />
+        <p>
+            After this process is complete, the initial epoch's committee can begin producing blocks under threshold
+            <code>consensus::simplex</code>.
+        </p>
+
         <h2>Trying It Locally</h2>
         <p>
             You can run the example by generating participant configurations and launching the validators with the
@@ -186,8 +203,11 @@
         </p>
         <pre><code>
 $ git clone git@github.com:commonwarexyz/monorepo.git && cd monorepo
+# Trusted Setup
 $ cargo run --bin commonware-reshare setup
-# Execute the `mprocs` command emitted by the previous step
+# DKG Setup
+$ cargo run --bin commonware-reshare setup --with-dkg
+# Execute the `mprocs` command(s) emitted by the previous step
         </code></pre>
 
         <h2>What Comes Next</h2>
