@@ -12,7 +12,7 @@ use crate::{
     },
     log_db::{
         adb::{align_mmr_and_locations, Error},
-        operation::Variable as Operation,
+        operation::variable::Operation,
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},

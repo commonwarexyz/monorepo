@@ -9,7 +9,7 @@ use commonware_storage::{
             any::fixed::{unordered::Any, Config},
             sync,
         },
-        operation::Fixed,
+        operation::fixed::unordered::Operation as Fixed,
     },
     mmr::StandardHasher as Standard,
     translator::TwoCap,

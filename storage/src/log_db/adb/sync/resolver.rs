@@ -1,7 +1,7 @@
 use crate::{
     log_db::{
         adb::{self, any::fixed::unordered::Any, immutable::Immutable},
-        operation::{Fixed, Variable},
+        operation::{fixed::unordered::Operation as Fixed, variable::Operation as Variable},
     },
     mmr::{Location, Proof},
     translator::Translator,

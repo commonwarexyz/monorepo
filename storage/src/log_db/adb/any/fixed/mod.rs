@@ -9,7 +9,7 @@
 
 use crate::{
     journal::fixed::{Config as JConfig, Journal},
-    log_db::{adb::Error, operation::FixedOperation as OperationTrait},
+    log_db::{adb::Error, operation::fixed::FixedOperation as OperationTrait},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,

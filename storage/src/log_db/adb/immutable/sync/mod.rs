@@ -7,7 +7,7 @@ use crate::{
             sync::{self, Journal as _},
             Error,
         },
-        operation::Variable,
+        operation::variable::Operation,
     },
     mmr::{Location, StandardHasher as Standard},
     translator::Translator,
@@ -28,7 +28,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    type Op = Variable<K, V>;
+    type Op = Operation<K, V>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
     type Config = immutable::Config<T, V::Cfg>;
@@ -154,7 +154,7 @@ where
 
     /// The [immutable::Immutable]'s log of operations. It has elements within the range.
     /// Reports the range start as its pruning boundary (oldest retained operation index).
-    pub log: variable::Journal<E, Variable<K, V>>,
+    pub log: variable::Journal<E, Operation<K, V>>,
 
     /// Sync range - operations outside this range are pruned or not synced.
     pub range: Range<Location>,
@@ -183,7 +183,7 @@ mod tests {
                     Engine, Journal, Target,
                 },
             },
-            operation::Variable,
+            operation::variable::Operation,
         },
         mmr::{Location, StandardHasher as Standard},
         translator::TwoCap,
@@ -247,13 +247,13 @@ mod tests {
 
     /// Create n random Set operations.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    fn create_test_ops(n: usize) -> Vec<Variable<sha256::Digest, sha256::Digest>> {
+    fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut ops = Vec::new();
         for _i in 0..n {
             let key = sha256::Digest::random(&mut rng);
             let value = sha256::Digest::random(&mut rng);
-            ops.push(Variable::Set(key, value));
+            ops.push(Operation::Set(key, value));
         }
         ops
     }
@@ -261,14 +261,14 @@ mod tests {
     /// Applies the given operations to the database.
     async fn apply_ops(
         db: &mut ImmutableSyncTest,
-        ops: Vec<Variable<sha256::Digest, sha256::Digest>>,
+        ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
     ) {
         for op in ops {
             match op {
-                Variable::Set(key, value) => {
+                Operation::Set(key, value) => {
                     db.set(key, value).await.unwrap();
                 }
-                Variable::Commit(metadata) => {
+                Operation::Commit(metadata) => {
                     db.commit(metadata).await.unwrap();
                 }
                 _ => {}
@@ -300,7 +300,7 @@ mod tests {
             // Capture target database state before moving into config
             let mut expected_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
             for op in &target_db_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     expected_kvs.insert(*key, *value);
                 }
             }
@@ -344,7 +344,7 @@ mod tests {
             for _i in 0..expected_kvs.len() {
                 let key = sha256::Digest::random(&mut rng);
                 let value = sha256::Digest::random(&mut rng);
-                new_ops.push(Variable::Set(key, value));
+                new_ops.push(Operation::Set(key, value));
                 new_kvs.insert(key, value);
             }
 
@@ -487,7 +487,7 @@ mod tests {
 
             // Verify data integrity
             for op in &target_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     let stored_value = reopened_db.get(key).await.unwrap();
                     assert_eq!(stored_value, Some(*value));
                 }
@@ -589,7 +589,7 @@ mod tests {
             // Verify all expected operations are present in the synced database
             let all_ops = [initial_ops, additional_ops].concat();
             for op in &all_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     let synced_value = synced_db.get(key).await.unwrap();
                     assert_eq!(synced_value, Some(*value));
                 }

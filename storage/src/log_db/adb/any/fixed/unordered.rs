@@ -10,7 +10,7 @@ use crate::{
             },
             Error,
         },
-        operation::{Fixed as Operation, FixedOperation as OperationTrait},
+        operation::fixed::{unordered::Operation, FixedOperation as _},
         KeyValueStore,
     },
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
@@ -606,7 +606,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::{Index as IndexTrait, Unordered as Index},
-        log_db::{adb::verify_proof, operation::Fixed as Operation},
+        log_db::{adb::verify_proof, operation::fixed::unordered::Operation},
         mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
     };

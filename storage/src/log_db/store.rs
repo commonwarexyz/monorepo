@@ -100,7 +100,7 @@ use crate::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
-    log_db::{operation::Variable as Operation, Error, KeyValueStore},
+    log_db::{operation::variable::Operation, Error, KeyValueStore},
     mmr::Location,
     translator::Translator,
 };

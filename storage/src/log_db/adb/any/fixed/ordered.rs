@@ -11,8 +11,9 @@ use crate::{
         adb::any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, Error, SNAPSHOT_READ_BUFFER_SIZE,
         },
-        operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
+        operation::fixed::{
+            ordered::{KeyData, Operation},
+            FixedOperation as OperationTrait,
         },
         KeyValueStore,
     },

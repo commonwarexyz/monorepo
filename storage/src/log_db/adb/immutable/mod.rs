@@ -6,7 +6,7 @@ use crate::{
     journal::{fixed, variable},
     log_db::{
         adb::{any::fixed::sync::init_journal, Error},
-        operation::Variable,
+        operation::variable::Operation,
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -89,7 +89,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its order of occurrence with respect to this log, and corresponds to its leaf
     /// number in the MMR.
-    log: variable::Journal<E, Variable<K, V>>,
+    log: variable::Journal<E, Operation<K, V>>,
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
@@ -109,7 +109,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Variable::Set].
+    /// Only references operations of type [Operation::Set].
     snapshot: Index<T, Location>,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
@@ -126,7 +126,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: Config<T, <Variable<K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
@@ -197,7 +197,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     #[allow(clippy::type_complexity)]
     pub async fn init_synced(
         context: E,
-        mut cfg: sync::Config<E, K, V, T, H::Digest, <Variable<K, V> as Read>::Cfg>,
+        mut cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // Initialize MMR for sync
         let mut mmr = Mmr::init_sync(
@@ -280,7 +280,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         hasher: &mut Standard<H>,
         log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
-        log: &mut variable::Journal<E, Variable<K, V>>,
+        log: &mut variable::Journal<E, Operation<K, V>>,
         locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, Location>,
     ) -> Result<(Location, Location), Error> {
@@ -338,10 +338,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             mmr_leaves += 1;
                         }
                         match op {
-                            Variable::Set(key, _) => {
+                            Operation::Set(key, _) => {
                                 uncommitted_ops.push((key, loc));
                             }
-                            Variable::Commit(_) => {
+                            Operation::Commit(_) => {
                                 for (key, loc) in uncommitted_ops.iter() {
                                     snapshot.insert(key, *loc);
                                 }
@@ -509,7 +509,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let section = *loc / self.log_items_per_section;
-        let Variable::Set(k, v) = self.log.get(section, offset).await? else {
+        let Operation::Set(k, v) = self.log.get(section, offset).await? else {
             return Err(Error::UnexpectedData(loc));
         };
 
@@ -537,7 +537,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.snapshot
             .insert_and_prune(&key, loc, |v| *v < self.oldest_retained_loc);
 
-        let op = Variable::Set(key, value);
+        let op = Operation::Set(key, value);
         self.apply_op(op).await
     }
 
@@ -552,7 +552,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Variable<K, V>) -> Result<(), Error> {
+    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let section = self.current_section();
         let encoded_op = op.encode();
 
@@ -596,7 +596,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         &self,
         start_index: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_index, max_ops)
             .await
     }
@@ -616,7 +616,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         if op_count > self.op_count() {
             return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
         }
@@ -650,7 +650,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.log_size);
-        let op = Variable::<K, V>::Commit(metadata);
+        let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
         let section = self.current_section();
 
@@ -688,7 +688,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
         let section = *last_commit / self.log_items_per_section;
         let offset = self.locations.read(*last_commit).await?;
-        let Variable::Commit(metadata) = self.log.get(section, offset).await? else {
+        let Operation::Commit(metadata) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
@@ -738,7 +738,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(None)).await?;
+        self.apply_op(Operation::Commit(None)).await?;
         self.log.close().await?;
         self.locations.close().await?;
         self.mmr
@@ -755,7 +755,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(None)).await?;
+        self.apply_op(Operation::Commit(None)).await?;
         let mut section = self.current_section();
 
         self.mmr.close(&mut self.hasher).await?;
@@ -781,7 +781,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(None)).await?;
+        self.apply_op(Operation::Commit(None)).await?;
         let op_count = self.op_count();
         assert!(op_count >= operations_to_trim);
 

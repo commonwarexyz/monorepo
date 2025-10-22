@@ -17,7 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::log_db::operation::Variable<Key, Value>;
+pub type Operation = commonware_storage::log_db::operation::variable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
