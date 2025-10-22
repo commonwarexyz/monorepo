@@ -1429,7 +1429,7 @@ mod tests {
                     !round.players.is_empty(),
                     "round {round_idx} must include at least one player",
                 );
-                let player_set = participant_set(&round.players);
+                let player_set = participants(&round.players);
                 let dealer_candidates = if let Some(ref registry) = share_holders {
                     registry.clone()
                 } else {
@@ -1442,7 +1442,7 @@ mod tests {
                 );
 
                 // Configure absent dealers and players
-                let absent_dealers = participant_set(&round.absent_dealers);
+                let absent_dealers = participants(&round.absent_dealers);
                 for absent in absent_dealers.iter() {
                     assert!(
                         dealer_candidates.position(absent).is_some(),
@@ -1480,7 +1480,7 @@ mod tests {
                     player_set.len(),
                     active_len
                 );
-                let absent_players = participant_set(&round.absent_players);
+                let absent_players = participants(&round.absent_players);
                 for absent in absent_players.iter() {
                     assert!(
                         player_set.position(absent).is_some(),
@@ -1672,7 +1672,7 @@ mod tests {
     }
 
     // Compute the participant set from a list of IDs
-    fn participant_set(ids: &[u64]) -> Set<EdPublicKey> {
+    fn participants(ids: &[u64]) -> Set<EdPublicKey> {
         ids.iter()
             .map(|id| PrivateKey::from_seed(*id).public_key())
             .collect::<Set<_>>()
