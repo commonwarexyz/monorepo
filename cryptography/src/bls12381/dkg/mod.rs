@@ -272,22 +272,38 @@ mod tests {
             // Deterministic RNG keeps every test path reproducible.
             let mut rng = StdRng::seed_from_u64(seed);
             let mut current_public: Option<poly::Public<V>> = None;
-            let mut participant_states: HashMap<u64, player::Output<V>> = HashMap::new();
+            let mut participant_states: HashMap<EdPublicKey, player::Output<V>> = HashMap::new();
+            let mut share_holders: Option<Set<EdPublicKey>> = None;
 
             for (round_idx, round) in self.rounds.iter().enumerate() {
                 // Validate committee definitions before instantiating protocol state.
                 assert!(
                     !round.dealers.is_empty(),
-                    "round {round_idx} must include at least one dealer",
+                    "round {} must include at least one dealer",
+                    round_idx
                 );
                 assert!(
                     !round.players.is_empty(),
-                    "round {round_idx} must include at least one player",
+                    "round {} must include at least one player",
+                    round_idx
                 );
 
                 // Materialize deterministic dealer/player sets (ordered by public key).
-                let (dealer_set, dealer_ids) = participant_set(&round.dealers);
-                let (player_set, player_ids) = participant_set(&round.players);
+                let dealer_set = participant_set(&round.dealers);
+                let player_set = participant_set(&round.players);
+                let dealer_registry = match share_holders.clone() {
+                    Some(registry) => {
+                        for dealer in dealer_set.iter() {
+                            assert!(
+                                registry.position(dealer).is_some(),
+                                "round {} dealer not in previous committee",
+                                round_idx
+                            );
+                        }
+                        registry
+                    }
+                    None => dealer_set.clone(),
+                };
                 let min_dealers = match current_public.as_ref() {
                     None => quorum(player_set.len() as u32),
                     Some(previous) => previous.required(),
@@ -305,20 +321,13 @@ mod tests {
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
                 for dealer_pk in dealer_set.iter() {
-                    let dealer_id = dealer_ids
-                        .get(dealer_pk)
-                        .expect("dealer missing identifier");
                     let previous_share = participant_states
-                        .get(dealer_id)
+                        .get(dealer_pk)
                         .map(|out| out.share.clone());
                     if current_public.is_some() && previous_share.is_none() {
                         panic!(
-                            "dealer {dealer_id} missing share required for reshare in round {round_idx}"
-                        );
-                    }
-                    if current_public.is_none() && previous_share.is_some() {
-                        panic!(
-                            "dealer {dealer_id} unexpectedly has share before initial round {round_idx}"
+                            "dealer missing share required for reshare in round {}",
+                            round_idx
                         );
                     }
 
@@ -330,21 +339,21 @@ mod tests {
 
                 // Prepare player handles so we can route shares and later finalize outputs.
                 let mut players = BTreeMap::new();
-                for (player_pk, player_id) in player_ids.iter() {
+                for player_pk in player_set.iter() {
                     let player = Player::<_, V>::new(
                         player_pk.clone(),
                         current_public.clone(),
-                        dealer_set.clone(),
+                        dealer_registry.clone(),
                         player_set.clone(),
                         self.concurrency,
                     );
-                    players.insert(player_pk.clone(), (*player_id, player));
+                    players.insert(player_pk.clone(), player);
                 }
 
                 // Arbiter mirrors on-chain behavior by gathering commitments/acks each round.
                 let mut arb = Arbiter::<_, V>::new(
                     current_public.clone(),
-                    dealer_set.clone(),
+                    dealer_registry.clone(),
                     player_set.clone(),
                     self.concurrency,
                 );
@@ -359,12 +368,18 @@ mod tests {
                         let dealer = dealers.get_mut(dealer_pk).expect("missing dealer instance");
                         for (idx, player_pk) in player_set.iter().enumerate() {
                             let share = shares[idx].clone();
-                            let (_, player_obj) = players
+                            let player_obj = players
                                 .get_mut(player_pk)
                                 .expect("missing player for share delivery");
-                            player_obj
-                                .share(dealer_pk.clone(), commitment.clone(), share)
-                                .unwrap();
+                            if let Err(err) =
+                                player_obj.share(dealer_pk.clone(), commitment.clone(), share)
+                            {
+                                panic!(
+                                    "failed to deliver share from dealer {:?} to player {:?}: {err:?}",
+                                    dealer_pk,
+                                    player_pk
+                                );
+                            }
                             dealer.ack(player_pk.clone()).unwrap();
                         }
                     }
@@ -386,40 +401,46 @@ mod tests {
                     .unwrap();
                 }
 
-                assert!(arb.ready(), "arbiter not ready in round {round_idx}");
+                assert!(arb.ready(), "arbiter not ready in round {}", round_idx);
                 let (result, disqualified) = arb.finalize();
-                assert!(
-                    disqualified.is_empty(),
-                    "unexpected disqualified dealers in round {round_idx}",
+                let expected_disqualified = dealer_registry.len().saturating_sub(dealer_set.len());
+                assert_eq!(
+                    disqualified.len(),
+                    expected_disqualified,
+                    "unexpected disqualified dealers in round {}",
+                    round_idx
                 );
                 let output = result.unwrap();
                 assert!(
                     output.reveals.is_empty(),
-                    "unexpected reveals in round {round_idx}",
+                    "unexpected reveals in round {}",
+                    round_idx
                 );
 
-                let expected_commitments = quorum(dealer_set.len() as u32) as usize;
+                let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
                 assert_eq!(
                     output.commitments.len(),
                     expected_commitments,
-                    "unexpected number of commitments in round {round_idx}"
+                    "unexpected number of commitments in round {}",
+                    round_idx
                 );
 
                 let mut round_results = Vec::new();
                 let mut next_states = HashMap::new();
                 for player_pk in player_set.iter() {
-                    let (player_id, player_obj) = players.remove(player_pk).unwrap();
+                    let player_obj = players.remove(player_pk).unwrap();
                     let result = player_obj
                         .finalize(output.commitments.clone(), BTreeMap::new())
                         .unwrap();
                     assert_eq!(result.public, output.public);
-                    next_states.insert(player_id, result.clone());
+                    next_states.insert(player_pk.clone(), result.clone());
                     round_results.push(result);
                 }
 
                 assert!(
                     !round_results.is_empty(),
-                    "round {round_idx} produced no outputs",
+                    "round {} produced no outputs",
+                    round_idx
                 );
 
                 // Sanity-check the recovered shares by constructing a threshold POP.
@@ -435,22 +456,22 @@ mod tests {
                     .expect("invalid proof of possession");
 
                 current_public = Some(round_results[0].public.clone());
+                share_holders = Some(player_set);
                 participant_states = next_states;
             }
         }
     }
 
-    // Helper to derive a sorted set of participants and a reverse lookup map.
-    fn participant_set(ids: &[u64]) -> (Set<EdPublicKey>, BTreeMap<EdPublicKey, u64>) {
-        let mut map = BTreeMap::new();
-        for &id in ids {
-            let key = PrivateKey::from_seed(id).public_key();
-            if map.insert(key.clone(), id).is_some() {
-                panic!("duplicate participant identifier {id}");
-            }
-        }
-        let set = map.keys().cloned().collect::<Set<_>>();
-        (set, map)
+    // Helper to derive a sorted, de-duplicated participant set for deterministic indexing.
+    fn participant_set(ids: &[u64]) -> Set<EdPublicKey> {
+        let keys = ids.iter().map(|id| PrivateKey::from_seed(*id).public_key());
+        let set: Set<_> = keys.collect();
+        assert_eq!(
+            set.len(),
+            ids.len(),
+            "duplicate participant identifier detected"
+        );
+        set
     }
 
     #[test]
