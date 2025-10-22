@@ -21,7 +21,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -31,7 +31,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     allowed_peers_rate: Quota,
     info_verifier: InfoVerifier<C>,
 
-    codec_config: types::Config,
+    max_bit_vec: u64,
+    max_peers: usize,
 
     mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
@@ -58,10 +59,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 info_verifier: cfg.info_verifier,
-                codec_config: types::Config {
-                    max_bit_vec: cfg.max_peer_set_size,
-                    max_peers: cfg.peer_gossip_max_count,
-                },
+                max_bit_vec: cfg.max_peer_set_size,
+                max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -187,10 +186,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
+                    let cfg = types::PayloadConfig {
+                        max_bit_vec: self.max_bit_vec,
+                        max_peers: self.max_peers,
+                        max_data_length: msg.len(), // apply loose bound to data read to prevent memory exhaustion
+                    };
+                    let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            info!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();

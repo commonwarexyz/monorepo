@@ -65,3 +65,10 @@ path = "fuzz_targets/futures.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "historical_bitmap"
+path = "fuzz_targets/historical_bitmap.rs"
+test = false
+doc = false
+bench = false
