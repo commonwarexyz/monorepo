@@ -991,6 +991,61 @@ mod tests {
         verify_certificate_rejects_unknown_signer::<MinSig>();
     }
 
+    fn verify_certificate_rejects_invalid_certificate_signers_size<V: Variant>() {
+        let (schemes, participants) = signing_schemes::<V>(4);
+        let proposal = sample_proposal(0, 20, 11);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+
+        // The certificate is valid
+        let verifier = Scheme::verifier(participants.clone());
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+
+        // Make the signers bitmap size smaller
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants.len() - 1, signers);
+
+        // The certificate verification should fail
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
+        verify_certificate_rejects_invalid_certificate_signers_size::<MinPk>();
+        verify_certificate_rejects_invalid_certificate_signers_size::<MinSig>();
+    }
+
     fn certificate_decode_checks_sorted_unique_signers<V: Variant>() {
         let (schemes, participants) = signing_schemes::<V>(4);
         let proposal = sample_proposal(0, 19, 10);

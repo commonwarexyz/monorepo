@@ -868,6 +868,56 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
+        let (schemes, participants) = schemes(4);
+        let proposal = sample_proposal(0, 26, 14);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        NAMESPACE,
+                        VoteContext::Finalize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0]
+            .assemble_certificate(votes)
+            .expect("assemble certificate");
+
+        // The certificate is valid
+        let verifier = Scheme::verifier(participants.clone());
+        assert!(verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+
+        // Make the signers bitmap size smaller
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants.len() - 1, signers);
+
+        // The certificate verification should fail
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+    }
+
+    #[test]
     fn test_verify_certificate_rejects_mismatched_signature_count() {
         let (schemes, participants) = schemes(4);
         let proposal = sample_proposal(0, 27, 14);
