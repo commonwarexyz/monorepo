@@ -120,12 +120,17 @@ pub struct PeerInfo {
 
 /// Components returned when creating a network instance.
 ///
-/// Contains everything needed to interact with the network:
-/// - `S`: Sender for sending messages to other peers
-/// - `R`: Receiver for receiving messages from other peers
-/// - `O`: Oracle for controlling the network (registering peers, blocking, etc.)
-/// - `Handle<()>`: Handle to the running network task that can be aborted
-pub type NetworkComponents<S, R, O> = (S, R, O, Handle<()>);
+/// Contains everything needed to interact with the network.
+pub struct NetworkComponents<S, R, O> {
+    /// Sender for sending messages to other peers.
+    pub sender: S,
+    /// Receiver for receiving messages from other peers.
+    pub receiver: R,
+    /// Oracle for controlling the network (registering peers, blocking, etc.).
+    pub oracle: O,
+    /// Handle to the running network task that can be aborted.
+    pub handle: Handle<()>,
+}
 
 /// Trait for abstracting over different p2p network implementations (Discovery, Lookup) during fuzzing.
 ///
@@ -248,7 +253,12 @@ impl NetworkScheme for Discovery {
         // Start the network background task
         let handle = network.start();
 
-        (sender, receiver, oracle, handle)
+        NetworkComponents {
+            sender,
+            receiver,
+            oracle,
+            handle,
+        }
     }
 
     async fn register_peers<'a>(
@@ -320,7 +330,12 @@ impl NetworkScheme for Lookup {
         // Start the network background task
         let handle = network.start();
 
-        (sender, receiver, oracle, handle)
+        NetworkComponents {
+            sender,
+            receiver,
+            oracle,
+            handle,
+        }
     }
 
     async fn register_peers<'a>(
@@ -393,14 +408,13 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             .collect();
 
         // Initialize network instances for each peer
-        let mut networks = Vec::new();
-        let mut oracles = Vec::new();
+        let mut peer_networks = Vec::new();
 
         for (peer_idx, peer) in peers.iter().enumerate() {
             let context = context.with_label(&format!("peer-{peer_idx}"));
 
             // Create a network instance for this peer
-            let (sender, receiver, oracle, handle) = N::create_network(
+            let components = N::create_network(
                 context.clone(),
                 peer,
                 &peers,
@@ -409,10 +423,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             )
             .await;
 
-            // Store sender/receiver/handle for message operations
-            networks.push((sender, receiver, Some(handle)));
-            // Store oracle separately for control operations
-            oracles.push(oracle);
+            peer_networks.push(components);
         }
 
         // Execute fuzzer operations and track message expectations
@@ -489,8 +500,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     };
 
                     // Attempt to send the message
-                    let sent = networks[sender_idx]
-                        .0
+                    let sent = peer_networks[sender_idx]
+                        .sender
                         .send(recipients, message.clone(), priority)
                         .await
                         .is_ok();
@@ -522,7 +533,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                         let receiver_idx = receiver_idx_u8 as usize;
 
                         // Safety check: ensure receiver index is valid
-                        if receiver_idx >= networks.len() {
+                        if receiver_idx >= peer_networks.len() {
                             continue;
                         }
 
@@ -533,7 +544,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                             continue;
                         }
 
-                        let receiver = &mut networks[receiver_idx].1;
+                        let receiver = &mut peer_networks[receiver_idx].receiver;
 
                         // TODO danlaine: check this select
                         // Try to receive one message with a timeout
@@ -618,7 +629,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Register this subset with the oracle
                     N::register_peers(
-                        &mut oracles[peer_idx],
+                        &mut peer_networks[peer_idx].oracle,
                         index as u64,
                         &peers,
                         peer_subset,
@@ -636,7 +647,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Block the target peer on the oracle
                     let target_pk = peers[target_idx].public_key.clone();
-                    let _ = oracles[peer_idx].block(target_pk).await;
+                    let _ = peer_networks[peer_idx].oracle.block(target_pk).await;
 
                     // Update our tracking: remove any expectations for messages
                     // from the blocked peer to this peer
@@ -656,10 +667,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         }
 
         // Clean up network handles before exiting
-        for (_, _, handle) in networks {
-            if let Some(h) = handle {
-                h.abort();
-            }
+        for components in peer_networks {
+            components.handle.abort();
         }
     });
 }
