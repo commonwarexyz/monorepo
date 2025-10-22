@@ -1410,30 +1410,30 @@ mod tests {
         }
 
         fn run<V: Variant>(&self) -> V::Public {
-            // Guard against empty plans so we always execute at least one DKG/reshare phase.
+            // We must have at least one round to execute
             assert!(
                 !self.rounds.is_empty(),
                 "plan must contain at least one round"
             );
 
-            // Deterministic RNG keeps every test path reproducible.
+            // Create seeded RNG (for determinism)
             let mut rng = StdRng::seed_from_u64(self.seed);
             let mut current_public: Option<poly::Public<V>> = None;
             let mut participant_states: HashMap<EdPublicKey, player::Output<V>> = HashMap::new();
             let mut share_holders: Option<Set<EdPublicKey>> = None;
 
+            // Process rounds
             for (round_idx, round) in self.rounds.iter().enumerate() {
-                // Validate committee definitions before instantiating protocol state.
+                // Materialize dealer/player sets
                 assert!(
                     !round.players.is_empty(),
                     "round {round_idx} must include at least one player",
                 );
-
-                // Materialize deterministic dealer/player sets (ordered by public key).
                 let player_set = participant_set(&round.players);
                 let dealer_candidates = if let Some(ref registry) = share_holders {
                     registry.clone()
                 } else {
+                    // If no previous share holders, use all players as dealers
                     player_set.clone()
                 };
                 assert!(
@@ -1441,19 +1441,12 @@ mod tests {
                     "round {round_idx} must have at least one dealer",
                 );
 
-                let absent_player_set = participant_set(&round.absent_players);
-                for absent in absent_player_set.iter() {
-                    assert!(
-                        player_set.position(absent).is_some(),
-                        "round {round_idx} absent player not in committee",
-                    );
-                }
-
-                let absent_set = participant_set(&round.absent_dealers);
-                for absent in absent_set.iter() {
+                // Configure absent dealers and players
+                let absent_dealers = participant_set(&round.absent_dealers);
+                for absent in absent_dealers.iter() {
                     assert!(
                         dealer_candidates.position(absent).is_some(),
-                        "round {round_idx} absent dealer not in committee",
+                        "round {round_idx} absent dealer not in committee"
                     );
                 }
                 let dealer_registry = if let Some(ref registry) = share_holders {
@@ -1469,7 +1462,7 @@ mod tests {
                 };
                 let mut active_dealers = Vec::new();
                 for dealer in dealer_candidates.iter() {
-                    if absent_set.position(dealer).is_some() {
+                    if absent_dealers.position(dealer).is_some() {
                         continue;
                     }
                     active_dealers.push(dealer.clone());
@@ -1487,12 +1480,19 @@ mod tests {
                     player_set.len(),
                     active_len
                 );
+                let absent_players = participant_set(&round.absent_players);
+                for absent in absent_players.iter() {
+                    assert!(
+                        player_set.position(absent).is_some(),
+                        "round {round_idx} absent player not in committee"
+                    );
+                }
 
-                // Instantiate dealers for this round, seeding them with prior shares when reshare happens.
+                // Setup dealers
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
                 let mut expected_reveals = BTreeMap::new();
-                let expected_inactive: Set<u32> = absent_player_set
+                let expected_inactive: Set<u32> = absent_players
                     .iter()
                     .map(|player_pk| player_set.position(player_pk).unwrap() as u32)
                     .collect();
@@ -1510,10 +1510,10 @@ mod tests {
                     dealer_outputs.insert(dealer_pk.clone(), (commitment, shares));
                 }
 
-                // Prepare player handles so we can route shares and later finalize outputs.
+                // Setup players
                 let mut players = BTreeMap::new();
                 for player_pk in player_set.iter() {
-                    if absent_player_set.position(player_pk).is_some() {
+                    if absent_players.position(player_pk).is_some() {
                         continue;
                     }
                     let player = Player::<_, V>::new(
@@ -1526,14 +1526,15 @@ mod tests {
                     players.insert(player_pk.clone(), player);
                 }
 
-                // Arbiter mirrors on-chain behavior by gathering commitments/acks each round.
-                let mut arb = Arbiter::<_, V>::new(
+                // Setup arbiter
+                let mut arbiter = Arbiter::<_, V>::new(
                     current_public.clone(),
                     dealer_registry.clone(),
                     player_set.clone(),
                     self.concurrency,
                 );
 
+                // Distribute dealings
                 for dealer_pk in active_dealers.iter() {
                     let (commitment, shares) = dealer_outputs
                         .get(dealer_pk)
@@ -1545,7 +1546,7 @@ mod tests {
                         let dealer = dealers.get_mut(dealer_pk).expect("missing dealer instance");
                         for (idx, player_pk) in player_set.iter().enumerate() {
                             let share = shares[idx].clone();
-                            if absent_player_set.position(player_pk).is_some() {
+                            if absent_players.position(player_pk).is_some() {
                                 dealer_reveals.push(share);
                                 continue;
                             }
@@ -1575,17 +1576,19 @@ mod tests {
                     if !dealer_reveals.is_empty() {
                         expected_reveals.insert(dealer_pos, dealer_reveals.clone());
                     }
-                    arb.commitment(
-                        dealer_pk.clone(),
-                        commitment,
-                        dealer_output.active.into(),
-                        dealer_reveals,
-                    )
-                    .unwrap();
+                    arbiter
+                        .commitment(
+                            dealer_pk.clone(),
+                            commitment,
+                            dealer_output.active.into(),
+                            dealer_reveals,
+                        )
+                        .unwrap();
                 }
 
-                assert!(arb.ready(), "arbiter not ready in round {round_idx}");
-                let (result, disqualified) = arb.finalize();
+                // Finalize arbiter
+                assert!(arbiter.ready(), "arbiter not ready in round {round_idx}");
+                let (result, disqualified) = arbiter.finalize();
                 let expected_disqualified =
                     dealer_registry.len().saturating_sub(active_dealers.len());
                 assert_eq!(
@@ -1613,7 +1616,6 @@ mod tests {
                         "reveals present for unselected dealer {dealer_idx} in round {round_idx}",
                     );
                 }
-
                 let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
                 assert_eq!(
                     output.commitments.len(),
@@ -1621,10 +1623,11 @@ mod tests {
                     "unexpected number of commitments in round {round_idx}",
                 );
 
+                // Finalize players
                 let mut round_results = Vec::new();
                 let mut next_states = HashMap::new();
                 for player_pk in player_set.iter() {
-                    if absent_player_set.position(player_pk).is_some() {
+                    if absent_players.position(player_pk).is_some() {
                         continue;
                     }
                     let player_obj = players.remove(player_pk).unwrap();
@@ -1635,18 +1638,18 @@ mod tests {
                     next_states.insert(player_pk.clone(), result.clone());
                     round_results.push(result);
                 }
-
                 assert!(
                     !round_results.is_empty(),
                     "round {round_idx} produced no outputs",
                 );
 
-                // Ensure constant is maintained between rounds
+                // Ensure public constant is maintained between rounds
+                let public_key = public::<V>(&round_results[0].public);
                 if let Some(previous) = current_public.as_ref() {
-                    assert_eq!(public::<V>(&round_results[0].public), public::<V>(previous));
+                    assert_eq!(public_key, public::<V>(previous));
                 }
 
-                // Sanity-check the recovered shares by constructing a threshold POP.
+                // Check recovered shares by constructing a proof-of-possession
                 let threshold = quorum(player_set.len() as u32);
                 let partials = round_results
                     .iter()
@@ -1654,15 +1657,16 @@ mod tests {
                     .collect::<Vec<_>>();
                 let signature = threshold_signature_recover::<V, _>(threshold, &partials)
                     .expect("unable to recover threshold signature");
-                let public_key = public::<V>(&round_results[0].public);
                 verify_proof_of_possession::<V>(public_key, &signature)
                     .expect("invalid proof of possession");
 
+                // Update state for next round
                 current_public = Some(round_results[0].public.clone());
                 share_holders = Some(player_set);
                 participant_states = next_states;
             }
 
+            // Return public constant
             *public::<V>(&current_public.expect("plan must produce a public constant"))
         }
     }
