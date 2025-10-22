@@ -5,8 +5,7 @@
 //! partial signatures can be used to forge a partial signature for any player,
 //! enabling equivocation attacks. To prevent this, per-validator activities and
 //! conflict evidence must not be reported to external observers, though peers
-//! can still be blocked locally and local participation can be tracked
-//! internally.
+//! can still be blocked locally.
 
 use crate::{
     simplex::{

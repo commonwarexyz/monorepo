@@ -1756,7 +1756,6 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 /// - For non-attributable schemes, per-validator peer activities are suppressed
 /// - Certificate-level activities (`Notarization`, `Nullification`, `Finalization`) are always
 ///   reported
-/// - Own activities are always reported
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
