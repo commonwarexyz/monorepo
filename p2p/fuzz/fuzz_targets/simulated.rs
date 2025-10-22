@@ -12,7 +12,7 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     time::Duration,
 };
 
@@ -124,6 +124,8 @@ fn fuzz(input: FuzzInput) {
         let network_handler = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
+        // Each peer can register multiple channels for message segregation
+        // The receiver gets messages from ALL senders on that channel, not per-sender streams
         let mut channels: HashMap<
             (usize, u8),
             (
@@ -131,9 +133,6 @@ fn fuzz(input: FuzzInput) {
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();
-
-        // Track which (peer, channel) combinations are already registered
-        let mut registered_peer_channels = HashSet::new();
 
         // Track expected messages: (receiver_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
@@ -147,15 +146,13 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     // Normalize peer index to valid range
                     let idx = (peer_idx as usize) % peers.len();
-                    let key = (idx, peers[idx].clone(), channel_id);
 
                     // Only register if not already registered
-                    if !registered_peer_channels.contains(&key) {
+                    if !channels.contains_key(&(idx, channel_id)) {
                         if let Ok((sender, receiver)) =
                             oracle.register(peers[idx].clone(), channel_id as u64).await
                         {
                             channels.insert((idx, channel_id), (sender, receiver));
-                            registered_peer_channels.insert(key);
                         }
                     }
                 }
@@ -186,17 +183,18 @@ fn fuzz(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
-                    let res = sender
+                    let sent = sender
                         .send(
                             Recipients::One(peers[to_idx].clone()),
                             message.clone(),
                             true,
                         )
-                        .await;
+                        .await
+                        .is_ok();
 
                     // Track message as expected only if send was accepted
                     // Message may still be dropped by unreliable link
-                    if res.is_ok() {
+                    if sent {
                         expected
                             .entry((to_idx, peers[from_idx].clone(), channel_id))
                             .or_default()
@@ -207,7 +205,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::ReceiveMessages => {
                     // Attempt to receive messages from all peers with pending messages
                     let expected_keys: Vec<_> = expected.keys().cloned().collect();
-                    for (to_idx, real_sender_id, channel_id) in expected_keys {
+                    for (to_idx, sender_pk, channel_id) in expected_keys {
                         // Skip if receiver channel not registered
                         let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id))
                         else {
@@ -215,7 +213,7 @@ fn fuzz(input: FuzzInput) {
                         };
 
                         // Skip if no expected messages for this combination
-                        let Some(queue) = expected.get_mut(&(to_idx, real_sender_id.clone(), channel_id)) else {
+                        let Some(queue) = expected.get_mut(&(to_idx, sender_pk.clone(), channel_id)) else {
                             continue;
                         };
 
@@ -229,13 +227,13 @@ fn fuzz(input: FuzzInput) {
                                         queue.remove(pos);
 
                                         // Verify sender identity matches
-                                        if recv_sender_id != real_sender_id {
-                                            panic!("Message sender: {recv_sender_id}, but real sender: {real_sender_id}");
+                                        if recv_sender_id != sender_pk {
+                                            panic!("Message sender: {recv_sender_id}, but real sender: {sender_pk}");
                                         }
 
                                         // Clean up empty queues
                                         if queue.is_empty() {
-                                            expected.remove(&(to_idx, real_sender_id, channel_id));
+                                            expected.remove(&(to_idx, sender_pk, channel_id));
                                         }
                                     } else {
                                         panic!("Message not found in expected queue");
