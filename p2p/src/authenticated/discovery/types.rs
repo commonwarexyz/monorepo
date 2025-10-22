@@ -45,18 +45,6 @@ const DATA_PREFIX: u8 = 2;
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
-/// Configuration when deserializing messages.
-///
-/// This is used to limit the size of the messages received from peers.
-#[derive(Clone)]
-pub struct Config {
-    /// The maximum number of peers that can be sent in a `Peers` message.
-    pub max_peers: usize,
-
-    /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bit_vec: u64,
-}
-
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
@@ -102,23 +90,24 @@ impl<C: PublicKey> Write for Payload<C> {
 }
 
 impl<C: PublicKey> Read for Payload<C> {
-    type Cfg = Config;
+    type Cfg = (u64, usize, usize); // max_bit_vec, max_peers, max_data_length
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_bit_vec, max_peers, max_data_length): &Self::Cfg,
+    ) -> Result<Self, CodecError> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
+                let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
                 Ok(Payload::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_range(buf, ..=cfg.max_peers)?;
+                let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
                 Ok(Payload::Peers(peers))
             }
             DATA_PREFIX => {
-                // Don't limit the size of the data to be read.
-                // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..).into())?;
+                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(CodecError::Invalid(
@@ -396,10 +385,7 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = Config {
-            max_peers: 10,
-            max_bit_vec: 1024,
-        };
+        let cfg = (1024, 10, 100);
 
         // Test BitVec
         let original = BitVec {
@@ -442,10 +428,7 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = Config {
-            max_peers: 10,
-            max_bit_vec: 1024,
-        };
+        let cfg = (1024, 10, 100);
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
