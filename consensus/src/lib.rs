@@ -110,7 +110,14 @@ cfg_if::cfg_if! {
                 &mut self,
                 _context: Self::Context,
                 _payload: Self::Digest,
-            ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+            ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
+                #[allow(clippy::async_yields_async)]
+                async move {
+                    let (sender, receiver) = oneshot::channel();
+                    let _ = sender.send(true);
+                    receiver
+                }
+            }
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.

@@ -27,10 +27,9 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use core::panic;
+use core::{future::Future, panic};
 use futures::{
     channel::{mpsc, oneshot},
-    future::{self, Either},
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{
@@ -40,7 +39,9 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    pin::Pin,
     sync::{atomic::AtomicI64, Arc},
+    task::{self, Poll},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
@@ -57,25 +58,30 @@ enum Action {
     Process,
 }
 
-/// Pending item for a request to the automaton.
-struct Pending<D: Digest, R> {
+/// A outstanding request to the automaton.
+struct Request<D: Digest, R> {
+    /// Attached context for the pending item.
     context: Context<D>,
+    /// Oneshot receiver that the automaton is expected to respond over.
     receiver: oneshot::Receiver<R>,
 }
 
-impl<D: Digest, R> Pending<D, R> {
-    /// Get the context for the pending item.
-    fn ctx(slot: &Option<Self>) -> Option<Context<D>> {
-        slot.as_ref().map(|i| i.context.clone())
-    }
+/// Adapter that polls an [Option<Request<D, R>>] in place.
+struct SlotWaiter<'a, D: Digest, R> {
+    slot: &'a mut Option<Request<D, R>>,
+}
 
-    /// Get the waiter for the pending item.
-    fn waiter(
-        slot: &mut Option<Self>,
-    ) -> Either<&mut oneshot::Receiver<R>, future::Pending<Result<R, oneshot::Canceled>>> {
-        match slot {
-            Some(item) => Either::Left(&mut item.receiver),
-            None => Either::Right(future::pending()),
+impl<'a, D: Digest, R> Future for SlotWaiter<'a, D, R> {
+    type Output = (Context<D>, Result<R, oneshot::Canceled>);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match this.slot.as_mut() {
+            None => Poll::Pending,
+            Some(p) => match Pin::new(&mut p.receiver).poll(cx) {
+                Poll::Ready(res) => Poll::Ready((p.context.clone(), res)),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
@@ -633,7 +639,7 @@ impl<
     }
 
     #[allow(clippy::question_mark)]
-    async fn propose(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> Option<Pending<D, D>> {
+    async fn propose(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> Option<Request<D, D>> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -677,7 +683,7 @@ impl<
             parent: (parent_view, parent_payload),
         };
         let receiver = self.automaton.propose(context.clone()).await;
-        Some(Pending { context, receiver })
+        Some(Request { context, receiver })
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -841,7 +847,7 @@ impl<
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<Pending<D, bool>> {
+    async fn peer_proposal(&mut self) -> Option<Request<D, bool>> {
         // Get round
         let proposal = {
             // Get view or exit
@@ -940,10 +946,10 @@ impl<
         let round = self.views.get_mut(&context.view()).unwrap();
         round.requested_proposal_verify = true;
         let receiver = self.automaton.verify(context.clone(), payload).await;
-        Some(Pending { context, receiver })
+        Some(Request { context, receiver })
     }
 
-    async fn certify(&mut self) -> Option<Pending<D, bool>> {
+    async fn certify(&mut self) -> Option<Request<D, bool>> {
         let round = self.views.get_mut(&self.view)?;
 
         // Request certification only once.
@@ -968,7 +974,7 @@ impl<
             .automaton
             .certify(context.clone(), proposal.payload)
             .await;
-        Some(Pending { context, receiver })
+        Some(Request { context, receiver })
     }
 
     async fn verified(&mut self, view: View) -> bool {
@@ -1761,9 +1767,9 @@ impl<
 
         // Process messages
         let mut prev_view: View = self.view;
-        let mut pending_propose: Option<Pending<D, D>> = None;
-        let mut pending_verify: Option<Pending<D, bool>> = None;
-        let mut pending_certify: Option<Pending<D, bool>> = None;
+        let mut pending_propose: Option<Request<D, D>> = None;
+        let mut pending_verify: Option<Request<D, bool>> = None;
+        let mut pending_certify: Option<Request<D, bool>> = None;
         loop {
             // Drop any pending items if we have moved to a new view
             if prev_view != self.view {
@@ -1773,28 +1779,31 @@ impl<
                 prev_view = self.view;
             }
 
-            // Attempt to propose a container
-            if let Some(item) = self.propose(&mut resolver).await {
-                pending_propose = Some(item);
+            // If needed, propose a container
+            if pending_propose.is_none() {
+                pending_propose = self.propose(&mut resolver).await;
             }
-            let propose_ctx = Pending::ctx(&pending_propose);
 
-            // Attempt to verify current view
-            if let Some(item) = self.peer_proposal().await {
-                pending_verify = Some(item);
+            // If needed, verify current view
+            if pending_verify.is_none() {
+                pending_verify = self.peer_proposal().await;
             }
-            let verify_ctx = Pending::ctx(&pending_verify);
 
-            // Attempt to check certification of the proposal
-            if let Some(item) = self.certify().await {
-                pending_certify = Some(item);
+            // If needed, check certification of the proposal
+            if pending_certify.is_none() {
+                pending_certify = self.certify().await;
             }
-            let certify_ctx = Pending::ctx(&pending_certify);
 
             // Prepare waiters
-            let propose_wait = Pending::waiter(&mut pending_propose);
-            let verify_wait = Pending::waiter(&mut pending_verify);
-            let certify_wait = Pending::waiter(&mut pending_certify);
+            let propose_wait = SlotWaiter {
+                slot: &mut pending_propose,
+            };
+            let verify_wait = SlotWaiter {
+                slot: &mut pending_verify,
+            };
+            let certify_wait = SlotWaiter {
+                slot: &mut pending_certify,
+            };
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -1816,9 +1825,7 @@ impl<
                     self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
                     view = self.view;
                 },
-                proposed = propose_wait => {
-                    // Use captured context
-                    let context = propose_ctx.expect("missing propose context");
+                (context, proposed) = propose_wait => {
                     // Clear propose waiter
                     pending_propose = None;
 
@@ -1854,9 +1861,7 @@ impl<
                     // Notify application of proposal
                     self.relay.broadcast(proposed).await;
                 },
-                verified = verify_wait => {
-                    // Use captured context
-                    let context = verify_ctx.expect("missing verify context");
+                (context, verified) = verify_wait => {
                     // Clear verify waiter
                     pending_verify = None;
 
@@ -1880,9 +1885,7 @@ impl<
                         continue;
                     }
                 },
-                certified = certify_wait => {
-                    // Use captured context
-                    let context = certify_ctx.expect("missing certify context");
+                (context, certified) = certify_wait => {
                     // Clear certify waiter
                     pending_certify = None;
 
