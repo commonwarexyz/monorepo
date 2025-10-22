@@ -263,16 +263,19 @@ mod tests {
         }
 
         fn run_with_seed<V: Variant>(&self, seed: u64) {
+            // Guard against empty plans so we always execute at least one DKG/reshare phase.
             assert!(
                 !self.rounds.is_empty(),
                 "plan must contain at least one round"
             );
 
+            // Deterministic RNG keeps every test path reproducible.
             let mut rng = StdRng::seed_from_u64(seed);
             let mut current_public: Option<poly::Public<V>> = None;
             let mut participant_states: HashMap<u64, player::Output<V>> = HashMap::new();
 
             for (round_idx, round) in self.rounds.iter().enumerate() {
+                // Validate committee definitions before instantiating protocol state.
                 assert!(
                     !round.dealers.is_empty(),
                     "round {} must include at least one dealer",
@@ -284,6 +287,7 @@ mod tests {
                     round_idx
                 );
 
+                // Materialize deterministic dealer/player sets (ordered by public key).
                 let (dealer_set, dealer_ids) = participant_set(&round.dealers);
                 let (player_set, player_ids) = participant_set(&round.players);
                 let min_dealers = match current_public.as_ref() {
@@ -299,6 +303,7 @@ mod tests {
                     dealer_set.len()
                 );
 
+                // Instantiate dealers for this round, seeding them with prior shares when reshare happens.
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
                 for dealer_pk in dealer_set.iter() {
@@ -325,6 +330,7 @@ mod tests {
                     dealer_outputs.insert(dealer_pk.clone(), (commitment, shares));
                 }
 
+                // Prepare player handles so we can route shares and later finalize outputs.
                 let mut players = BTreeMap::new();
                 for (player_pk, player_id) in player_ids.iter() {
                     let player = Player::<_, V>::new(
@@ -337,6 +343,7 @@ mod tests {
                     players.insert(player_pk.clone(), (*player_id, player));
                 }
 
+                // Arbiter mirrors on-chain behavior by gathering commitments/acks each round.
                 let mut arb = Arbiter::<_, V>::new(
                     current_public.clone(),
                     dealer_set.clone(),
@@ -421,6 +428,7 @@ mod tests {
                     round_idx
                 );
 
+                // Sanity-check the recovered shares by constructing a threshold POP.
                 let threshold = quorum(player_set.len() as u32);
                 let partials = round_results
                     .iter()
@@ -438,6 +446,7 @@ mod tests {
         }
     }
 
+    // Helper to derive a sorted set of participants and a reverse lookup map.
     fn participant_set(ids: &[u64]) -> (Set<EdPublicKey>, BTreeMap<EdPublicKey, u64>) {
         let mut map = BTreeMap::new();
         for &id in ids {
