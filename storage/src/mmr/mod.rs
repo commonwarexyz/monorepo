@@ -138,5 +138,5 @@ pub enum Error {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
-    DataCorrupted(String),
+    DataCorrupted(&'static str),
 }
