@@ -560,6 +560,10 @@ impl<
     }
 
     fn is_notarized(&self, view: View) -> Option<&D> {
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().unwrap());
+        }
+
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
             return Some(&notarization.proposal.payload);
@@ -572,11 +576,26 @@ impl<
         None
     }
 
-    fn is_certified(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .map(|r| r.certified_proposal)
-            .unwrap_or(false)
+    /// Returns the payload of the certified proposal for the given view.
+    fn is_certified(&self, view: View) -> Option<&D> {
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().unwrap());
+        }
+
+        // Finalized blocks are certified
+        if let Some(finalization) = self.is_finalized(view) {
+            return Some(finalization);
+        }
+
+        // Otherwise, check that the proposal is certified. If so, it must have a notarization.
+        let round = self.views.get(&view)?;
+        if round.certified_proposal {
+            let result = self
+                .is_notarized(view)
+                .expect("certified proposal should be notarized");
+            return Some(result);
+        }
+        None
     }
 
     fn is_nullified(&self, view: View) -> bool {
@@ -589,6 +608,10 @@ impl<
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().unwrap());
+        }
+
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
             return Some(&finalization.proposal.payload);
@@ -612,11 +635,9 @@ impl<
             }
 
             // If notarized and certified, return
-            let parent = self.is_notarized(cursor);
+            let parent = self.is_certified(cursor);
             if let Some(parent) = parent {
-                if self.is_certified(cursor) {
-                    return Ok((cursor, *parent));
-                }
+                return Ok((cursor, *parent));
             }
 
             // If have finalization, return
@@ -916,16 +937,11 @@ impl<
         let mut cursor = self.view.checked_sub(1)?;
         let parent_payload = loop {
             if cursor == proposal.parent {
-                // Check if first block
-                if proposal.parent == GENESIS_VIEW {
-                    break self.genesis.as_ref().unwrap();
-                }
-
-                // Check notarization exists
-                let parent_proposal = match self.is_notarized(cursor) {
+                // Check notarization and certification exist
+                let parent_proposal = match self.is_certified(cursor) {
                     Some(parent) => parent,
                     None => {
-                        debug!(view = cursor, "parent proposal is not notarized");
+                        debug!(view = cursor, "parent proposal is not certified");
                         return None;
                     }
                 };
@@ -967,12 +983,18 @@ impl<
             return None;
         }
 
-        // Ensure we have a proposal.
-        let proposal = round.proposal.clone()?;
+        // Request certification only if we have a notarization
+        round.notarization.as_ref()?;
+
+        // Get the proposal
+        let proposal = round
+            .proposal
+            .clone()
+            .expect("notarized proposal should have a proposal");
 
         // Get the context for the proposal.
         let parent_view = proposal.parent;
-        let parent_payload = self.is_notarized(parent_view)?;
+        let parent_payload = self.is_certified(parent_view)?;
         let context = Context {
             round: proposal.round,
             parent: (parent_view, *parent_payload),
@@ -1025,7 +1047,7 @@ impl<
     }
 
     /// Handles the successful certification of a proposal.
-    async fn certified(&mut self, view: View) -> bool {
+    async fn certified(&mut self, view: View) {
         // Mark proposal as certified
         let round = self.views.get_mut(&view).unwrap();
         round.certified_proposal = true;
@@ -1036,11 +1058,14 @@ impl<
             .notarization
             .as_ref()
             .expect("certified proposal should have notarization");
+
+        // Enter next view
         let seed = self
             .scheme
             .seed(notarization.round(), &notarization.certificate);
         self.enter_view(view + 1, seed);
-        true
+
+        debug!(view, "certified proposal");
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
@@ -1168,15 +1193,14 @@ impl<
         // Get view for notarization
         let view = notarization.view();
 
-        // Store notarization
-        let msg = Voter::Notarization(notarization.clone());
-        let seed = self
-            .scheme
-            .seed(notarization.round(), &notarization.certificate);
-
         // Create round (if it doesn't exist) and add verified notarization
-        if self.round_mut(view).add_verified_notarization(notarization) {
+        if self
+            .round_mut(view)
+            .add_verified_notarization(notarization.clone())
+        {
             if let Some(journal) = self.journal.as_mut() {
+                // Store notarization
+                let msg = Voter::Notarization(notarization);
                 journal
                     .append(view, msg)
                     .await
@@ -1184,10 +1208,7 @@ impl<
             }
         }
 
-        // TODO: remove, just checking a notarization should not come in after a certification
-        if self.is_certified(view) {
-            panic!("certified proposal should not have notarization");
-        }
+        // Do not yet move to the next view, we need to wait for certification.
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1514,7 +1535,7 @@ impl<
                 if parent >= self.last_finalized {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
-                    if parent != GENESIS_VIEW && self.is_notarized(parent).is_none() {
+                    if self.is_notarized(parent).is_none() {
                         missing_notarizations.push(parent);
                     }
                     let missing_nullifications = self.missing_nullifications(parent);
@@ -1934,9 +1955,7 @@ impl<
 
                     // Handle certified proposal
                     view = context.view();
-                    if !self.certified(view).await {
-                        continue;
-                    }
+                    self.certified(view).await;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
