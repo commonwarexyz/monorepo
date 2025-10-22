@@ -262,13 +262,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Read the location of the first item to discard (at position 'size').
         let discard_location = self.locations.read(size).await?;
 
-        // Rewind locations first to maintain crash-safety invariant.
-        self.locations.rewind(size).await?;
-        self.data
-            .rewind_to_offset(discard_location.section, discard_location.offset)
-            .await?;
-
-        // Sync the location journal and then data journal in this order.
+        // Rewind and sync the locations journal before the data journal.
         // If we didn't do this, we could get into an invalid state in this case:
         // * rewind() truncates the (new) final section of the data journal and locations journal.
         // * This truncation is not guaranteed to be persisted until sync() is called on the
@@ -277,7 +271,12 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         //   journal is synced.
         // * The final section of the data journal is truncated but the locations journal is not,
         //   which makes the location journal size > data journal size, which is invalid.
+        self.locations.rewind(size).await?;
         self.locations.sync().await?;
+
+        self.data
+            .rewind_to_offset(discard_location.section, discard_location.offset)
+            .await?;
         self.sync_data().await?;
 
         // Update our size
