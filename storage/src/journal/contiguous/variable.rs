@@ -268,6 +268,18 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             .rewind_to_offset(discard_location.section, discard_location.offset)
             .await?;
 
+        // Sync the location journal and then data journal in this order.
+        // If we didn't do this, we could get into an invalid state in this case:
+        // * rewind() truncates the (new) final section of the data journal and locations journal.
+        // * This truncation is not guaranteed to be persisted until sync() is called on the
+        //   respective journals.
+        // * Then we call sync() and crash after the data journal is synced but before the locations
+        //   journal is synced.
+        // * The final section of the data journal is truncated but the locations journal is not,
+        //   which makes the location journal size > data journal size, which is invalid.
+        self.locations.sync().await?;
+        self.sync_data().await?;
+
         // Update our size
         self.size = size;
 
