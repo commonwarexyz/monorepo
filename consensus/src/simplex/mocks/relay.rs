@@ -1,3 +1,5 @@
+//! Simple in-memory broadcast relay for mock applications; not a network.
+
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
@@ -9,6 +11,7 @@ pub struct Relay<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),

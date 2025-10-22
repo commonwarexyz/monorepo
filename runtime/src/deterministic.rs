@@ -4,6 +4,20 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
+//! # External Processes
+//!
+//! When testing an application that interacts with some external process, it can appear to
+//! the runtime that progress has stalled because no pending tasks can make progress and/or
+//! that futures resolve at variable latency (which in turn triggers non-deterministic execution).
+//!
+//! To support such applications, the runtime can be built with the `external` feature to both
+//! sleep for each [Config::cycle] (opting to wait if all futures are pending) and to constrain
+//! the resolution latency of any future (with `pace()`).
+//!
+//! **Applications that do not interact with external processes (or are able to mock them) should never
+//! need to enable this feature. It is commonly used when testing consensus with external execution environments
+//! that use their own runtime (but are deterministic over some set of inputs).**
+//!
 //! # Example
 //!
 //! ```rust
@@ -34,17 +48,24 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter, Panicker,
+        supervision::Tree,
+        Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Model, Panicked, METRICS_PREFIX,
+    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
+#[cfg(feature = "external")]
+use futures::task::noop_waker;
 use futures::{
     task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+#[cfg(feature = "external")]
+use pin_project::pin_project;
 use prometheus_client::{
     encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -65,6 +86,7 @@ use tracing::trace;
 
 #[derive(Debug)]
 struct Metrics {
+    iterations: Counter,
     tasks_spawned: Family<Label, Counter>,
     tasks_running: Family<Label, Gauge>,
     task_polls: Family<Label, Counter>,
@@ -75,11 +97,17 @@ struct Metrics {
 impl Metrics {
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
+            iterations: Counter::default(),
             task_polls: Family::default(),
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
             network_bandwidth: Counter::default(),
         };
+        registry.register(
+            "iterations",
+            "Total number of iterations",
+            metrics.iterations.clone(),
+        );
         registry.register(
             "tasks_spawned",
             "Total number of tasks spawned",
@@ -250,6 +278,79 @@ pub struct Executor {
     panicker: Panicker,
 }
 
+impl Executor {
+    /// Advance simulated time by [Config::cycle].
+    ///
+    /// When built with the `external` feature, sleep for [Config::cycle] to let
+    /// external processes make progress.
+    fn advance_time(&self) -> SystemTime {
+        #[cfg(feature = "external")]
+        std::thread::sleep(self.cycle);
+
+        let mut time = self.time.lock().unwrap();
+        *time = time
+            .checked_add(self.cycle)
+            .expect("executor time overflowed");
+        let now = *time;
+        trace!(now = now.epoch_millis(), "time advanced");
+        now
+    }
+
+    /// When idle, jump directly to the next actionable time.
+    ///
+    /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
+    /// every [Config::cycle]).
+    fn skip_idle_time(&self, current: SystemTime) -> SystemTime {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 {
+            return current;
+        }
+
+        let mut skip_until = None;
+        {
+            let sleeping = self.sleeping.lock().unwrap();
+            if let Some(next) = sleeping.peek() {
+                if next.time > current {
+                    skip_until = Some(next.time);
+                }
+            }
+        }
+
+        if let Some(deadline) = skip_until {
+            let mut time = self.time.lock().unwrap();
+            *time = deadline;
+            let now = *time;
+            trace!(now = now.epoch_millis(), "time skipped");
+            now
+        } else {
+            current
+        }
+    }
+
+    /// Wake any sleepers whose deadlines have elapsed.
+    fn wake_ready_sleepers(&self, current: SystemTime) {
+        let mut sleeping = self.sleeping.lock().unwrap();
+        while let Some(next) = sleeping.peek() {
+            if next.time <= current {
+                let sleeper = sleeping.pop().unwrap();
+                sleeper.waker.wake();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Ensure the runtime is making progress.
+    ///
+    /// When built with the `external` feature, always poll pending tasks after the passage of time.
+    fn assert_liveness(&self) {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 {
+            return;
+        }
+
+        panic!("runtime stalled");
+    }
+}
+
 /// An artifact that can be used to recover the state of the runtime.
 ///
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
@@ -339,7 +440,6 @@ impl Runner {
         Tasks::register_root(&executor.tasks);
 
         // Process tasks until root task completes or progress stalls
-        let mut iter = 0;
         let output = loop {
             // Ensure we have not exceeded our deadline
             {
@@ -365,7 +465,11 @@ impl Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
-            trace!(iter, tasks = queue.len(), "starting loop");
+            trace!(
+                iter = executor.metrics.iterations.get(),
+                tasks = queue.len(),
+                "starting loop"
+            );
             let mut output = None;
             for id in queue {
                 // Lookup the task (it may have completed already)
@@ -431,60 +535,16 @@ impl Runner {
                 break output;
             }
 
-            // Advance time by cycle
-            //
-            // This approach prevents starvation if some task never yields (to approximate this,
-            // duration can be set to 1ns).
-            let mut current;
-            {
-                let mut time = executor.time.lock().unwrap();
-                *time = time
-                    .checked_add(executor.cycle)
-                    .expect("executor time overflowed");
-                current = *time;
-            }
-            trace!(now = current.epoch_millis(), "time advanced");
+            // Advance time (skipping ahead if no tasks are ready yet)
+            let mut current = executor.advance_time();
+            current = executor.skip_idle_time(current);
 
-            // Skip time if there is nothing to do
-            if executor.tasks.ready() == 0 {
-                let mut skip = None;
-                {
-                    let sleeping = executor.sleeping.lock().unwrap();
-                    if let Some(next) = sleeping.peek() {
-                        if next.time > current {
-                            skip = Some(next.time);
-                        }
-                    }
-                }
-                if let Some(skip_time) = skip {
-                    {
-                        let mut time = executor.time.lock().unwrap();
-                        *time = skip_time;
-                        current = *time;
-                    }
-                    trace!(now = current.epoch_millis(), "time skipped");
-                }
-            }
+            // Wake sleepers and ensure we continue to make progress
+            executor.wake_ready_sleepers(current);
+            executor.assert_liveness();
 
-            // Wake all sleeping tasks that are ready
-            {
-                let mut sleeping = executor.sleeping.lock().unwrap();
-                while let Some(next) = sleeping.peek() {
-                    if next.time <= current {
-                        let sleeper = sleeping.pop().unwrap();
-                        sleeper.waker.wake();
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            // If there are no tasks to run after advancing time, the executor is stalled
-            // and will never finish.
-            if executor.tasks.ready() == 0 {
-                panic!("runtime stalled");
-            }
-            iter += 1;
+            // Record that we completed another iteration of the event loop.
+            executor.metrics.iterations.inc();
         };
 
         // Clear remaining tasks from the executor.
@@ -696,14 +756,28 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
-#[derive(Clone)]
 pub struct Context {
     name: String,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<Aborter>>>,
-    model: Model,
+    tree: Arc<Tree>,
+    execution: Execution,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        let (child, _) = Tree::child(&self.tree);
+        Self {
+            name: self.name.clone(),
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+
+            tree: child,
+            execution: Execution::default(),
+        }
+    }
 }
 
 impl Context {
@@ -749,8 +823,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                children: Arc::new(Mutex::new(Vec::new())),
-                model: Model::default(),
+                tree: Tree::root(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -804,8 +878,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                children: Arc::new(Mutex::new(Vec::new())),
-                model: Model::default(),
+                tree: Tree::root(),
+                execution: Execution::default(),
             },
             executor,
             panicked,
@@ -829,23 +903,13 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn supervised(mut self) -> Self {
-        self.model.supervised();
-        self
-    }
-
-    fn detached(mut self) -> Self {
-        self.model.detached();
-        self
-    }
-
     fn dedicated(mut self) -> Self {
-        self.model.dedicated();
+        self.execution = Execution::Dedicated;
         self
     }
 
     fn shared(mut self, blocking: bool) -> Self {
-        self.model.shared(blocking);
+        self.execution = Execution::Shared(blocking);
         self
     }
 
@@ -858,29 +922,29 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Track parent-child relationship when supervision is requested
-        let parent_children = if self.model.is_supervised() {
-            Some(self.children.clone())
-        } else {
-            None
-        };
-
-        // Set up the task
-        let executor = self.executor();
-        self.model = Model::default();
-
-        // Give spawned task its own empty children list
-        let children = Arc::new(Mutex::new(Vec::new()));
-        self.children = children.clone();
+        // Track supervision before resetting configuration
+        let parent = Arc::clone(&self.tree);
+        self.execution = Execution::default();
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
 
         // Spawn the task (we don't care about Model)
+        let executor = self.executor();
         let future = f(self);
-        let (f, handle) = Handle::init(future, metric, executor.panicker.clone(), children);
+        let (f, handle) = Handle::init(
+            future,
+            metric,
+            executor.panicker.clone(),
+            Arc::clone(&parent),
+        );
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
-        // Register this child with the parent
-        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
-            parent_children.lock().unwrap().push(aborter);
+        // Register the task on the parent
+        if let Some(aborter) = handle.aborter() {
+            parent.register(aborter);
         }
 
         handle
@@ -1063,6 +1127,107 @@ impl Clock for Context {
     }
 }
 
+/// A future that resolves when a given target time is reached.
+///
+/// If the future is not ready at the target time, the future is blocked until the target time is reached.
+#[cfg(feature = "external")]
+#[pin_project]
+struct Waiter<F: Future> {
+    executor: Weak<Executor>,
+    target: SystemTime,
+    #[pin]
+    future: F,
+    ready: Option<F::Output>,
+    started: bool,
+    registered: bool,
+}
+
+#[cfg(feature = "external")]
+impl<F> Future for Waiter<F>
+where
+    F: Future + Send,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+
+        // Poll once with a noop waker so the future can register interest or start work
+        // without being able to wake this task before the sampled delay expires. Any ready
+        // value is cached and only released after the clock reaches `self.target`.
+        if !*this.started {
+            *this.started = true;
+            let waker = noop_waker();
+            let mut cx_noop = task::Context::from_waker(&waker);
+            if let Poll::Ready(value) = this.future.as_mut().poll(&mut cx_noop) {
+                *this.ready = Some(value);
+            }
+        }
+
+        // Only allow the task to progress once the sampled delay has elapsed.
+        let executor = this.executor.upgrade().expect("executor already dropped");
+        let current_time = *executor.time.lock().unwrap();
+        if current_time < *this.target {
+            // Register exactly once with the deterministic sleeper queue so the executor
+            // wakes us once the clock reaches the scheduled target time.
+            if !*this.registered {
+                *this.registered = true;
+                executor.sleeping.lock().unwrap().push(Alarm {
+                    time: *this.target,
+                    waker: cx.waker().clone(),
+                });
+            }
+            return Poll::Pending;
+        }
+
+        // If the underlying future completed during the noop pre-poll, surface the cached value.
+        if let Some(value) = this.ready.take() {
+            return Poll::Ready(value);
+        }
+
+        // Block the current thread until the future reschedules itself, keeping polling
+        // deterministic with respect to executor time.
+        let blocker = Blocker::new();
+        loop {
+            let waker = waker(blocker.clone());
+            let mut cx_block = task::Context::from_waker(&waker);
+            match this.future.as_mut().poll(&mut cx_block) {
+                Poll::Ready(value) => {
+                    break Poll::Ready(value);
+                }
+                Poll::Pending => blocker.wait(),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "external")]
+impl Pacer for Context {
+    fn pace<'a, F, T>(&'a self, latency: Duration, future: F) -> impl Future<Output = T> + Send + 'a
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        // Compute target time
+        let target = self
+            .executor()
+            .time
+            .lock()
+            .unwrap()
+            .checked_add(latency)
+            .expect("overflow when setting wake time");
+
+        Waiter {
+            executor: self.executor.clone(),
+            target,
+            future,
+            ready: None,
+            started: false,
+            registered: false,
+        }
+    }
+}
+
 impl GClock for Context {
     type Instant = SystemTime;
 
@@ -1146,9 +1311,17 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Runner as _, Storage};
+    #[cfg(feature = "external")]
+    use crate::FutureExt;
+    #[cfg(feature = "external")]
+    use crate::Spawner;
+    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
     use commonware_macros::test_traced;
-    use futures::task::noop_waker;
+    #[cfg(not(feature = "external"))]
+    use futures::future::pending;
+    #[cfg(feature = "external")]
+    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::oneshot, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1352,6 +1525,168 @@ mod tests {
                 context.current().duration_since(UNIX_EPOCH).unwrap(),
                 Duration::ZERO
             );
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime stalled")]
+    fn test_stall() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Start runtime
+        executor.start(|_| async move {
+            pending::<()>().await;
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime stalled")]
+    fn test_external_simulated() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Create a thread that waits for 1 second
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            tx.send(()).unwrap();
+        });
+
+        // Start runtime
+        executor.start(|_| async move {
+            rx.await.unwrap();
+        });
+    }
+
+    #[cfg(feature = "external")]
+    #[test]
+    fn test_external_realtime() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Create a thread that waits for 1 second
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            tx.send(()).unwrap();
+        });
+
+        // Start runtime
+        executor.start(|_| async move {
+            rx.await.unwrap();
+        });
+    }
+
+    #[cfg(feature = "external")]
+    #[test]
+    fn test_external_realtime_variable() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Start runtime
+        executor.start(|context| async move {
+            // Initialize test
+            let start_real = SystemTime::now();
+            let start_sim = context.current();
+            let (first_tx, first_rx) = oneshot::channel();
+            let (second_tx, second_rx) = oneshot::channel();
+            let (mut results_tx, mut results_rx) = mpsc::channel(2);
+
+            // Create a thread that waits for 1 second
+            let first_wait = Duration::from_secs(1);
+            std::thread::spawn(move || {
+                std::thread::sleep(first_wait);
+                first_tx.send(()).unwrap();
+            });
+
+            // Create a thread
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::ZERO);
+                second_tx.send(()).unwrap();
+            });
+
+            // Wait for a delay sampled before the external send occurs
+            let first = context.clone().spawn({
+                let mut results_tx = results_tx.clone();
+                move |context| async move {
+                    first_rx.pace(&context, Duration::ZERO).await.unwrap();
+                    let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                    assert!(elapsed_real > first_wait);
+                    let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                    assert!(elapsed_sim < first_wait);
+                    results_tx.send(1).await.unwrap();
+                }
+            });
+
+            // Wait for a delay sampled after the external send occurs
+            let second = context.clone().spawn(move |context| async move {
+                second_rx.pace(&context, first_wait).await.unwrap();
+                let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
+                assert!(elapsed_real >= first_wait);
+                let elapsed_sim = context.current().duration_since(start_sim).unwrap();
+                assert!(elapsed_sim >= first_wait);
+                results_tx.send(2).await.unwrap();
+            });
+
+            // Wait for both tasks to complete
+            second.await.unwrap();
+            first.await.unwrap();
+
+            // Ensure order is correct
+            let mut results = Vec::new();
+            for _ in 0..2 {
+                results.push(results_rx.next().await.unwrap());
+            }
+            assert_eq!(results, vec![1, 2]);
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    fn test_simulated_skip() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Start runtime
+        executor.start(|context| async move {
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check if we skipped
+            let metrics = context.encode();
+            let iterations = metrics
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("runtime_iterations_total ")
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                })
+                .expect("missing runtime_iterations_total metric");
+            assert!(iterations < 10);
+        });
+    }
+
+    #[cfg(feature = "external")]
+    #[test]
+    fn test_realtime_no_skip() {
+        // Initialize runtime
+        let executor = deterministic::Runner::default();
+
+        // Start runtime
+        executor.start(|context| async move {
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Check if we skipped
+            let metrics = context.encode();
+            let iterations = metrics
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("runtime_iterations_total ")
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                })
+                .expect("missing runtime_iterations_total metric");
+            assert!(iterations > 500);
         });
     }
 }

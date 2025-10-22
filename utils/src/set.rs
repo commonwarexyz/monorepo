@@ -78,7 +78,13 @@ impl<T: Read> Read for Set<T> {
 
 impl<T: Ord> FromIterator<T> for Set<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut items: Vec<_> = iter.into_iter().collect();
+        let items: Vec<_> = iter.into_iter().collect();
+        items.into()
+    }
+}
+
+impl<T: Ord> From<Vec<T>> for Set<T> {
+    fn from(mut items: Vec<T>) -> Self {
         items.sort();
         items.dedup();
         Self(items)
@@ -135,7 +141,7 @@ impl<T: fmt::Display> fmt::Display for Set<T> {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", item)?;
+            write!(f, "{item}")?;
         }
         write!(f, "]")
     }

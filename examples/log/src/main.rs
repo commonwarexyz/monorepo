@@ -12,9 +12,9 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids introducing
-//! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
-//! for the reader.
+//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids
+//! introducing logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as
+//! an exercise for the reader.
 //!
 //! # Usage (Run at Least 3 to Make Progress)
 //!
@@ -169,35 +169,43 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (voter_sender, voter_receiver) = network.register(
+        let (pending_sender, pending_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (resolver_sender, resolver_receiver) = network.register(
+        let (recovered_sender, recovered_receiver) = network.register(
             1,
+            Quota::per_second(NZU32!(10)),
+            256, // 256 messages in flight
+        );
+        let (resolver_sender, resolver_receiver) = network.register(
+            2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let (application, supervisor, mailbox) = application::Application::new(
+        let (application, scheme, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
+                private_key: signer.clone(),
             },
         );
 
         // Initialize consensus
-        let cfg = simplex::Config::<_, _, _, _, _, _> {
-            crypto: signer.clone(),
+        let cfg = simplex::Config {
+            me: signer.public_key(),
+            participants: validators.clone().into(),
+            scheme,
+            blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
-            reporter: supervisor.clone(),
-            supervisor,
+            reporter: reporter.clone(),
             namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
@@ -211,7 +219,6 @@ fn main() {
             activity_timeout: 10,
             skip_timeout: 5,
             max_fetch_count: 32,
-            max_participants: participants.len(),
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
@@ -222,7 +229,8 @@ fn main() {
         application.start();
         network.start();
         engine.start(
-            (voter_sender, voter_receiver),
+            (pending_sender, pending_receiver),
+            (recovered_sender, recovered_receiver),
             (resolver_sender, resolver_receiver),
         );
 

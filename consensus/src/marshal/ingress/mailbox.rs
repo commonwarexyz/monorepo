@@ -1,9 +1,12 @@
 use crate::{
-    threshold_simplex::types::{Activity, Finalization, Notarization},
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Activity, Finalization, Notarization},
+    },
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::Digest;
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
@@ -50,7 +53,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<S: Scheme, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -69,6 +72,13 @@ pub(crate) enum Message<V: Variant, B: Block> {
         identifier: Identifier<B::Commitment>,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<B>>,
+    },
+    /// A request to retrieve a finalization by height.
+    GetFinalization {
+        /// The height of the finalization to retrieve.
+        height: u64,
+        /// A channel to send the retrieved finalization.
+        response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
     },
     /// A request to retrieve a block by its commitment.
     Subscribe {
@@ -97,24 +107,24 @@ pub(crate) enum Message<V: Variant, B: Block> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<V, B::Commitment>,
+        notarization: Notarization<S, B::Commitment>,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<V, B::Commitment>,
+        finalization: Finalization<S, B::Commitment>,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block> {
-    sender: mpsc::Sender<Message<V, B>>,
+pub struct Mailbox<S: Scheme, B: Block> {
+    sender: mpsc::Sender<Message<S, B>>,
 }
 
-impl<V: Variant, B: Block> Mailbox<V, B> {
+impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
     }
 
@@ -166,6 +176,33 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             Ok(result) => result,
             Err(_) => {
                 error!("failed to get block: receiver dropped");
+                None
+            }
+        }
+    }
+
+    /// A best-effort attempt to retrieve a given [Finalization] from local
+    /// storage. It is not an indication to go fetch the [Finalization] from the network.
+    pub async fn get_finalization(
+        &mut self,
+        height: u64,
+    ) -> Option<Finalization<S, B::Commitment>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetFinalization {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get finalization message to actor: receiver dropped");
+        }
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get finalization: receiver dropped");
                 None
             }
         }
@@ -226,8 +263,8 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 }
 
-impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
-    type Activity = Activity<V, B::Commitment>;
+impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
+    type Activity = Activity<S, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {

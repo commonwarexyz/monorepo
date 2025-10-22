@@ -1009,8 +1009,13 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_1k() {
+    fn test_1k_min_pk() {
         run_1k::<MinPk>();
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_min_sig() {
         run_1k::<MinSig>();
     }
 }

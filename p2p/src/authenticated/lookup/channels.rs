@@ -129,7 +129,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P>>)> {
         self.receivers
     }
 }
