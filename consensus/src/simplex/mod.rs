@@ -3738,9 +3738,8 @@ mod tests {
                     if signing_schemes[0].is_attributable() {
                         assert!(signers > 1, "view {}: {}", view, signers);
                     } else {
-                        // For non-attributable, we expect only 1 signer
-                        // per payload (only own activities reported)
-                        assert_eq!(signers, 1);
+                        // For non-attributable, we shouldn't see any peer activities
+                        assert_eq!(signers, 0);
                     }
                 }
 
@@ -3753,9 +3752,8 @@ mod tests {
                     if signing_schemes[0].is_attributable() {
                         assert!(signers > 1);
                     } else {
-                        // For non-attributable, we expect only 1 signer per payload
-                        // (only own activities reported)
-                        assert_eq!(signers, 1);
+                        // For non-attributable, we shouldn't see any peer activities
+                        assert_eq!(signers, 0);
                     }
                 }
             }
