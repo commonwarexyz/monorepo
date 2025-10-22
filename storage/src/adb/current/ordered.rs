@@ -672,7 +672,6 @@ impl<
             ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
                 // proven excluded.
-                // Compute the root of an empty MMR by hashing the position (equivalent to MMR Hasher::root)
                 let empty_root = MemMmr::empty_mmr_root(hasher);
                 return proof.size == Position::new(0) && *root == empty_root;
             }
