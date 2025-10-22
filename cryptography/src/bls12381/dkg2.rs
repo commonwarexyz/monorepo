@@ -20,7 +20,7 @@ use super::primitives::group::Share;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     round: u32,
     players: Set<P>,
@@ -33,7 +33,7 @@ impl<V: Variant, P: PublicKey> Output<V, P> {
         Some(self.public.evaluate(index as u32).value)
     }
 
-    fn quorum(&self) -> u32 {
+    pub fn quorum(&self) -> u32 {
         quorum(self.players.len() as u32)
     }
 
@@ -200,11 +200,13 @@ impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
     }
 }
 
+#[derive(Clone)]
 enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
     Reveal(Scalar),
 }
 
+#[derive(Clone)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<P>>,
@@ -334,6 +336,7 @@ impl<V: Variant> Write for DealerPubMsg<V> {
     }
 }
 
+#[derive(Clone)]
 pub struct DealerPrivMsg {
     share: Scalar,
 }
@@ -358,6 +361,7 @@ impl Write for DealerPrivMsg {
     }
 }
 
+#[derive(Clone)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -482,9 +486,9 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
         mut rng: impl CryptoRngCore,
         round_info: RoundInfo<V, P>,
         me: P,
-        share: Option<Scalar>,
+        share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(P, DealerPrivMsg)>), Error> {
-        let share = round_info.dealer_share(&mut rng, share)?;
+        let share = round_info.dealer_share(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
         let reveals = round_info
             .players
@@ -536,5 +540,220 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
             pub_msg: self.pub_msg,
             results: self.results,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ed25519;
+    use crate::{
+        bls12381::primitives::{
+            ops::{partial_sign_message, partial_verify_message, threshold_signature_recover},
+            variant::MinSig,
+        },
+        Signer as _,
+    };
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    const MAX_IDENTITIES: u32 = 1000;
+
+    struct Round {
+        dealers: Vec<u32>,
+        players: Vec<u32>,
+    }
+
+    impl From<(Vec<u32>, Vec<u32>)> for Round {
+        fn from((dealers, players): (Vec<u32>, Vec<u32>)) -> Self {
+            Self { dealers, players }
+        }
+    }
+
+    struct Plan {
+        rounds: Vec<Round>,
+    }
+
+    impl Plan {
+        fn run_with_seed(self, seed: u64) {
+            // Create a single RNG from the seed
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            // 1. Figure out the maximum index between dealers and players across all rounds.
+            // Also, check that the dealers in round N + 1 are players in round N.
+            let max_index = self
+                .rounds
+                .iter()
+                .map(|round| {
+                    round
+                        .dealers
+                        .iter()
+                        .copied()
+                        .chain(round.players.iter().copied())
+                        .max()
+                        .unwrap_or_default()
+                })
+                .max()
+                .unwrap_or_default();
+            // 2. Make sure this is a reasonable value (<= MAX_IDENTITIES).
+            assert!(max_index <= MAX_IDENTITIES, "too many players for test",);
+            let mut previous_output: Option<Output<MinSig, ed25519::PublicKey>> = None;
+            let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
+
+            // 3. Generate the Ed25519 keys for each index, using the RNG.
+            let mut keys = BTreeMap::new();
+            for i in 0..=max_index {
+                let signing_key = ed25519_consensus::SigningKey::new(&mut rng);
+                let private_key = ed25519::PrivateKey::from(signing_key);
+                keys.insert(i, private_key);
+            }
+
+            // 4. For each round, run the DKG, using, if necessary the previous output.
+            for (round_idx, round) in self.rounds.into_iter().enumerate() {
+                // 4.1 Create round info.
+                let dealer_set = round
+                    .dealers
+                    .iter()
+                    .map(|&idx| keys[&idx].public_key())
+                    .collect::<Set<_>>();
+                let player_set = round
+                    .players
+                    .iter()
+                    .map(|&idx| keys[&idx].public_key())
+                    .collect::<Set<_>>();
+
+                let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+                    std::mem::take(&mut previous_output),
+                    dealer_set,
+                    player_set,
+                )
+                .expect("Failed to create round info");
+
+                // 4.2 Initialize players
+                let mut players = BTreeMap::new();
+                for &player_idx in &round.players {
+                    let player = Player::<MinSig, ed25519::PrivateKey>::new(
+                        round_info.clone(),
+                        keys[&player_idx].clone(),
+                    )
+                    .expect("Failed to create player");
+                    players.insert(keys[&player_idx].public_key(), player);
+                }
+
+                // 4.3 For each dealer:
+                let mut log = BTreeMap::new();
+
+                for dealer_idx in &round.dealers {
+                    // 4.3.1 Generate the messages intended for the other players
+                    let dealer_pub = keys[&dealer_idx].public_key();
+                    // Get share from previous round if this dealer was a player
+                    let share = shares.get(&dealer_pub).cloned();
+                    let (mut dealer, pub_msg, priv_msgs) =
+                        Dealer::<MinSig, ed25519::PublicKey>::start(
+                            &mut rng,
+                            round_info.clone(),
+                            dealer_pub.clone(),
+                            share,
+                        )
+                        .expect("Failed to start dealer");
+
+                    // 4.3.2 Have each player process the message, and the dealer process the ack.
+                    for (player_id, priv_msg) in priv_msgs {
+                        let player = players.get_mut(&player_id).expect("player should exist");
+                        let ack = player
+                            .dealer_message(dealer_pub.clone(), pub_msg.clone(), priv_msg)
+                            .expect("player should ack valid dealer message");
+                        dealer
+                            .receive_player_ack(player_id, ack)
+                            .expect("should be able to accept ack");
+                    }
+
+                    log.insert(dealer_pub, dealer.finalize());
+                }
+
+                // 4.5 Run the observer to get an output.
+                let observer_output =
+                    observe::<MinSig, ed25519::PublicKey>(round_info.clone(), log.clone())
+                        .expect("Observer failed");
+
+                // 4.6 Finalize each player, checking that its output is the same as the observer,
+                // and remember its shares.
+                let mut player_ids = Vec::with_capacity(players.len());
+                for (player_id, player) in players {
+                    let (player_output, share) = player
+                        .finalize(log.clone())
+                        .expect("Player finalize failed");
+
+                    // Check that player output matches observer output
+                    assert_eq!(player_output, observer_output);
+
+                    shares.insert(player_id.clone(), share);
+                    player_ids.push(player_id)
+                }
+
+                // 4.7 Generate a signature, by using each player's share, and then recover a group signature.
+                //
+                let test_message = format!("test message {}", round_idx).into_bytes();
+                let namespace = Some(&b"test"[..]);
+
+                // Create partial signatures from each player's share
+                let mut partial_sigs = Vec::new();
+                for player_id in player_ids {
+                    let share = &shares[&player_id];
+                    let partial_sig =
+                        partial_sign_message::<MinSig>(share, namespace, &test_message);
+
+                    // Verify partial signature
+                    partial_verify_message::<MinSig>(
+                        &observer_output.public,
+                        namespace,
+                        &test_message,
+                        &partial_sig,
+                    )
+                    .expect("Partial signature verification failed");
+
+                    partial_sigs.push(partial_sig);
+                }
+
+                // Recover threshold signature
+                let threshold = observer_output.quorum();
+                let threshold_sig = threshold_signature_recover::<MinSig, _>(
+                    threshold,
+                    &partial_sigs[0..threshold as usize],
+                )
+                .expect("Failed to recover threshold signature");
+
+                // 4.8 Check this signature
+                let threshold_public = poly::public::<MinSig>(&observer_output.public());
+                crate::bls12381::primitives::ops::verify_message::<MinSig>(
+                    &threshold_public,
+                    namespace,
+                    &test_message,
+                    &threshold_sig,
+                )
+                .expect("Threshold signature verification failed");
+
+                // Update state for next round
+                previous_output = Some(observer_output);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dkg2_single_round() {
+        let plan = Plan {
+            rounds: vec![Round::from((vec![0, 1, 2], vec![0, 1, 2, 3, 4]))],
+        };
+        plan.run_with_seed(42);
+    }
+
+    #[test]
+    fn test_dkg2_multiple_rounds() {
+        let plan = Plan {
+            rounds: vec![
+                Round::from((vec![0, 1], vec![0, 1, 2])),
+                Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
+            ],
+        };
+        plan.run_with_seed(42);
     }
 }
