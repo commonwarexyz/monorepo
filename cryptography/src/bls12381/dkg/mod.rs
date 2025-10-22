@@ -1477,6 +1477,14 @@ mod tests {
                     None => quorum(player_set.len() as u32),
                     Some(previous) => previous.required(),
                 } as usize;
+                assert!(
+                    active_len >= min_dealers,
+                    "round {} requires at least {} active dealers for {} players, got {}",
+                    round_idx,
+                    min_dealers,
+                    player_set.len(),
+                    active_len
+                );
 
                 // Instantiate dealers for this round, seeding them with prior shares when reshare happens.
                 let mut dealers = BTreeMap::new();
@@ -1574,7 +1582,7 @@ mod tests {
                     .unwrap();
                 }
 
-                // assert!(arb.ready(), "arbiter not ready in round {round_idx}");
+                assert!(arb.ready(), "arbiter not ready in round {round_idx}");
                 let (result, disqualified) = arb.finalize();
                 let expected_disqualified =
                     dealer_registry.len().saturating_sub(active_dealers.len());
