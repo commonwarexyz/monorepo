@@ -556,37 +556,29 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                                 // Check if we expected a message from this sender to this receiver
                                 let expected_msgs_key = (to_idx, from_idx);
-                                if let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) {
-                                    // Verify message is at front of queue (FIFO ordering per sender-receiver pair)
-                                    if queue.front() == Some(&message) {
-                                        queue.pop_front();
+                                let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) else {
+                                    panic!("No expected messages for this sender-receiver pair");
+                                };
 
-                                        // Clean up empty queues
-                                        if queue.is_empty() {
-                                            expected_msgs.remove(&expected_msgs_key);
+                                // Verify message is at front of queue (FIFO ordering per sender-receiver pair)
+                                let oldest_msg = queue.pop_front().expect("Queue is empty");
+                                if oldest_msg == message {
+                                    // Update pending tracking
+                                    if let Some(senders) = pending_by_receiver.get_mut(&to_idx) {
+                                        if let Some(pos) = senders.iter().position(|&x| x == from_idx) {
+                                            senders.remove(pos);
                                         }
-
-                                        // Update pending tracking
-                                        if let Some(senders) = pending_by_receiver.get_mut(&to_idx) {
-                                            if let Some(pos) = senders.iter().position(|&x| x == from_idx) {
-                                                senders.remove(pos);
-                                            }
-                                            if senders.is_empty() {
-                                                pending_by_receiver.remove(&to_idx);
-                                            }
+                                        if senders.is_empty() {
+                                            pending_by_receiver.remove(&to_idx);
                                         }
-                                    } else {
-                                        panic!(
-                                            "Message out of order from sender {} to receiver {}. Expected: {:?}, Got: {:?}",
-                                            from_idx, to_idx,
-                                            queue.front().map(|b| b.len()),
-                                            message.len()
-                                        );
                                     }
                                 } else {
-                                    // No expectations for this sender-receiver pair
-                                    // This can happen if the sender was blocked after sending but before delivery
-                                    continue;
+                                    panic!(
+                                        "Message out of order from sender {} to receiver {}. Expected: {:?}, Got: {:?}",
+                                        from_idx, to_idx,
+                                        queue.front().map(|b| b.len()),
+                                        message.len()
+                                    );
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
