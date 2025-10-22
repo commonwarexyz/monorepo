@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn test_reshare_min_active() {
         let plan = Plan::from(vec![
-            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![0, 1, 2, 3]).with_absent_players(vec![3]),
             Round::from(vec![4, 5, 6, 7]).with_absent_dealers(vec![3]),
         ]);
         plan.run::<MinPk>();
@@ -1789,7 +1789,7 @@ mod tests {
     #[test]
     fn test_reshare_min_active_different_sizes() {
         let plan = Plan::from(vec![
-            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![0, 1, 2, 3]).with_absent_players(vec![3]),
             Round::from(vec![4, 5, 6, 7, 8, 9]).with_absent_dealers(vec![3]),
         ]);
         plan.run::<MinPk>();
