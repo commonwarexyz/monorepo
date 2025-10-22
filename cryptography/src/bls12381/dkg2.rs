@@ -104,6 +104,10 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         quorum(self.players.len() as u32).saturating_sub(1)
     }
 
+    fn threshold(&self) -> u32 {
+        self.degree() + 1
+    }
+
     fn required_commitments(&self) -> u32 {
         let dealer_quorum = quorum(self.dealers.len() as u32);
         let prev_quorum = self
@@ -283,14 +287,14 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                     .expect("select checks that dealer exists, via our signature")
             })
             .collect::<Vec<_>>();
-        let (public, weights) = if let Some(previous) = round_info.previous {
+        let (public, weights) = if let Some(previous) = round_info.previous.as_ref() {
             let weights =
                 poly::compute_weights(indices).expect("should be able to compute weights");
             let public = recover_public_with_weights::<V>(
                 &previous.public,
                 &commitments,
                 &weights,
-                quorum(previous.players.len() as u32),
+                round_info.threshold(),
                 1,
             )
             .expect("should be able to recover group");
@@ -303,7 +307,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             (public, None)
         };
         let output = Output {
-            round: round_info.round + 1,
+            round: round_info.round,
             players: round_info.players,
             public,
         };
@@ -559,6 +563,7 @@ mod test {
 
     const MAX_IDENTITIES: u32 = 1000;
 
+    #[derive(Clone)]
     struct Round {
         dealers: Vec<u32>,
         players: Vec<u32>,
@@ -572,6 +577,12 @@ mod test {
 
     struct Plan {
         rounds: Vec<Round>,
+    }
+
+    impl From<Vec<Round>> for Plan {
+        fn from(rounds: Vec<Round>) -> Self {
+            Self { rounds }
+        }
     }
 
     impl Plan {
@@ -623,8 +634,8 @@ mod test {
 
                 let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
                     std::mem::take(&mut previous_output),
-                    dealer_set,
-                    player_set,
+                    dealer_set.clone(),
+                    player_set.clone(),
                 )
                 .expect("Failed to create round info");
 
@@ -686,6 +697,15 @@ mod test {
                     // Check that player output matches observer output
                     assert_eq!(player_output, observer_output);
 
+                    // Verify the share matches the public polynomial
+                    let expected_public = observer_output.public.evaluate(share.index);
+                    let actual_public = {
+                        let mut g = <MinSig as Variant>::Public::one();
+                        g.mul(&share.private);
+                        g
+                    };
+                    assert_eq!(expected_public.value, actual_public);
+
                     shares.insert(player_id.clone(), share);
                     player_ids.push(player_id)
                 }
@@ -740,20 +760,32 @@ mod test {
 
     #[test]
     fn test_dkg2_single_round() {
-        let plan = Plan {
-            rounds: vec![Round::from((vec![0, 1, 2], vec![0, 1, 2, 3, 4]))],
-        };
-        plan.run_with_seed(42);
+        Plan::from(vec![Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3]))]).run_with_seed(0);
     }
 
     #[test]
     fn test_dkg2_multiple_rounds() {
-        let plan = Plan {
-            rounds: vec![
-                Round::from((vec![0, 1], vec![0, 1, 2])),
-                Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
-            ],
-        };
-        plan.run_with_seed(42);
+        Plan::from(vec![Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3])); 4]).run_with_seed(0);
+    }
+
+    #[test]
+    fn test_dkg2_changing_committee() {
+        Plan::from(vec![
+            Round::from((vec![0, 1, 2], vec![1, 2, 3])),
+            Round::from((vec![1, 2, 3], vec![2, 3, 4])),
+            Round::from((vec![2, 3, 4], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2])),
+        ])
+        .run_with_seed(0);
+    }
+
+    #[test]
+    fn test_dkg2_increasing_committee() {
+        Plan::from(vec![
+            Round::from((vec![0, 1], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
+            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
+        ])
+        .run_with_seed(0);
     }
 }
