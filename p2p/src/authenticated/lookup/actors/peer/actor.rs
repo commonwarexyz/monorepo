@@ -165,7 +165,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let msg = match types::Message::decode_cfg(msg, &(..).into()) {
+                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");
