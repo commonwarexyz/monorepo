@@ -1639,6 +1639,11 @@ mod tests {
                     "round {round_idx} produced no outputs",
                 );
 
+                // Ensure constant is maintained between rounds
+                if let Some(previous) = current_public.as_ref() {
+                    assert_eq!(public::<V>(&round_results[0].public), public::<V>(previous));
+                }
+
                 // Sanity-check the recovered shares by constructing a threshold POP.
                 let threshold = quorum(player_set.len() as u32);
                 let partials = round_results
