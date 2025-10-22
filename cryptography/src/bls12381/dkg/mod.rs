@@ -1352,6 +1352,7 @@ mod tests {
         assert!(matches!(result, Err(Error::MissingShare)));
     }
 
+    /// Scenario configuration for a single synthetic DKG/reshare round.
     #[derive(Clone)]
     struct Round {
         players: Vec<u64>,
@@ -1381,6 +1382,7 @@ mod tests {
         }
     }
 
+    /// Sequence of rounds executed deterministically with a seeded RNG.
     #[derive(Clone)]
     struct Plan {
         rounds: Vec<Round>,
