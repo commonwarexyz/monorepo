@@ -1686,6 +1686,24 @@ mod tests {
     }
 
     #[test]
+    fn test_dkg_with_absent_dealer() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]).with_absent_dealers(vec![3])
+        ]);
+        plan.run::<MinPk>();
+        plan.run::<MinSig>();
+    }
+
+    #[test]
+    fn test_dkg_with_absent_player() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]).with_absent_players(vec![3])
+        ]);
+        plan.run::<MinPk>();
+        plan.run::<MinSig>();
+    }
+
+    #[test]
     fn test_dkg_determinism() {
         let plan_template = || Plan::from(vec![Round::from((0..5).collect::<Vec<_>>())]);
 
@@ -1732,24 +1750,6 @@ mod tests {
             Round::from(vec![0, 1, 2, 3, 4]),
             Round::from(vec![0, 1, 2, 3]),
             Round::from(vec![0, 1, 2]),
-        ]);
-        plan.run::<MinPk>();
-        plan.run::<MinSig>();
-    }
-
-    #[test]
-    fn test_dkg_with_absent_dealer() {
-        let plan = Plan::from(vec![
-            Round::from(vec![0, 1, 2, 3]).with_absent_dealers(vec![2, 3])
-        ]);
-        plan.run::<MinPk>();
-        plan.run::<MinSig>();
-    }
-
-    #[test]
-    fn test_dkg_with_absent_player() {
-        let plan = Plan::from(vec![
-            Round::from(vec![0, 1, 2, 3]).with_absent_players(vec![3])
         ]);
         plan.run::<MinPk>();
         plan.run::<MinSig>();
