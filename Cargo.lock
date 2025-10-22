@@ -1345,7 +1345,6 @@ dependencies = [
 name = "commonware-p2p"
 version = "0.0.62"
 dependencies = [
- "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
