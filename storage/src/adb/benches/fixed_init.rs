@@ -293,23 +293,19 @@ fn bench_fixed_init(c: &mut Criterion) {
                     // Clean up the database after the benchmark.
                     match variant {
                         Variant::AnyUnordered => {
-                            let db = UAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                            let db = UAnyDb::init(ctx.clone(), any_cfg).await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         Variant::AnyOrdered => {
-                            let db = OAnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
+                            let db = OAnyDb::init(ctx.clone(), any_cfg).await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         Variant::CurrentUnordered => {
-                            let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
-                                .await
-                                .unwrap();
+                            let db = UCurrentDb::init(ctx.clone(), current_cfg).await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         Variant::CurrentOrdered => {
-                            let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
-                                .await
-                                .unwrap();
+                            let db = OCurrentDb::init(ctx.clone(), current_cfg).await.unwrap();
                             db.destroy().await.unwrap();
                         }
                     }
