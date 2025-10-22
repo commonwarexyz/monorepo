@@ -52,8 +52,9 @@ pub struct Config<
 
     /// Reporter for the consensus engine.
     ///
-    /// Consider wrapping with [`crate::simplex::signing_scheme::reporter::AttributableReporter`]
-    /// to automatically filter and verify activities based on scheme attributability.
+    /// All activity is exported for downstream applications that benefit from total observability,
+    /// consider wrapping with [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to
+    /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
     /// Partition for the consensus engine.

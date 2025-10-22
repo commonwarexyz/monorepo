@@ -1842,7 +1842,7 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Activity<S, D> {
-    /// Indicates whether the activity has been verified by consensus.
+    /// Indicates whether the activity is guaranteed to **always** have been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
             Activity::Notarize(_) => false,

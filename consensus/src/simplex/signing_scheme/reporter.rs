@@ -9,7 +9,6 @@
 //! 1. **Peer activities are cryptographically verified** before being reported
 //! 2. **Non-attributable schemes** suppress per-validator activities from peers to prevent
 //!    signature forgery attacks
-//! 3. **Own activities** are always reported regardless of scheme attributability
 //! 4. **Certificates** are always reported as they contain valid quorum proofs
 //!
 //! # Security Rationale
@@ -18,22 +17,12 @@
 //! can be used to forge a partial signature for any participant. If per-validator activities
 //! were exposed for such schemes, adversaries could fabricate Byzantine fault evidence.
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
-//!
-//! # Observer Support
-//!
-//! The wrapper supports both validators and observers:
-//! - **Validators** (`me = Some(public_key)`): Distinguish own vs peer activities
-//! - **Observers** (`me = None`): Treat all activities as peer activities, useful for monitoring
 
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Attributable},
-    },
+    simplex::{signing_scheme::Scheme, types::Activity},
     Reporter,
 };
-use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Set;
+use commonware_cryptography::Digest;
 use rand::{CryptoRng, Rng};
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -44,17 +33,12 @@ use rand::{CryptoRng, Rng};
 #[derive(Clone)]
 pub struct AttributableReporter<
     E: Clone + Rng + CryptoRng + Send + 'static,
-    P: PublicKey,
     S: Scheme,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
     rng: E,
-    /// Our validator identity (`None` for observers/monitors)
-    me: Option<P>,
-    /// All participants in the consensus
-    participants: Set<P>,
     /// Signing scheme for verification
     scheme: S,
     /// Namespace for domain separation in verification
@@ -67,26 +51,15 @@ pub struct AttributableReporter<
 
 impl<
         E: Clone + Rng + CryptoRng + Send + 'static,
-        P: PublicKey,
         S: Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, P, S, D, R>
+    > AttributableReporter<E, S, D, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub fn new(
-        rng: E,
-        me: Option<P>,
-        participants: Set<P>,
-        scheme: S,
-        namespace: Vec<u8>,
-        reporter: R,
-        verify: bool,
-    ) -> Self {
+    pub fn new(rng: E, scheme: S, namespace: Vec<u8>, reporter: R, verify: bool) -> Self {
         Self {
             rng,
-            me,
-            participants,
             scheme,
             namespace,
             reporter,
@@ -97,44 +70,16 @@ impl<
 
 impl<
         E: Clone + Rng + CryptoRng + Send + 'static,
-        P: PublicKey,
         S: Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, P, S, D, R>
+    > Reporter for AttributableReporter<E, S, D, R>
 {
     type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        // Determine if the activity is from our local validator
-        let is_local = if let Some(ref me) = self.me {
-            // Extract signer from activity
-            let signer = match &activity {
-                Activity::Notarize(n) => Some(n.signer()),
-                Activity::Nullify(n) => Some(n.signer()),
-                Activity::Finalize(f) => Some(f.signer()),
-                Activity::ConflictingNotarize(c) => Some(c.signer()),
-                Activity::ConflictingFinalize(c) => Some(c.signer()),
-                Activity::NullifyFinalize(c) => Some(c.signer()),
-                // Certificates don't have direct attribution
-                Activity::Notarization(_)
-                | Activity::Nullification(_)
-                | Activity::Finalization(_) => None,
-            };
-
-            // Check if the signer is us
-            signer
-                .and_then(|s| self.participants.get(s as usize))
-                .map(|s| s == me)
-                .unwrap_or(false)
-        } else {
-            // Observers have no local identity
-            false
-        };
-
-        // Verify peer activities if verification is enabled and it's not our local activity
+        // Verify peer activities if verification is enabled
         if self.verify
-            && !is_local
             && !(activity.verified()
                 || activity.verify(&mut self.rng, &self.scheme, &self.namespace))
         {
@@ -143,7 +88,7 @@ impl<
         }
 
         // Filter based on scheme attributability
-        if !self.scheme.is_attributable() && !is_local {
+        if !self.scheme.is_attributable() {
             match activity {
                 Activity::Notarize(_)
                 | Activity::Nullify(_)
@@ -178,7 +123,6 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest, Hasher, Sha256,
-        Signer,
     };
     use futures::executor::block_on;
     use rand::{rngs::StdRng, SeedableRng};
@@ -222,64 +166,16 @@ mod tests {
     }
 
     #[test]
-    fn test_local_activity_always_reported() {
-        // Local activities should always be reported, even for non-attributable schemes
-        let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
-
-        assert!(
-            !verifier.is_attributable(),
-            "BLS threshold must be non-attributable"
-        );
-
-        let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            Some(keys[0].public_key()),
-            public_keys.into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
-
-        let proposal = create_proposal(0, 1);
-        let vote = schemes[0]
-            .sign_vote::<Sha256Digest>(
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
-
-        block_on(reporter.report(Activity::Notarize(notarize)));
-
-        // Should be reported even though scheme is non-attributable (it's our own activity)
-        assert_eq!(mock.count(), 1);
-        let reported = mock.reported();
-        assert!(matches!(reported[0], Activity::Notarize(_)));
-    }
-
-    #[test]
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
         let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            Some(keys[0].public_key()),
-            public_keys.clone().into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
+        let mut reporter =
+            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
@@ -304,15 +200,13 @@ mod tests {
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
         let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(
             rng,
-            Some(keys[0].public_key()),
-            public_keys.into(),
             verifier,
             NAMESPACE.to_vec(),
             mock.clone(),
@@ -344,7 +238,7 @@ mod tests {
     fn test_certificates_always_reported() {
         // Certificates should always be reported, even for non-attributable schemes
         let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
+        let (_, _, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -352,15 +246,8 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            Some(keys[0].public_key()),
-            public_keys.into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
+        let mut reporter =
+            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
 
         // Create a certificate from multiple validators
         let proposal = create_proposal(0, 1);
@@ -400,7 +287,7 @@ mod tests {
     fn test_non_attributable_filters_peer_activities() {
         // Non-attributable schemes (like BLS threshold) must filter peer per-validator activities
         let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
+        let (_, _, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -408,15 +295,8 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            Some(keys[0].public_key()),
-            public_keys.into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
+        let mut reporter =
+            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
@@ -442,20 +322,13 @@ mod tests {
     fn test_attributable_scheme_reports_peer_activities() {
         // Ed25519 (attributable) should report peer per-validator activities
         let mut rng = StdRng::seed_from_u64(42);
-        let (keys, public_keys, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            Some(keys[0].public_key()),
-            public_keys.into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
+        let mut reporter =
+            AttributableReporter::new(rng, verifier, NAMESPACE.to_vec(), mock.clone(), true);
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
@@ -477,46 +350,5 @@ mod tests {
         assert_eq!(mock.count(), 1);
         let reported = mock.reported();
         assert!(matches!(reported[0], Activity::Notarize(_)));
-    }
-
-    #[test]
-    fn test_observer_treats_all_as_peer() {
-        // Observers (me = None) with non-attributable schemes filter all per-validator activities
-        let mut rng = StdRng::seed_from_u64(42);
-        let (_, public_keys, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
-
-        assert!(
-            !verifier.is_attributable(),
-            "BLS threshold must be non-attributable"
-        );
-
-        let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(
-            rng,
-            None, // Observer has no identity
-            public_keys.into(),
-            verifier,
-            NAMESPACE.to_vec(),
-            mock.clone(),
-            true,
-        );
-
-        // Create a valid activity from validator 0
-        let proposal = create_proposal(0, 1);
-        let vote = schemes[0]
-            .sign_vote::<Sha256Digest>(
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-            )
-            .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
-
-        // Report it
-        block_on(reporter.report(Activity::Notarize(notarize)));
-
-        // Should be filtered (observer treats all as peer)
-        assert_eq!(mock.count(), 0);
     }
 }

@@ -1,6 +1,6 @@
 //! Signing scheme implementations for `simplex`.
 //!
-//! # Attributability and Fault Evidence
+//! # Attributable Schemes and Fault Evidence
 //!
 //! Signing schemes differ in whether they can safely expose per-validator activities and
 //! Byzantine fault evidence:

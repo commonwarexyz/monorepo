@@ -3634,8 +3634,6 @@ mod tests {
                 let validator = scheme.public_key();
                 let attributable_reporter = signing_scheme::reporter::AttributableReporter::new(
                     context.with_label("rng"),
-                    Some(validator.clone()),
-                    validators.clone().into(),
                     signing_schemes[idx].clone(),
                     namespace.clone(),
                     mock_reporter.clone(),
