@@ -1417,8 +1417,7 @@ mod tests {
                 // Validate committee definitions before instantiating protocol state.
                 assert!(
                     !round.players.is_empty(),
-                    "round {} must include at least one player",
-                    round_idx
+                    "round {round_idx} must include at least one player",
                 );
 
                 // Materialize deterministic dealer/player sets (ordered by public key).
@@ -1430,16 +1429,14 @@ mod tests {
                 };
                 assert!(
                     !dealer_candidates.is_empty(),
-                    "round {} must have at least one dealer",
-                    round_idx
+                    "round {round_idx} must have at least one dealer",
                 );
 
                 let absent_player_set = participant_set(&round.absent_players);
                 for absent in absent_player_set.iter() {
                     assert!(
                         player_set.position(absent).is_some(),
-                        "round {} absent player not in committee",
-                        round_idx
+                        "round {round_idx} absent player not in committee",
                     );
                 }
 
@@ -1447,16 +1444,14 @@ mod tests {
                 for absent in absent_set.iter() {
                     assert!(
                         dealer_candidates.position(absent).is_some(),
-                        "round {} absent dealer not in committee",
-                        round_idx
+                        "round {round_idx} absent dealer not in committee",
                     );
                 }
                 let dealer_registry = if let Some(ref registry) = share_holders {
                     for dealer in dealer_candidates.iter() {
                         assert!(
                             registry.position(dealer).is_some(),
-                            "round {} dealer not in previous committee",
-                            round_idx
+                            "round {round_idx} dealer not in previous committee",
                         );
                     }
                     registry.clone()
@@ -1497,10 +1492,7 @@ mod tests {
                         .get(dealer_pk)
                         .map(|out| out.share.clone());
                     if current_public.is_some() && previous_share.is_none() {
-                        panic!(
-                            "dealer missing share required for reshare in round {}",
-                            round_idx
-                        );
+                        panic!("dealer missing share required for reshare in round {round_idx}",);
                     }
 
                     let (dealer, commitment, shares) =
@@ -1555,9 +1547,7 @@ mod tests {
                                 player_obj.share(dealer_pk.clone(), commitment.clone(), share)
                             {
                                 panic!(
-                                    "failed to deliver share from dealer {:?} to player {:?}: {err:?}",
-                                    dealer_pk,
-                                    player_pk
+                                    "failed to deliver share from dealer {dealer_pk:?} to player {player_pk:?}: {err:?}",
                                 );
                             }
                             dealer.ack(player_pk.clone()).unwrap();
@@ -1570,8 +1560,7 @@ mod tests {
                     let dealer_output = dealer.finalize().expect("insufficient acknowledgements");
                     assert!(
                         dealer_output.inactive == expected_inactive,
-                        "inactive set mismatch for dealer in round {}",
-                        round_idx
+                        "inactive set mismatch for dealer in round {round_idx}",
                     );
                     let dealer_pos = dealer_registry.position(dealer_pk).unwrap() as u32;
                     if !dealer_reveals.is_empty() {
@@ -1586,15 +1575,14 @@ mod tests {
                     .unwrap();
                 }
 
-                assert!(arb.ready(), "arbiter not ready in round {}", round_idx);
+                assert!(arb.ready(), "arbiter not ready in round {round_idx}",);
                 let (result, disqualified) = arb.finalize();
                 let expected_disqualified =
                     dealer_registry.len().saturating_sub(active_dealers.len());
                 assert_eq!(
                     disqualified.len(),
                     expected_disqualified,
-                    "unexpected disqualified dealers in round {}",
-                    round_idx
+                    "unexpected disqualified dealers in round {round_idx}",
                 );
                 let output = result.unwrap();
                 for (&dealer_idx, _) in output.commitments.iter() {
@@ -1602,23 +1590,18 @@ mod tests {
                     match output.reveals.get(&dealer_idx) {
                         Some(reveals) => assert_eq!(
                             reveals, &expected,
-                            "unexpected reveal content for dealer {} in round {}",
-                            dealer_idx, round_idx
+                            "unexpected reveal content for dealer {dealer_idx} in round {round_idx}",
                         ),
                         None => assert!(
                             expected.is_empty(),
-                            "missing reveals for dealer {} in round {}",
-                            dealer_idx,
-                            round_idx
+                            "missing reveals for dealer {dealer_idx} in round {round_idx}",
                         ),
                     }
                 }
                 for dealer_idx in output.reveals.keys() {
                     assert!(
                         output.commitments.contains_key(dealer_idx),
-                        "reveals present for unselected dealer {} in round {}",
-                        dealer_idx,
-                        round_idx
+                        "reveals present for unselected dealer {dealer_idx} in round {round_idx}",
                     );
                 }
 
@@ -1626,8 +1609,7 @@ mod tests {
                 assert_eq!(
                     output.commitments.len(),
                     expected_commitments,
-                    "unexpected number of commitments in round {}",
-                    round_idx
+                    "unexpected number of commitments in round {round_idx}",
                 );
 
                 let mut round_results = Vec::new();
@@ -1647,8 +1629,7 @@ mod tests {
 
                 assert!(
                     !round_results.is_empty(),
-                    "round {} produced no outputs",
-                    round_idx
+                    "round {round_idx} produced no outputs",
                 );
 
                 // Sanity-check the recovered shares by constructing a threshold POP.
