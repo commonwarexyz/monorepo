@@ -2488,73 +2488,71 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
+
+                // Byzantine node (idx 0) uses empty namespace to produce invalid signatures
+                let engine_namespace = if idx_scheme == 0 {
+                    vec![]
+                } else {
+                    namespace.clone()
+                };
+
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
+                    namespace: namespace.clone(), // Reporter always uses correct namespace
                     participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: engine_namespace,
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                if idx_scheme == 0 {
-                    let cfg = mocks::invalid::Config {
-                        scheme: signing_schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
-                    };
-
-                    let engine: mocks::invalid::Invalid<_, _, Sha256> =
-                        mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(pending);
-                } else {
-                    reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
-                        relay: relay.clone(),
-                        participant: validator.clone(),
-                        propose_latency: (10.0, 5.0),
-                        verify_latency: (10.0, 5.0),
-                    };
-                    let (actor, application) = mocks::application::Application::new(
-                        context.with_label("application"),
-                        application_cfg,
-                    );
-                    actor.start();
-                    let blocker = oracle.control(scheme.public_key());
-                    let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
-                        scheme: signing_schemes[idx_scheme].clone(),
-                        blocker,
-                        automaton: application.clone(),
-                        relay: application.clone(),
-                        reporter: reporter.clone(),
-                        partition: validator.to_string(),
-                        mailbox_size: 1024,
-                        epoch: 333,
-                        namespace: namespace.clone(),
-                        leader_timeout: Duration::from_secs(1),
-                        notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
-                        skip_timeout,
-                        max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
-                    let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
-                }
+                engine.start(pending, recovered, resolver);
             }
 
-            // Wait for all engines to finish
+            // Wait for honest engines to finish (skip byzantine node at index 0)
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -2564,10 +2562,9 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check reporters for correct activity
+            // Check honest reporters (reporters[1..]) for correct activity
             let mut invalid_count = 0;
-            let byz = &validators[0];
-            for reporter in reporters.iter() {
+            for reporter in reporters.iter().skip(1) {
                 // Ensure no faults
                 {
                     let faults = reporter.faults.lock().unwrap();
@@ -2582,14 +2579,17 @@ mod tests {
                     }
                 }
             }
+
+            // All honest nodes should see invalid signatures from the byzantine node
             assert_eq!(invalid_count, n - 1);
 
-            // Ensure invalid is blocked
+            // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();
             assert!(!blocked.is_empty());
             for (a, b) in blocked {
-                assert_ne!(&a, byz);
-                assert_eq!(&b, byz);
+                if a != validators[0] {
+                    assert_eq!(b, validators[0]);
+                }
             }
         });
     }
@@ -3578,6 +3578,199 @@ mod tests {
         children_shutdown_on_engine_abort(bls_multisig_fixture::<MinPk, _>);
         children_shutdown_on_engine_abort(bls_multisig_fixture::<MinSig, _>);
         children_shutdown_on_engine_abort(ed25519_fixture);
+    }
+
+    fn attributable_reporter_filtering<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 3;
+        let required_containers = 10;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines with `AttributableReporter` wrapper
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                };
+                let mock_reporter = mocks::reporter::Reporter::new(
+                    context.with_label("mock_reporter"),
+                    reporter_config,
+                );
+
+                // Wrap with `AttributableReporter`
+                let validator = scheme.public_key();
+                let attributable_reporter = signing_scheme::reporter::AttributableReporter::new(
+                    context.with_label("rng"),
+                    signing_schemes[idx].clone(),
+                    namespace.clone(),
+                    mock_reporter.clone(),
+                    true, // Enable verification
+                );
+                reporters.push(mock_reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: attributable_reporter,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Verify filtering behavior based on scheme attributability
+            for reporter in reporters.iter() {
+                // Ensure no faults (normal operation)
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty(), "No faults should be reported");
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0, "No invalid signatures");
+                }
+
+                // Check that we have certificates reported
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    assert!(
+                        !notarizations.is_empty() || !finalizations.is_empty(),
+                        "Certificates should be reported"
+                    );
+                }
+
+                // Check notarizes
+                let notarizes = reporter.notarizes.lock().unwrap();
+                let last_view = notarizes.keys().max().cloned().unwrap_or_default();
+                for (view, payloads) in notarizes.iter() {
+                    if *view == last_view {
+                        continue; // Skip last view
+                    }
+
+                    let signers: usize = payloads.values().map(|signers| signers.len()).sum();
+
+                    // For attributable schemes, we should see peer activities
+                    if signing_schemes[0].is_attributable() {
+                        assert!(signers > 1, "view {view}: {signers}");
+                    } else {
+                        // For non-attributable, we shouldn't see any peer activities
+                        assert_eq!(signers, 0);
+                    }
+                }
+
+                // Check finalizes
+                let finalizes = reporter.finalizes.lock().unwrap();
+                for (_, payloads) in finalizes.iter() {
+                    let signers: usize = payloads.values().map(|signers| signers.len()).sum();
+
+                    // For attributable schemes, we should see peer activities
+                    if signing_schemes[0].is_attributable() {
+                        assert!(signers > 1);
+                    } else {
+                        // For non-attributable, we shouldn't see any peer activities
+                        assert_eq!(signers, 0);
+                    }
+                }
+            }
+
+            // Ensure no blocked connections (normal operation)
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_attributable_reporter_filtering() {
+        attributable_reporter_filtering(bls_threshold_fixture::<MinPk, _>);
+        attributable_reporter_filtering(bls_threshold_fixture::<MinSig, _>);
+        attributable_reporter_filtering(bls_multisig_fixture::<MinPk, _>);
+        attributable_reporter_filtering(bls_multisig_fixture::<MinSig, _>);
+        attributable_reporter_filtering(ed25519_fixture);
     }
 
     fn tle<V: Variant>() {

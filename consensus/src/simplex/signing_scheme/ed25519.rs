@@ -1,4 +1,9 @@
 //! Ed25519 implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! [`Scheme`] is **attributable**: individual signatures can be safely
+//! presented to some third party as evidence of either liveness or of committing a fault. Certificates
+//! contain signer indices alongside individual signatures, enabling secure
+//! per-validator activity tracking and fault detection.
 
 use crate::{
     simplex::{
@@ -300,6 +305,10 @@ impl signing_scheme::Scheme for Scheme {
 
     fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
         None
+    }
+
+    fn is_attributable(&self) -> bool {
+        true
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {

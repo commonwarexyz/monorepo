@@ -1738,33 +1738,39 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 ///
-/// Some activities issued by consensus are not verified. To determine if an activity has been verified,
-/// use the `verified` method.
+/// # Verification
 ///
-/// # Warning
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed
+/// to produce a minimum quorum certificate). Use [`Activity::verified`] to check if an activity may not be verified,
+/// and [`Activity::verify`] to perform verification.
 ///
-/// Certain signing schemes produce aggregated artifacts that do not expose every contributor.
-/// Unless the scheme provides attributable signatures, do not use unverified activities for
-/// incentives, an attacker may be able to synthesize contributions for offline participants.
+/// # Activity Filtering
+///
+/// For **non-attributable** schemes like [`crate::simplex::signing_scheme::bls12381_threshold`], exposing
+/// per-validator activity as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
+/// be used to forge a partial signature for any player.
+///
+/// Use [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to automatically filter and
+/// verify activities based on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
-    /// A validator's notarize vote over a proposal
+    /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
-    /// A recovered certificate for a notarization (scheme-specific)
+    /// A recovered certificate for a notarization (scheme-specific).
     Notarization(Notarization<S, D>),
-    /// A validator's nullify vote used to skip the current view
+    /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
-    /// A recovered certificate for a nullification (scheme-specific)
+    /// A recovered certificate for a nullification (scheme-specific).
     Nullification(Nullification<S>),
-    /// A validator's finalize vote over a proposal
+    /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
-    /// A recovered certificate for a finalization (scheme-specific)
+    /// A recovered certificate for a finalization (scheme-specific).
     Finalization(Finalization<S, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior).
     ConflictingNotarize(ConflictingNotarize<S, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior).
     ConflictingFinalize(ConflictingFinalize<S, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
+    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
@@ -1831,7 +1837,7 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Activity<S, D> {
-    /// Indicates whether the activity has been verified by consensus.
+    /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
             Activity::Notarize(_) => false,
@@ -1843,6 +1849,25 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Activity::ConflictingNotarize(_) => false,
             Activity::ConflictingFinalize(_) => false,
             Activity::NullifyFinalize(_) => false,
+        }
+    }
+
+    /// Verifies the validity of this activity against the signing scheme.
+    ///
+    /// This method **always** performs verification regardless of whether the activity has been
+    /// previously verified. Callers can use [`Activity::verified`] to check if verification is
+    /// necessary before calling this method.
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+        match self {
+            Activity::Notarize(n) => n.verify(scheme, namespace),
+            Activity::Notarization(n) => n.verify(rng, scheme, namespace),
+            Activity::Nullify(n) => n.verify::<D>(scheme, namespace),
+            Activity::Nullification(n) => n.verify::<R, D>(rng, scheme, namespace),
+            Activity::Finalize(f) => f.verify(scheme, namespace),
+            Activity::Finalization(f) => f.verify(rng, scheme, namespace),
+            Activity::ConflictingNotarize(c) => c.verify(scheme, namespace),
+            Activity::ConflictingFinalize(c) => c.verify(scheme, namespace),
+            Activity::NullifyFinalize(c) => c.verify(scheme, namespace),
         }
     }
 }
