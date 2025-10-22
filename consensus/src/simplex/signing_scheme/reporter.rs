@@ -1,21 +1,21 @@
-//! [`Reporter`] wrapper for scheme-dependent activity filtering and verification.
+//! Wrapper for scheme-dependent activity filtering and verification.
 //!
 //! # Overview
 //!
-//! The `AttributableReporter` provides a composable wrapper around consensus reporters
-//! that automatically filters and verifies activities based on signing scheme properties.
+//! The [`AttributableReporter`] provides a composable wrapper around consensus reporters
+//! that automatically filters and verifies activities based on scheme attributability.
 //! This ensures that:
 //!
 //! 1. **Peer activities are cryptographically verified** before being reported
 //! 2. **Non-attributable schemes** suppress per-validator activities from peers to prevent
 //!    signature forgery attacks
-//! 4. **Certificates** are always reported as they contain valid quorum proofs
+//! 3. **Certificates** are always reported as they contain valid quorum proofs
 //!
 //! # Security Rationale
 //!
-//! With threshold signature schemes (like BLS threshold), any `t` valid partial signatures
+//! With [`super::bls12381_threshold`], any `t` valid partial signatures
 //! can be used to forge a partial signature for any participant. If per-validator activities
-//! were exposed for such schemes, adversaries could fabricate Byzantine fault evidence.
+//! were exposed for such schemes, adversaries could fabricate evidence of either liveness or of committing a fault.
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
 use crate::{
@@ -99,10 +99,11 @@ impl<
                     // Drop per-validator peer activity for non-attributable scheme
                     return;
                 }
-                // Always report certificates
                 Activity::Notarization(_)
                 | Activity::Nullification(_)
-                | Activity::Finalization(_) => {}
+                | Activity::Finalization(_) => {
+                    // Always report certificates
+                }
             }
         }
 
