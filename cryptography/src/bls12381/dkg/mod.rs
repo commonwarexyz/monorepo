@@ -278,13 +278,11 @@ mod tests {
                 // Validate committee definitions before instantiating protocol state.
                 assert!(
                     !round.dealers.is_empty(),
-                    "round {} must include at least one dealer",
-                    round_idx
+                    "round {round_idx} must include at least one dealer",
                 );
                 assert!(
                     !round.players.is_empty(),
-                    "round {} must include at least one player",
-                    round_idx
+                    "round {round_idx} must include at least one player",
                 );
 
                 // Materialize deterministic dealer/player sets (ordered by public key).
@@ -388,26 +386,23 @@ mod tests {
                     .unwrap();
                 }
 
-                assert!(arb.ready(), "arbiter not ready in round {}", round_idx);
+                assert!(arb.ready(), "arbiter not ready in round {round_idx}");
                 let (result, disqualified) = arb.finalize();
                 assert!(
                     disqualified.is_empty(),
-                    "unexpected disqualified dealers in round {}",
-                    round_idx
+                    "unexpected disqualified dealers in round {round_idx}",
                 );
                 let output = result.unwrap();
                 assert!(
                     output.reveals.is_empty(),
-                    "unexpected reveals in round {}",
-                    round_idx
+                    "unexpected reveals in round {round_idx}",
                 );
 
                 let expected_commitments = quorum(dealer_set.len() as u32) as usize;
                 assert_eq!(
                     output.commitments.len(),
                     expected_commitments,
-                    "unexpected number of commitments in round {}",
-                    round_idx
+                    "unexpected number of commitments in round {round_idx}"
                 );
 
                 let mut round_results = Vec::new();
@@ -424,8 +419,7 @@ mod tests {
 
                 assert!(
                     !round_results.is_empty(),
-                    "round {} produced no outputs",
-                    round_idx
+                    "round {round_idx} produced no outputs",
                 );
 
                 // Sanity-check the recovered shares by constructing a threshold POP.
