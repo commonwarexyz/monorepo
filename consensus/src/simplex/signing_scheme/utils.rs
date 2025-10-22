@@ -67,9 +67,6 @@ impl Read for Signers {
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
         let bitmap = BitMap::read_cfg(reader, &(*participants as u64))?;
-        if bitmap.len() != *participants as u64 {
-            return Err(Error::Invalid("Signers", "Invalid number of participants"));
-        }
         Ok(Self { bitmap })
     }
 }
@@ -120,7 +117,7 @@ mod tests {
         assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
         // Exact participant bound succeeds.
         assert!(Signers::decode_cfg(encoded.clone(), &8).is_ok());
-        // Less participants than expected should fail.
-        assert!(Signers::decode_cfg(encoded.clone(), &10).is_err());
+        // Less participants than expected succeeds (upper bound).
+        assert!(Signers::decode_cfg(encoded.clone(), &10).is_ok());
     }
 }
