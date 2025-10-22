@@ -376,9 +376,6 @@ mod tests {
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
-
-        let too_short = BitVec::decode_cfg(original.encode(), &70);
-        assert!(matches!(too_short, Err(CodecError::InvalidLength(71))));
     }
 
     #[test]
@@ -458,6 +455,22 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_payload_bitvec_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 8,
+            max_peers: 10,
+            max_data_length: 32,
+        };
+        let encoded = Payload::<secp256r1::PublicKey>::BitVec(BitVec {
+            index: 5,
+            bits: BitMap::ones(9),
+        })
+        .encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(9)));
     }
 
     #[test]
