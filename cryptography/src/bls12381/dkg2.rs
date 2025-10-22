@@ -1,11 +1,10 @@
+use super::primitives::group::Share;
 use crate::{
-    bls12381::{
-        dkg::ops::recover_public_with_weights,
-        primitives::{
-            group::{Element, Scalar},
-            poly::{self, new_with_constant, Eval, Poly, Public, Weight},
-            variant::Variant,
-        },
+    bls12381::primitives::{
+        group::{Element, Scalar},
+        ops::msm_interpolate,
+        poly::{self, new_with_constant, Eval, Poly, Public, Weight},
+        variant::Variant,
     },
     transcript::Transcript,
     PrivateKey, PublicKey,
@@ -16,7 +15,33 @@ use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-use super::primitives::group::Share;
+/// Recover public polynomial by interpolating coefficient-wise all
+/// polynomials using precomputed Barycentric Weights.
+///
+/// It is assumed that the required number of commitments are provided.
+pub fn recover_public_with_weights<V: Variant>(
+    commitments: &BTreeMap<u32, poly::Public<V>>,
+    weights: &BTreeMap<u32, poly::Weight>,
+    threshold: u32,
+) -> poly::Public<V> {
+    // Perform interpolation over each coefficient using the precomputed weights
+    (0..threshold)
+        .into_iter()
+        .map(|coeff| {
+            // Extract evaluations for this coefficient from all commitments
+            let evals = commitments
+                .iter()
+                .map(|(dealer, commitment)| poly::Eval {
+                    index: *dealer,
+                    value: commitment.get(coeff),
+                })
+                .collect::<Vec<_>>();
+
+            // Use precomputed weights for interpolation
+            msm_interpolate(weights, &evals).expect("interpolation should not fail")
+        })
+        .collect()
+}
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
@@ -290,14 +315,11 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         let (public, weights) = if let Some(previous) = round_info.previous.as_ref() {
             let weights =
                 poly::compute_weights(indices).expect("should be able to compute weights");
-            let public = recover_public_with_weights::<V>(
-                &previous.public,
-                &commitments,
-                &weights,
-                round_info.threshold(),
-                1,
-            )
-            .expect("should be able to recover group");
+            let public =
+                recover_public_with_weights::<V>(&commitments, &weights, round_info.threshold());
+            if previous.public().constant() != public.constant() {
+                return Err(Error::DkgFailed);
+            }
             (public, Some(weights))
         } else {
             let mut public = Poly::zero();
@@ -550,13 +572,12 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ed25519;
     use crate::{
         bls12381::primitives::{
             ops::{partial_sign_message, partial_verify_message, threshold_signature_recover},
             variant::MinSig,
         },
-        Signer as _,
+        ed25519, Signer as _,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
