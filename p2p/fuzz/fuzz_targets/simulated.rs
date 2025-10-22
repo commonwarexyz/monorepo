@@ -22,7 +22,7 @@ const MAX_SLEEP_DURATION: u64 = 1000;
 const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 
 #[derive(Debug, Arbitrary)]
-enum SimulatedOperation {
+enum Operation {
     RegisterChannel {
         peer_idx: u8,
         channel_id: u8,
@@ -51,7 +51,7 @@ enum SimulatedOperation {
 struct FuzzInput {
     seed: u64,
     // Length is in [1, MAX_OPERATIONS]
-    operations: Vec<SimulatedOperation>,
+    operations: Vec<Operation>,
     // Length is in [2, MAX_PEERS]
     num_peers: u8,
 }
@@ -103,7 +103,7 @@ fn fuzz(input: FuzzInput) {
 
         for op in input.operations.into_iter() {
             match op {
-                SimulatedOperation::RegisterChannel {
+                Operation::RegisterChannel {
                     peer_idx,
                     channel_id,
                 } => {
@@ -119,7 +119,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SimulatedOperation::SendMessage {
+                Operation::SendMessage {
                     peer_idx,
                     channel_id,
                     to_idx,
@@ -154,7 +154,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SimulatedOperation::ReceiveMessages => {
+                Operation::ReceiveMessages => {
                     let expected_keys: Vec<_> = expected.keys().cloned().collect();
                     for (to_idx, real_sender_id, channel_id) in expected_keys {
                         let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id))
@@ -188,7 +188,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SimulatedOperation::AddLink {
+                Operation::AddLink {
                     from_idx,
                     to_idx,
                     latency_ms,
@@ -208,7 +208,7 @@ fn fuzz(input: FuzzInput) {
                         .await;
                 }
 
-                SimulatedOperation::RemoveLink { from_idx, to_idx } => {
+                Operation::RemoveLink { from_idx, to_idx } => {
                     let from_idx = (from_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
                     let _ = oracle
