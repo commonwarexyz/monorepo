@@ -1,9 +1,6 @@
 #![allow(dead_code)]
 
-use crate::{
-    types::{FuzzInput, Message, Mutation},
-    DEFAULT_TIMEOUT,
-};
+use crate::types::{FuzzInput, Message, Mutation};
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Encode, Read};
@@ -26,6 +23,9 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
+use std::time::Duration;
+
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Fuzzer<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
     context: E,

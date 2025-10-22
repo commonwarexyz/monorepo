@@ -1,19 +1,12 @@
-use std::{num::NonZeroUsize, time::Duration};
-
 pub mod fuzzer;
 pub mod invariants;
 pub mod types;
 pub mod utils;
-
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
-pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
-pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
 pub use crate::types::FuzzInput;
 use crate::{
     fuzzer::Fuzzer,
     invariants::{check_invariants, extract_simplex_state},
-    utils::register_validators,
+    utils::{link_peers, register_validators, Action, PartitionStrategy},
 };
 use commonware_codec::Read;
 use commonware_consensus::{
@@ -33,21 +26,23 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest, Sha256, Signer as _,
 };
-use commonware_p2p::simulated::{
-    helpers::{link_peers, Action, PartitionStrategy},
-    Config as NetworkConfig, Link, Network,
-};
+use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use std::{
+    num::NonZeroUsize,
     panic,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
+
+pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 const VALID_PANICS: [&str; 3] = [
     "invalid payload:",
@@ -56,26 +51,6 @@ const VALID_PANICS: [&str; 3] = [
 ];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
-
-pub struct SimplexEd25519;
-
-impl Simplex for SimplexEd25519 {
-    type Scheme = simplex_ed25519::Scheme;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519_fixture(context, n)
-    }
-}
-
-pub struct SimplexBls12381MinPk;
-
-impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold::Scheme<MinPk>;
-
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls_threshold_fixture::<MinPk, _>(context, n)
-    }
-}
 
 pub trait Simplex: 'static
 where
@@ -98,7 +73,27 @@ where
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
-fn fuzz_inner<P: Simplex>(input: FuzzInput) {
+pub struct SimplexEd25519;
+
+impl Simplex for SimplexEd25519 {
+    type Scheme = simplex_ed25519::Scheme;
+
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
+        ed25519_fixture(context, n)
+    }
+}
+
+pub struct SimplexBls12381MinPk;
+
+impl Simplex for SimplexBls12381MinPk {
+    type Scheme = bls12381_threshold::Scheme<MinPk>;
+
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
+        bls_threshold_fixture::<MinPk, _>(context, n)
+    }
+}
+
+fn run_fuzz<P: Simplex>(input: FuzzInput) {
     let n = P::node_count();
     let required_containers = P::required_containers();
     let namespace = P::namespace();
@@ -268,7 +263,7 @@ pub fn fuzz<P: Simplex>(input: FuzzInput) {
 
     // Try to catch the panic
     let result = panic::catch_unwind(move || {
-        fuzz_inner::<P>(input);
+        run_fuzz::<P>(input);
     });
 
     // Restore original hook

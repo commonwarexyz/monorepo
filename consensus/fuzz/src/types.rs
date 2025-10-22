@@ -1,7 +1,13 @@
+use crate::utils::PartitionStrategy;
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_p2p::simulated::helpers::PartitionStrategy;
 use std::collections::HashMap;
+
+#[derive(Debug, Arbitrary, Clone)]
+pub struct FuzzInput {
+    pub seed: u64, // Seed for rng
+    pub partition: PartitionStrategy,
+}
 
 #[derive(Debug, Clone, Arbitrary)]
 pub enum Mutation {
@@ -17,12 +23,6 @@ pub enum Message {
     Nullify,
     Finalize,
     Random,
-}
-
-#[derive(Debug, Arbitrary, Clone)]
-pub struct FuzzInput {
-    pub seed: u64, // Seed for rng
-    pub partition: PartitionStrategy,
 }
 
 // Generic data structures for invariant checking
