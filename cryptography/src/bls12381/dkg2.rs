@@ -262,6 +262,9 @@ fn select<V: Variant, P: PublicKey>(
     let out = logs
         .into_iter()
         .filter_map(|(dealer, log)| {
+            if !round_info.check_dealer_commitment(&dealer, &log.pub_msg.commitment) {
+                return None;
+            }
             let results_iter = log.zip_players(&round_info.players)?;
             let transcript = transcript_for_dealer(&transcript, &dealer, &log.pub_msg);
             let (acks_good, reveal_count) = results_iter.fold(
@@ -439,12 +442,6 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             return None;
         }
         if pub_msg.commitment.evaluate(self.index).value != priv_msg.expected_element() {
-            return None;
-        }
-        if !self
-            .round_info
-            .check_dealer_commitment(&dealer, &pub_msg.commitment)
-        {
             return None;
         }
         let sig = transcript_for_dealer(&self.transcript, &dealer, &pub_msg).sign(&self.me);
