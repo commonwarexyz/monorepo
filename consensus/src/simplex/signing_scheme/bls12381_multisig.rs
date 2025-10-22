@@ -251,8 +251,8 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
-        // If the certificate signers length does not match the participant set, return false.
-        if certificate.signers.len() != self.participants.len() {
+        // If the certificate signers size does not match the participant set, return false.
+        if certificate.signers.size() != self.participants.len() {
             return false;
         }
 
