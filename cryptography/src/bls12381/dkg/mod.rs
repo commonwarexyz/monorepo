@@ -1407,7 +1407,7 @@ mod tests {
             self
         }
 
-        fn run<V: Variant>(&self) {
+        fn run<V: Variant>(&self) -> V::Public {
             // Guard against empty plans so we always execute at least one DKG/reshare phase.
             assert!(
                 !self.rounds.is_empty(),
@@ -1655,6 +1655,8 @@ mod tests {
                 share_holders = Some(player_set);
                 participant_states = next_states;
             }
+
+            *public::<V>(&current_public.expect("plan must produce a public constant"))
         }
     }
 
@@ -1675,6 +1677,23 @@ mod tests {
         let plan = Plan::from(vec![Round::from((0..5).collect::<Vec<_>>())]);
         plan.run::<MinPk>();
         plan.run::<MinSig>();
+    }
+
+    #[test]
+    fn test_dkg_determinism() {
+        let plan_template = || Plan::from(vec![Round::from((0..5).collect::<Vec<_>>())]);
+
+        let public_a_pk = plan_template().with_seed(1).run::<MinPk>();
+        assert_eq!(public_a_pk, plan_template().with_seed(1).run::<MinPk>());
+        let public_b_pk = plan_template().with_seed(2).run::<MinPk>();
+        assert_eq!(public_b_pk, plan_template().with_seed(2).run::<MinPk>());
+        assert_ne!(public_a_pk, public_b_pk);
+
+        let public_a_sig = plan_template().with_seed(1).run::<MinSig>();
+        assert_eq!(public_a_sig, plan_template().with_seed(1).run::<MinSig>());
+        let public_b_sig = plan_template().with_seed(2).run::<MinSig>();
+        assert_eq!(public_b_sig, plan_template().with_seed(2).run::<MinSig>());
+        assert_ne!(public_a_sig, public_b_sig);
     }
 
     #[test]
