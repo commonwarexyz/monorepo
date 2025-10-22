@@ -233,13 +233,23 @@ mod tests {
 
     #[derive(Clone)]
     struct Round {
-        dealers: Vec<u64>,
         players: Vec<u64>,
+        absent_dealers: Vec<u64>,
     }
 
-    impl From<(Vec<u64>, Vec<u64>)> for Round {
-        fn from((dealers, players): (Vec<u64>, Vec<u64>)) -> Self {
-            Self { dealers, players }
+    impl From<Vec<u64>> for Round {
+        fn from(players: Vec<u64>) -> Self {
+            Self {
+                players,
+                absent_dealers: Vec::new(),
+            }
+        }
+    }
+
+    impl Round {
+        fn with_absent_dealers(mut self, absent_dealers: Vec<u64>) -> Self {
+            self.absent_dealers = absent_dealers;
+            self
         }
     }
 
@@ -278,49 +288,69 @@ mod tests {
             for (round_idx, round) in self.rounds.iter().enumerate() {
                 // Validate committee definitions before instantiating protocol state.
                 assert!(
-                    !round.dealers.is_empty(),
-                    "round {} must include at least one dealer",
-                    round_idx
-                );
-                assert!(
                     !round.players.is_empty(),
                     "round {} must include at least one player",
                     round_idx
                 );
 
                 // Materialize deterministic dealer/player sets (ordered by public key).
-                let dealer_set = participant_set(&round.dealers);
                 let player_set = participant_set(&round.players);
-                let dealer_registry = match share_holders.clone() {
-                    Some(registry) => {
-                        for dealer in dealer_set.iter() {
-                            assert!(
-                                registry.position(dealer).is_some(),
-                                "round {} dealer not in previous committee",
-                                round_idx
-                            );
-                        }
-                        registry
-                    }
-                    None => dealer_set.clone(),
+                let dealer_candidates = if let Some(ref registry) = share_holders {
+                    registry.clone()
+                } else {
+                    player_set.clone()
                 };
+                assert!(
+                    !dealer_candidates.is_empty(),
+                    "round {} must have at least one dealer",
+                    round_idx
+                );
+
+                let absent_set = participant_set(&round.absent_dealers);
+                for absent in absent_set.iter() {
+                    assert!(
+                        dealer_candidates.position(absent).is_some(),
+                        "round {} absent dealer not in committee",
+                        round_idx
+                    );
+                }
+                let dealer_registry = if let Some(ref registry) = share_holders {
+                    for dealer in dealer_candidates.iter() {
+                        assert!(
+                            registry.position(dealer).is_some(),
+                            "round {} dealer not in previous committee",
+                            round_idx
+                        );
+                    }
+                    registry.clone()
+                } else {
+                    dealer_candidates.clone()
+                };
+                let mut active_dealers = Vec::new();
+                for dealer in dealer_candidates.iter() {
+                    if absent_set.position(dealer).is_some() {
+                        continue;
+                    }
+                    active_dealers.push(dealer.clone());
+                }
+                let active_len = active_dealers.len();
                 let min_dealers = match current_public.as_ref() {
                     None => quorum(player_set.len() as u32),
                     Some(previous) => previous.required(),
                 } as usize;
                 assert!(
-                    dealer_set.len() >= min_dealers,
-                    "round {} requires at least {} dealers for {} players, got {}",
+                    active_len >= min_dealers,
+                    "round {} requires at least {} active dealers for {} players, got {}",
                     round_idx,
                     min_dealers,
                     player_set.len(),
-                    dealer_set.len()
+                    active_len
                 );
 
                 // Instantiate dealers for this round, seeding them with prior shares when reshare happens.
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
-                for dealer_pk in dealer_set.iter() {
+                for dealer_pk in active_dealers.iter() {
                     let previous_share = participant_states
                         .get(dealer_pk)
                         .map(|out| out.share.clone());
@@ -358,7 +388,7 @@ mod tests {
                     self.concurrency,
                 );
 
-                for dealer_pk in dealer_set.iter() {
+                for dealer_pk in active_dealers.iter() {
                     let (commitment, shares) = dealer_outputs
                         .get(dealer_pk)
                         .expect("missing dealer output");
@@ -403,7 +433,8 @@ mod tests {
 
                 assert!(arb.ready(), "arbiter not ready in round {}", round_idx);
                 let (result, disqualified) = arb.finalize();
-                let expected_disqualified = dealer_registry.len().saturating_sub(dealer_set.len());
+                let expected_disqualified =
+                    dealer_registry.len().saturating_sub(active_dealers.len());
                 assert_eq!(
                     disqualified.len(),
                     expected_disqualified,
@@ -476,8 +507,7 @@ mod tests {
 
     #[test]
     fn test_dkg() {
-        let plan =
-            Plan::from(vec![Round::from(((0..5).collect(), (0..5).collect()))]).with_concurrency(4);
+        let plan = Plan::from(vec![Round::from((0..5).collect::<Vec<_>>())]).with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
     }
@@ -485,9 +515,9 @@ mod tests {
     #[test]
     fn test_reshare_distinct() {
         let plan = Plan::from(vec![
-            Round::from(((0..5).collect(), (0..5).collect())),
-            Round::from(((0..5).collect(), (5..15).collect())),
-            Round::from(((5..15).collect(), (15..30).collect())),
+            Round::from((0..5).collect::<Vec<_>>()),
+            Round::from((5..15).collect::<Vec<_>>()),
+            Round::from((15..30).collect::<Vec<_>>()),
         ])
         .with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
@@ -497,10 +527,10 @@ mod tests {
     #[test]
     fn test_reshare_increasing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0, 1, 2], vec![0, 1, 2])),
-            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
-            Round::from((vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3, 4, 5])),
+            Round::from(vec![0, 1, 2]),
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![0, 1, 2, 3, 4]),
+            Round::from(vec![0, 1, 2, 3, 4, 5]),
         ]);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
@@ -509,11 +539,32 @@ mod tests {
     #[test]
     fn test_reshare_decreasing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4, 5])),
-            Round::from((vec![0, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4])),
-            Round::from((vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2])),
+            Round::from(vec![0, 1, 2, 3, 4, 5]),
+            Round::from(vec![0, 1, 2, 3, 4]),
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![0, 1, 2]),
         ]);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_dkg_with_absent_dealer() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]).with_absent_dealers(vec![3])
+        ])
+        .with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_reshare_with_absent_dealer() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![4, 5, 6, 7]).with_absent_dealers(vec![3]),
+        ])
+        .with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
     }
@@ -521,8 +572,8 @@ mod tests {
     #[test]
     fn test_reshare_min_active() {
         let plan = Plan::from(vec![
-            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1, 2], vec![4, 5, 6, 7])),
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![4, 5, 6, 7]).with_absent_dealers(vec![3]),
         ])
         .with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
