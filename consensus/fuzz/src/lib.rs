@@ -40,6 +40,9 @@ use std::{
     },
     time::Duration,
 };
+use commonware_consensus::simplex::mocks::fixtures::bls_multisig_fixture;
+use commonware_consensus::simplex::signing_scheme::bls12381_multisig;
+use commonware_cryptography::bls12381::primitives::variant::MinSig;
 
 pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -90,6 +93,36 @@ impl Simplex for SimplexBls12381MinPk {
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
         bls_threshold_fixture::<MinPk, _>(context, n)
+    }
+}
+
+pub struct SimplexBls12381MinSig;
+
+impl Simplex for SimplexBls12381MinSig {
+    type Scheme = bls12381_threshold::Scheme<MinSig>;
+
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
+        bls_threshold_fixture::<MinSig, _>(context, n)
+    }
+}
+
+pub struct SimplexBls12381MultisigMinPk;
+
+impl Simplex for SimplexBls12381MultisigMinPk {
+    type Scheme = bls12381_multisig::Scheme<MinPk>;
+
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
+        bls_multisig_fixture::<MinPk, _>(context, n)
+    }
+}
+
+pub struct SimplexBls12381MultisigMinSig;
+
+impl Simplex for SimplexBls12381MultisigMinSig {
+    type Scheme = bls12381_multisig::Scheme<MinSig>;
+
+    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
+        bls_multisig_fixture::<MinSig, _>(context, n)
     }
 }
 

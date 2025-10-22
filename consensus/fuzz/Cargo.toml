@@ -1,8 +1,9 @@
 [package]
 name = "commonware-consensus-fuzz"
-version = "0.0.57"
+version.workspace = true
 publish = false
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
@@ -36,6 +37,27 @@ bench = false
 [[bin]]
 name = "simplex_bls12381_minpk"
 path = "fuzz_targets/simplex_bls12381_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_minsig"
+path = "fuzz_targets/simplex_bls12381_minsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
 test = false
 doc = false
 bench = false

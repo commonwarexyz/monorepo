@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus-fuzz"
-version = "0.0.57"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "bytes",
