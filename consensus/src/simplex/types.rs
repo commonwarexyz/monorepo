@@ -1740,22 +1740,18 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 ///
 /// # Verification
 ///
-/// Some activities issued by consensus are not cryptographically verified. Use [`Activity::verified`]
-/// to check if an activity has been verified, and [`Activity::verify`] to perform verification.
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed
+/// to produce a minimum quorum certificate). Use [`Activity::verified`] to check if an activity may not be verified,
+/// and [`Activity::verify`] to perform verification.
 ///
-/// # Scheme-dependent Activity Filtering
+/// # Activity Filtering
 ///
-/// For **non-attributable** schemes like BLS threshold signatures, exposing per-validator activities
-/// as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
-/// be used to forge a partial signature for any player, enabling equivocation attacks.
+/// For **non-attributable** schemes like [`crate::simplex::signing_scheme::bls12381_threshold`], exposing
+/// per-validator activity as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
+/// be used to forge a partial signature for any player.
 ///
 /// Use [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to automatically filter and
-/// verify activities based on [`Scheme::is_attributable`]. The reporter wrapper ensures:
-///
-/// - Per-validator activities from peers are verified before reporting
-/// - For non-attributable schemes, per-validator peer activities are suppressed
-/// - Certificate-level activities (`Notarization`, `Nullification`, `Finalization`) are always
-///   reported
+/// verify activities based on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
