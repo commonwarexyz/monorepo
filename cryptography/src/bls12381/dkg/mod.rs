@@ -1623,7 +1623,7 @@ mod tests {
                     "unexpected number of commitments in round {round_idx}",
                 );
 
-                // Finalize players
+                // Finalize players (that were not revealed)
                 let mut round_results = Vec::new();
                 let mut next_states = HashMap::new();
                 for player_pk in player_set.iter() {
