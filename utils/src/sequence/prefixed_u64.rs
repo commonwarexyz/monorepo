@@ -24,12 +24,11 @@ pub enum Error {
 pub struct U64([u8; u64::SIZE + 1]);
 
 impl U64 {
-    pub fn new(prefix: u8, value: u64) -> Self {
-        let mut arr = [0; u64::SIZE + 1];
-        arr[0] = prefix;
-        arr[1..].copy_from_slice(&u64::to_be_bytes(value));
-
-        Self(arr)
+    pub const fn new(prefix: u8, value: u64) -> Self {
+        // TODO: #![feature(const_index)]
+        // https://github.com/rust-lang/rust/issues/143775
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_be_bytes();
+        Self([prefix, b0, b1, b2, b3, b4, b5, b6, b7])
     }
 
     pub fn prefix(&self) -> u8 {

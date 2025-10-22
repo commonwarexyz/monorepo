@@ -73,6 +73,13 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<B>>,
     },
+    /// A request to retrieve a finalization by height.
+    GetFinalization {
+        /// The height of the finalization to retrieve.
+        height: u64,
+        /// A channel to send the retrieved finalization.
+        response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
+    },
     /// A request to retrieve a block by its commitment.
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
@@ -169,6 +176,33 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             Ok(result) => result,
             Err(_) => {
                 error!("failed to get block: receiver dropped");
+                None
+            }
+        }
+    }
+
+    /// A best-effort attempt to retrieve a given [Finalization] from local
+    /// storage. It is not an indication to go fetch the [Finalization] from the network.
+    pub async fn get_finalization(
+        &mut self,
+        height: u64,
+    ) -> Option<Finalization<S, B::Commitment>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetFinalization {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get finalization message to actor: receiver dropped");
+        }
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get finalization: receiver dropped");
                 None
             }
         }

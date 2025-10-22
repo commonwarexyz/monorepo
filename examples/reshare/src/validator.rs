@@ -21,12 +21,12 @@ use tracing::{error, info};
 
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE";
 
-const PENDING_CHANNEL: u32 = 0;
-const RECOVERED_CHANNEL: u32 = 1;
-const RESOLVER_CHANNEL: u32 = 2;
-const BROADCASTER_CHANNEL: u32 = 3;
-const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
-const DKG_CHANNEL: u32 = 5;
+const PENDING_CHANNEL: u64 = 0;
+const RECOVERED_CHANNEL: u64 = 1;
+const RESOLVER_CHANNEL: u64 = 2;
+const BROADCASTER_CHANNEL: u64 = 3;
+const BACKFILL_BY_DIGEST_CHANNEL: u64 = 4;
+const DKG_CHANNEL: u64 = 5;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
@@ -778,7 +778,7 @@ mod test {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut success = true;
+                let mut success = false;
                 for line in metrics.lines() {
                     // Split metric and value
                     let mut parts = line.split_whitespace();
@@ -880,6 +880,225 @@ mod test {
                     }
                 }
                 if success {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_backfill_multi_epoch() {
+        // Create context
+        let n = 5;
+        let threshold = quorum(n);
+        let initial_container_required = BLOCKS_PER_EPOCH + (BLOCKS_PER_EPOCH / 2);
+        let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
+        let executor = Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Register participants
+            let mut signers = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let signer = PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
+                signers.push(signer);
+                validators.push(pk);
+            }
+            validators.sort();
+            signers.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
+
+            // Link all validators (except 0)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                link.clone(),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Create instances
+            for (idx, signer) in signers.iter().enumerate() {
+                // Skip first
+                if idx == 0 {
+                    continue;
+                }
+
+                let public_key = signer.public_key();
+                let engine = engine::Engine::<_, _, _, Sha256, MinSig>::new(
+                    context.with_label(&format!("engine_{idx}")),
+                    engine::Config {
+                        signer: signer.clone(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        polynomial: polynomial.clone(),
+                        share: Some(shares[idx].clone()),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
+                        dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
+
+                // Get networking
+                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
+                    registrations.remove(&public_key).unwrap();
+
+                // Start engine
+                engine.start(
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    backfill,
+                    dkg_channel,
+                );
+            }
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = false;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with processed_height, ensure it is at least initial_container_required
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= initial_container_required {
+                            success = true;
+                            break;
+                        }
+                    }
+                }
+                if success {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            // Link first peer
+            link_validators(
+                &mut oracle,
+                &validators,
+                link,
+                Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+            )
+            .await;
+
+            let signer = signers[0].clone();
+            let share = shares[0].clone();
+            let public_key = signer.public_key();
+            let engine = engine::Engine::<_, _, _, Sha256, MinSig>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    polynomial: polynomial.clone(),
+                    share: Some(share),
+                    active_participants: validators.clone(),
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: validators.len(),
+                    dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
+
+            // Get networking
+            let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
+                registrations.remove(&public_key).unwrap();
+
+            // Start engine
+            engine.start(
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                backfill,
+                dkg_channel,
+            );
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut completed_validators = HashSet::new();
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    if metric.ends_with("_failed_rounds_total") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with processed_height, ensure it is at least final_container_required
+                    for idx in 0..n {
+                        if metric.contains(&format!("engine_{idx}"))
+                            && metric.ends_with("_processed_height")
+                        {
+                            let value = value.parse::<u64>().unwrap();
+                            if value >= final_container_required {
+                                completed_validators.insert(idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if completed_validators.len() == n as usize {
                     break;
                 }
 

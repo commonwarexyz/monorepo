@@ -30,9 +30,21 @@ enum CurrentOperation {
     KeyValueProof { key: RawKey },
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 100;
+
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<CurrentOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CurrentOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { operations })
+    }
 }
 
 const PAGE_SIZE: usize = 88;
@@ -66,7 +78,7 @@ fn fuzz(data: FuzzInput) {
         let mut uncommitted_ops = 0;
         let mut last_committed_op_count = Location::new(0).unwrap();
 
-        for op in data.operations.iter().take(100) {
+        for op in &data.operations {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);

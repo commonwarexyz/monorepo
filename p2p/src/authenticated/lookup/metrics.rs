@@ -18,7 +18,7 @@ impl Peer {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum MessageType {
-    Data(u32),
+    Data(u64),
     Invalid,
     Ping,
 }
