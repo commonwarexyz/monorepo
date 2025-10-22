@@ -1,6 +1,7 @@
 use crate::{
     index::Unordered as Index,
     journal::fixed,
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     log_db::{
         adb::{self, any::fixed::unordered::Any},
         operation::fixed::unordered::Operation,
