@@ -67,16 +67,14 @@ struct Request<D: Digest, R> {
 }
 
 /// Adapter that polls an [Option<Request<D, R>>] in place.
-struct SlotWaiter<'a, D: Digest, R> {
-    slot: &'a mut Option<Request<D, R>>,
-}
+struct Waiter<'a, D: Digest, R>(&'a mut Option<Request<D, R>>);
 
-impl<'a, D: Digest, R> Future for SlotWaiter<'a, D, R> {
+impl<'a, D: Digest, R> Future for Waiter<'a, D, R> {
     type Output = (Context<D>, Result<R, oneshot::Canceled>);
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match this.slot.as_mut() {
+        let Waiter(slot) = self.get_mut();
+        match slot.as_mut() {
             None => Poll::Pending,
             Some(p) => match Pin::new(&mut p.receiver).poll(cx) {
                 Poll::Ready(res) => Poll::Ready((p.context.clone(), res)),
@@ -101,7 +99,6 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     //
     // We will, however, construct a notarization or finalization (if we have enough partial
     // signatures of either) even if we did not verify the proposal.
-    requested_proposal_build: bool,
     requested_proposal_verify: bool,
     verified_proposal: bool,
 
@@ -109,6 +106,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     requested_proposal_certify: bool,
     certified_proposal: bool,
 
+    requested_proposal_build: bool,
     proposal: Option<Proposal<D>>,
 
     leader_deadline: Option<SystemTime>,
@@ -574,6 +572,13 @@ impl<
         None
     }
 
+    fn is_certified(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .map(|r| r.certified_proposal)
+            .unwrap_or(false)
+    }
+
     fn is_nullified(&self, view: View) -> bool {
         let round = match self.views.get(&view) {
             Some(round) => round,
@@ -603,10 +608,12 @@ impl<
                 return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
             }
 
-            // If have notarization, return
+            // If notarized and certified, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, *parent));
+                if self.is_certified(cursor) {
+                    return Ok((cursor, *parent));
+                }
             }
 
             // If have finalization, return
@@ -1147,8 +1154,10 @@ impl<
             }
         }
 
-        // Enter next view
-        self.enter_view(view + 1, seed);
+        // Enter next view only if the proposal has been certified
+        if self.is_certified(view) {
+            self.enter_view(view + 1, seed);
+        }
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1330,12 +1339,10 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        /*
         if !round.certified_proposal {
             // Ensure the proposal has been certified as safe to finalize
             return None;
         }
-        */
         if !round.broadcast_notarize {
             // Ensure we notarize before we finalize
             return None;
@@ -1795,15 +1802,9 @@ impl<
             }
 
             // Prepare waiters
-            let propose_wait = SlotWaiter {
-                slot: &mut pending_propose,
-            };
-            let verify_wait = SlotWaiter {
-                slot: &mut pending_verify,
-            };
-            let certify_wait = SlotWaiter {
-                slot: &mut pending_certify,
-            };
+            let propose_wait = Waiter(&mut pending_propose);
+            let verify_wait = Waiter(&mut pending_verify);
+            let certify_wait = Waiter(&mut pending_certify);
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -1902,10 +1903,17 @@ impl<
                         _ => {},
                     };
 
-                    // Handle certification
+                    // Ensure downstream notify runs for this view (finalize/finalization attempts)
                     view = context.view();
-                    let round = self.views.get_mut(&context.view()).unwrap();
+                    let round = self.views.get_mut(&view).unwrap();
                     round.certified_proposal = true;
+
+                    // If we already have a notarization for this view, advance now.
+                    let notarization = round.notarization.as_ref().expect("certified proposal should have notarization");
+                    let seed = self
+                        .scheme
+                        .seed(notarization.round(), &notarization.certificate);
+                    self.enter_view(view + 1, seed);
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
