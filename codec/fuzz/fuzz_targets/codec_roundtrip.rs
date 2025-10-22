@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
     varint::{SInt, UInt},
     Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
@@ -39,13 +39,13 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
     let input_len = input_data_bytes.len();
     let encoded_bytes = input_data_bytes.encode();
 
-    // Decode with too long length
+    // Decode with too long a length
     assert!(matches!(
         Bytes::decode_cfg(encoded_bytes.clone(), &(0..input_len).into()),
         Err(Error::InvalidLength(_))
     ));
 
-    // Decode with too short length
+    // Decode with too short a length
     assert!(matches!(
         Bytes::decode_cfg(encoded_bytes.clone(), &(input_len + 1..).into()),
         Err(Error::InvalidLength(_))
@@ -61,7 +61,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
 fn roundtrip_primitive<T, X>(v: T)
 where
-    X: std::default::Default,
+    X: Default,
     T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
@@ -118,13 +118,13 @@ where
     let encoded_vec = vec.encode();
     assert_eq!(encoded_vec.len(), vec.encode_size());
 
-    // Decode with too long length
+    // Decode with too long a length
     assert!(matches!(
         Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
         Err(Error::InvalidLength(_))
     ));
 
-    // Decode with too short length
+    // Decode with too short a length
     assert!(matches!(
         Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
         Err(Error::InvalidLength(_))
@@ -136,6 +136,19 @@ where
     assert_eq!(vec, decoded);
 }
 
+fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
+    let mut buf = Vec::new();
+    for _ in 0..continuation_bytes.min(20) {
+        buf.put_u8(0xFF);
+    }
+    buf.put_u8(last_byte);
+    let _ = UInt::<u16>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u32>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u64>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u128>::decode(Bytes::from(buf));
+}
+
+// Wrapped socket for arbitrary
 #[derive(Arbitrary, Debug)]
 struct WrappedSocketAddr(SocketAddr);
 
@@ -172,6 +185,12 @@ enum PrimitiveValue {
     F32(f32),
     F64(f64),
     Bool(bool),
+    VarIntOverflow {
+        // Number of continuation bytes before the last byte
+        continuation_bytes: u8,
+        // Value for the last byte (will test if it has too many bits)
+        last_byte: u8,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -232,6 +251,12 @@ enum DecodeTarget {
     VecU8Range,
     OptionVecU8,
     BTreeMapU8U8,
+    VarIntOverflow {
+        // Number of continuation bytes before the last byte
+        continuation_bytes: u8,
+        // Value for the last byte (will test if it has too many bits)
+        last_byte: u8,
+    },
 }
 
 fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u16) {
@@ -241,7 +266,7 @@ fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u
 
     let min_size = (min_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
     let max_size = (max_size as usize).clamp(min_size, MAX_COLLECTION_SIZE);
-    let range_cfg: RangeCfg = (min_size..=max_size).into();
+    let range_cfg: RangeCfg<usize> = (min_size..=max_size).into();
 
     match target {
         // Primitives
@@ -383,6 +408,10 @@ fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u
         DecodeTarget::BTreeMapU8U8 => {
             let _ = BTreeMap::<u8, u8>::decode_range(data, range_cfg);
         }
+        DecodeTarget::VarIntOverflow {
+            continuation_bytes,
+            last_byte,
+        } => roundtrip_overflow(continuation_bytes, last_byte),
     }
 }
 
@@ -408,6 +437,10 @@ fn fuzz(operation: FuzzOperation) {
             PrimitiveValue::F32(v) => roundtrip_primitive_f32(v),
             PrimitiveValue::F64(v) => roundtrip_primitive_f64(v),
             PrimitiveValue::Bool(v) => roundtrip_primitive(v),
+            PrimitiveValue::VarIntOverflow {
+                continuation_bytes,
+                last_byte,
+            } => roundtrip_overflow(continuation_bytes, last_byte),
         },
 
         // Decode-only operations

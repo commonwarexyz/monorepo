@@ -14,6 +14,7 @@ enum Op {
     Insert(Vec<u8>),
     Contains(Vec<u8>),
     Encode(Vec<u8>),
+    DecodeCfg(Vec<u8>, NonZeroU8, NonZeroU16),
     EncodeSize,
 }
 
@@ -54,6 +55,10 @@ fn fuzz(input: FuzzInput) {
                 if model.contains(&item) {
                     assert!(res);
                 }
+            }
+            Op::DecodeCfg(data, hashers, bits) => {
+                let cfg = (hashers, bits.into());
+                _ = BloomFilter::decode_cfg(&data[..], &cfg);
             }
             Op::Encode(_item) => {
                 let encoded = bf.encode();
