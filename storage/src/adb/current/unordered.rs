@@ -23,7 +23,7 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
-use tracing::{debug, info};
+use tracing::info;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -66,9 +66,6 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 
     /// The location of the operation that assigned this value to the key.
     pub loc: Location,
-
-    /// The next key in the key space, for ordered keyspaces.
-    pub next_key: Option<K>,
 
     /// The status bitmap chunk that contains the bit corresponding the operation's location.
     pub chunk: [u8; N],
@@ -510,7 +507,6 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                next_key: None,
                 loc,
                 chunk,
             },
@@ -525,10 +521,6 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        if info.next_key.is_some() {
-            debug!("next_key should be None in unordered proof verification");
-            return false;
-        }
         let element = Operation::Update(info.key, info.value);
         verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
@@ -790,7 +782,6 @@ pub mod test {
             let info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                next_key: None,
                 loc: op.1,
                 chunk: proof.3,
             };
@@ -800,16 +791,6 @@ pub mod test {
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
-                &root,
-            ));
-
-            // Proof should not verify if next_key is not None
-            let mut info_with_next_key = info.clone();
-            info_with_next_key.next_key = Some(k);
-            assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
-                &proof.0,
-                info_with_next_key,
                 &root,
             ));
 
@@ -847,7 +828,6 @@ pub mod test {
             let proof_inactive_info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                next_key: None,
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
@@ -1090,7 +1070,6 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                next_key: None,
                 loc: Location::new_unchecked(0),
                 chunk: [0; 32],
             };
