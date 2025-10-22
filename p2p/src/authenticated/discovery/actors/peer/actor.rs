@@ -186,7 +186,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let cfg = (self.max_bit_vec, self.max_peers, msg.len()); // apply loose bound to data read to prevent memory exhaustion
+                    let cfg = types::PayloadConfig {
+                        max_bit_vec: self.max_bit_vec,
+                        max_peers: self.max_peers,
+                        max_data_length: msg.len(), // apply loose bound to data read to prevent memory exhaustion
+                    };
                     let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {

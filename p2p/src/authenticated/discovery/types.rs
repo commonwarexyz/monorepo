@@ -45,6 +45,21 @@ const DATA_PREFIX: u8 = 2;
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
+/// Configuration when deserializing [Payload].
+///
+/// This is used to limit the size of the messages received from peers.
+#[derive(Clone)]
+pub struct PayloadConfig {
+    /// The maximum number of bits that can be sent in a `BitVec` message.
+    pub max_bit_vec: u64,
+
+    /// The maximum number of peers that can be sent in a `Peers` message.
+    pub max_peers: usize,
+
+    /// The maximum length of the data that can be sent in a `Data` message.
+    pub max_data_length: usize,
+}
+
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
@@ -90,12 +105,15 @@ impl<C: PublicKey> Write for Payload<C> {
 }
 
 impl<C: PublicKey> Read for Payload<C> {
-    type Cfg = (u64, usize, usize); // max_bit_vec, max_peers, max_data_length
+    type Cfg = PayloadConfig;
 
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_bit_vec, max_peers, max_data_length): &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let PayloadConfig {
+            max_bit_vec,
+            max_peers,
+            max_data_length,
+        } = cfg;
+
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
@@ -385,7 +403,11 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = (1024, 10, 100);
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 100,
+        };
 
         // Test BitVec
         let original = BitVec {
@@ -428,7 +450,11 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = (1024, 10, 100);
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 100,
+        };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
