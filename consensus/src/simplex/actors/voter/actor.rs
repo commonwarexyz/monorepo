@@ -601,6 +601,9 @@ impl<
         None
     }
 
+    /// Returns the `(view, payload)` tuple of the highest view below `self.view` that is either
+    /// finalized or both notarized and certified. The view must also have nullifications for all
+    /// views between it and `self.view` (exclusive). If no such view exists, returns an error.
     fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
@@ -963,7 +966,6 @@ impl<
         if round.requested_proposal_certify {
             return None;
         }
-        round.requested_proposal_certify = true;
 
         // Ensure we have a proposal.
         let proposal = round.proposal.clone()?;
@@ -981,9 +983,18 @@ impl<
             .automaton
             .certify(context.clone(), proposal.payload)
             .await;
+
+        // Set that we requested certification
+        self.views
+            .get_mut(&self.view)
+            .unwrap()
+            .requested_proposal_certify = true;
+
+        // Return request
         Some(Request { context, receiver })
     }
 
+    /// Handles the successful verification of a proposal.
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
         let round = match self.views.get_mut(&view) {
@@ -1010,6 +1021,25 @@ impl<
 
         // Indicate that verification is done
         debug!(view, "verified proposal");
+        true
+    }
+
+    /// Handles the successful certification of a proposal.
+    async fn certified(&mut self, view: View) -> bool {
+        // Mark proposal as certified
+        let round = self.views.get_mut(&view).unwrap();
+        round.certified_proposal = true;
+
+        // We should have a notarization for this view,
+        // otherwise we would not have asked for certification in the first place.
+        let notarization = round
+            .notarization
+            .as_ref()
+            .expect("certified proposal should have notarization");
+        let seed = self
+            .scheme
+            .seed(notarization.round(), &notarization.certificate);
+        self.enter_view(view + 1, seed);
         true
     }
 
@@ -1154,9 +1184,9 @@ impl<
             }
         }
 
-        // Enter next view only if the proposal has been certified
+        // TODO: remove, just checking a notarization should not come in after a certification
         if self.is_certified(view) {
-            self.enter_view(view + 1, seed);
+            panic!("certified proposal should not have notarization");
         }
     }
 
@@ -1868,11 +1898,10 @@ impl<
 
                     // Try to use result
                     match verified {
-                        Ok(verified) => {
-                            if !verified {
-                                debug!(round = ?context.round, "proposal failed verification");
-                                continue;
-                            }
+                        Ok(true) => {},
+                        Ok(false) => {
+                            debug!(round = ?context.round, "proposal failed verification");
+                            continue;
                         },
                         Err(err) => {
                             debug!(?err, round = ?context.round, "failed to verify proposal");
@@ -1892,6 +1921,7 @@ impl<
 
                     // Return early if the proposal is not certified
                     match certified {
+                        Ok(true) => {},
                         Ok(false) => {
                             debug!(round = ?context.round, "proposal is not certified");
                             continue;
@@ -1900,20 +1930,13 @@ impl<
                             debug!(?err, round = ?context.round, "failed to certify proposal");
                             continue;
                         }
-                        _ => {},
                     };
 
-                    // Ensure downstream notify runs for this view (finalize/finalization attempts)
+                    // Handle certified proposal
                     view = context.view();
-                    let round = self.views.get_mut(&view).unwrap();
-                    round.certified_proposal = true;
-
-                    // If we already have a notarization for this view, advance now.
-                    let notarization = round.notarization.as_ref().expect("certified proposal should have notarization");
-                    let seed = self
-                        .scheme
-                        .seed(notarization.round(), &notarization.certificate);
-                    self.enter_view(view + 1, seed);
+                    if !self.certified(view).await {
+                        continue;
+                    }
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
