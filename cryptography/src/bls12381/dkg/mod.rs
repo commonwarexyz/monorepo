@@ -462,18 +462,9 @@ mod tests {
     #[test]
     fn test_dkg_and_reshare_all_active() {
         let plan = Plan::from(vec![
-            Round::from((
-                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
-                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
-            )),
-            Round::from((
-                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
-                (5..15).map(|i| i as u64).collect::<Vec<_>>(),
-            )),
-            Round::from((
-                (5..15).map(|i| i as u64).collect::<Vec<_>>(),
-                (15..30).map(|i| i as u64).collect::<Vec<_>>(),
-            )),
+            Round::from(((0..5).collect(), (0..5).collect())),
+            Round::from(((0..5).collect(), (5..15).collect())),
+            Round::from(((5..15).collect(), (15..30).collect())),
         ])
         .with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
@@ -483,10 +474,10 @@ mod tests {
     #[test]
     fn test_dkg2_changing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0_u64, 1, 2], vec![1_u64, 2, 3])),
-            Round::from((vec![1_u64, 2, 3], vec![2_u64, 3, 4])),
-            Round::from((vec![2_u64, 3, 4], vec![0_u64, 1, 2])),
-            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![1, 2, 3])),
+            Round::from((vec![1, 2, 3], vec![2, 3, 4])),
+            Round::from((vec![2, 3, 4], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2])),
         ]);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
@@ -495,9 +486,9 @@ mod tests {
     #[test]
     fn test_dkg2_increasing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2])),
-            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2, 3])),
-            Round::from((vec![0_u64, 1, 2, 3], vec![0_u64, 1, 2, 3, 4])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
+            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
         ]);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
