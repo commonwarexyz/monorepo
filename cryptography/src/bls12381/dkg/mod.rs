@@ -235,6 +235,7 @@ mod tests {
     struct Round {
         players: Vec<u64>,
         absent_dealers: Vec<u64>,
+        absent_players: Vec<u64>,
     }
 
     impl From<Vec<u64>> for Round {
@@ -242,6 +243,7 @@ mod tests {
             Self {
                 players,
                 absent_dealers: Vec::new(),
+                absent_players: Vec::new(),
             }
         }
     }
@@ -249,6 +251,11 @@ mod tests {
     impl Round {
         fn with_absent_dealers(mut self, absent_dealers: Vec<u64>) -> Self {
             self.absent_dealers = absent_dealers;
+            self
+        }
+
+        fn with_absent_players(mut self, absent_players: Vec<u64>) -> Self {
+            self.absent_players = absent_players;
             self
         }
     }
@@ -306,6 +313,15 @@ mod tests {
                     round_idx
                 );
 
+                let absent_player_set = participant_set(&round.absent_players);
+                for absent in absent_player_set.iter() {
+                    assert!(
+                        player_set.position(absent).is_some(),
+                        "round {} absent player not in committee",
+                        round_idx
+                    );
+                }
+
                 let absent_set = participant_set(&round.absent_dealers);
                 for absent in absent_set.iter() {
                     assert!(
@@ -350,6 +366,11 @@ mod tests {
                 // Instantiate dealers for this round, seeding them with prior shares when reshare happens.
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
+                let mut expected_reveals = BTreeMap::new();
+                let expected_inactive: Set<u32> = absent_player_set
+                    .iter()
+                    .map(|player_pk| player_set.position(player_pk).unwrap() as u32)
+                    .collect();
                 for dealer_pk in active_dealers.iter() {
                     let previous_share = participant_states
                         .get(dealer_pk)
@@ -370,6 +391,9 @@ mod tests {
                 // Prepare player handles so we can route shares and later finalize outputs.
                 let mut players = BTreeMap::new();
                 for player_pk in player_set.iter() {
+                    if absent_player_set.position(player_pk).is_some() {
+                        continue;
+                    }
                     let player = Player::<_, V>::new(
                         player_pk.clone(),
                         current_public.clone(),
@@ -394,10 +418,15 @@ mod tests {
                         .expect("missing dealer output");
                     let commitment = commitment.clone();
                     let shares = shares.clone();
+                    let mut dealer_reveals = Vec::new();
                     {
                         let dealer = dealers.get_mut(dealer_pk).expect("missing dealer instance");
                         for (idx, player_pk) in player_set.iter().enumerate() {
                             let share = shares[idx].clone();
+                            if absent_player_set.position(player_pk).is_some() {
+                                dealer_reveals.push(share);
+                                continue;
+                            }
                             let player_obj = players
                                 .get_mut(player_pk)
                                 .expect("missing player for share delivery");
@@ -419,14 +448,19 @@ mod tests {
                         .expect("missing dealer instance after distribution");
                     let dealer_output = dealer.finalize().expect("insufficient acknowledgements");
                     assert!(
-                        dealer_output.inactive.is_empty(),
-                        "inactive players require reveals"
+                        dealer_output.inactive == expected_inactive,
+                        "inactive set mismatch for dealer in round {}",
+                        round_idx
                     );
+                    let dealer_pos = dealer_registry.position(dealer_pk).unwrap() as u32;
+                    if !dealer_reveals.is_empty() {
+                        expected_reveals.insert(dealer_pos, dealer_reveals.clone());
+                    }
                     arb.commitment(
                         dealer_pk.clone(),
                         commitment,
                         dealer_output.active.into(),
-                        Vec::new(),
+                        dealer_reveals,
                     )
                     .unwrap();
                 }
@@ -442,11 +476,30 @@ mod tests {
                     round_idx
                 );
                 let output = result.unwrap();
-                assert!(
-                    output.reveals.is_empty(),
-                    "unexpected reveals in round {}",
-                    round_idx
-                );
+                for (&dealer_idx, _) in output.commitments.iter() {
+                    let expected = expected_reveals.remove(&dealer_idx).unwrap_or_default();
+                    match output.reveals.get(&dealer_idx) {
+                        Some(reveals) => assert_eq!(
+                            reveals, &expected,
+                            "unexpected reveal content for dealer {} in round {}",
+                            dealer_idx, round_idx
+                        ),
+                        None => assert!(
+                            expected.is_empty(),
+                            "missing reveals for dealer {} in round {}",
+                            dealer_idx,
+                            round_idx
+                        ),
+                    }
+                }
+                for dealer_idx in output.reveals.keys() {
+                    assert!(
+                        output.commitments.contains_key(dealer_idx),
+                        "reveals present for unselected dealer {} in round {}",
+                        dealer_idx,
+                        round_idx
+                    );
+                }
 
                 let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
                 assert_eq!(
@@ -459,6 +512,9 @@ mod tests {
                 let mut round_results = Vec::new();
                 let mut next_states = HashMap::new();
                 for player_pk in player_set.iter() {
+                    if absent_player_set.position(player_pk).is_some() {
+                        continue;
+                    }
                     let player_obj = players.remove(player_pk).unwrap();
                     let result = player_obj
                         .finalize(output.commitments.clone(), BTreeMap::new())
@@ -559,10 +615,32 @@ mod tests {
     }
 
     #[test]
+    fn test_dkg_with_absent_player() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]).with_absent_players(vec![3])
+        ])
+        .with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
     fn test_reshare_with_absent_dealer() {
         let plan = Plan::from(vec![
             Round::from(vec![0, 1, 2, 3]),
             Round::from(vec![4, 5, 6, 7]).with_absent_dealers(vec![3]),
+        ])
+        .with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_reshare_with_absent_player() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![4, 5, 6, 7]).with_absent_players(vec![4]),
+            Round::from(vec![8, 9, 10, 11]).with_absent_dealers(vec![4]),
         ])
         .with_concurrency(4);
         plan.run_with_seed::<MinPk>(0);
