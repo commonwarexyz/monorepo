@@ -3734,7 +3734,7 @@ mod tests {
                         continue; // Skip last view
                     }
 
-                    let signers: usize = payloads.iter().map(|(_, signers)| signers.len()).sum();
+                    let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
                     if signing_schemes[0].is_attributable() {
@@ -3749,7 +3749,7 @@ mod tests {
                 // Check finalizes
                 let finalizes = reporter.finalizes.lock().unwrap();
                 for (_, payloads) in finalizes.iter() {
-                    let signers: usize = payloads.iter().map(|(_, signers)| signers.len()).sum();
+                    let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
                     if signing_schemes[0].is_attributable() {
