@@ -454,7 +454,15 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_and_reshare_all_active() {
+    fn test_dkg() {
+        let plan =
+            Plan::from(vec![Round::from(((0..5).collect(), (0..5).collect()))]).with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_reshare_distinct() {
         let plan = Plan::from(vec![
             Round::from(((0..5).collect(), (0..5).collect())),
             Round::from(((0..5).collect(), (5..15).collect())),
@@ -466,23 +474,24 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg2_changing_committee() {
+    fn test_reshare_increasing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0, 1, 2], vec![1, 2, 3])),
-            Round::from((vec![1, 2, 3], vec![2, 3, 4])),
-            Round::from((vec![2, 3, 4], vec![0, 1, 2])),
             Round::from((vec![0, 1, 2], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
+            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
+            Round::from((vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3, 4, 5])),
         ]);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
     }
 
     #[test]
-    fn test_dkg2_increasing_committee() {
+    fn test_reshare_decreasing_committee() {
         let plan = Plan::from(vec![
-            Round::from((vec![0, 1, 2], vec![0, 1, 2])),
-            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
+            Round::from((vec![0, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4, 5])),
+            Round::from((vec![0, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4])),
+            Round::from((vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3])),
+            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2])),
         ]);
         plan.run_with_seed::<MinPk>(0);
         plan.run_with_seed::<MinSig>(0);
