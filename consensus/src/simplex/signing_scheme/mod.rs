@@ -1,24 +1,26 @@
 //! Signing scheme implementations for `simplex`.
 //!
-//! # Attributable Schemes and Fault Evidence
+//! # Attributable Schemes and Liveness/Fault Evidence
 //!
-//! Signing schemes differ in whether they can safely expose per-validator activities and
-//! Byzantine fault evidence:
+//! Signing schemes differ in whether per-validator activities can be used as evidence of either
+//! liveness or of committing a fault:
 //!
-//! - **Attributable schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be safely
-//!   exposed as fault evidence. Certificates contain signer indices alongside individual
-//!   or aggregated signatures, enabling secure per-validator activity tracking and
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be presented
+//!   to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
+//!   indices alongside individual signatures, enabling secure per-validator activity tracking and
 //!   conflict detection.
 //!
-//! - **Non-attributable schemes** ([`bls12381_threshold`]): Exposing partial signatures as fault
-//!   evidence is not safe. With threshold signatures, any `t` valid partial signatures can
-//!   be used to forge a partial signature for any player, enabling equivocation attacks.
-//!   Per-validator activities and conflict evidence must not be reported to prevent this
-//!   attack vector, though peers can still be blocked locally.
+//! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
+//!   to some third party as evidence of either liveness or of committing a fault because they can be forged
+//!   by other players (often after some quorum of partial signatures are collected). With [`bls12381_threshold`],
+//!   possession of any `t` valid partial signatures can be used to forge a partial signature for any other player.
+//!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
+//!   but can't be used by an external observer.
 //!
-//! The [`Scheme::is_attributable()`] method signals whether fault evidence can be safely
-//! exposed. The recommended approach is to use [`reporter::AttributableReporter`] which
-//! automatically handles filtering and verification based on scheme attributability.
+//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely
+//! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
+//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
+//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
