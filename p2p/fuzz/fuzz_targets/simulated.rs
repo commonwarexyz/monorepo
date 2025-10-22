@@ -12,7 +12,7 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -113,15 +113,15 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|mut context| async move {
         // Generate peer identities
-        let mut peers = Vec::new();
+        let mut peer_pks = Vec::new();
         for _ in 0..num_peers {
             let private_key = ed25519::PrivateKey::from_seed(context.gen());
-            peers.push(private_key.public_key());
+            peer_pks.push(private_key.public_key());
         }
 
         // Create the simulated network and oracle for controlling it
         let (network, mut oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
-        let network_handler = network.start();
+        let network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation
@@ -145,12 +145,12 @@ fn fuzz(input: FuzzInput) {
                     channel_id,
                 } => {
                     // Normalize peer index to valid range
-                    let idx = (peer_idx as usize) % peers.len();
+                    let idx = (peer_idx as usize) % peer_pks.len();
 
                     // Only register if not already registered
                     if !channels.contains_key(&(idx, channel_id)) {
                         if let Ok((sender, receiver)) =
-                            oracle.register(peers[idx].clone(), channel_id as u64).await
+                            oracle.register(peer_pks[idx].clone(), channel_id as u64).await
                         {
                             channels.insert((idx, channel_id), (sender, receiver));
                         }
@@ -164,15 +164,19 @@ fn fuzz(input: FuzzInput) {
                     msg_size,
                 } => {
                     // Normalize indices to valid ranges
-                    let from_idx = (peer_idx as usize) % peers.len();
-                    let to_idx = (to_idx as usize) % peers.len();
+                    let from_idx = (peer_idx as usize) % peer_pks.len();
+                    let to_idx = (to_idx as usize) % peer_pks.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
                     let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
 
+                    // Skip if receiver hasn't registered this channel - they won't be able to receive
+                    if !channels.contains_key(&(to_idx, channel_id)) {
+                        continue;
+                    }
+
                     // Skip if sender channel not registered
-                    let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id))
-                    else {
+                    let Some((sender, _)) = channels.get_mut(&(from_idx, channel_id)) else {
                         continue;
                     };
 
@@ -185,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                     // Note: Success only means accepted for transmission, not guaranteed delivery
                     let sent = sender
                         .send(
-                            Recipients::One(peers[to_idx].clone()),
+                            Recipients::One(peer_pks[to_idx].clone()),
                             message.clone(),
                             true,
                         )
@@ -196,53 +200,56 @@ fn fuzz(input: FuzzInput) {
                     // Message may still be dropped by unreliable link
                     if sent {
                         expected
-                            .entry((to_idx, peers[from_idx].clone(), channel_id))
+                            .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
                             .or_default()
                             .push_back(message);
                     }
                 }
 
                 Operation::ReceiveMessages => {
-                    // Attempt to receive messages from all peers with pending messages
-                    let expected_keys: Vec<_> = expected.keys().cloned().collect();
-                    for (to_idx, sender_pk, channel_id) in expected_keys {
-                        // Skip if receiver channel not registered
-                        let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id))
-                        else {
+                    // Collect unique receiver channels that have pending messages
+                    let receiver_channels: HashSet<(usize, u8)> = expected
+                        .keys()
+                        .map(|(to_idx, _sender_pk, channel_id)| (*to_idx, *channel_id))
+                        .collect();
+
+                    // Each (receiver_idx, channel_id) is a distinct mailbox receiving from all senders
+                    for (receiver_idx, channel_id) in receiver_channels {
+                        // Skip if receiver hasn't registered this channel
+                        let Some((_, receiver)) = channels.get_mut(&(receiver_idx, channel_id)) else {
                             continue;
                         };
 
-                        // Skip if no expected messages for this combination
-                        let Some(queue) = expected.get_mut(&(to_idx, sender_pk.clone(), channel_id)) else {
-                            continue;
-                        };
-
-                        // Try to receive one message with a timeout
+                        // Try to receive one message with timeout
                         commonware_macros::select! {
-                            result = receiver.recv() => {
-                                if let Ok((recv_sender_id, message)) = result {
-                                    // Search for this message in the expected queue
-                                    // Note: Messages may arrive out of order
-                                    if let Some(pos) = queue.iter().position(|m: &Bytes| m == &message) {
-                                        queue.remove(pos);
+                            recv_result = receiver.recv() => {
+                                let Ok((sender_pk, message)) = recv_result else {
+                                    continue; // Receive error
+                                };
 
-                                        // Verify sender identity matches
-                                        if recv_sender_id != sender_pk {
-                                            panic!("Message sender: {recv_sender_id}, but real sender: {sender_pk}");
-                                        }
+                                // Find the expected queue for the actual sender who sent this message
+                                let expected_msgs_key = (receiver_idx, sender_pk.clone(), channel_id);
+                                let expected_msgs = expected.get_mut(&expected_msgs_key).expect("Expected queue not found");
 
-                                        // Clean up empty queues
-                                        if queue.is_empty() {
-                                            expected.remove(&(to_idx, sender_pk, channel_id));
-                                        }
-                                    } else {
-                                        panic!("Message not found in expected queue");
+                                // Verify message is at front of queue (messages per sender must be ordered)
+                                if expected_msgs.front() == Some(&message) {
+                                    expected_msgs.pop_front();
+
+                                    // Clean up empty queues
+                                    if expected_msgs.is_empty() {
+                                        expected.remove(&expected_msgs_key);
                                     }
+                                } else {
+                                    panic!(
+                                        "Message out of order from sender {} to receiver {} on channel {}. Expected: {:?}, Got: {:?}",
+                                        sender_pk, receiver_idx, channel_id,
+                                        expected_msgs.front().map(|b| b.len()),
+                                        message.len()
+                                    );
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
-                                // Timeout: message didn't arrive, may have been dropped
-                                continue;
+                                continue; // Timeout - message may not have arrived yet
                             }
                         }
                     }
@@ -256,8 +263,8 @@ fn fuzz(input: FuzzInput) {
                     success_rate,
                 } => {
                     // Normalize indices to valid ranges
-                    let from_idx = (from_idx as usize) % peers.len();
-                    let to_idx = (to_idx as usize) % peers.len();
+                    let from_idx = (from_idx as usize) % peer_pks.len();
+                    let to_idx = (to_idx as usize) % peer_pks.len();
 
                     // Create link with specified characteristics
                     // success_rate is normalized from u8 (0-255) to f64 (0.0-1.0)
@@ -267,25 +274,25 @@ fn fuzz(input: FuzzInput) {
                         success_rate: (success_rate as f64) / 255.0,
                     };
                     let _ = oracle
-                        .add_link(peers[from_idx].clone(), peers[to_idx].clone(), link)
+                        .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)
                         .await;
                 }
 
                 Operation::RemoveLink { from_idx, to_idx } => {
                     // Normalize indices to valid ranges
-                    let from_idx = (from_idx as usize) % peers.len();
-                    let to_idx = (to_idx as usize) % peers.len();
+                    let from_idx = (from_idx as usize) % peer_pks.len();
+                    let to_idx = (to_idx as usize) % peer_pks.len();
 
                     // Remove link to simulate network partition
                     let _ = oracle
-                        .remove_link(peers[from_idx].clone(), peers[to_idx].clone())
+                        .remove_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone())
                         .await;
                 }
             }
         }
 
         // Clean up network handler before exiting
-        network_handler.abort();
+        network_handle.abort();
     });
 }
 
