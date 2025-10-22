@@ -45,7 +45,7 @@ const DATA_PREFIX: u8 = 2;
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
-/// Configuration when deserializing [Payload].
+/// Configuration for deserializing [Payload].
 ///
 /// This is used to limit the size of the messages received from peers.
 #[derive(Clone)]
