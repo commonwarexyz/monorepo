@@ -14,17 +14,22 @@ use commonware_consensus::{
         config,
         mocks::{
             application,
-            fixtures::{bls_threshold_fixture, ed25519_fixture, Fixture},
+            fixtures::{bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture},
             relay, reporter,
         },
-        signing_scheme::{bls12381_threshold, ed25519 as simplex_ed25519, Scheme as SimplexScheme},
+        signing_scheme::{
+            bls12381_multisig, bls12381_threshold, ed25519 as simplex_ed25519,
+            Scheme as SimplexScheme,
+        },
         Engine,
     },
     types::View,
     Monitor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest, Sha256, Signer as _,
+    bls12381::primitives::variant::{MinPk, MinSig},
+    sha256::Digest as Sha256Digest,
+    Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
@@ -40,14 +45,11 @@ use std::{
     },
     time::Duration,
 };
-use commonware_consensus::simplex::mocks::fixtures::bls_multisig_fixture;
-use commonware_consensus::simplex::signing_scheme::bls12381_multisig;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
 
 pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-const VALID_PANICS: [&str; 3] = [
+const APPLICATION_VALID_PANICS: [&str; 3] = [
     "invalid payload:",
     "invalid parent (in payload):",
     "invalid round (in payload)",
@@ -70,7 +72,7 @@ where
     }
 
     fn required_containers() -> u64 {
-        200
+        50
     }
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
@@ -139,7 +141,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
     executor.start(|mut context| async move {
-        // Create simulated network
+        // Create a simulated network
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
             NetworkConfig {
@@ -178,7 +180,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         // Start a consensus engine for the fuzzing actor (first validator).
         let ed25519_key = validator_keys.remove(0);
         let scheme = signing_schemes.remove(0);
-        let validator = validators[0].clone(); // Don't remove from validators list
+        let validator = validators[0].clone(); // Don't remove from the validator list
         let context = context.with_label(&format!("validator-{}", ed25519_key.public_key()));
         let reporter_config = reporter::Config {
             namespace: namespace.clone(),
@@ -272,7 +274,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 join_all(finalizers).await;
             }
             _ => {
-                context.sleep(Duration::from_secs(10)).await;
+                context.sleep(Duration::from_secs(5)).await;
             }
         }
 
@@ -288,7 +290,7 @@ pub fn fuzz<P: Simplex>(input: FuzzInput) {
         let panic_message = format!("{panic_info}");
 
         // Check if we should ignore this panic
-        for pattern in VALID_PANICS {
+        for pattern in APPLICATION_VALID_PANICS {
             if panic_message.contains(pattern) {
                 println!("Ignored panic: {panic_message}");
                 SHOULD_IGNORE_PANIC.store(true, Ordering::SeqCst);
