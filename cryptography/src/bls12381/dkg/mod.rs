@@ -580,17 +580,16 @@ mod tests {
         plan.run_with_seed::<MinSig>(0);
     }
 
-    //#[test]
-    //fn test_dkg_and_reshare_min_active() {
-    //    run_dkg_and_reshare::<MinPk>(4, 3, 4, 3, 4);
-    //    run_dkg_and_reshare::<MinSig>(4, 3, 4, 3, 4);
-    //}
-
-    //#[test]
-    //fn test_dkg_and_reshare_min_active_different_sizes() {
-    //    run_dkg_and_reshare::<MinPk>(5, 4, 10, 4, 4);
-    //    run_dkg_and_reshare::<MinSig>(5, 4, 10, 4, 4);
-    //}
+    #[test]
+    fn test_reshare_min_active_different_sizes() {
+        let plan = Plan::from(vec![
+            Round::from(vec![0, 1, 2, 3]),
+            Round::from(vec![4, 5, 6, 7, 8, 9]).with_absent_dealers(vec![3]),
+        ])
+        .with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
 
     //#[test]
     //fn test_dkg_and_reshare_min_active_large() {
