@@ -131,12 +131,12 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     db.delete(k).await.expect("delete should not fail");
                     if expected_state.remove(key).is_some() {
+                        all_keys.insert(*key);
                         uncommitted_ops += 1;
                         if expected_state.keys().len() != 0 {
                             uncommitted_ops += 1;
                         }
                     }
-
                 }
 
                 CurrentOperation::Get { key } => {
