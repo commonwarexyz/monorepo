@@ -1,13 +1,13 @@
-pub mod fuzzer;
+pub mod disrupter;
 pub mod invariants;
 pub mod types;
 pub mod utils;
-pub use crate::types::FuzzInput;
 use crate::{
-    fuzzer::Fuzzer,
+    disrupter::Disrupter,
     invariants::{check_invariants, extract_simplex_state},
     utils::{link_peers, register_validators, Action, PartitionStrategy},
 };
+use arbitrary::Arbitrary;
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
@@ -93,6 +93,12 @@ impl Simplex for SimplexBls12381MinPk {
     }
 }
 
+#[derive(Debug, Arbitrary, Clone)]
+pub struct FuzzInput {
+    pub seed: u64,
+    pub partition: PartitionStrategy,
+}
+
 fn run_fuzz<P: Simplex>(input: FuzzInput) {
     let n = P::node_count();
     let required_containers = P::required_containers();
@@ -151,13 +157,13 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         let (pending, _recovered, _resolver) = registrations
             .remove(&validator)
             .expect("validator should be registered");
-        let actor = Fuzzer::<_, _, Sha256Digest>::new(
+        let actor = Disrupter::<_, _, Sha256Digest>::new(
             context.with_label("fuzzing_actor"),
             ed25519_key,
             scheme,
             reporter,
             namespace.clone(),
-            input.clone(),
+            input.seed,
         );
         actor.start(pending);
 
@@ -241,6 +247,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         check_invariants(n, replica_states);
     });
 }
+
 pub fn fuzz<P: Simplex>(input: FuzzInput) {
     // Set up a custom panic hook
     let original_hook = panic::take_hook();

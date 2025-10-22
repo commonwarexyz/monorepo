@@ -62,57 +62,6 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i + 1 % n == j % n || i == j
 }
 
-pub async fn simplex_register_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
-    validators: &[P],
-) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
-    let mut registrations = HashMap::new();
-    for validator in validators.iter() {
-        let (voter_sender, voter_receiver) = oracle.register(validator.clone(), 0).await.unwrap();
-        let (resolver_sender, resolver_receiver) =
-            oracle.register(validator.clone(), 1).await.unwrap();
-        registrations.insert(
-            validator.clone(),
-            (
-                (voter_sender, voter_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
-        );
-    }
-    registrations
-}
-
-pub async fn threshold_simplex_register_peers<P: PublicKey>(
-    oracle: &mut Oracle<P>,
-    validators: &[P],
-) -> HashMap<
-    P,
-    (
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-        (Sender<P>, Receiver<P>),
-    ),
-> {
-    let mut registrations = HashMap::new();
-    for validator in validators.iter() {
-        let (pending_sender, pending_receiver) =
-            oracle.register(validator.clone(), 0).await.unwrap();
-        let (recovered_sender, recovered_receiver) =
-            oracle.register(validator.clone(), 1).await.unwrap();
-        let (resolver_sender, resolver_receiver) =
-            oracle.register(validator.clone(), 2).await.unwrap();
-        registrations.insert(
-            validator.clone(),
-            (
-                (pending_sender, pending_receiver),
-                (recovered_sender, recovered_receiver),
-                (resolver_sender, resolver_receiver),
-            ),
-        );
-    }
-    registrations
-}
-
 pub async fn link_peers<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],

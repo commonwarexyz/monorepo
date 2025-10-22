@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::types::{FuzzInput, Message, Mutation};
+use crate::types::Message;
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Encode, Read};
@@ -27,7 +27,27 @@ use std::time::Duration;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
-pub struct Fuzzer<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
+#[derive(Debug, Clone, Arbitrary)]
+pub enum Mutation {
+    Payload,
+    View,
+    Parent,
+    All,
+}
+
+/// A disrupter node that intentionally disrupts consensus protocol execution
+/// by sending malformed messages, mutating valid messages, and exhibiting
+/// Byzantine behavior. Used for testing protocol resilience and fault tolerance.
+///
+/// The disrupter acts **randomly** rather than implementing sophisticated attacks:
+/// - Mutates proposal payloads, views, and parent references randomly
+/// - Mirrors received messages back to the network
+/// - Sends malformed/random byte sequences
+/// - Signs messages with incorrect data
+///
+/// This simulates basic adversarial or faulty nodes in a distributed consensus
+/// system without coordinated or targeted attack strategies.
+pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
     context: E,
     private_key: PrivateKey,
     scheme: S,
@@ -37,7 +57,7 @@ pub struct Fuzzer<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
     view: u64,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> Fuzzer<E, S, D>
+impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> Disrupter<E, S, D>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
@@ -47,7 +67,7 @@ where
         scheme: S,
         reporter: Reporter<E, PublicKey, S, D>,
         namespace: Vec<u8>,
-        input: FuzzInput,
+        seed: u64,
     ) -> Self {
         Self {
             view: 0,
@@ -56,7 +76,7 @@ where
             scheme,
             reporter,
             namespace,
-            rng: StdRng::seed_from_u64(input.seed),
+            rng: StdRng::seed_from_u64(seed),
         }
     }
 
