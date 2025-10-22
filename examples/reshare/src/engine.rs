@@ -107,7 +107,6 @@ where
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
-                is_dkg: config.polynomial.is_none(),
                 participant_config: config.participant_config.clone(),
                 namespace: dkg_namespace,
                 signer: config.signer.clone(),

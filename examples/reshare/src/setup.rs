@@ -32,9 +32,11 @@ pub struct ParticipantConfig {
     /// The bootstrapper node identities.
     #[serde(with = "serde_peer_map")]
     pub bootstrappers: HashMap<PublicKey, SocketAddr>,
-    /// The group polynomial.
-    pub raw_polynomial: Option<String>,
+    /// The group polynomial, as a hex-encoded string.
+    pub polynomial: Option<String>,
     /// The validator's ed25519 signing key.
+    ///
+    /// Used for P2P, and in the DKG bootstrap phase, for consensus message signing.
     #[serde(with = "serde_hex")]
     pub signing_key: PrivateKey,
     /// The validator's share, if active in the first epoch.
@@ -45,7 +47,7 @@ pub struct ParticipantConfig {
 impl ParticipantConfig {
     /// Get the polynomial commitment for the DKG.
     pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
-        self.raw_polynomial.as_ref().map(|raw| {
+        self.polynomial.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
             Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &(threshold as usize)).unwrap()
         })
@@ -195,7 +197,7 @@ fn generate_configs(
         let participant_config = ParticipantConfig {
             port: args.base_port + index as u16,
             bootstrappers: bootstrappers.clone(),
-            raw_polynomial: polynomial.map(|polynomial| hex(polynomial.encode().as_ref())),
+            polynomial: polynomial.map(|polynomial| hex(polynomial.encode().as_ref())),
             signing_key: signer.clone(),
             share: share.clone(),
         };

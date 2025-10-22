@@ -40,7 +40,6 @@ use tracing::info;
 const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
 
 pub struct Config<C> {
-    pub is_dkg: bool,
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
@@ -59,7 +58,6 @@ where
     V: Variant,
 {
     context: ContextCell<E>,
-    is_dkg: bool,
     participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
@@ -117,7 +115,6 @@ where
         (
             Self {
                 context,
-                is_dkg: config.is_dkg,
                 participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
@@ -174,6 +171,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
+        let is_dkg = initial_public.is_none();
+
         // Start a muxer for the physical channel used by DKG/reshare
         let (mux, mut dkg_mux) =
             Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
@@ -193,7 +192,7 @@ where
                 (0, initial_public, initial_share)
             };
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let (active_participants, mut inactive_participants) = Self::select_participants(
+        let (dealers, mut players) = Self::select_participants(
             current_epoch,
             self.num_participants_per_epoch,
             active_participants,
@@ -201,12 +200,12 @@ where
         );
 
         // If we're performing DKG, dealers == players.
-        if self.is_dkg {
-            inactive_participants = active_participants.clone();
+        if is_dkg {
+            players = dealers.clone();
         }
 
         // Inform the orchestrator of the epoch transition
-        let active_participants = Set::from_iter(active_participants);
+        let active_participants = Set::from_iter(dealers);
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -226,7 +225,7 @@ where
             current_share,
             &mut self.signer,
             active_participants,
-            Set::from_iter(inactive_participants),
+            Set::from_iter(players),
             &mut dkg_mux,
             self.rate_limit,
             &mut self.round_metadata,
@@ -356,20 +355,23 @@ where
                         }
 
                         // If the DKG succeeded, exit.
-                        if self.is_dkg && next_public.is_some() {
-                            // Dump the share and group polynomial to disk.
-                            let self_idx = all_participants
-                                .position(&self.signer.public_key())
-                                .expect("self must be a participant");
-
+                        if is_dkg && next_public.is_some() {
+                            // Dump the share and group polynomial to disk so that it can be
+                            // used by the validator process.
+                            //
+                            // In a production setting, care should be taken to ensure the
+                            // share is stored securely.
                             if let Some((path, config)) = self.participant_config.take() {
                                 config.update_and_write(path.as_path(), |config| {
-                                    config.raw_polynomial =
+                                    config.polynomial =
                                         next_public.map(|p| hex(p.encode().as_ref()));
                                     config.share = next_share;
                                 });
                             }
 
+                            let self_idx = all_participants
+                                .position(&self.signer.public_key())
+                                .expect("self must be a participant");
                             info!(
                                 participant = self_idx,
                                 "dkg completed successfully, persisted outcome."
@@ -378,7 +380,7 @@ where
                             break;
                         }
 
-                        let next_players = if self.is_dkg {
+                        let next_players = if is_dkg {
                             // Use the same set of participants for DKG - if we enter a new epoch,
                             // the DKG failed, and we do not want to change the set of participants.
                             next_participants.clone()
@@ -434,7 +436,7 @@ where
         }
 
         // If the initial DKG was just performed, keep running until forcible exit.
-        if self.is_dkg {
+        if is_dkg {
             // Close the mailbox to prevent accepting any new messages.
             drop(self.mailbox);
 
@@ -443,6 +445,7 @@ where
             //
             // The initial DKG process will never be exited automatically, assuming coordination
             // between participants is manual.
+            info!("suspending DKG actor; waiting for forcible shutdown");
             futures::future::pending::<()>().await;
         }
 
