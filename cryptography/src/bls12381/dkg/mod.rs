@@ -224,7 +224,7 @@ mod tests {
             poly::{self, public},
             variant::{MinPk, MinSig, Variant},
         },
-        ed25519::{PrivateKey, PublicKey as EdPublicKey},
+        ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
     };
     use commonware_utils::{quorum, set::Set};
@@ -1419,8 +1419,8 @@ mod tests {
             // Create seeded RNG (for determinism)
             let mut rng = StdRng::seed_from_u64(self.seed);
             let mut current_public: Option<poly::Public<V>> = None;
-            let mut participant_states: HashMap<EdPublicKey, player::Output<V>> = HashMap::new();
-            let mut share_holders: Option<Set<EdPublicKey>> = None;
+            let mut participant_states: HashMap<PublicKey, player::Output<V>> = HashMap::new();
+            let mut share_holders: Option<Set<PublicKey>> = None;
 
             // Process rounds
             for (round_idx, round) in self.rounds.iter().enumerate() {
@@ -1672,7 +1672,7 @@ mod tests {
     }
 
     // Compute the participant set from a list of IDs
-    fn participants(ids: &[u64]) -> Set<EdPublicKey> {
+    fn participants(ids: &[u64]) -> Set<PublicKey> {
         ids.iter()
             .map(|id| PrivateKey::from_seed(*id).public_key())
             .collect::<Set<_>>()
