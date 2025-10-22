@@ -180,3 +180,24 @@ path = "fuzz_targets/proofs_malleability.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "verify_proof"
+path = "fuzz_targets/verify_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range_proof"
+path = "fuzz_targets/range_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_pinned_nodes"
+path = "fuzz_targets/extract_pinned_nodes.rs"
+test = false
+doc = false
+bench = false
