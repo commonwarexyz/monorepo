@@ -53,8 +53,6 @@ pub enum NetworkOperation {
         recipient_idx: u8,
         /// Size of the message payload in bytes.
         msg_size: usize,
-        /// Whether to send with priority.
-        priority: bool,
     },
     /// Attempt to receive messages from any peers with pending messages.
     ReceiveMessages,
@@ -118,10 +116,8 @@ pub struct PeerInfo {
     pub address: SocketAddr,
 }
 
-/// Components returned when creating a network instance.
-///
-/// Contains everything needed to interact with the network.
-pub struct NetworkComponents<S, R, O> {
+/// A network with a sender, receiver, oracle, and handle.
+pub struct Network<S, R, O> {
     /// Sender for sending messages to other peers.
     pub sender: S,
     /// Receiver for receiving messages from other peers.
@@ -130,6 +126,14 @@ pub struct NetworkComponents<S, R, O> {
     pub oracle: O,
     /// Handle to the running network task that can be aborted.
     pub handle: Handle<()>,
+}
+
+/// All information and components for a single peer.
+pub struct Peer<S, R, O> {
+    /// Peer information (keys and address).
+    pub info: PeerInfo,
+    /// Network components for this peer.
+    pub network: Network<S, R, O>,
 }
 
 /// Trait for abstracting over different p2p network implementations (Discovery, Lookup) during fuzzing.
@@ -158,18 +162,14 @@ pub trait NetworkScheme: Send + 'static {
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// - The sender for sending messages
-    /// - The receiver for receiving messages
-    /// - The oracle for controlling the network
-    /// - A handle to the running network task
+    /// A network instance for interacting with the network.
     fn create_network<'a>(
         context: Context,
         peer: &'a PeerInfo,
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> impl Future<Output = NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle>>;
+    ) -> impl Future<Output = Network<Self::Sender, Self::Receiver, Self::Oracle>>;
 
     /// Registers a subset of peers under a specific index with the oracle.
     ///
@@ -204,7 +204,7 @@ impl NetworkScheme for Discovery {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle> {
+    ) -> Network<Self::Sender, Self::Receiver, Self::Oracle> {
         // Collect all peer public keys for potential discovery
         let addresses = peers
             .iter()
@@ -253,7 +253,7 @@ impl NetworkScheme for Discovery {
         // Start the network background task
         let handle = network.start();
 
-        NetworkComponents {
+        Network {
             sender,
             receiver,
             oracle,
@@ -287,7 +287,7 @@ impl NetworkScheme for Lookup {
         peers: &'a [PeerInfo],
         _peer_idx: usize,
         _base_port: u16,
-    ) -> NetworkComponents<Self::Sender, Self::Receiver, Self::Oracle> {
+    ) -> Network<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
             peer.private_key.clone(),
@@ -330,7 +330,7 @@ impl NetworkScheme for Lookup {
         // Start the network background task
         let handle = network.start();
 
-        NetworkComponents {
+        Network {
             sender,
             receiver,
             oracle,
@@ -383,57 +383,60 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
     // Create a deterministic executor with the provided seed
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|mut context| async move {
-        // Generate peer identities and addresses
-        let mut peers = Vec::new();
         let base_port = 63000;  // Arbitrary starting port for localhost testing
+        
+        // Build peer_infos and reverse lookup map together
+        let mut pk_to_idx = HashMap::new();
+        let mut peer_infos = Vec::new();
 
-        // Create N peers with deterministic keys
         for i in 0..input.peers {
             let private_key = ed25519::PrivateKey::from_seed(context.gen());
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-            peers.push(PeerInfo {
+            
+            pk_to_idx.insert(public_key.clone(), i as u8);
+            
+            peer_infos.push(PeerInfo {
                 private_key,
                 public_key,
                 address,
             });
         }
 
-        // Build a reverse lookup: public key -> peer index
-        // Used to identify senders when receiving messages
-        let pk_to_idx: HashMap<ed25519::PublicKey, u8> = peers
-            .iter()
-            .enumerate()
-            .map(|(idx, peer)| (peer.public_key.clone(), idx as u8))
-            .collect();
+        // Create network instances and peer states
+        let mut peers = Vec::new();
 
-        // Initialize network instances for each peer
-        let mut peer_networks = Vec::new();
+        for (peer_idx, peer_info) in peer_infos.iter().enumerate() {
 
-        for (peer_idx, peer) in peers.iter().enumerate() {
-            let context = context.with_label(&format!("peer-{peer_idx}"));
-
-            // Create a network instance for this peer
-            let components = N::create_network(
-                context.clone(),
-                peer,
-                &peers,
+            // Create network instance for this peer
+            let peer_context = context.with_label(&format!("peer-{peer_idx}"));
+            let network = N::create_network(
+                peer_context,
+                peer_info,
+                &peer_infos,
                 peer_idx,
                 base_port,
             )
             .await;
 
-            peer_networks.push(components);
+            // Create and store peer state
+            peers.push(Peer {
+                info: PeerInfo {
+                    private_key: peer_info.private_key.clone(),
+                    public_key: peer_info.public_key.clone(),
+                    address: peer_info.address,
+                },
+                network,
+            });
         }
 
         // Execute fuzzer operations and track message expectations
 
-        // Track expected messages: (receiver_idx, sender_idx) -> queue of messages
-        // We verify that every sent message is eventually received in order per sender-receiver pair
-        let mut expected_messages: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
+        // Track expected messages: (to_idx, from_idx) -> queue of messages
+        // Messages are sent with the same priority, ensuring FIFO delivery per sender-receiver pair
+        let mut expected_msgs: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
 
-        // Track which receivers have pending messages from which senders
-        // This optimizes the ReceiveMessages operation to only check receivers with pending messages
+        // Peer index --> list of sender indices that have pending messages for this receiver
         let mut pending_by_receiver: HashMap<u8, Vec<u8>> = HashMap::new();
 
         for op in input.operations.into_iter() {
@@ -443,43 +446,41 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     recipient_mode,
                     recipient_idx,
                     msg_size,
-                    priority,
                 } => {
-                    // Normalize sender index to valid peer range
-                    let sender_idx = (sender_idx as usize) % peers.len();
-                    let sender_idx_u8 = sender_idx as u8;
+                    // Normalize sender index to valid range
+                    let from_idx = (sender_idx as usize) % peers.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
                     let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
 
-                    // Generate a random message payload
+                    // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
                     context.fill(&mut bytes[..]);
                     let message = Bytes::from(bytes);
 
                     // Determine recipients based on the mode
-                    let (recipients, recipients_indices) = match recipient_mode {
+                    let (recipients, _recipient_indices) = match recipient_mode {
                         RecipientMode::All => {
                             // Send to all peers except self
                             let indices: Vec<u8> = (0..peers.len())
                                 .map(|i| i as u8)
-                                .filter(|&to_idx| to_idx != sender_idx_u8)
+                                .filter(|&to_idx| to_idx != from_idx as u8)
                                 .collect();
                             (Recipients::All, indices)
                         }
                         RecipientMode::One => {
                             // Send to exactly one peer
-                            let idx = (recipient_idx as usize) % peers.len();
-                            if idx == sender_idx {
+                            let to_idx = (recipient_idx as usize) % peers.len();
+                            if to_idx == from_idx {
                                 continue;  // Skip if trying to send to self
                             }
-                            let recipient_pk = peers[idx].public_key.clone();
-                            (Recipients::One(recipient_pk), vec![idx as u8])
+                            let recipient_pk = peers[to_idx].info.public_key.clone();
+                            (Recipients::One(recipient_pk), vec![to_idx as u8])
                         }
                         RecipientMode::Some => {
                             // Send to a random subset of peers
                             let mut available: Vec<_> = (0..peers.len())
-                                .filter(|&i| i != sender_idx)  // Exclude sender
+                                .filter(|&i| i != from_idx)  // Exclude sender
                                 .collect();
 
                             if available.is_empty() {
@@ -492,112 +493,100 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                             let selected = &available[..num_recipients];
 
                             let recipients_set: HashSet<_> = selected.iter()
-                                .map(|&idx| peers[idx].public_key.clone())
+                                .map(|&idx| peers[idx].info.public_key.clone())
                                 .collect();
                             let indices: Vec<_> = selected.iter().map(|&idx| idx as u8).collect();
                             (Recipients::Some(recipients_set.into_iter().collect()), indices)
                         }
                     };
 
-                    // Attempt to send the message
-                    let sent = peer_networks[sender_idx]
+                    // Attempt to send the message (always use low priority for FIFO ordering)
+                    let send_result = peers[from_idx]
+                        .network
                         .sender
-                        .send(recipients, message.clone(), priority)
-                        .await
-                        .is_ok();
+                        .send(recipients, message.clone(), false)
+                        .await;
 
-                    // If send succeeded, track the message as expected for each recipient
-                    if sent {
-                        for to_idx in recipients_indices {
-                            // Add message to the queue for this (receiver, sender) pair
-                            expected_messages
-                                .entry((to_idx, sender_idx_u8))
-                                .or_default()
-                                .push_back(message.clone());
+                    // Only enqueue expectations for recipients that actually accepted the payload
+                    if let Ok(accepted_recipients) = send_result {
+                        // Map accepted recipient public keys to indices
+                        for pk in accepted_recipients.into_iter() {
+                            if let Some(&to_idx) = pk_to_idx.get(&pk) {
+                                // Add message to the queue for this (receiver, sender) pair
+                                expected_msgs
+                                    .entry((to_idx, from_idx as u8))
+                                    .or_default()
+                                    .push_back(message.clone());
 
-                            // Track that this receiver has pending messages from this sender
-                            pending_by_receiver
-                                .entry(to_idx)
-                                .or_default()
-                                .push(sender_idx_u8);
+                                // Track that this receiver has pending messages from this sender
+                                let senders = pending_by_receiver.entry(to_idx).or_default();
+                                if !senders.contains(&(from_idx as u8)) {
+                                    senders.push(from_idx as u8);
+                                }
+                            }
                         }
                     }
                 }
 
                 NetworkOperation::ReceiveMessages => {
-                    // Attempt to receive messages from all peers that have pending messages
-                    // We iterate through all receivers that we expect to have messages
+                    // Attempt to receive one message from each receiver with pending messages
+                    // Strategy: For each receiver, try to receive from ANY sender, then verify
+                    // the message matches expectations for that specific sender
                     let receivers_with_pending: Vec<u8> = pending_by_receiver.keys().cloned().collect();
 
-                    for receiver_idx_u8 in receivers_with_pending {
-                        let receiver_idx = receiver_idx_u8 as usize;
-
+                    for to_idx in receivers_with_pending {
                         // Safety check: ensure receiver index is valid
-                        if receiver_idx >= peer_networks.len() {
+                        if to_idx as usize >= peers.len() {
                             continue;
                         }
 
-                        // Re-check if this receiver still has pending messages
-                        // (may have been cleared by a previous iteration)
-                        // TODO danlaine: check this
-                        if !pending_by_receiver.contains_key(&receiver_idx_u8) {
-                            continue;
-                        }
+                        let receiver = &mut peers[to_idx as usize].network.receiver;
 
-                        let receiver = &mut peer_networks[receiver_idx].receiver;
-
-                        // TODO danlaine: check this select
                         // Try to receive one message with a timeout
                         commonware_macros::select! {
                             result = receiver.recv() => {
-                                // Skip if receive failed TODO danlaine: check this
                                 let Ok((sender_pk, message)) = result else {
-                                    continue;
+                                    continue; // Receive error (not timeout)
                                 };
 
                                 // Identify the sender by their public key
-                                let Some(&actual_sender_idx) = pk_to_idx.get(&sender_pk) else {
-                                    continue;  // Unknown sender, shouldn't happen. TODO danlaine: check this
+                                let Some(&from_idx) = pk_to_idx.get(&sender_pk) else {
+                                    panic!("Received message from unknown sender: {}", sender_pk);
                                 };
 
                                 // Check if we expected a message from this sender to this receiver
-                                let key = (receiver_idx_u8, actual_sender_idx);
-                                if let Some(queue) = expected_messages.get_mut(&key) {
-                                    // Search for this message in the expected queue
-                                    // NOTE: Messages may arrive out of order, so we search the entire queue
-                                    let mut found_index = None;
-                                    for (i, expected) in queue.iter().enumerate() {
-                                        if message == *expected {
-                                            found_index = Some(i);
-                                            break;
-                                        }
-                                    }
-
-                                    if let Some(index) = found_index {
-                                        // Message was expected. Remove it from the queue
-                                        queue.remove(index);
+                                let expected_msgs_key = (to_idx, from_idx);
+                                if let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) {
+                                    // Verify message is at front of queue (FIFO ordering per sender-receiver pair)
+                                    if queue.front() == Some(&message) {
+                                        queue.pop_front();
 
                                         // Clean up empty queues
                                         if queue.is_empty() {
-                                            expected_messages.remove(&key);
+                                            expected_msgs.remove(&expected_msgs_key);
                                         }
 
                                         // Update pending tracking
-                                        if let Some(senders) = pending_by_receiver.get_mut(&receiver_idx_u8) {
-                                            if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
+                                        if let Some(senders) = pending_by_receiver.get_mut(&to_idx) {
+                                            if let Some(pos) = senders.iter().position(|&x| x == from_idx) {
                                                 senders.remove(pos);
                                             }
                                             if senders.is_empty() {
-                                                pending_by_receiver.remove(&receiver_idx_u8);
+                                                pending_by_receiver.remove(&to_idx);
                                             }
                                         }
                                     } else {
-                                        // Received a message we didn't expect (or received duplicate)
-                                        panic!("Peer index {} Received unexpected message from sender {}", receiver_idx_u8, actual_sender_idx);
+                                        panic!(
+                                            "Message out of order from sender {} to receiver {}. Expected: {:?}, Got: {:?}",
+                                            from_idx, to_idx,
+                                            queue.front().map(|b| b.len()),
+                                            message.len()
+                                        );
                                     }
                                 } else {
-                                    // Received a message from a sender-receiver pair we never tracked
-                                    panic!("Unexpected delivery for peer {} with index {}", peers[receiver_idx_u8 as usize].public_key, receiver_idx_u8);
+                                    // No expectations for this sender-receiver pair
+                                    // This can happen if the sender was blocked after sending but before delivery
+                                    continue;
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
@@ -623,15 +612,15 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let mut peer_set = HashSet::new();
                     for _ in 0..num_peers {
                         let idx = context.gen::<usize>() % peers.len();
-                        peer_set.insert(peers[idx].public_key.clone());
+                        peer_set.insert(peers[idx].info.public_key.clone());
                     }
                     let peer_subset: Vec<_> = peer_set.into_iter().collect();
 
                     // Register this subset with the oracle
                     N::register_peers(
-                        &mut peer_networks[peer_idx].oracle,
+                        &mut peers[peer_idx].network.oracle,
                         index as u64,
-                        &peers,
+                        &peer_infos,
                         peer_subset,
                     )
                     .await;
@@ -640,26 +629,24 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                 NetworkOperation::BlockPeer { peer_idx, target_idx } => {
                     // Block a peer from sending messages to another peer
                     // Normalize indices to valid ranges
-                    let peer_idx = (peer_idx as usize) % peers.len();
-                    let peer_idx_u8 = peer_idx as u8;
-                    let target_idx = (target_idx as usize) % peers.len();
-                    let target_idx_u8 = target_idx as u8;
+                    let to_idx = (peer_idx as usize) % peers.len();
+                    let from_idx = (target_idx as usize) % peers.len();
 
                     // Block the target peer on the oracle
-                    let target_pk = peers[target_idx].public_key.clone();
-                    let _ = peer_networks[peer_idx].oracle.block(target_pk).await;
+                    let target_pk = peers[from_idx].info.public_key.clone();
+                    let _ = peers[to_idx].network.oracle.block(target_pk).await;
 
                     // Update our tracking: remove any expectations for messages
                     // from the blocked peer to this peer
-                    expected_messages.retain(|(to_idx, from_idx), _queue| {
-                        !(*to_idx == peer_idx_u8 && *from_idx == target_idx_u8)
+                    expected_msgs.retain(|(receiver, sender), _queue| {
+                        !(*receiver == to_idx as u8 && *sender == from_idx as u8)
                     });
 
                     // Clean up pending tracking for the blocked sender
-                    if let Some(senders) = pending_by_receiver.get_mut(&peer_idx_u8) {
-                        senders.retain(|&from_idx| from_idx != target_idx_u8);
+                    if let Some(senders) = pending_by_receiver.get_mut(&(to_idx as u8)) {
+                        senders.retain(|&sender| sender != from_idx as u8);
                         if senders.is_empty() {
-                            pending_by_receiver.remove(&peer_idx_u8);
+                            pending_by_receiver.remove(&(to_idx as u8));
                         }
                     }
                 }
@@ -667,8 +654,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         }
 
         // Clean up network handles before exiting
-        for components in peer_networks {
-            components.handle.abort();
+        for peer in peers {
+            peer.network.handle.abort();
         }
     });
 }
