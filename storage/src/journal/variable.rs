@@ -797,6 +797,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             self.pruned.inc();
         }
 
+        if pruned {
+            self.oldest_retained_section = min;
+        }
+
         Ok(pruned)
     }
 
@@ -1091,6 +1095,190 @@ mod tests {
                 .await
                 .expect("Failed to list blobs")
                 .is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_prune_guard() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append items to sections 1-5
+            for section in 1u64..=5u64 {
+                journal
+                    .append(section, section as i32)
+                    .await
+                    .expect("Failed to append data");
+                journal.sync(section).await.expect("Failed to sync");
+            }
+
+            // Verify initial oldest_retained_section is 0
+            assert_eq!(journal.oldest_retained_section, 0);
+
+            // Prune sections < 3
+            journal.prune(3).await.expect("Failed to prune");
+
+            // Verify oldest_retained_section is updated
+            assert_eq!(journal.oldest_retained_section, 3);
+
+            // Test that accessing pruned sections returns the correct error
+
+            // Test append on pruned section
+            match journal.append(1, 100).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            match journal.append(2, 100).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test get on pruned section
+            match journal.get(1, 0).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test get_exact on pruned section
+            match journal.get_exact(2, 0, 12).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test size on pruned section
+            match journal.size(1).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test rewind on pruned section
+            match journal.rewind(2, 0).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test rewind_section on pruned section
+            match journal.rewind_section(1, 0).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test sync on pruned section
+            match journal.sync(2).await {
+                Err(Error::AlreadyPrunedToSection(3)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+            }
+
+            // Test that accessing sections at or after the threshold works
+            assert!(journal.get(3, 0).await.is_ok());
+            assert!(journal.get(4, 0).await.is_ok());
+            assert!(journal.get(5, 0).await.is_ok());
+            assert!(journal.size(3).await.is_ok());
+            assert!(journal.sync(4).await.is_ok());
+
+            // Append to section at threshold should work
+            journal
+                .append(3, 999)
+                .await
+                .expect("Should be able to append to section 3");
+
+            // Prune more sections
+            journal.prune(5).await.expect("Failed to prune");
+            assert_eq!(journal.oldest_retained_section, 5);
+
+            // Verify sections 3 and 4 are now pruned
+            match journal.get(3, 0).await {
+                Err(Error::AlreadyPrunedToSection(5)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
+            }
+
+            match journal.get(4, 0).await {
+                Err(Error::AlreadyPrunedToSection(5)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
+            }
+
+            // Section 5 should still be accessible
+            assert!(journal.get(5, 0).await.is_ok());
+
+            journal.close().await.expect("Failed to close journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_prune_guard_across_restart() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // First session: create and prune
+            {
+                let mut journal = Journal::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize journal");
+
+                for section in 1u64..=5u64 {
+                    journal
+                        .append(section, section as i32)
+                        .await
+                        .expect("Failed to append data");
+                    journal.sync(section).await.expect("Failed to sync");
+                }
+
+                journal.prune(3).await.expect("Failed to prune");
+                assert_eq!(journal.oldest_retained_section, 3);
+
+                journal.close().await.expect("Failed to close journal");
+            }
+
+            // Second session: verify oldest_retained_section is reset
+            {
+                let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to re-initialize journal");
+
+                // After restart, oldest_retained_section should be back to 0
+                // since it's not persisted
+                assert_eq!(journal.oldest_retained_section, 0);
+
+                // But the actual sections 1 and 2 should be gone from storage
+                // so get should return SectionOutOfRange, not AlreadyPrunedToSection
+                match journal.get(1, 0).await {
+                    Err(Error::SectionOutOfRange(1)) => {}
+                    other => panic!("Expected SectionOutOfRange(1), got {:?}", other),
+                }
+
+                match journal.get(2, 0).await {
+                    Err(Error::SectionOutOfRange(2)) => {}
+                    other => panic!("Expected SectionOutOfRange(2), got {:?}", other),
+                }
+
+                // Sections 3-5 should still be accessible
+                assert!(journal.get(3, 0).await.is_ok());
+                assert!(journal.get(4, 0).await.is_ok());
+                assert!(journal.get(5, 0).await.is_ok());
+
+                journal.close().await.expect("Failed to close journal");
+            }
         });
     }
 
