@@ -604,19 +604,6 @@ mod tests {
         plan.run_with_seed::<MinSig>(0);
     }
 
-    //#[test]
-    //fn test_dkg_and_reshare_min_active_large() {
-    //    run_dkg_and_reshare::<MinPk>(20, 14, 100, 14, 4);
-    //    run_dkg_and_reshare::<MinSig>(20, 14, 100, 14, 4);
-    //}
-
-    // #[test]
-    // #[should_panic]
-    // fn test_dkg_and_reshare_insufficient_active() {
-    //     run_dkg_and_reshare::<MinPk>(5, 3, 10, 2, 4);
-    //     run_dkg_and_reshare::<MinSig>(5, 3, 10, 2, 4);
-    // }
-
     #[test]
     fn test_invalid_commitment() {
         // Initialize test
