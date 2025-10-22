@@ -1568,8 +1568,8 @@ mod tests {
                         .remove(dealer_pk)
                         .expect("missing dealer instance after distribution");
                     let dealer_output = dealer.finalize().expect("insufficient acknowledgements");
-                    assert!(
-                        dealer_output.inactive == expected_inactive,
+                    assert_eq!(
+                        dealer_output.inactive, expected_inactive,
                         "inactive set mismatch for dealer in round {round_idx}",
                     );
                     let dealer_pos = dealer_registry.position(dealer_pk).unwrap() as u32;
