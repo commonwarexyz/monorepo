@@ -37,6 +37,7 @@ impl Signers {
     }
 
     /// Returns the length of the bitmap (the size of the participant set).
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.bitmap.len() as usize
     }
