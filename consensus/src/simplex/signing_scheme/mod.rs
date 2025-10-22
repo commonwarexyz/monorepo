@@ -5,18 +5,18 @@
 //! Signing schemes differ in whether they can safely expose per-validator activities and
 //! Byzantine fault evidence:
 //!
-//! - **Attributable schemes** (Ed25519, BLS multisig): Individual signatures can be safely
+//! - **Attributable schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be safely
 //!   exposed as fault evidence. Certificates contain signer indices alongside individual
 //!   or aggregated signatures, enabling secure per-validator activity tracking and
 //!   conflict detection.
 //!
-//! - **Non-attributable schemes** (BLS threshold): Exposing partial signatures as fault
+//! - **Non-attributable schemes** ([`bls12381_threshold`]): Exposing partial signatures as fault
 //!   evidence is not safe. With threshold signatures, any `t` valid partial signatures can
 //!   be used to forge a partial signature for any player, enabling equivocation attacks.
 //!   Per-validator activities and conflict evidence must not be reported to prevent this
 //!   attack vector, though peers can still be blocked locally.
 //!
-//! The `Scheme::is_attributable()` method signals whether fault evidence can be safely
+//! The [`Scheme::is_attributable()`] method signals whether fault evidence can be safely
 //! exposed. The recommended approach is to use [`reporter::AttributableReporter`] which
 //! automatically handles filtering and verification based on scheme attributability.
 
@@ -145,9 +145,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns whether per-validator fault evidence can be safely exposed.
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
-    /// return `true`. Threshold schemes that are vulnerable to signature forgery attacks
-    /// (where `t` partial signatures enable forging signatures for any player) should
-    /// return `false`.
+    /// return `true`.
     ///
     /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
     /// activities.
