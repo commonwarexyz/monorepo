@@ -1422,6 +1422,7 @@ mod tests {
 
                 // Materialize deterministic dealer/player sets (ordered by public key).
                 let player_set = participant_set(&round.players);
+                // Reshares must reuse the exact dealer population from the prior round.
                 let dealer_candidates = if let Some(ref registry) = share_holders {
                     registry.clone()
                 } else {
@@ -1440,6 +1441,7 @@ mod tests {
                     );
                 }
 
+                // Absent dealers must also be members of the eligible dealer set.
                 let absent_set = participant_set(&round.absent_dealers);
                 for absent in absent_set.iter() {
                     assert!(
@@ -1447,6 +1449,7 @@ mod tests {
                         "round {round_idx} absent dealer not in committee",
                     );
                 }
+                // When resharing, ensure every dealer participated in the previous committee.
                 let dealer_registry = if let Some(ref registry) = share_holders {
                     for dealer in dealer_candidates.iter() {
                         assert!(
@@ -1458,6 +1461,7 @@ mod tests {
                 } else {
                     dealer_candidates.clone()
                 };
+                // Track the dealers that are actually active this round.
                 let mut active_dealers = Vec::new();
                 for dealer in dealer_candidates.iter() {
                     if absent_set.position(dealer).is_some() {
@@ -1466,6 +1470,7 @@ mod tests {
                     active_dealers.push(dealer.clone());
                 }
                 let active_len = active_dealers.len();
+                // Initial round needs quorum many dealers; reshares require every prior share holder.
                 let min_dealers = match current_public.as_ref() {
                     None => quorum(player_set.len() as u32),
                     Some(previous) => previous.required(),
@@ -1483,6 +1488,7 @@ mod tests {
                 let mut dealers = BTreeMap::new();
                 let mut dealer_outputs = BTreeMap::new();
                 let mut expected_reveals = BTreeMap::new();
+                // Pre-compute which player indices we expect the dealers to mark inactive.
                 let expected_inactive: Set<u32> = absent_player_set
                     .iter()
                     .map(|player_pk| player_set.position(player_pk).unwrap() as u32)
@@ -1534,6 +1540,7 @@ mod tests {
                     let mut dealer_reveals = Vec::new();
                     {
                         let dealer = dealers.get_mut(dealer_pk).expect("missing dealer instance");
+                        // Deliver per-player shares, capturing reveals for nodes that are offline.
                         for (idx, player_pk) in player_set.iter().enumerate() {
                             let share = shares[idx].clone();
                             if absent_player_set.position(player_pk).is_some() {
@@ -1550,6 +1557,7 @@ mod tests {
                                     "failed to deliver share from dealer {dealer_pk:?} to player {player_pk:?}: {err:?}",
                                 );
                             }
+                            // Honest dealers acknowledge every successful delivery.
                             dealer.ack(player_pk.clone()).unwrap();
                         }
                     }
@@ -1557,6 +1565,7 @@ mod tests {
                     let dealer = dealers
                         .remove(dealer_pk)
                         .expect("missing dealer instance after distribution");
+                    // Dealer must have collected enough acknowledgements before finalizing.
                     let dealer_output = dealer.finalize().expect("insufficient acknowledgements");
                     assert!(
                         dealer_output.inactive == expected_inactive,
@@ -1566,6 +1575,7 @@ mod tests {
                     if !dealer_reveals.is_empty() {
                         expected_reveals.insert(dealer_pos, dealer_reveals.clone());
                     }
+                    // Arbiter receives commitments, membership proofs, and any reveals.
                     arb.commitment(
                         dealer_pk.clone(),
                         commitment,
@@ -1587,6 +1597,7 @@ mod tests {
                 let output = result.unwrap();
                 for (&dealer_idx, _) in output.commitments.iter() {
                     let expected = expected_reveals.remove(&dealer_idx).unwrap_or_default();
+                    // Reveal contents must exactly match the shares we predicted earlier.
                     match output.reveals.get(&dealer_idx) {
                         Some(reveals) => assert_eq!(
                             reveals, &expected,
@@ -1605,6 +1616,7 @@ mod tests {
                     );
                 }
 
+                // Arbiter should pick enough commitments to satisfy the threshold.
                 let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
                 assert_eq!(
                     output.commitments.len(),
@@ -1644,6 +1656,7 @@ mod tests {
                 verify_proof_of_possession::<V>(public_key, &signature)
                     .expect("invalid proof of possession");
 
+                // Persist the newly derived public polynomial and participant state for the next round.
                 current_public = Some(round_results[0].public.clone());
                 share_holders = Some(player_set);
                 participant_states = next_states;
