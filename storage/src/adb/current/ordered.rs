@@ -390,8 +390,8 @@ impl<
         // The digest contains all information from the base mmr, and all information from the peak
         // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
         // all the information we need.
-        let last_chunk = self.status.last_chunk();
-        if last_chunk.1 == 0 {
+        let (last_chunk, next_bit) = self.status.last_chunk();
+        if next_bit == 0 {
             return Ok(mmr_root);
         }
 
@@ -399,13 +399,13 @@ impl<
         // information into the root digest. We do so by computing a root in the same format as an
         // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
         // the last chunk and the digest of the last chunk.
-        hasher.inner().update(last_chunk.0);
+        hasher.inner().update(last_chunk);
         let last_chunk_digest = hasher.inner().finalize();
 
         Ok(BitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
-            last_chunk.1,
+            next_bit,
             &last_chunk_digest,
         ))
     }
@@ -465,12 +465,12 @@ impl<
             chunks.push(chunk);
         }
 
-        let last_chunk = self.status.last_chunk();
-        if last_chunk.1 == 0 {
+        let (last_chunk, next_bit) = self.status.last_chunk();
+        if next_bit == 0 {
             return Ok((proof, ops, chunks));
         }
 
-        hasher.update(last_chunk.0);
+        hasher.update(last_chunk);
         proof.digests.push(hasher.finalize());
 
         Ok((proof, ops, chunks))
@@ -523,9 +523,9 @@ impl<
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk_containing(*loc);
 
-        let last_chunk = self.status.last_chunk();
-        if last_chunk.1 != 0 {
-            hasher.update(last_chunk.0);
+        let (last_chunk, next_bit) = self.status.last_chunk();
+        if next_bit != 0 {
+            hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
 
@@ -561,7 +561,7 @@ impl<
         }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
-        let (last_chunk, last_bit) = self.status.last_chunk();
+        let (last_chunk, next_bit) = self.status.last_chunk();
 
         let span = self.any.get_span(key).await?;
         let (loc, proof_info) = match span {
@@ -594,7 +594,7 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if last_bit != 0 {
+        if next_bit != 0 {
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
@@ -718,9 +718,9 @@ impl<
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk_containing(*loc);
 
-        let last_chunk = self.status.last_chunk();
-        if last_chunk.1 != 0 {
-            hasher.update(last_chunk.0);
+        let (last_chunk, next_bit) = self.status.last_chunk();
+        if next_bit != 0 {
+            hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
 

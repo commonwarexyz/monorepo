@@ -486,9 +486,6 @@ impl<
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
-        if !loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(loc).into());
-        }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
