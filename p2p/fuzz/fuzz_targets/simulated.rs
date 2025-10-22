@@ -111,7 +111,7 @@ fn fuzz(input: FuzzInput) {
                     let key = (idx, peers[idx].clone(), channel_id);
                     if !registered_peer_channels.contains(&key) {
                         if let Ok((sender, receiver)) =
-                            oracle.register(peers[idx].clone(), channel_id as u32).await
+                            oracle.register(peers[idx].clone(), channel_id as u64).await
                         {
                             channels.insert((idx, channel_id), (sender, receiver));
                             registered_peer_channels.insert(key);
