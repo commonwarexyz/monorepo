@@ -1394,6 +1394,14 @@ pub(super) mod test {
                 &root_hash
             ));
 
+            // Try to get historical proof with op_count > number of operations and confirm it
+            // returns RangeOutOfBounds error.
+            assert!(matches!(
+                db.historical_proof(db.op_count() + 1, Location::new_unchecked(5), NZU64!(10))
+                    .await,
+                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+            ));
+
             db.destroy().await.unwrap();
         });
     }

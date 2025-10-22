@@ -935,4 +935,52 @@ mod tests {
             assert!(missing_block.is_none());
         })
     }
+
+    #[test_traced("WARN")]
+    fn test_get_finalization_by_height() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(vec![]),
+                secret,
+                signing_schemes[0].clone().into(),
+            )
+            .await;
+
+            // Before any finalization, get_finalization should be None
+            let finalization = actor.get_finalization(1).await;
+            assert!(finalization.is_none());
+
+            // Finalize a block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+            let round = Round::new(0, 1);
+            actor.verified(round, block.clone()).await;
+            let proposal = Proposal {
+                round,
+                parent: 0,
+                payload: commitment,
+            };
+            let finalization = make_finalization(proposal, &signing_schemes, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            // Get finalization by height
+            let finalization = actor
+                .get_finalization(1)
+                .await
+                .expect("missing finalization by height");
+            assert_eq!(finalization.proposal.parent, 0);
+            assert_eq!(finalization.proposal.round, Round::new(0, 1));
+            assert_eq!(finalization.proposal.payload, commitment);
+
+            assert!(actor.get_finalization(2).await.is_none());
+        })
+    }
 }

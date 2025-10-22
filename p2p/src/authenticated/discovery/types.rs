@@ -31,9 +31,9 @@ pub enum Error {
 ///
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Payload enum value
-/// - 5: Channel varint
+/// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
+pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
 /// Prefix byte used to identify a [Payload] with variant BitVec.
 const BIT_VEC_PREFIX: u8 = 0;
@@ -45,16 +45,19 @@ const DATA_PREFIX: u8 = 2;
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
-/// Configuration when deserializing messages.
+/// Configuration for deserializing [Payload].
 ///
 /// This is used to limit the size of the messages received from peers.
 #[derive(Clone)]
-pub struct Config {
+pub struct PayloadConfig {
+    /// The maximum number of bits that can be sent in a `BitVec` message.
+    pub max_bit_vec: u64,
+
     /// The maximum number of peers that can be sent in a `Peers` message.
     pub max_peers: usize,
 
-    /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bit_vec: u64,
+    /// The maximum length of the data that can be sent in a `Data` message.
+    pub max_data_length: usize,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -102,23 +105,27 @@ impl<C: PublicKey> Write for Payload<C> {
 }
 
 impl<C: PublicKey> Read for Payload<C> {
-    type Cfg = Config;
+    type Cfg = PayloadConfig;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let PayloadConfig {
+            max_bit_vec,
+            max_peers,
+            max_data_length,
+        } = cfg;
+
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
+                let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
                 Ok(Payload::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_range(buf, ..=cfg.max_peers)?;
+                let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
                 Ok(Payload::Peers(peers))
             }
             DATA_PREFIX => {
-                // Don't limit the size of the data to be read.
-                // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..).into())?;
+                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(CodecError::Invalid(
@@ -369,9 +376,6 @@ mod tests {
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
-
-        let too_short = BitVec::decode_cfg(original.encode(), &70);
-        assert!(matches!(too_short, Err(CodecError::InvalidLength(71))));
     }
 
     #[test]
@@ -396,9 +400,10 @@ mod tests {
     #[test]
     fn test_payload_codec() {
         // Config for the codec
-        let cfg = Config {
-            max_peers: 10,
+        let cfg = PayloadConfig {
             max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 100,
         };
 
         // Test BitVec
@@ -442,9 +447,10 @@ mod tests {
 
     #[test]
     fn test_payload_decode_invalid_type() {
-        let cfg = Config {
-            max_peers: 10,
+        let cfg = PayloadConfig {
             max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 100,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
@@ -452,11 +458,56 @@ mod tests {
     }
 
     #[test]
+    fn test_payload_bitvec_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 8,
+            max_peers: 10,
+            max_data_length: 32,
+        };
+        let encoded = Payload::<secp256r1::PublicKey>::BitVec(BitVec {
+            index: 5,
+            bits: BitMap::ones(9),
+        })
+        .encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(9)));
+    }
+
+    #[test]
+    fn test_payload_peers_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 1,
+            max_data_length: 32,
+        };
+        let peers = vec![signed_peer_info(), signed_peer_info()];
+        let encoded = Payload::Peers(peers).encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(2)));
+    }
+
+    #[test]
+    fn test_payload_data_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 4,
+        };
+        let encoded = Payload::<secp256r1::PublicKey>::Data(Data {
+            channel: 1,
+            message: Bytes::from_static(b"hello"),
+        })
+        .encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(5)));
+    }
+
+    #[test]
     fn test_max_payload_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Payload::<secp256r1::PublicKey>::Data(Data {
-            channel: u32::MAX,
+            channel: u64::MAX,
             message,
         });
         assert_eq!(

@@ -10,7 +10,7 @@ use commonware_storage::{
 };
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 50;
+const MAX_MUTATIONS: usize = 50;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum Mutation {
@@ -27,11 +27,27 @@ enum ProofType {
     Bmt,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     num_elements: u8,
     proof: ProofType,
     mutations: Vec<Mutation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_elements = u.arbitrary()?;
+        let proof = u.arbitrary()?;
+        let num_mutations = u.int_in_range(1..=MAX_MUTATIONS)?;
+        let mutations = (0..num_mutations)
+            .map(|_| Mutation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput {
+            num_elements,
+            proof,
+            mutations,
+        })
+    }
 }
 
 fn mutate_proof_bytes<P, C>(proof: &mut P, mutation: &Mutation, cfg: &C)
@@ -125,7 +141,7 @@ fn fuzz(input: FuzzInput) {
                         "Original MMR proof must be valid"
                     );
 
-                    for mutation in input.mutations.iter().take(MAX_OPERATIONS) {
+                    for mutation in &input.mutations {
                         let mut mutated_proof = original_proof.clone();
                         mutate_proof_bytes(&mut mutated_proof, mutation, &256);
 
@@ -164,7 +180,7 @@ fn fuzz(input: FuzzInput) {
                         "Original BMT proof must be valid"
                     );
 
-                    for mutation in input.mutations.iter().take(10) {
+                    for mutation in &input.mutations {
                         let mut mutated_proof = original_proof.clone();
                         mutate_proof_bytes(&mut mutated_proof, mutation, &());
 

@@ -14,14 +14,29 @@ enum Op {
     Insert(Vec<u8>),
     Contains(Vec<u8>),
     Encode(Vec<u8>),
+    DecodeCfg(Vec<u8>, NonZeroU8, NonZeroU16),
     EncodeSize,
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 64;
+
+#[derive(Debug)]
 struct FuzzInput {
     hashers: NonZeroU8,
     bits: NonZeroU16,
     ops: Vec<Op>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let hashers = u.arbitrary()?;
+        let bits = u.arbitrary()?;
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let ops = (0..num_ops)
+            .map(|_| Op::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { hashers, bits, ops })
+    }
 }
 
 fn fuzz(input: FuzzInput) {
@@ -29,7 +44,7 @@ fn fuzz(input: FuzzInput) {
     let mut bf = BloomFilter::new(input.hashers, input.bits.into());
     let mut model: HashSet<Vec<u8>> = HashSet::new();
 
-    for op in input.ops.into_iter().take(64) {
+    for op in input.ops {
         match op {
             Op::Insert(item) => {
                 bf.insert(&item);
@@ -40,6 +55,10 @@ fn fuzz(input: FuzzInput) {
                 if model.contains(&item) {
                     assert!(res);
                 }
+            }
+            Op::DecodeCfg(data, hashers, bits) => {
+                let cfg = (hashers, bits.into());
+                _ = BloomFilter::decode_cfg(&data[..], &cfg);
             }
             Op::Encode(_item) => {
                 let encoded = bf.encode();

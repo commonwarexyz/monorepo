@@ -7,7 +7,7 @@ pub struct Data {
     /// A unique identifier for the channel the message is sent on.
     ///
     /// This is used to route the message to the correct handler.
-    pub channel: u32,
+    pub channel: u64,
 
     /// The payload of the message.
     pub message: Bytes,
