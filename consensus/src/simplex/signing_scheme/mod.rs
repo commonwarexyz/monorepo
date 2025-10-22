@@ -17,12 +17,13 @@
 //!   attack vector, though peers can still be blocked locally.
 //!
 //! The `Scheme::is_attributable()` method signals whether fault evidence can be safely
-//! exposed, allowing the consensus engine to suppress per-validator activity reporting
-//! for schemes vulnerable to signature forgery attacks.
+//! exposed. The recommended approach is to use [`reporter::AttributableReporter`] which
+//! automatically handles filtering and verification based on scheme attributability.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
+pub mod reporter;
 pub mod utils;
 
 use crate::{
@@ -143,11 +144,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// (where `t` partial signatures enable forging signatures for any player) should
     /// return `false`.
     ///
-    /// When `false`, the consensus engine will suppress per-validator activities
-    /// (`Notarize`, `Nullify`, `Finalize`) and conflict evidence (`ConflictingNotarize`,
-    /// `ConflictingFinalize`, `NullifyFinalize`).
-    ///
-    /// Local participation is always tracked regardless of this value.
+    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
+    /// activities.
     fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.

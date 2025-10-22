@@ -1607,11 +1607,7 @@ impl<
                         let me = self.participants[public_key_index as usize] == self.me;
                         let proposal = notarize.proposal.clone();
                         self.handle_notarize(notarize.clone()).await;
-
-                        // Report activity only if it's our own vote or scheme is attributable
-                        if me || self.scheme.is_attributable() {
-                            self.reporter.report(Activity::Notarize(notarize)).await;
-                        }
+                        self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update round info
                         if me {
@@ -1639,11 +1635,7 @@ impl<
                         let public_key_index = nullify.signer();
                         let me = self.participants[public_key_index as usize] == self.me;
                         self.handle_nullify(nullify.clone()).await;
-
-                        // Report activity only if it's our own vote or scheme is attributable
-                        if me || self.scheme.is_attributable() {
-                            self.reporter.report(Activity::Nullify(nullify)).await;
-                        }
+                        self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update round info
                         if me {
@@ -1667,11 +1659,7 @@ impl<
                         let public_key_index = finalize.signer();
                         let me = self.participants[public_key_index as usize] == self.me;
                         self.handle_finalize(finalize.clone()).await;
-
-                        // Report activity only if it's our own vote or scheme is attributable
-                        if me || self.scheme.is_attributable() {
-                            self.reporter.report(Activity::Finalize(finalize)).await;
-                        }
+                        self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update round info
                         //

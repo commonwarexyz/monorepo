@@ -96,10 +96,6 @@ where
             self.participants[leader_index as usize].clone()
         });
     }
-
-    pub fn is_attributable(&self) -> bool {
-        self.scheme.is_attributable()
-    }
 }
 
 impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>

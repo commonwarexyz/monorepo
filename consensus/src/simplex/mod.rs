@@ -538,8 +538,7 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        // For non-attributable schemes, per-validator activities are not reported
-                        if reporter.is_attributable() && notarizers.len() < quorum as usize {
+                        if notarizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -578,8 +577,7 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        // For non-attributable schemes, per-validator activities are not reported
-                        if reporter.is_attributable() && finalizers.len() < quorum as usize {
+                        if finalizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -1419,8 +1417,7 @@ mod tests {
                 assert!(!offline_views.is_empty());
 
                 // Ensure nullifies/nullification collected for offline node
-                // For non-attributable schemes, per-validator activities are not reported
-                if reporter.is_attributable() {
+                {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
@@ -2392,42 +2389,33 @@ mod tests {
             let byz = &validators[0];
             let mut count_conflicting = 0;
             for reporter in reporters.iter() {
+                // Ensure only faults for byz
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert_eq!(faults.len(), 1);
+                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
+                    for (_, faults) in faulter.iter() {
+                        for fault in faults.iter() {
+                            match fault {
+                                Activity::ConflictingNotarize(_) => {
+                                    count_conflicting += 1;
+                                }
+                                Activity::ConflictingFinalize(_) => {
+                                    count_conflicting += 1;
+                                }
+                                _ => panic!("unexpected fault: {fault:?}"),
+                            }
+                        }
+                    }
+                }
+
                 // Ensure no invalid signatures
                 {
                     let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
-
-                let faults = reporter.faults.lock().unwrap();
-                if !reporter.is_attributable() {
-                    // For non-attributable schemes, conflicts are not reported
-                    assert!(faults.is_empty());
-                    continue;
-                }
-
-                // Ensure only faults for byz (only for attributable schemes)
-                assert_eq!(faults.len(), 1);
-                let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                for (_, faults) in faulter.iter() {
-                    for fault in faults.iter() {
-                        match fault {
-                            Activity::ConflictingNotarize(_) => {
-                                count_conflicting += 1;
-                            }
-                            Activity::ConflictingFinalize(_) => {
-                                count_conflicting += 1;
-                            }
-                            _ => panic!("unexpected fault: {fault:?}"),
-                        }
-                    }
-                }
             }
-
-            if reporters[0].is_attributable() {
-                assert!(count_conflicting > 0);
-            } else {
-                assert_eq!(count_conflicting, 0);
-            }
+            assert!(count_conflicting > 0);
 
             // Ensure conflicter is blocked
             let blocked = oracle.blocked().await.unwrap();
@@ -2592,16 +2580,8 @@ mod tests {
                 }
             }
 
-            // For attributable schemes, honest nodes see peer invalid sigs
-            if reporters[0].is_attributable() {
-                assert_eq!(invalid_count, n - 1);
-            } else {
-                // For non-attributable schemes, peer activities aren't reported
-                // but the byzantine node can still see its own invalid activity
-                assert_eq!(invalid_count, 0);
-                let invalid = reporters[0].invalid.lock().unwrap();
-                assert!(*invalid > 0);
-            }
+            // All honest nodes should see invalid signatures from the byzantine node
+            assert_eq!(invalid_count, n - 1);
 
             // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();
@@ -3085,39 +3065,30 @@ mod tests {
             let byz = &validators[0];
             let mut count_nullify_and_finalize = 0;
             for reporter in reporters.iter() {
+                // Ensure only faults for byz
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert_eq!(faults.len(), 1);
+                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
+                    for (_, faults) in faulter.iter() {
+                        for fault in faults.iter() {
+                            match fault {
+                                Activity::NullifyFinalize(_) => {
+                                    count_nullify_and_finalize += 1;
+                                }
+                                _ => panic!("unexpected fault: {fault:?}"),
+                            }
+                        }
+                    }
+                }
+
                 // Ensure no invalid signatures
                 {
                     let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
-
-                let faults = reporter.faults.lock().unwrap();
-                if !reporter.is_attributable() {
-                    // For non-attributable schemes, conflicts are not reported
-                    assert!(faults.is_empty());
-                    continue;
-                }
-
-                // Ensure only faults for byz (only for attributable schemes)
-                assert_eq!(faults.len(), 1);
-                let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                for (_, faults) in faulter.iter() {
-                    for fault in faults.iter() {
-                        match fault {
-                            Activity::NullifyFinalize(_) => {
-                                count_nullify_and_finalize += 1;
-                            }
-                            _ => panic!("unexpected fault: {fault:?}"),
-                        }
-                    }
-                }
             }
-
-            if reporters[0].is_attributable() {
-                assert!(count_nullify_and_finalize > 0);
-            } else {
-                assert_eq!(count_nullify_and_finalize, 0);
-            }
+            assert!(count_nullify_and_finalize > 0);
 
             // Ensure nullifier is blocked
             let blocked = oracle.blocked().await.unwrap();
@@ -3751,187 +3722,6 @@ mod tests {
                 break;
             }
         });
-    }
-
-    fn always_reports_own_activity<S, F>(seed: u64, mut fixture: F)
-    where
-        S: Scheme,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-    {
-        // Create context
-        let n = 4;
-        let required_containers = 10;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
-        let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new()
-            .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
-        let executor = deterministic::Runner::new(cfg);
-        executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                },
-            );
-            network.start();
-
-            // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &validators).await;
-
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut reporters = Vec::new();
-            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
-                let validator = scheme.public_key();
-                let (pending, recovered, resolver) = registrations
-                    .remove(&validator)
-                    .expect("validator should be registered");
-
-                let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
-                    participants: validators.clone().into(),
-                    scheme: signing_schemes[idx_scheme].clone(),
-                };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-                reporters.push(reporter.clone());
-
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
-                    relay: relay.clone(),
-                    participant: validator.clone(),
-                    propose_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(scheme.public_key());
-                let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
-                    scheme: signing_schemes[idx_scheme].clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    partition: validator.to_string(),
-                    mailbox_size: 1024,
-                    epoch: 333,
-                    namespace: namespace.clone(),
-                    leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
-                    skip_timeout,
-                    max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine.start(pending, recovered, resolver);
-            }
-
-            // Wait for all engines to finish
-            let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
-                let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Verify that all nodes tracked their own activity
-            for (idx, reporter) in reporters.iter().enumerate() {
-                let validator = &validators[idx];
-
-                // Each node should have tracked its own notarize votes
-                let notarizes = reporter.notarizes.lock().unwrap();
-                let own_notarize_count: usize = notarizes
-                    .values()
-                    .map(|notarizes| {
-                        notarizes
-                            .values()
-                            .filter(|signers| signers.contains(validator))
-                            .count()
-                    })
-                    .sum();
-                assert!(own_notarize_count > 0);
-
-                // Each node should have tracked its own finalize votes
-                let finalizes = reporter.finalizes.lock().unwrap();
-                let own_finalize_count: usize = finalizes
-                    .values()
-                    .map(|finalizes| {
-                        finalizes
-                            .values()
-                            .filter(|signers| signers.contains(validator))
-                            .count()
-                    })
-                    .sum();
-                assert!(own_finalize_count > 0);
-
-                // For non-attributable schemes, verify no peer activity is tracked
-                if !reporter.is_attributable() {
-                    for (_, notarizes) in notarizes.iter() {
-                        for (_, signers) in notarizes.iter() {
-                            // Should only contain own signature
-                            assert_eq!(signers.len(), 1);
-                            assert!(signers.contains(validator));
-                        }
-                    }
-
-                    for (_, finalizes) in finalizes.iter() {
-                        for (_, signers) in finalizes.iter() {
-                            // Should only contain own signature
-                            assert_eq!(signers.len(), 1);
-                            assert!(signers.contains(validator));
-                        }
-                    }
-                }
-
-                // All schemes should track certificates
-                let notarizations = reporter.notarizations.lock().unwrap();
-                assert!(!notarizations.is_empty());
-
-                let finalizations = reporter.finalizations.lock().unwrap();
-                assert!(!finalizations.is_empty());
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_always_reports_own_activity() {
-        for seed in 0..5 {
-            always_reports_own_activity(seed, bls_threshold_fixture::<MinPk, _>);
-            always_reports_own_activity(seed, bls_threshold_fixture::<MinSig, _>);
-            always_reports_own_activity(seed, bls_multisig_fixture::<MinPk, _>);
-            always_reports_own_activity(seed, bls_multisig_fixture::<MinSig, _>);
-            always_reports_own_activity(seed, ed25519_fixture);
-        }
     }
 
     #[test_traced]

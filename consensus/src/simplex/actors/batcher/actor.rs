@@ -35,7 +35,6 @@ struct Round<
     R: Reporter<Activity = Activity<S, D>>,
 > {
     participants: Participants<P>,
-    attributable_scheme: bool,
 
     blocker: B,
     reporter: R,
@@ -77,7 +76,6 @@ impl<
         // Initialize data structures
         Self {
             participants,
-            attributable_scheme: scheme.is_attributable(),
 
             blocker,
             reporter,
@@ -118,23 +116,19 @@ impl<
                 match self.notarizes[index as usize] {
                     Some(ref previous) => {
                         if previous != &notarize {
-                            if self.attributable_scheme {
-                                let activity = ConflictingNotarize::new(previous.clone(), notarize);
-                                self.reporter
-                                    .report(Activity::ConflictingNotarize(activity))
-                                    .await;
-                            }
+                            let activity = ConflictingNotarize::new(previous.clone(), notarize);
+                            self.reporter
+                                .report(Activity::ConflictingNotarize(activity))
+                                .await;
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
                         false
                     }
                     None => {
-                        if self.attributable_scheme {
-                            self.reporter
-                                .report(Activity::Notarize(notarize.clone()))
-                                .await;
-                        }
+                        self.reporter
+                            .report(Activity::Notarize(notarize.clone()))
+                            .await;
                         self.notarizes[index as usize] = Some(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
@@ -156,12 +150,10 @@ impl<
 
                 // Check if finalized
                 if let Some(ref previous) = self.finalizes[index as usize] {
-                    if self.attributable_scheme {
-                        let activity = NullifyFinalize::new(nullify, previous.clone());
-                        self.reporter
-                            .report(Activity::NullifyFinalize(activity))
-                            .await;
-                    }
+                    let activity = NullifyFinalize::new(nullify, previous.clone());
+                    self.reporter
+                        .report(Activity::NullifyFinalize(activity))
+                        .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
@@ -177,11 +169,9 @@ impl<
                         false
                     }
                     None => {
-                        if self.attributable_scheme {
-                            self.reporter
-                                .report(Activity::Nullify(nullify.clone()))
-                                .await;
-                        }
+                        self.reporter
+                            .report(Activity::Nullify(nullify.clone()))
+                            .await;
                         self.nullifies[index as usize] = Some(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
@@ -203,12 +193,10 @@ impl<
 
                 // Check if nullified
                 if let Some(ref previous) = self.nullifies[index as usize] {
-                    if self.attributable_scheme {
-                        let activity = NullifyFinalize::new(previous.clone(), finalize);
-                        self.reporter
-                            .report(Activity::NullifyFinalize(activity))
-                            .await;
-                    }
+                    let activity = NullifyFinalize::new(previous.clone(), finalize);
+                    self.reporter
+                        .report(Activity::NullifyFinalize(activity))
+                        .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
@@ -218,23 +206,19 @@ impl<
                 match self.finalizes[index as usize] {
                     Some(ref previous) => {
                         if previous != &finalize {
-                            if self.attributable_scheme {
-                                let activity = ConflictingFinalize::new(previous.clone(), finalize);
-                                self.reporter
-                                    .report(Activity::ConflictingFinalize(activity))
-                                    .await;
-                            }
+                            let activity = ConflictingFinalize::new(previous.clone(), finalize);
+                            self.reporter
+                                .report(Activity::ConflictingFinalize(activity))
+                                .await;
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
                         false
                     }
                     None => {
-                        if self.attributable_scheme {
-                            self.reporter
-                                .report(Activity::Finalize(finalize.clone()))
-                                .await;
-                        }
+                        self.reporter
+                            .report(Activity::Finalize(finalize.clone()))
+                            .await;
                         self.finalizes[index as usize] = Some(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
@@ -250,7 +234,6 @@ impl<
     }
 
     async fn add_constructed(&mut self, message: Voter<S, D>) {
-        // We can always report our own votes regardless of scheme attributability.
         match &message {
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer() as usize;
