@@ -134,12 +134,19 @@ pub struct Config<C> {
 ///
 /// ## 2. Data Journal is Source of Truth
 ///
-/// The locations journal may be behind the data journal, but never ahead:
-/// * locations.size() <= data.size() always holds.
-/// * locations.oldest_retained_pos() <= data.oldest_retained_pos() always holds.
+/// The data journal is always the source of truth. The locations journal is an index
+/// that may temporarily diverge during crashes. Divergences are automatically
+/// repaired during init():
+/// * If locations.size() < data.size(): Rebuild missing locations by replaying data.
+///   (This can happen if we crash after writing data journal but before writing locations journal)
+/// * If locations.size() > data.size(): Rewind locations to match data size.
+///   (This can happen if we crash after rewinding data journal but before rewinding locations journal)
+/// * If locations.oldest_retained_pos() < data.oldest_retained_pos(): Prune locations to match
+///   (This can happen if we crash after pruning data journal but before pruning locations journal)
 ///
-/// The order in which we manipulate the journals is important to maintaining these invariants
-/// for crash recovery.
+/// Note that we don't recover from the case where locations.oldest_retained_pos() >
+/// data.oldest_retained_pos(). This should never occur because we always prune the data journal
+/// before the locations journal.
 pub struct Variable<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
@@ -232,13 +239,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// After rewinding to size N, the journal will contain exactly N items,
     /// and the next append will receive position N.
     ///
-    /// # Crash Safety
-    ///
-    /// This method maintains crash-safety by rewinding the locations journal BEFORE
-    /// the data journal to maintain the invariants on `Variable`.
-    ///
-    /// The write ordering is opposite of append (which writes data first, then locations).
-    ///
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
@@ -262,22 +262,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Read the location of the first item to discard (at position 'size').
         let discard_location = self.locations.read(size).await?;
 
-        // Rewind and sync the locations journal before the data journal.
-        // If we didn't do this, we could get into an invalid state in this case:
-        // * rewind() truncates the (new) final section of the data journal and locations journal.
-        // * This truncation is not guaranteed to be persisted until sync() is called on the
-        //   respective journals.
-        // * Then we call sync() and crash after the data journal is synced but before the locations
-        //   journal is synced.
-        // * The final section of the data journal is truncated but the locations journal is not,
-        //   which makes the location journal size > data journal size, which is invalid.
-        self.locations.rewind(size).await?;
-        self.locations.sync().await?;
-
         self.data
             .rewind_to_offset(discard_location.section, discard_location.offset)
             .await?;
-        self.sync_data().await?;
+        self.locations.rewind(size).await?;
 
         // Update our size
         self.size = size;
@@ -318,7 +306,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         // Maintain invariant that all full sections are synced.
         if self.size.is_multiple_of(self.items_per_section) {
-            // Maintain invariant that data journal size >= locations journal size.
             self.data.sync(section).await?;
             self.locations.sync().await?;
         }
@@ -369,7 +356,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Calculate section number
         let min_section = min_position / self.items_per_section;
 
-        // Maintain invariant that data journal oldest position >= locations journal oldest position.
         let pruned = self.data.prune(min_section).await?;
         if pruned {
             self.oldest_retained_pos = min_section * self.items_per_section;
@@ -485,19 +471,16 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// This closes both the data journal and the locations journal.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
-        self.locations.close().await?;
-        self.data.close().await
+        self.data.close().await?;
+        self.locations.close().await
     }
 
     /// Remove any underlying blobs created by the journal.
     ///
     /// This destroys both the data journal and the locations journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        // The locations journal is destroyed first to maintain consistency with the
-        // write-ordering invariant: if interrupted, the data journal will remain with
-        // no locations index, which is automatically repaired by [Variable::init].
-        self.locations.destroy().await?;
-        self.data.destroy().await
+        self.data.destroy().await?;
+        self.locations.destroy().await
     }
 
     /// Return the section number where the next append will write.
@@ -540,14 +523,30 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
-            // Journal never had any elements or is fully pruned.
-            // The locations journal is the only source of truth.
             let size = locations.size().await?;
 
-            // Ensure locations journal is also fully pruned to match empty data
-            if let Some(locations_oldest) = locations.oldest_retained_pos().await? {
-                if locations_oldest < size {
+            if !data.blobs.is_empty() {
+                // A section exists but contains 0 items. This can happen in two cases:
+                // 1. Rewind crash: we rewound the data journal but crashed before rewinding locations
+                // 2. First append crash: we opened the first section blob but crashed before writing to it
+                // In both cases, calculate target position from the first remaining section
+                let first_section = *data.blobs.first_key_value().unwrap().0;
+                let target_pos = first_section * items_per_section;
+
+                info!("crash repair: rewinding locations from {size} to {target_pos}");
+                locations.rewind(target_pos).await?;
+                locations.sync().await?;
+                return Ok((target_pos, target_pos));
+            }
+
+            // data.blobs is empty. This can happen in two cases:
+            // 1. Rewind crash: we completely pruned the data journal but crashed before rewinding
+            //    the locations journal.
+            // 2. The data journal was never opened.
+            if let Some(oldest) = locations.oldest_retained_pos().await? {
+                if oldest < size {
                     // Locations has unpruned entries but data is gone - repair by pruning
+                    info!("crash repair: pruning locations to {size} (prune-all crash)");
                     locations.prune(size).await?;
                     locations.sync().await?;
                 }
@@ -575,14 +574,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             "data journal expected to be non-empty"
         );
 
-        // Validate invariant that data journal size >= locations journal size.
-        let locations_size = locations.size().await?;
-        if locations_size > data_size {
-            return Err(Error::Corruption(format!(
-                "locations ahead of data: locations_size={locations_size} > data_size={data_size}"
-            )));
-        }
-
         // Align pruning state. We always prune the data journal before the locations journal,
         // so we validate that invariant and repair crash faults or detect corruption.
         match locations.oldest_retained_pos().await? {
@@ -600,25 +591,24 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 // Both journals are pruned to the same position.
             }
             None if data_oldest_pos > 0 => {
-                if locations_size == data_oldest_pos {
-                    // We crashed after rewinding the locations journal to the oldest retained
-                    // position but before rewinding the data journal.
-                    info!("crash repair: rebuilding locations from data (rewind crash)");
-                } else {
-                    return Err(Error::Corruption(
-                        "locations journal unexpectedly empty".to_string(),
-                    ));
-                }
+                return Err(Error::Corruption(
+                    "locations journal unexpectedly empty".to_string(),
+                ));
             }
             None => {
                 // Both journals are empty/fully pruned.
             }
         }
 
-        // Rebuild missing locations entries that are missing from the locations journal
-        // because we crashed after writing to the data journal but before writing to the locations journal,
-        // or after rewinding the locations journal but before rewinding the data journal.
-        if locations_size < data_size {
+        let locations_size = locations.size().await?;
+        if locations_size > data_size {
+            // We must have crashed after rewinding the journal and writing the rewound data
+            // journal but before writing the rewound locations journal.
+            info!("crash repair: rewinding locations from {locations_size} to {data_size}");
+            locations.rewind(data_size).await?;
+        } else if locations_size < data_size {
+            // We must have crashed after writing the data journal but before writing the locations
+            // journal.
             Self::add_missing_locations(data, locations, locations_size).await?;
         }
 
@@ -752,7 +742,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
     use test_case::test_case;
@@ -1155,55 +1145,6 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that init() detects and errors on corrupted data in the last section.
-    ///
-    /// Verifies that replay errors (e.g., checksum failures, truncated data) are
-    /// properly propagated during init() rather than being silently ignored.
-    #[test_traced]
-    fn test_variable_init_detects_last_section_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                data_partition: "init_corruption".to_string(),
-                locations_partition: "init_corruption_locations".to_string(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // === Setup: Create journal with data ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..15u64 {
-                journal.append(i * 100).await.unwrap();
-            }
-
-            journal.close().await.unwrap();
-
-            // === Simulate corruption: Truncate the last section blob ===
-            // This simulates a crash that corrupted the last section
-            let last_section_name = 1u64.to_be_bytes();
-            let (blob, size) = context
-                .open(&cfg.data_partition, &last_section_name)
-                .await
-                .unwrap();
-            assert!(size > 10);
-
-            // Truncate to corrupt the data (remove last few bytes)
-            blob.resize(size - 10).await.unwrap();
-            blob.sync().await.unwrap();
-
-            // === Verify: Init should detect corruption and error ===
-            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
-
-            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
