@@ -23,8 +23,13 @@
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
-pub mod reporter;
 pub mod utils;
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+      pub mod reporter;
+    }
+}
 
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
