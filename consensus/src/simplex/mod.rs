@@ -3736,7 +3736,7 @@ mod tests {
 
                     // For attributable schemes, we should see peer activities
                     if signing_schemes[0].is_attributable() {
-                        assert!(signers > 1, "view {}: {}", view, signers);
+                        assert!(signers > 1, "view {view}: {signers}");
                     } else {
                         // For non-attributable, we shouldn't see any peer activities
                         assert_eq!(signers, 0);
