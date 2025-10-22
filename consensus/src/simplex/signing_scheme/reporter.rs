@@ -135,7 +135,8 @@ impl<
         // Verify peer activities if verification is enabled and it's not our local activity
         if self.verify
             && !is_local
-            && !activity.verify(&mut self.rng, &self.scheme, &self.namespace)
+            && !(activity.verified()
+                || activity.verify(&mut self.rng, &self.scheme, &self.namespace))
         {
             // Drop unverified peer activity
             return;
