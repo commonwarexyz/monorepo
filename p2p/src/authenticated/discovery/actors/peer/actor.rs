@@ -21,7 +21,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
@@ -190,7 +190,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            info!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_invalid(&peer))
                                 .inc();
