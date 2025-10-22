@@ -224,375 +224,274 @@ mod tests {
             poly::{self, public},
             variant::{MinPk, MinSig, Variant},
         },
-        ed25519::PrivateKey,
+        ed25519::{PrivateKey, PublicKey as EdPublicKey},
         PrivateKeyExt as _, Signer as _,
     };
-    use arbiter::Output;
     use commonware_utils::{quorum, set::Set};
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
-    fn run_dkg_and_reshare<V: Variant>(
-        n_0: u32,
-        dealers_0: u32,
-        n_1: u32,
-        dealers_1: u32,
-        n_2: u32,
-        dealers_2: u32,
+    #[derive(Clone)]
+    struct Round {
+        dealers: Vec<u64>,
+        players: Vec<u64>,
+    }
+
+    impl From<(Vec<u64>, Vec<u64>)> for Round {
+        fn from((dealers, players): (Vec<u64>, Vec<u64>)) -> Self {
+            Self { dealers, players }
+        }
+    }
+
+    #[derive(Clone)]
+    struct Plan {
+        rounds: Vec<Round>,
         concurrency: usize,
-    ) {
-        // Create shared RNG (for reproducibility)
-        let mut rng = StdRng::seed_from_u64(0);
+    }
 
-        // Create contributors (must be in sorted order)
-        let contributors = (0..n_0)
-            .map(|i| PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Set<_>>();
-
-        // Create dealers
-        let mut dealer_shares = HashMap::new();
-        let mut dealers = HashMap::new();
-        for con in contributors.iter().take(dealers_0 as usize) {
-            let (dealer, commitment, shares) =
-                Dealer::<_, V>::new(&mut rng, None, contributors.clone());
-            dealer_shares.insert(con.clone(), (commitment, shares));
-            dealers.insert(con.clone(), dealer);
+    impl Plan {
+        fn from(rounds: Vec<Round>) -> Self {
+            Self {
+                rounds,
+                concurrency: 4,
+            }
         }
 
-        // Create players
-        let mut players = HashMap::new();
-        for con in &contributors {
-            let player = Player::<_, V>::new(
-                con.clone(),
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                concurrency,
+        fn with_concurrency(mut self, concurrency: usize) -> Self {
+            self.concurrency = concurrency;
+            self
+        }
+
+        fn run_with_seed<V: Variant>(&self, seed: u64) {
+            assert!(
+                !self.rounds.is_empty(),
+                "plan must contain at least one round"
             );
-            players.insert(con.clone(), player);
-        }
 
-        // Create arbiter
-        let mut arb = Arbiter::<_, V>::new(
-            None,
-            contributors.clone(),
-            contributors.clone(),
-            concurrency,
-        );
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut current_public: Option<poly::Public<V>> = None;
+            let mut participant_states: HashMap<u64, player::Output<V>> = HashMap::new();
 
-        // Check ready
-        assert!(!arb.ready());
+            for (round_idx, round) in self.rounds.iter().enumerate() {
+                assert!(
+                    !round.dealers.is_empty(),
+                    "round {} must include at least one dealer",
+                    round_idx
+                );
+                assert!(
+                    !round.players.is_empty(),
+                    "round {} must include at least one player",
+                    round_idx
+                );
 
-        // Send commitments and shares to players
-        for (dealer, mut dealer_obj) in dealers {
-            // Distribute shares to players
-            let (commitment, shares) = dealer_shares.get(&dealer).unwrap().clone();
-            for (player_idx, player) in contributors.iter().enumerate() {
-                // Process share
-                let player_obj = players.get_mut(player).unwrap();
-                player_obj
-                    .share(
-                        dealer.clone(),
-                        commitment.clone(),
-                        shares[player_idx].clone(),
+                let (dealer_set, dealer_ids) = participant_set(&round.dealers);
+                let (player_set, player_ids) = participant_set(&round.players);
+                let min_dealers = match current_public.as_ref() {
+                    None => quorum(player_set.len() as u32),
+                    Some(previous) => previous.required(),
+                } as usize;
+                assert!(
+                    dealer_set.len() >= min_dealers,
+                    "round {} requires at least {} dealers for {} players, got {}",
+                    round_idx,
+                    min_dealers,
+                    player_set.len(),
+                    dealer_set.len()
+                );
+
+                let mut dealers = BTreeMap::new();
+                let mut dealer_outputs = BTreeMap::new();
+                for dealer_pk in dealer_set.iter() {
+                    let dealer_id = dealer_ids
+                        .get(dealer_pk)
+                        .expect("dealer missing identifier");
+                    let previous_share = participant_states
+                        .get(dealer_id)
+                        .map(|out| out.share.clone());
+                    if current_public.is_some() && previous_share.is_none() {
+                        panic!(
+                            "dealer {dealer_id} missing share required for reshare in round {round_idx}"
+                        );
+                    }
+                    if current_public.is_none() && previous_share.is_some() {
+                        panic!(
+                            "dealer {dealer_id} unexpectedly has share before initial round {round_idx}"
+                        );
+                    }
+
+                    let (dealer, commitment, shares) =
+                        Dealer::<_, V>::new(&mut rng, previous_share, player_set.clone());
+                    dealers.insert(dealer_pk.clone(), dealer);
+                    dealer_outputs.insert(dealer_pk.clone(), (commitment, shares));
+                }
+
+                let mut players = BTreeMap::new();
+                for (player_pk, player_id) in player_ids.iter() {
+                    let player = Player::<_, V>::new(
+                        player_pk.clone(),
+                        current_public.clone(),
+                        dealer_set.clone(),
+                        player_set.clone(),
+                        self.concurrency,
+                    );
+                    players.insert(player_pk.clone(), (*player_id, player));
+                }
+
+                let mut arb = Arbiter::<_, V>::new(
+                    current_public.clone(),
+                    dealer_set.clone(),
+                    player_set.clone(),
+                    self.concurrency,
+                );
+
+                for dealer_pk in dealer_set.iter() {
+                    let (commitment, shares) = dealer_outputs
+                        .get(dealer_pk)
+                        .expect("missing dealer output");
+                    let commitment = commitment.clone();
+                    let shares = shares.clone();
+                    {
+                        let dealer = dealers.get_mut(dealer_pk).expect("missing dealer instance");
+                        for (idx, player_pk) in player_set.iter().enumerate() {
+                            let share = shares[idx].clone();
+                            let (_, player_obj) = players
+                                .get_mut(player_pk)
+                                .expect("missing player for share delivery");
+                            player_obj
+                                .share(dealer_pk.clone(), commitment.clone(), share)
+                                .unwrap();
+                            dealer.ack(player_pk.clone()).unwrap();
+                        }
+                    }
+
+                    let dealer = dealers
+                        .remove(dealer_pk)
+                        .expect("missing dealer instance after distribution");
+                    let dealer_output = dealer.finalize().expect("insufficient acknowledgements");
+                    assert!(
+                        dealer_output.inactive.is_empty(),
+                        "inactive players require reveals"
+                    );
+                    arb.commitment(
+                        dealer_pk.clone(),
+                        commitment,
+                        dealer_output.active.into(),
+                        Vec::new(),
                     )
                     .unwrap();
+                }
 
-                // Collect ack
-                dealer_obj.ack(player.clone()).unwrap();
+                assert!(arb.ready(), "arbiter not ready in round {}", round_idx);
+                let (result, disqualified) = arb.finalize();
+                assert!(
+                    disqualified.is_empty(),
+                    "unexpected disqualified dealers in round {}",
+                    round_idx
+                );
+                let output = result.unwrap();
+                assert!(
+                    output.reveals.is_empty(),
+                    "unexpected reveals in round {}",
+                    round_idx
+                );
+
+                let expected_commitments = quorum(dealer_set.len() as u32) as usize;
+                assert_eq!(
+                    output.commitments.len(),
+                    expected_commitments,
+                    "unexpected number of commitments in round {}",
+                    round_idx
+                );
+
+                let mut round_results = Vec::new();
+                let mut next_states = HashMap::new();
+                for player_pk in player_set.iter() {
+                    let (player_id, player_obj) = players.remove(player_pk).unwrap();
+                    let result = player_obj
+                        .finalize(output.commitments.clone(), BTreeMap::new())
+                        .unwrap();
+                    assert_eq!(result.public, output.public);
+                    next_states.insert(player_id, result.clone());
+                    round_results.push(result);
+                }
+
+                assert!(
+                    !round_results.is_empty(),
+                    "round {} produced no outputs",
+                    round_idx
+                );
+
+                let threshold = quorum(player_set.len() as u32);
+                let partials = round_results
+                    .iter()
+                    .map(|res| partial_sign_proof_of_possession::<V>(&res.public, &res.share))
+                    .collect::<Vec<_>>();
+                let signature = threshold_signature_recover::<V, _>(threshold, &partials)
+                    .expect("unable to recover threshold signature");
+                let public_key = public::<V>(&round_results[0].public);
+                verify_proof_of_possession::<V>(public_key, &signature)
+                    .expect("invalid proof of possession");
+
+                current_public = Some(round_results[0].public.clone());
+                participant_states = next_states;
             }
-
-            // Finalize dealer
-            let output = dealer_obj.finalize().unwrap();
-
-            // Ensure no reveals required
-            assert!(output.inactive.is_empty());
-
-            // Send commitment and acks to arbiter
-            arb.commitment(dealer, commitment, output.active.into(), Vec::new())
-                .unwrap();
         }
+    }
 
-        // Check ready
-        assert!(arb.ready());
-
-        // Finalize arbiter
-        let (result, disqualified) = arb.finalize();
-
-        // Verify disqualifications are empty (only occurs if invalid commitment or missing)
-        assert_eq!(disqualified.len(), (n_0 - dealers_0) as usize);
-
-        // Verify result
-        let output: Output<V> = result.unwrap();
-
-        // Ensure right number of commitments picked
-        let expected_commitments = quorum(n_0) as usize;
-        assert_eq!(output.commitments.len(), expected_commitments);
-
-        // Ensure no reveals required
-        assert!(output.reveals.is_empty());
-
-        // Distribute commitments to players and recover public key
-        let mut outputs = HashMap::new();
-        for player in contributors.iter() {
-            let result = players
-                .remove(player)
-                .unwrap()
-                .finalize(output.commitments.clone(), BTreeMap::new())
-                .unwrap();
-            outputs.insert(player.clone(), result);
-        }
-
-        // Test that can generate proof-of-possession
-        let t = quorum(n_0);
-        let partials = outputs
-            .values()
-            .map(|s| partial_sign_proof_of_possession::<V>(&s.public, &s.share))
-            .collect::<Vec<_>>();
-        let signature =
-            threshold_signature_recover::<V, _>(t, &partials).expect("unable to recover signature");
-        let public_key = public::<V>(&outputs.iter().next().unwrap().1.public);
-        verify_proof_of_possession::<V>(public_key, &signature)
-            .expect("invalid proof of possession");
-
-        // Create reshare players (assume no overlap)
-        let reshare_players = (0..n_1)
-            .map(|i| PrivateKey::from_seed((i + n_0) as u64).public_key())
-            .collect::<Set<_>>();
-
-        // Create reshare dealers
-        let mut reshare_shares = HashMap::new();
-        let mut reshare_dealers = HashMap::new();
-        for con in contributors.iter().take(dealers_1 as usize) {
-            let output = outputs.get(con).unwrap();
-            let (dealer, commitment, shares) = Dealer::<_, V>::new(
-                &mut rng,
-                Some(output.share.clone()),
-                reshare_players.clone(),
-            );
-            reshare_shares.insert(con.clone(), (commitment, shares));
-            reshare_dealers.insert(con.clone(), dealer);
-        }
-
-        // Create reshare player objects
-        let mut reshare_player_objs = HashMap::new();
-        for con in &reshare_players {
-            let player = Player::<_, V>::new(
-                con.clone(),
-                Some(output.public.clone()),
-                contributors.clone(),
-                reshare_players.clone(),
-                concurrency,
-            );
-            reshare_player_objs.insert(con.clone(), player);
-        }
-
-        // Create arbiter
-        let mut arb = Arbiter::<_, V>::new(
-            Some(output.public),
-            contributors.clone(),
-            reshare_players.clone(),
-            concurrency,
-        );
-
-        // Check ready
-        assert!(!arb.ready());
-
-        // Send commitments and shares to players
-        for (dealer, mut dealer_obj) in reshare_dealers {
-            // Distribute shares to players
-            let (commitment, shares) = reshare_shares.get(&dealer).unwrap().clone();
-            for (player_idx, player) in reshare_players.iter().enumerate() {
-                // Process share
-                let player_obj = reshare_player_objs.get_mut(player).unwrap();
-                player_obj
-                    .share(
-                        dealer.clone(),
-                        commitment.clone(),
-                        shares[player_idx].clone(),
-                    )
-                    .unwrap();
-
-                // Collect ack
-                dealer_obj.ack(player.clone()).unwrap();
+    fn participant_set(ids: &[u64]) -> (Set<EdPublicKey>, BTreeMap<EdPublicKey, u64>) {
+        let mut map = BTreeMap::new();
+        for &id in ids {
+            let key = PrivateKey::from_seed(id).public_key();
+            if map.insert(key.clone(), id).is_some() {
+                panic!("duplicate participant identifier {id}");
             }
-
-            // Finalize dealer
-            let output = dealer_obj.finalize().unwrap();
-
-            // Ensure no reveals required
-            assert!(output.inactive.is_empty());
-
-            // Send commitment and acks to arbiter
-            arb.commitment(dealer, commitment, output.active.into(), Vec::new())
-                .unwrap();
         }
-
-        // Check ready
-        assert!(arb.ready());
-
-        // Finalize arbiter
-        let (result, disqualified) = arb.finalize();
-
-        // Verify disqualifications are empty (only occurs if invalid commitment)
-        assert_eq!(disqualified.len(), (n_0 - dealers_1) as usize);
-
-        // Verify result
-        let output: Output<V> = result.unwrap();
-
-        // Ensure right number of commitments picked
-        let expected_commitments = quorum(n_0) as usize;
-        assert_eq!(output.commitments.len(), expected_commitments);
-
-        // Ensure no reveals required
-        assert!(output.reveals.is_empty());
-
-        // Distribute commitments to players and recover public key
-        let mut outputs = HashMap::new();
-        for player in reshare_players.iter() {
-            let result = reshare_player_objs
-                .remove(player)
-                .unwrap()
-                .finalize(output.commitments.clone(), BTreeMap::new())
-                .unwrap();
-            assert_eq!(result.public, output.public);
-            outputs.insert(player.clone(), result);
-        }
-
-        // Test that can generate proof-of-possession
-        let t = quorum(n_1);
-        let partials = outputs
-            .values()
-            .map(|s| partial_sign_proof_of_possession::<V>(&s.public, &s.share))
-            .collect::<Vec<_>>();
-        let signature =
-            threshold_signature_recover::<V, _>(t, &partials).expect("unable to recover signature");
-        let public_key = public::<V>(&outputs.values().next().unwrap().public);
-        verify_proof_of_possession::<V>(public_key, &signature)
-            .expect("invalid proof of possession");
-
-        // Create reshare players (assume no overlap)
-        let contributors = reshare_players;
-        let reshare_players = (0..n_2)
-            .map(|i| PrivateKey::from_seed((i + n_0 + n_1) as u64).public_key())
-            .collect::<Set<_>>();
-
-        // Create reshare dealers
-        let mut reshare_shares = HashMap::new();
-        let mut reshare_dealers = HashMap::new();
-        for con in contributors.iter().take(dealers_2 as usize) {
-            let output = outputs.get(con).unwrap();
-            let (dealer, commitment, shares) = Dealer::<_, V>::new(
-                &mut rng,
-                Some(output.share.clone()),
-                reshare_players.clone(),
-            );
-            reshare_shares.insert(con.clone(), (commitment, shares));
-            reshare_dealers.insert(con.clone(), dealer);
-        }
-
-        // Create reshare player objects
-        let mut reshare_player_objs = HashMap::new();
-        for con in &reshare_players {
-            let player = Player::<_, V>::new(
-                con.clone(),
-                Some(output.public.clone()),
-                contributors.clone(),
-                reshare_players.clone(),
-                concurrency,
-            );
-            reshare_player_objs.insert(con.clone(), player);
-        }
-
-        // Create arbiter
-        let mut arb = Arbiter::<_, V>::new(
-            Some(output.public),
-            contributors.clone(),
-            reshare_players.clone(),
-            concurrency,
-        );
-
-        // Check ready
-        assert!(!arb.ready());
-
-        // Send commitments and shares to players
-        for (dealer, mut dealer_obj) in reshare_dealers {
-            // Distribute shares to players
-            let (commitment, shares) = reshare_shares.get(&dealer).unwrap().clone();
-            for (player_idx, player) in reshare_players.iter().enumerate() {
-                // Process share
-                let player_obj = reshare_player_objs.get_mut(player).unwrap();
-                player_obj
-                    .share(
-                        dealer.clone(),
-                        commitment.clone(),
-                        shares[player_idx].clone(),
-                    )
-                    .unwrap();
-
-                // Collect ack
-                dealer_obj.ack(player.clone()).unwrap();
-            }
-
-            // Finalize dealer
-            let output = dealer_obj.finalize().unwrap();
-
-            // Ensure no reveals required
-            assert!(output.inactive.is_empty());
-
-            // Send commitment and acks to arbiter
-            arb.commitment(dealer, commitment, output.active.into(), Vec::new())
-                .unwrap();
-        }
-
-        // Check ready
-        assert!(arb.ready());
-
-        // Finalize arbiter
-        let (result, disqualified) = arb.finalize();
-
-        // Verify disqualifications are empty (only occurs if invalid commitment)
-        assert_eq!(disqualified.len(), (n_1 - dealers_2) as usize);
-
-        // Verify result
-        let output: Output<V> = result.unwrap();
-
-        // Ensure right number of commitments picked
-        let expected_commitments = quorum(n_1) as usize;
-        assert_eq!(output.commitments.len(), expected_commitments);
-
-        // Ensure no reveals required
-        assert!(output.reveals.is_empty());
-
-        // Distribute commitments to players and recover public key
-        let mut outputs = Vec::new();
-        for player in reshare_players.iter() {
-            let result = reshare_player_objs
-                .remove(player)
-                .unwrap()
-                .finalize(output.commitments.clone(), BTreeMap::new())
-                .unwrap();
-            assert_eq!(result.public, output.public);
-            outputs.push(result);
-        }
-
-        // Test that can generate proof-of-possession
-        let t = quorum(n_2);
-        let partials = outputs
-            .iter()
-            .map(|s| partial_sign_proof_of_possession::<V>(&s.public, &s.share))
-            .collect::<Vec<_>>();
-        let signature =
-            threshold_signature_recover::<V, _>(t, &partials).expect("unable to recover signature");
-        let public_key = public::<V>(&outputs[0].public);
-        verify_proof_of_possession::<V>(public_key, &signature)
-            .expect("invalid proof of possession");
+        let set = map.keys().cloned().collect::<Set<_>>();
+        (set, map)
     }
 
     #[test]
     fn test_dkg_and_reshare_all_active() {
-        run_dkg_and_reshare::<MinPk>(5, 5, 10, 5, 15, 10, 4);
-        run_dkg_and_reshare::<MinSig>(5, 5, 10, 5, 15, 10, 4);
+        let plan = Plan::from(vec![
+            Round::from((
+                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
+                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
+            )),
+            Round::from((
+                (0..5).map(|i| i as u64).collect::<Vec<_>>(),
+                (5..15).map(|i| i as u64).collect::<Vec<_>>(),
+            )),
+            Round::from((
+                (5..15).map(|i| i as u64).collect::<Vec<_>>(),
+                (15..30).map(|i| i as u64).collect::<Vec<_>>(),
+            )),
+        ])
+        .with_concurrency(4);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_dkg2_changing_committee() {
+        let plan = Plan::from(vec![
+            Round::from((vec![0_u64, 1, 2], vec![1_u64, 2, 3])),
+            Round::from((vec![1_u64, 2, 3], vec![2_u64, 3, 4])),
+            Round::from((vec![2_u64, 3, 4], vec![0_u64, 1, 2])),
+            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2])),
+        ]);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
+    }
+
+    #[test]
+    fn test_dkg2_increasing_committee() {
+        let plan = Plan::from(vec![
+            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2])),
+            Round::from((vec![0_u64, 1, 2], vec![0_u64, 1, 2, 3])),
+            Round::from((vec![0_u64, 1, 2, 3], vec![0_u64, 1, 2, 3, 4])),
+        ]);
+        plan.run_with_seed::<MinPk>(0);
+        plan.run_with_seed::<MinSig>(0);
     }
 
     //#[test]
