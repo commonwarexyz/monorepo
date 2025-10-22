@@ -461,6 +461,35 @@ mod tests {
     }
 
     #[test]
+    fn test_payload_peers_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 1,
+            max_data_length: 32,
+        };
+        let peers = vec![signed_peer_info(), signed_peer_info()];
+        let encoded = Payload::Peers(peers).encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(2)));
+    }
+
+    #[test]
+    fn test_payload_data_respects_limit() {
+        let cfg = PayloadConfig {
+            max_bit_vec: 1024,
+            max_peers: 10,
+            max_data_length: 4,
+        };
+        let encoded = Payload::<secp256r1::PublicKey>::Data(Data {
+            channel: 1,
+            message: Bytes::from_static(b"hello"),
+        })
+        .encode();
+        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidLength(5)));
+    }
+
+    #[test]
     fn test_max_payload_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();

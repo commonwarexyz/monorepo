@@ -75,6 +75,7 @@ impl Read for Message {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_codec::{Decode as _, Encode as _, Error};
 
     #[test]
     fn test_max_payload_overhead() {
@@ -88,5 +89,35 @@ mod tests {
             payload.encode_size(),
             message_len + MAX_PAYLOAD_DATA_OVERHEAD
         );
+    }
+
+    #[test]
+    fn test_decode_data_within_limit() {
+        let payload = Message::Data(Data {
+            channel: 7,
+            message: Bytes::from_static(b"ping"),
+        });
+        let encoded = payload.encode().freeze();
+
+        let decoded = Message::decode_cfg(encoded, &4).expect("within limit");
+        match decoded {
+            Message::Data(data) => {
+                assert_eq!(data.channel, 7);
+                assert_eq!(data.message, Bytes::from_static(b"ping"));
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_data_exceeding_limit() {
+        let payload = Message::Data(Data {
+            channel: 9,
+            message: Bytes::from_static(b"hello"),
+        });
+        let encoded = payload.encode().freeze();
+
+        let result = Message::decode_cfg(encoded, &4);
+        assert!(matches!(result, Err(Error::InvalidLength(5))));
     }
 }
