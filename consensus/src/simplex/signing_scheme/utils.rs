@@ -36,6 +36,11 @@ impl Signers {
         Self { bitmap }
     }
 
+    /// Returns the length of the bitmap (the size of the participant set).
+    pub fn len(&self) -> usize {
+        self.bitmap.len() as usize
+    }
+
     /// Returns how many validators are marked as signers.
     pub fn count(&self) -> usize {
         self.bitmap.count_ones() as usize

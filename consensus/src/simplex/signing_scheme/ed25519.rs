@@ -59,6 +59,11 @@ impl Scheme {
         context: VoteContext<'a, D>,
         certificate: &'a Certificate,
     ) -> bool {
+        // If the certificate signers length does not match the participant set, return false.
+        if certificate.signers.len() != self.participants.len() {
+            return false;
+        }
+
         // If the certificate signers and signatures counts differ, return false.
         if certificate.signers.count() != certificate.signatures.len() {
             return false;
