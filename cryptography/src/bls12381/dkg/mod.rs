@@ -1702,6 +1702,28 @@ mod tests {
     }
 
     #[test]
+    fn test_reshare_determinism() {
+        let plan_template = || {
+            Plan::from(vec![
+                Round::from((0..5).collect::<Vec<_>>()),
+                Round::from((5..10).collect::<Vec<_>>()),
+            ])
+        };
+
+        let public_a_pk = plan_template().with_seed(1).run::<MinPk>();
+        assert_eq!(public_a_pk, plan_template().with_seed(1).run::<MinPk>());
+        let public_b_pk = plan_template().with_seed(2).run::<MinPk>();
+        assert_eq!(public_b_pk, plan_template().with_seed(2).run::<MinPk>());
+        assert_ne!(public_a_pk, public_b_pk);
+
+        let public_a_sig = plan_template().with_seed(1).run::<MinSig>();
+        assert_eq!(public_a_sig, plan_template().with_seed(1).run::<MinSig>());
+        let public_b_sig = plan_template().with_seed(2).run::<MinSig>();
+        assert_eq!(public_b_sig, plan_template().with_seed(2).run::<MinSig>());
+        assert_ne!(public_a_sig, public_b_sig);
+    }
+
+    #[test]
     fn test_reshare_distinct() {
         let plan = Plan::from(vec![
             Round::from((0..5).collect::<Vec<_>>()),
