@@ -81,7 +81,7 @@ fn fuzz(data: FuzzInput) {
         let mut uncommitted_ops = 0;
         let mut last_committed_op_count = Location::new(0).unwrap();
 
-        for op in data.operations.iter().take(100) {
+        for op in data.operations.iter() {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
