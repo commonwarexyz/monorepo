@@ -116,24 +116,27 @@ pub struct PeerInfo {
     pub address: SocketAddr,
 }
 
-/// A network with a sender, receiver, oracle, and handle.
-pub struct Network<S, R, O> {
+/// Per-peer network stack.
+pub struct PeerNetwork<S, R, O> {
     /// Sender for sending messages to other peers.
     pub sender: S,
     /// Receiver for receiving messages from other peers.
     pub receiver: R,
-    /// Oracle for controlling the network (registering peers, blocking, etc.).
+    /// Oracle for registering peers, blocking peers, etc.
     pub oracle: O,
-    /// Handle to the running network task that can be aborted.
+    /// Handle to the peer task.
     pub handle: Handle<()>,
 }
 
 /// All information and components for a single peer.
+///
+/// The `network` field holds this peer's own networking stack (sender/receiver/oracle/handle).
+/// It is not the global network; each peer has a `PeerNetwork` instance.
 pub struct Peer<S, R, O> {
     /// Peer information (keys and address).
     pub info: PeerInfo,
-    /// Network components for this peer.
-    pub network: Network<S, R, O>,
+    /// Peer network stack.
+    pub network: PeerNetwork<S, R, O>,
 }
 
 /// Trait for abstracting over different p2p network implementations (Discovery, Lookup) during fuzzing.
@@ -169,7 +172,7 @@ pub trait NetworkScheme: Send + 'static {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> impl Future<Output = Network<Self::Sender, Self::Receiver, Self::Oracle>>;
+    ) -> impl Future<Output = PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle>>;
 
     /// Registers a subset of peers under a specific index with the oracle.
     ///
@@ -204,7 +207,7 @@ impl NetworkScheme for Discovery {
         peers: &'a [PeerInfo],
         peer_idx: usize,
         base_port: u16,
-    ) -> Network<Self::Sender, Self::Receiver, Self::Oracle> {
+    ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Collect all peer public keys for potential discovery
         let addresses = peers
             .iter()
@@ -253,7 +256,7 @@ impl NetworkScheme for Discovery {
         // Start the network background task
         let handle = network.start();
 
-        Network {
+        PeerNetwork {
             sender,
             receiver,
             oracle,
@@ -287,7 +290,7 @@ impl NetworkScheme for Lookup {
         peers: &'a [PeerInfo],
         _peer_idx: usize,
         _base_port: u16,
-    ) -> Network<Self::Sender, Self::Receiver, Self::Oracle> {
+    ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
             peer.private_key.clone(),
@@ -330,7 +333,7 @@ impl NetworkScheme for Lookup {
         // Start the network background task
         let handle = network.start();
 
-        Network {
+        PeerNetwork {
             sender,
             receiver,
             oracle,
