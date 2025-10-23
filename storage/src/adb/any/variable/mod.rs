@@ -7,14 +7,12 @@
 use crate::{
     adb::{align_mmr_and_locations, Error},
     index::{Cursor, Index as _, Unordered as Index},
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
+    multijournal::{Config as VConfig, Journal as VJournal},
     store::operation::Variable as Operation,
     translator::Translator,
 };

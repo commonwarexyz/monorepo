@@ -4,11 +4,12 @@
 use crate::{
     adb::{any::fixed::sync::init_journal, Error},
     index::{Index as _, Unordered as Index},
-    journal::{fixed, variable},
+    journal::fixed,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
+    multijournal as variable,
     store::operation::Variable,
     translator::Translator,
 };

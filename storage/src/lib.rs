@@ -24,6 +24,7 @@ cfg_if::cfg_if! {
         pub mod index;
         pub mod journal;
         pub mod metadata;
+        pub mod multijournal;
         pub mod ordinal;
         pub mod rmap;
         pub mod store;

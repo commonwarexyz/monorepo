@@ -61,7 +61,7 @@ pub struct Config<
     /// Number of indices to track below the tip when collecting acks and/or pruning.
     pub activity_timeout: u64,
 
-    /// Partition for the [commonware_storage::journal::variable::Journal].
+    /// Partition for the [commonware_storage::multijournal::Journal].
     pub journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.

@@ -4,7 +4,7 @@
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
 //! pruning.
 //!
-//! _See [crate::journal::variable] for a journal that supports variable length items._
+//! _See [crate::multijournal] for a journal that supports variable length items._
 //!
 //! # Format
 //!
@@ -616,6 +616,55 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         }
 
         Ok(())
+    }
+}
+
+// Implement Journal trait for fixed-length journals
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> super::Journal for Journal<E, A> {
+    type Item = A;
+
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Journal::append(self, item).await
+    }
+
+    async fn size(&self) -> Result<u64, Error> {
+        Journal::size(self).await
+    }
+
+    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
+        Journal::oldest_retained_pos(self).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Journal::prune(self, min_position).await
+    }
+
+    async fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
+        Journal::replay(self, buffer, start_pos).await
+    }
+
+    async fn read(&self, position: u64) -> Result<Self::Item, Error> {
+        Journal::read(self, position).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        Journal::sync(self).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        Journal::close(self).await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        Journal::destroy(self).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Journal::rewind(self, size).await
     }
 }
 

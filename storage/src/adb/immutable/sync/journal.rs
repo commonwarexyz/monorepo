@@ -7,13 +7,13 @@
 //!   `size` from a replay that considers only `[range.start, range.end)`.
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
-use crate::{adb::sync, journal::variable, store::operation::Variable};
+use crate::{adb::sync, multijournal, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
 
-/// Wraps a [variable::Journal] to provide a sync-compatible interface.
+/// Wraps a [multijournal::Journal] to provide a sync-compatible interface.
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
@@ -24,7 +24,7 @@ where
     V: Codec,
 {
     /// Underlying variable journal storing the operations.
-    inner: variable::Journal<E, Variable<K, V>>,
+    inner: multijournal::Journal<E, Variable<K, V>>,
 
     /// Logical operations per storage section.
     items_per_section: NonZeroU64,
@@ -44,12 +44,12 @@ where
     /// Create a new sync-compatible [Journal].
     ///
     /// # Arguments
-    /// * `inner` - The wrapped [variable::Journal], whose logical last operation location is
+    /// * `inner` - The wrapped [multijournal::Journal], whose logical last operation location is
     ///   `size - 1`.
     /// * `items_per_section` - Operations per section.
     /// * `size` - Logical next append location to report.
     pub fn new(
-        inner: variable::Journal<E, Variable<K, V>>,
+        inner: multijournal::Journal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
@@ -60,8 +60,8 @@ where
         }
     }
 
-    /// Return the inner [variable::Journal].
-    pub fn into_inner(self) -> variable::Journal<E, Variable<K, V>> {
+    /// Return the inner [multijournal::Journal].
+    pub fn into_inner(self) -> multijournal::Journal<E, Variable<K, V>> {
         self.inner
     }
 }
