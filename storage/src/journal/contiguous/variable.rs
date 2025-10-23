@@ -48,6 +48,11 @@ const fn position_to_section(
     oldest_retained_pos: u64,
     items_per_section: u64,
 ) -> u64 {
+    assert!(
+        oldest_retained_pos.is_multiple_of(items_per_section),
+        "oldest_retained_pos must be section aligned"
+    );
+
     // Calculate position relative to the oldest retained position
     let relative_position = position - oldest_retained_pos;
 
@@ -506,7 +511,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             }
 
             // data.blobs is empty. This can happen in two cases:
-            // 1. Rewind crash: we completely pruned the data journal but crashed before rewinding
+            // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
             if let Some(oldest) = offsets.oldest_retained_pos().await? {
