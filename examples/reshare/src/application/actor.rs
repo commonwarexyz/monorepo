@@ -125,10 +125,18 @@ where
                             // Re-propose the parent block if it's already at the last height in the epoch.
                             if parent.height == last_block_in_epoch(BLOCKS_PER_EPOCH, round.epoch())
                             {
-                                let result = response.send(parent.digest());
+                                // Set the built block to the parent block
+                                let digest = parent.digest();
+                                {
+                                    let mut built = built.lock().await;
+                                    *built = Some((round.view(), parent));
+                                }
+
+                                // Send the digest to the consensus
+                                let result = response.send(digest);
                                 info!(
                                     ?round,
-                                    digest = ?parent.digest(),
+                                    ?digest,
                                     success = result.is_ok(),
                                     "re-proposed parent block at epoch boundary"
                                 );
