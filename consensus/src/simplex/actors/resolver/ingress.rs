@@ -7,6 +7,7 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
+use tracing::error;
 
 pub enum Message<S: Scheme, D: Digest> {
     Fetch {
@@ -36,33 +37,33 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     pub async fn fetch(&mut self, notarizations: Vec<View>, nullifications: Vec<View>) {
-        self.sender
+        if let Err(err) = self
+            .sender
             .send(Message::Fetch {
                 notarizations,
                 nullifications,
             })
             .await
-            .expect("Failed to send notarizations");
+        {
+            error!(?err, "failed to send fetch message");
+        }
     }
 
     pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
-        self.sender
-            .send(Message::Notarized { notarization })
-            .await
-            .expect("Failed to send notarization");
+        if let Err(err) = self.sender.send(Message::Notarized { notarization }).await {
+            error!(?err, "failed to send notarization message");
+        }
     }
 
     pub async fn nullified(&mut self, nullification: Nullification<S>) {
-        self.sender
-            .send(Message::Nullified { nullification })
-            .await
-            .expect("Failed to send nullification");
+        if let Err(err) = self.sender.send(Message::Nullified { nullification }).await {
+            error!(?err, "failed to send nullification message");
+        }
     }
 
     pub async fn finalized(&mut self, view: View) {
-        self.sender
-            .send(Message::Finalized { view })
-            .await
-            .expect("Failed to send finalized view");
+        if let Err(err) = self.sender.send(Message::Finalized { view }).await {
+            error!(?err, "failed to send finalized view message");
+        }
     }
 }

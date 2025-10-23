@@ -102,6 +102,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     ///
     /// The metadata must store the number of pruned chunks and the pinned digests corresponding to
     /// that pruning boundary.
+    ///
+    /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
+    /// underlying storage error.
     pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
         partition: &str,
@@ -116,12 +119,10 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         let pruned_chunks = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("pruned_chunks bytes could not be converted to u64"),
-            ),
+            Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
+                error!("pruned chunks value not a valid u64");
+                Error::DataCorrupted("pruned chunks value not a valid u64")
+            })?),
             None => {
                 warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
                 0
@@ -130,7 +131,6 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
         let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
 
         let mut pinned_nodes = Vec::new();

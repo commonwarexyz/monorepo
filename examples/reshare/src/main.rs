@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
+use crate::application::{EdScheme, ThresholdScheme};
 use clap::{Args, Parser, Subcommand};
+use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
@@ -43,8 +45,11 @@ pub enum Subcommands {
     /// Set up a new network's participants.
     Setup(SetupArgs),
 
+    /// Run a DKG over ED25519 simplex to distribute initial threshold shares.
+    Dkg(ParticipantArgs),
+
     /// Start a validator node.
-    Validator(ValidatorArgs),
+    Validator(ParticipantArgs),
 }
 
 /// Arguments for the `setup` subcommand.
@@ -70,11 +75,15 @@ pub struct SetupArgs {
     /// added to this base port.
     #[arg(long, default_value_t = 3000)]
     base_port: u16,
+
+    /// Whether or not to set up peers for an initial DKG.
+    #[arg(long, default_value_t = false)]
+    with_dkg: bool,
 }
 
-/// Arguments for the `validator` subcommand.
+/// Arguments for the `validator` and `dkg` subcommand.
 #[derive(Args)]
-pub struct ValidatorArgs {
+pub struct ParticipantArgs {
     /// The path to the participant's configuration file.
     #[arg(long = "cfg")]
     config_path: PathBuf,
@@ -106,7 +115,10 @@ fn main() {
 
         match app.subcommand {
             Subcommands::Setup(args) => setup::run(args),
-            Subcommands::Validator(args) => validator::run(context, args).await,
+            Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
+            Subcommands::Validator(args) => {
+                validator::run::<ThresholdScheme<MinSig>>(context, args).await
+            }
         }
     });
 }
