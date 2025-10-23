@@ -358,7 +358,10 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
                     self.finalizes.push(finalize);
                 }
             }
-            Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
+            Voter::Notarization(_)
+            | Voter::Nullification(_)
+            | Voter::Finalization(_)
+            | Voter::Certification(_, _) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
             }
         }
@@ -675,6 +678,8 @@ pub enum Voter<S: Scheme, D: Digest> {
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization (scheme-specific)
     Finalization(Finalization<S, D>),
+    /// A local record indicating the proposal for this round was certified by the automaton
+    Certification(Round, bool),
 }
 
 impl<S: Scheme, D: Digest> Write for Voter<S, D> {
@@ -704,6 +709,11 @@ impl<S: Scheme, D: Digest> Write for Voter<S, D> {
                 5u8.write(writer);
                 v.write(writer);
             }
+            Voter::Certification(r, b) => {
+                6u8.write(writer);
+                r.write(writer);
+                b.write(writer);
+            }
         }
     }
 }
@@ -717,6 +727,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Voter<S, D> {
             Voter::Nullification(v) => v.encode_size(),
             Voter::Finalize(v) => v.encode_size(),
             Voter::Finalization(v) => v.encode_size(),
+            Voter::Certification(r, b) => r.encode_size() + b.encode_size(),
         }
     }
 }
@@ -751,6 +762,11 @@ impl<S: Scheme, D: Digest> Read for Voter<S, D> {
                 let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Voter::Finalization(v))
             }
+            6 => {
+                let r = Round::read(reader)?;
+                let b = bool::read(reader)?;
+                Ok(Voter::Certification(r, b))
+            }
             _ => Err(Error::Invalid("consensus::simplex::Voter", "Invalid type")),
         }
     }
@@ -767,6 +783,7 @@ impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
             Voter::Nullification(v) => v.epoch(),
             Voter::Finalize(v) => v.epoch(),
             Voter::Finalization(v) => v.epoch(),
+            Voter::Certification(r, _) => r.epoch(),
         }
     }
 }
@@ -782,6 +799,7 @@ impl<S: Scheme, D: Digest> Viewable for Voter<S, D> {
             Voter::Nullification(v) => v.view(),
             Voter::Finalize(v) => v.view(),
             Voter::Finalization(v) => v.view(),
+            Voter::Certification(r, _) => r.view(),
         }
     }
 }

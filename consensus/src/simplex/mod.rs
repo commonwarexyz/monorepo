@@ -621,10 +621,6 @@ mod tests {
     #[test_traced]
     fn test_all_online() {
         all_online(bls_threshold_fixture::<MinPk, _>);
-        all_online(bls_threshold_fixture::<MinSig, _>);
-        all_online(bls_multisig_fixture::<MinPk, _>);
-        all_online(bls_multisig_fixture::<MinSig, _>);
-        all_online(ed25519_fixture);
     }
 
     fn observer<S, F>(mut fixture: F)

@@ -109,6 +109,16 @@ where
             .expect("Failed to send verify");
         receiver
     }
+
+    async fn certify(
+        &mut self,
+        _context: Self::Context,
+        _payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        tx.send(true).unwrap();
+        rx
+    }
 }
 
 impl<H> Relay for Mailbox<H>
