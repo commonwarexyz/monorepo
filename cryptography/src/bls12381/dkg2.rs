@@ -9,7 +9,7 @@ use crate::{
     transcript::Transcript,
     PrivateKey, PublicKey,
 };
-use commonware_codec::{Encode, EncodeSize, Write};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{max_faults, quorum, set::Set};
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
@@ -95,6 +95,21 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
         self.round.write(buf);
         self.players.write(buf);
         self.public.write(buf);
+    }
+}
+
+impl<V: Variant, P: PublicKey> Read for Output<V, P> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &max_players: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            round: ReadExt::read(buf)?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
+            public: Read::read_cfg(buf, &max_players)?,
+        })
     }
 }
 
@@ -229,6 +244,22 @@ impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
     }
 }
 
+impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &max_players: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            round: ReadExt::read(buf)?,
+            previous: Read::read_cfg(buf, &max_players)?,
+            dealers: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct DealerPubMsg<V: Variant> {
     commitment: Public<V>,
@@ -243,6 +274,19 @@ impl<V: Variant> EncodeSize for DealerPubMsg<V> {
 impl<V: Variant> Write for DealerPubMsg<V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commitment.write(buf);
+    }
+}
+
+impl<V: Variant> Read for DealerPubMsg<V> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            commitment: Read::read_cfg(buf, cfg)?,
+        })
     }
 }
 
@@ -271,9 +315,47 @@ impl Write for DealerPrivMsg {
     }
 }
 
+impl Read for DealerPrivMsg {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            share: Read::read_cfg(buf, cfg)?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
+}
+
+impl<P: PublicKey> EncodeSize for PlayerAck<P> {
+    fn encode_size(&self) -> usize {
+        self.sig.encode_size()
+    }
+}
+
+impl<P: PublicKey> Write for PlayerAck<P> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.sig.write(buf);
+    }
+}
+
+impl<P: PublicKey> Read for PlayerAck<P> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            sig: ReadExt::read(buf)?,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -282,10 +364,77 @@ enum AckOrReveal<P: PublicKey> {
     Reveal(Scalar),
 }
 
+impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Ack(x) => x.encode_size(),
+            Self::Reveal(x) => x.encode_size(),
+        }
+    }
+}
+
+impl<P: PublicKey> Write for AckOrReveal<P> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Ack(x) => {
+                1u8.write(buf);
+                x.write(buf);
+            }
+            Self::Reveal(x) => {
+                2u8.write(buf);
+                x.write(buf);
+            }
+        }
+    }
+}
+
+impl<P: PublicKey> Read for AckOrReveal<P> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            1 => Ok(Self::Ack(ReadExt::read(buf)?)),
+            2 => Ok(Self::Reveal(ReadExt::read(buf)?)),
+            x => Err(commonware_codec::Error::InvalidEnum(x)),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<P>>,
+}
+
+impl<V: Variant, P: PublicKey> EncodeSize for DealerLog<V, P> {
+    fn encode_size(&self) -> usize {
+        self.pub_msg.encode_size() + self.results.encode_size()
+    }
+}
+
+impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.pub_msg.write(buf);
+        self.results.write(buf);
+    }
+}
+
+impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &max_players: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            pub_msg: Read::read_cfg(buf, &max_players)?,
+            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players), ()))?,
+        })
+    }
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
