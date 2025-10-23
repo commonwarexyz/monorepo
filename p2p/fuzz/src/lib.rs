@@ -49,11 +49,11 @@ pub struct PeerCtx {
 const MAX_OPERATIONS: usize = 30;
 const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
-const MAX_MSG_SIZE: usize = 1024 * 1024;
+const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
-const MAX_SLEEP_DURATION: u64 = 1000;
+const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
 
 /// Operations that can be performed on the p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -445,8 +445,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         // Messages are sent with the same priority, ensuring FIFO delivery per sender-receiver pair
         let mut expected_msgs: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
 
-        // Peer index --> list of sender indices that have pending messages for this receiver
-        let mut pending_by_receiver: HashMap<u8, Vec<u8>> = HashMap::new();
+        // Track which receivers have pending messages from which senders
+        // Receiver index -> set of sender indices that have pending messages for this receiver
+        let mut pending_by_receiver: HashMap<u8, HashSet<u8>> = HashMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -493,14 +494,15 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                         Recipients::Some(pks)
                     };
 
-                    // Attempt to send the message (always use low priority for FIFO ordering)
+                    // Attempt to send the message
+                    // Note: Always use low priority (false) to ensure FIFO ordering
                     let send_result = peers[from_idx]
                         .network
                         .sender
                         .send(recipients, message.clone(), false)
                         .await;
 
-                    // Only enqueue expectations for recipients that actually accepted the payload
+                    // Track message as expected only if send was accepted
                     if let Ok(accepted_recipients) = send_result {
                         // Map accepted recipient public keys to indices
                         for pk in accepted_recipients.into_iter() {
@@ -512,10 +514,10 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     .push_back(message.clone());
 
                                 // Track that this receiver has pending messages from this sender
-                                let senders = pending_by_receiver.entry(to_idx).or_default();
-                                if !senders.contains(&(from_idx as u8)) {
-                                    senders.push(from_idx as u8);
-                                }
+                                pending_by_receiver
+                                    .entry(to_idx)
+                                    .or_default()
+                                    .insert(from_idx as u8);
                             }
                         }
                     }
@@ -523,18 +525,17 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                 NetworkOperation::ReceiveMessages => {
                     // Attempt to receive one message from each receiver with pending messages
-                    // Strategy: For each receiver, try to receive from ANY sender, then verify
-                    // the message matches expectations for that specific sender
-                    let receivers_with_pending: Vec<u8> = pending_by_receiver.keys().cloned().collect();
+                    let receivers_with_pending: Vec<u8> =
+                        pending_by_receiver.keys().cloned().collect();
 
                     for to_idx in receivers_with_pending {
                         let receiver = &mut peers[to_idx as usize].network.receiver;
 
-                        // Try to receive a message with a timeout
+                        // Try to receive one message with timeout
                         commonware_macros::select! {
                             result = receiver.recv() => {
                                 let Ok((sender_pk, message)) = result else {
-                                    continue; // Receive error (not timeout)
+                                    continue; // Receive error
                                 };
 
                                 // Identify the sender by their public key
@@ -542,7 +543,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     panic!("Received message from unknown sender: {}", sender_pk);
                                 };
 
-                                // Check if we expected a message from this sender to this receiver
+                                // Find the expected queue for this sender-receiver pair
                                 let expected_msgs_key = (to_idx, from_idx);
                                 let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) else {
                                     panic!("No expected messages for this sender-receiver pair");
@@ -550,8 +551,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                                 // Find message in expected queue
                                 if let Some(pos) = queue.iter().position(|m| m == &message) {
-                                    // Remove all messages up to and including this one so we error
-                                    // if they are received in the future (i.e. out of order).
+                                    // Remove all messages up to and including this one
+                                    // Messages before it were implicitly dropped, this one is received
                                     for _ in 0..=pos {
                                         queue.pop_front();
                                     }
@@ -560,9 +561,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     if queue.is_empty() {
                                         expected_msgs.remove(&expected_msgs_key);
                                         if let Some(senders) = pending_by_receiver.get_mut(&to_idx) {
-                                            if let Some(sender_pos) = senders.iter().position(|&x| x == from_idx) {
-                                                senders.remove(sender_pos);
-                                            }
+                                            senders.remove(&from_idx);
                                             if senders.is_empty() {
                                                 pending_by_receiver.remove(&to_idx);
                                             }
@@ -570,14 +569,13 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     }
                                 } else {
                                     panic!(
-                                        "Unexpected message: received message from sender {} to receiver {} that was never sent/tracked. Message len: {}",
+                                        "Unexpected message from sender {} to receiver {}. Message len: {}",
                                         from_idx, to_idx, message.len()
                                     );
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
-                                // Timeout: message didn't arrive in time, continue to next receiver
-                                continue;
+                                continue; // Timeout - message may not have arrived yet
                             },
                         }
                     }

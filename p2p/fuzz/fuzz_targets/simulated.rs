@@ -18,8 +18,8 @@ use std::{
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
-const MAX_SLEEP_DURATION: u64 = 1000;
 const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
+const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
 
 /// Operations that can be performed on the simulated p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -121,7 +121,7 @@ fn fuzz(input: FuzzInput) {
 
         // Create the simulated network and oracle for controlling it
         let (network, mut oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
-        let network_handle = network.start();
+        let _network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation
@@ -134,9 +134,9 @@ fn fuzz(input: FuzzInput) {
             ),
         > = HashMap::new();
 
-        // Track expected messages: (receiver_idx, sender_pk, channel_id) -> queue of messages
+        // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
-        let mut expected: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -163,7 +163,7 @@ fn fuzz(input: FuzzInput) {
                     to_idx,
                     msg_size,
                 } => {
-                    // Normalize indices to valid ranges
+                    // Normalize sender and receiver indices to valid ranges
                     let from_idx = (peer_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
@@ -197,9 +197,9 @@ fn fuzz(input: FuzzInput) {
                         .is_ok();
 
                     // Track message as expected only if send was accepted
-                    // Message may still be dropped by unreliable link
+                    // Note: Message may still be dropped by unreliable link
                     if sent {
-                        expected
+                        expected_msgs
                             .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
                             .or_default()
                             .push_back(message);
@@ -207,43 +207,43 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::ReceiveMessages => {
-                    // Collect unique receiver channels that have pending messages
-                    let receiver_channels: HashSet<(usize, u8)> = expected
+                    // Attempt to receive one message from each receiver channel with pending messages
+                    let receiver_channels: HashSet<(usize, u8)> = expected_msgs
                         .keys()
                         .map(|(to_idx, _sender_pk, channel_id)| (*to_idx, *channel_id))
                         .collect();
 
-                    // Each (receiver_idx, channel_id) is a distinct mailbox receiving from all senders
-                    for (receiver_idx, channel_id) in receiver_channels {
+                    // Each (to_idx, channel_id) is a distinct mailbox receiving from all senders
+                    for (to_idx, channel_id) in receiver_channels {
                         // Skip if receiver hasn't registered this channel
-                        let Some((_, receiver)) = channels.get_mut(&(receiver_idx, channel_id)) else {
+                        let Some((_, receiver)) = channels.get_mut(&(to_idx, channel_id)) else {
                             continue;
                         };
 
                         // Try to receive one message with timeout
                         commonware_macros::select! {
-                            recv_result = receiver.recv() => {
-                                let Ok((sender_pk, message)) = recv_result else {
+                            result = receiver.recv() => {
+                                let Ok((sender_pk, message)) = result else {
                                     continue; // Receive error
                                 };
 
-                                // Find the expected queue for the actual sender who sent this message
-                                let expected_msgs_key = (receiver_idx, sender_pk.clone(), channel_id);
-                                let expected_msgs = expected.get_mut(&expected_msgs_key).expect("Expected queue not found");
+                                // Find the expected queue for this sender-receiver-channel tuple
+                                let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
+                                let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
 
                                 // Verify message is at front of queue (messages per sender must be ordered)
-                                if expected_msgs.front() == Some(&message) {
-                                    expected_msgs.pop_front();
+                                if queue.front() == Some(&message) {
+                                    queue.pop_front();
 
-                                    // Clean up empty queues
-                                    if expected_msgs.is_empty() {
-                                        expected.remove(&expected_msgs_key);
+                                    // Clean up empty queue
+                                    if queue.is_empty() {
+                                        expected_msgs.remove(&expected_msgs_key);
                                     }
                                 } else {
                                     panic!(
                                         "Message out of order from sender {} to receiver {} on channel {}. Expected: {:?}, Got: {:?}",
-                                        sender_pk, receiver_idx, channel_id,
-                                        expected_msgs.front().map(|b| b.len()),
+                                        sender_pk, to_idx, channel_id,
+                                        queue.front().map(|b| b.len()),
                                         message.len()
                                     );
                                 }
@@ -262,7 +262,7 @@ fn fuzz(input: FuzzInput) {
                     jitter,
                     success_rate,
                 } => {
-                    // Normalize indices to valid ranges
+                    // Normalize sender and receiver indices to valid ranges
                     let from_idx = (from_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
@@ -279,7 +279,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::RemoveLink { from_idx, to_idx } => {
-                    // Normalize indices to valid ranges
+                    // Normalize sender and receiver indices to valid ranges
                     let from_idx = (from_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
@@ -290,9 +290,6 @@ fn fuzz(input: FuzzInput) {
                 }
             }
         }
-
-        // Clean up network handler before exiting
-        network_handle.abort();
     });
 }
 
