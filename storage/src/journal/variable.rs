@@ -276,8 +276,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         // Maintain invariant that all full sections are synced.
         if self.size.is_multiple_of(self.items_per_section) {
-            self.data.sync(section).await?;
-            self.offsets.sync().await?;
+            futures::try_join!(self.data.sync(section), self.offsets.sync())?;
         }
 
         Ok(position)
@@ -399,13 +398,27 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             return Err(Error::ItemPruned(position));
         }
 
-        // Read offset from index and calculate section from position
+        // Read offset from journal and calculate section from position
         let offset = self.offsets.read(position).await?;
         let section =
             position_to_section(position, self.oldest_retained_pos, self.items_per_section);
 
         // Read item from data journal
         self.data.get(section, offset).await
+    }
+
+    /// Sync only the data journal to storage, without syncing the offsets journal.
+    ///
+    /// This is faster than `sync()` and can be used to ensure data durability without
+    /// the overhead of syncing the offsets journal.
+    ///
+    /// We call `sync` when appending to a section, so the offsets journal will eventually be
+    /// synced as well, maintaining the invariant that all nonfinal sections are fully synced.
+    /// In other words, the journal will remain in a consistent, recoverable state even if a crash
+    /// occurs after calling this method but before calling `sync`.
+    pub async fn sync_data(&mut self) -> Result<(), Error> {
+        let section = self.current_section();
+        self.data.sync(section).await
     }
 
     /// Sync all pending writes to storage.
@@ -1488,8 +1501,7 @@ mod tests {
             }
 
             // Manually sync only data to simulate crash during concurrent sync
-            let section = journal.current_section();
-            journal.data.sync(section).await.unwrap();
+            journal.sync_data().await.unwrap();
 
             // Simulate a crash (offsets not synced)
             drop(journal);
