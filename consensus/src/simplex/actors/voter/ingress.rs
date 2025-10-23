@@ -1,6 +1,7 @@
 use crate::simplex::{signing_scheme::Scheme, types::Voter};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, stream, SinkExt};
+use tracing::error;
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<S: Scheme, D: Digest> {
@@ -18,11 +19,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     pub async fn verified(&mut self, voters: Vec<Voter<S, D>>) {
-        self.sender
+        if let Err(e) = self
+            .sender
             .send_all(&mut stream::iter(
                 voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
             ))
             .await
-            .expect("Failed to send batch of voters");
+        {
+            error!(error = %e, "failed to send batch of voters");
+        }
     }
 }
