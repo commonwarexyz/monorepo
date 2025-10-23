@@ -693,6 +693,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Apply the commit operation with the new inactivity floor.
         self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
+        self.last_commit = Some(self.op_count() - 1);
 
         // Sync the log and process the updates to the MMR in parallel.
         let section = self.current_section();
@@ -1143,19 +1144,22 @@ pub(super) mod test {
             db.update(d1, v2.clone()).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
 
-            // Confirm close/reopen gets us back to the same state.
+            // Make sure last_commit is updated by changing the metadata back to None.
             db.commit(None).await.unwrap();
+            let metadata = db.get_metadata().await.unwrap();
+            assert_eq!(metadata, Some((Location::new_unchecked(21), None)));
+
+            // Confirm close/reopen gets us back to the same state.
             assert_eq!(db.op_count(), 22);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
+
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.op_count(), 22);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(21), None))
-            );
+            let metadata = db.get_metadata().await.unwrap();
+            assert_eq!(metadata, Some((Location::new_unchecked(21), None)));
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
