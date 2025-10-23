@@ -478,7 +478,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Randomly select num_recipients peers (at least 1, at most all available)
                     available.shuffle(&mut context);
-                    let count = ((num_recipients as usize) % available.len()) + 1;
+                    let count = (num_recipients as usize).clamp(1, available.len());
                     let selected = &available[..count];
 
                     // Build Recipients based on count
