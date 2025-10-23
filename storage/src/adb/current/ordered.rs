@@ -349,6 +349,9 @@ impl<
         self.status.sync(&mut grafter).await?;
 
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
+
+        // Write the pruned portion of the bitmap to disk, which is required for
+        // recovery. Active part is not persisted but restored by reply on restart.
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),

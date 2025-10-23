@@ -233,11 +233,11 @@ fn bench_fixed_init(c: &mut Criterion) {
 
                 c.bench_function(
                     &format!(
-                        "{}/elements={} operations={}, variant={}",
+                        "{}/variant={}, elements={} operations={}",
                         module_path!(),
+                        variant.name(),
                         elements,
                         operations,
-                        variant.name(),
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
