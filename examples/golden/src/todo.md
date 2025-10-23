@@ -1,0 +1,17 @@
+- [X] implement generic broadcast message validation: to be triggered when a generic player receives a message from a generic dealer
+  - [ ] The commitment to the shares of all the players should be accumulated in some way (maybe returned). In this way, once we had correctly validated all n-1 the broadcast messages, we have for free also the public keys of all the players
+  - [ ] The same should be said for the constant term of the dealer committed polynomial: once we have validated all the broadcast messages, we get for free also the group public key
+  - [ ] Maybe we should have a Registry or something like that, where we hold
+    - [ ] A counter counting the number of correctly validated (and accumulated) broadcast messages
+    - [ ] Commitments to the shares of all the players: X_{j,k} -> after processing n-1 messages, this will contain the public keys of all the players
+    - [ ] Commitments to the constant term of each dealer polynomial: A_{j,0} -> after processing n-1 messages, this will contain the group public key
+    - [ ] My decrypted shares received by all the dealers: x_{j,i} -> after processing n-1 messages, this will contain my share of the group secret key
+- [ ] implement specific broadcast message processing: from an incoming broadcast message the player,
+  - [ ] re-computes the random scalar (it is sure that it corresponds to the authentic random scalar thanks to the zk proof, previously validated) 
+  - [ ] decrypts the cyphered share using the recovered random scalar
+  - [ ] accumulates the decrypted share, summing it to the previously accumulated shares
+- [ ] Implement bulletproof zk-proof system for correct random scalar
+  - [ ] Maybe open first a DRAFT PR asking Patrick how to move (as this would require a non-commonware primitive)
+  - [ ] Ask if they want implementation with bulletproofs crate or with a zkSNARK from SP1
+- [ ] Recover the group secret key via collusion of t players: validate the public key against the group public key stored in the Registry
+- [ ] Implement re-sharing
