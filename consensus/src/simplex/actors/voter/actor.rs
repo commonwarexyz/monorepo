@@ -27,6 +27,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
+use commonware_utils::futures::Pool as FuturesPool;
 use core::{future::Future, panic};
 use futures::{
     channel::{mpsc, oneshot},
@@ -1048,16 +1049,25 @@ impl<
 
     /// Handles the successful certification of a proposal.
     async fn certified(&mut self, view: View, success: bool) {
+        // If the view has been pruned, skip safely.
+        let Some(round) = self.views.get_mut(&view) else {
+            debug!(view, reason = "view missing", "dropping certified result");
+            return;
+        };
+
         // Mark proposal as certified
-        let round = self.views.get_mut(&view).unwrap();
         round.certified_proposal = Some(success);
 
         // We should have a notarization for this view,
         // otherwise we would not have asked for certification in the first place.
-        let notarization = round
-            .notarization
-            .as_ref()
-            .expect("certified proposal should have notarization");
+        let Some(notarization) = round.notarization.as_ref() else {
+            debug!(
+                view,
+                reason = "notarization missing",
+                "dropping certified result"
+            );
+            return;
+        };
 
         // Persist certification result for recovery
         if let Some(journal) = self.journal.as_mut() {
@@ -1839,13 +1849,13 @@ impl<
         let mut prev_view: View = self.view;
         let mut pending_propose: Option<Request<D, D>> = None;
         let mut pending_verify: Option<Request<D, bool>> = None;
-        let mut pending_certify: Option<Request<D, bool>> = None;
+        let mut certify_pool: FuturesPool<(Context<D>, Result<bool, oneshot::Canceled>)> =
+            Default::default();
         loop {
             // Drop any pending items if we have moved to a new view
             if prev_view != self.view {
                 pending_propose = None;
                 pending_verify = None;
-                pending_certify = None;
                 prev_view = self.view;
             }
 
@@ -1859,15 +1869,16 @@ impl<
                 pending_verify = self.peer_proposal().await;
             }
 
-            // If needed, check certification of the proposal
-            if pending_certify.is_none() {
-                pending_certify = self.certify().await;
+            // Opportunistically enqueue certification requests (keep across view changes)
+            if let Some(req) = self.certify().await {
+                let ctx = req.context.clone();
+                certify_pool.push(async move { (ctx, req.receiver.await) });
             }
 
             // Prepare waiters
             let propose_wait = Waiter(&mut pending_propose);
             let verify_wait = Waiter(&mut pending_verify);
-            let certify_wait = Waiter(&mut pending_certify);
+            let cert_next = certify_pool.next_completed();
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -1948,10 +1959,7 @@ impl<
                         continue;
                     }
                 },
-                (context, certified) = certify_wait => {
-                    // Clear certify waiter
-                    pending_certify = None;
-
+                (context, certified) = cert_next => {
                     // Return early if the proposal errors
                     if let Err(err) = certified {
                         debug!(?err, round = ?context.round, "failed to certify proposal");
