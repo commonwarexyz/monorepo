@@ -26,7 +26,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{set::Set, NZUsize, NZU32};
+use commonware_utils::{set::Ordered, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
@@ -280,7 +280,7 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        participants: Set<C::PublicKey>,
+        participants: Ordered<C::PublicKey>,
         scheme: S,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
