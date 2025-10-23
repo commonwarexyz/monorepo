@@ -1,0 +1,63 @@
+[package]
+name = "commonware-consensus-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-utils = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+rand = { workspace = true }
+governor = { workspace = true }
+futures-timer = "3.0.3"
+futures = { workspace = true }
+bytes = { workspace = true }
+
+[dependencies.commonware-consensus]
+path = ".."
+features = ["fuzz"]
+
+[[bin]]
+name = "simplex_ed25519"
+path = "fuzz_targets/simplex_ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_minpk"
+path = "fuzz_targets/simplex_bls12381_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_minsig"
+path = "fuzz_targets/simplex_bls12381_minsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
+test = false
+doc = false
+bench = false
