@@ -440,7 +440,8 @@ where
             // Close the mailbox to prevent accepting any new messages.
             drop(self.mailbox);
 
-            // Exit last consensus instance (marshal can serve blocks to anyone still stuck in the epoch)
+            // Exit last consensus instance to avoid useless work while we wait for shutdown (we
+            // won't need to finalize further blocks after the DKG completes).
             orchestrator
                 .report(orchestrator::Message::Exit(current_epoch))
                 .await;
