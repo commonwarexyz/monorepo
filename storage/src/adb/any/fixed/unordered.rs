@@ -456,9 +456,10 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there is not at least one active operation above the inactivity floor.
+    /// Expects there is at least one active operation above the inactivity floor, and returns Error
+    /// otherwise.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
