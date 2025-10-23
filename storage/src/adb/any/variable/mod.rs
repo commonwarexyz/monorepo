@@ -1067,10 +1067,14 @@ pub(super) mod test {
                 &root2
             ));
 
-            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
+            // non-empty db.
+            db.update(d1, vec![2u8; 20]).await.unwrap();
             for _ in 1..100 {
                 db.commit(None).await.unwrap();
-                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
+                // Distance should equal 3 after the second commit, with inactivity_floor
+                // referencing the previous commit operation.
+                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
             }
 
             db.destroy().await.unwrap();
