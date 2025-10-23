@@ -224,7 +224,7 @@ impl ExecutionContext {
             }
             FuzzedOperation::SummarizeAndResume(_) => {
                 let summary = self.transcript.summarize();
-                self.transcript = Transcript::resume(summary.clone());
+                self.transcript = Transcript::resume(summary);
             }
         }
     }
