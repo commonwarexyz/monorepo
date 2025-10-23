@@ -171,6 +171,13 @@ impl<
             hasher: Standard::<H>::new(),
         };
         let last_commit_loc = status.len().checked_sub(1).map(Location::new_unchecked);
+        assert!(
+            last_commit_loc.is_none()
+                || matches!(
+                    any.log.read(*last_commit_loc.unwrap()).await?,
+                    Operation::CommitFloor(_)
+                )
+        );
 
         Ok(Self {
             any,
