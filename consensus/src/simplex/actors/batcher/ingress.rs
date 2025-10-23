@@ -43,13 +43,13 @@ impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
             .await
         {
             error!(?err, "failed to send update message");
-            return false;
+            return true; // default to active
         }
         match active_receiver.await {
             Ok(active) => active,
             Err(err) => {
                 error!(?err, "failed to receive active response");
-                false
+                true // default to active
             }
         }
     }
