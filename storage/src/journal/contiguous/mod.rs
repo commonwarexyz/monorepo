@@ -1,9 +1,10 @@
-//! A contiguous journal interface for position-based append-only logging.
+//! An interface for journaling with position-indexed reads.
 //!
 //! This module includes:
 //!
 //! - [Contiguous]: Trait for append-only log
 //! - [Variable]: Wrapper for [super::variable::Journal] that implements [Contiguous]
+//! - Implementation of [Contiguous] for [super::fixed::Journal]
 
 use super::Error;
 use futures::Stream;

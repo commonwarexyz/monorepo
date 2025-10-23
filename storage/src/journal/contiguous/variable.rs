@@ -591,9 +591,17 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 // Both journals are pruned to the same position.
             }
             None if data_oldest_pos > 0 => {
-                return Err(Error::Corruption(
-                    "locations journal unexpectedly empty".to_string(),
-                ));
+                // Locations journal is empty (size == oldest_retained_pos).
+                // This can happen if we pruned all data, then appended new data, synced the
+                // data journal, but crashed before syncing the locations journal.
+                // We can recover if locations.size() matches data_oldest_pos (proper pruning).
+                let locations_size = locations.size().await?;
+                if locations_size != data_oldest_pos {
+                    return Err(Error::Corruption(format!(
+                        "locations journal empty: size ({locations_size}) != data oldest pos ({data_oldest_pos})"
+                    )));
+                }
+                info!("crash repair: locations journal empty at {data_oldest_pos}");
             }
             None => {
                 // Both journals are empty/fully pruned.
@@ -1428,6 +1436,75 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery from crash after data sync but before locations sync when journal was
+    /// previously emptied by pruning.
+    #[test_traced]
+    fn test_variable_recovery_empty_locations_after_prune_and_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "recovery_empty_after_prune".to_string(),
+                locations_partition: "recovery_empty_after_prune_locations".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Phase 1: Create journal with one full section ===
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 10 items (positions 0-9), fills section 0
+            for i in 0..10u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            assert_eq!(journal.size().await.unwrap(), 10);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+
+            // === Phase 2: Prune to create empty journal ===
+            journal.prune(10).await.unwrap();
+            assert_eq!(journal.size().await.unwrap(), 10);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Empty!
+
+            // === Phase 3: Append directly to data journal to simulate crash ===
+            // Manually append to data journal only (bypassing Variable's append logic)
+            // This simulates the case where data was synced but locations wasn't
+            for i in 10..20u64 {
+                journal.data.append(1, i * 100).await.unwrap();
+            }
+            // Sync the data journal (section 1)
+            journal.data.sync(1).await.unwrap();
+            // Do NOT sync locations journal - simulates crash before locations.sync()
+
+            // Close without syncing locations
+            drop(journal);
+
+            // === Phase 4: Verify recovery succeeds ===
+            let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Should recover from crash after data sync but before locations sync");
+
+            // All data should be recovered
+            assert_eq!(journal.size().await.unwrap(), 20);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+
+            // All items from position 10-19 should be readable
+            for i in 10..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Items 0-9 should be pruned
+            for i in 0..10 {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            }
+
+            journal.destroy().await.unwrap();
         });
     }
 
