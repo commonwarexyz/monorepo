@@ -55,17 +55,6 @@ const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION: u64 = 1000;
 
-/// Modes for selecting message recipients during fuzzing.
-#[derive(Debug, Arbitrary)]
-pub enum RecipientMode {
-    /// Send to all peers except the sender.
-    All,
-    /// Send to exactly one peer.
-    One,
-    /// Send to a random subset of peers.
-    Some,
-}
-
 /// Operations that can be performed on the p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
 pub enum NetworkOperation {
@@ -73,10 +62,8 @@ pub enum NetworkOperation {
     SendMessage {
         /// Index of the peer sending the message.
         from_idx: u8,
-        /// How to select recipients.
-        recipient_mode: RecipientMode,
-        /// Index of the recipient peer (used for `RecipientMode::One`).
-        recipient_idx: u8,
+        /// Number of recipients to send to (randomly selected).
+        num_recipients: u8,
         /// Size of the message payload in bytes.
         msg_size: usize,
     },
@@ -465,8 +452,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             match op {
                 NetworkOperation::SendMessage {
                     from_idx,
-                    recipient_mode,
-                    recipient_idx,
+                    num_recipients,
                     msg_size,
                 } => {
                     // Normalize sender index to valid range
@@ -480,46 +466,31 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     context.fill(&mut bytes[..]);
                     let message = Bytes::from(bytes);
 
-                    // Determine recipients based on the mode
-                    let (recipients, _recipient_indices) = match recipient_mode {
-                        RecipientMode::All => {
-                            // Send to all peers except self
-                            let indices: Vec<u8> = (0..peers.len())
-                                .map(|i| i as u8)
-                                .filter(|&to_idx| to_idx != from_idx as u8)
-                                .collect();
-                            (Recipients::All, indices)
-                        }
-                        RecipientMode::One => {
-                            // Send to exactly one peer
-                            let to_idx = (recipient_idx as usize) % peers.len();
-                            if to_idx == from_idx {
-                                continue;  // Skip if trying to send to self
-                            }
-                            let recipient_pk = peers[to_idx].info.public_key.clone();
-                            (Recipients::One(recipient_pk), vec![to_idx as u8])
-                        }
-                        RecipientMode::Some => {
-                            // Send to a random subset of peers
-                            let mut available: Vec<_> = (0..peers.len())
-                                .filter(|&i| i != from_idx)  // Exclude sender
-                                .collect();
+                    // Select random recipients (excluding sender)
+                    let mut available: Vec<_> = (0..peers.len())
+                        .filter(|&i| i != from_idx)
+                        .collect();
 
-                            if available.is_empty() {
-                                continue;  // Only 1 peer (self) in network, can't send anywhere
-                            }
+                    if available.is_empty() {
+                        continue; // Only 1 peer (self) in network, can't send anywhere
+                    }
 
-                            // Randomly select some subset of peers
-                            available.shuffle(&mut context);
-                            let num_recipients = context.gen_range(1..=available.len());
-                            let selected = &available[..num_recipients];
+                    // Randomly select num_recipients peers (at least 1, at most all available)
+                    available.shuffle(&mut context);
+                    let count = ((num_recipients as usize) % available.len()).max(1);
+                    let selected = &available[..count];
 
-                            let recipients_set: HashSet<_> = selected.iter()
-                                .map(|&idx| peers[idx].info.public_key.clone())
-                                .collect();
-                            let indices: Vec<_> = selected.iter().map(|&idx| idx as u8).collect();
-                            (Recipients::Some(recipients_set.into_iter().collect()), indices)
-                        }
+                    // Build Recipients based on count
+                    let recipients = if count == available.len() {
+                        Recipients::All
+                    } else if count == 1 {
+                        Recipients::One(peers[selected[0]].info.public_key.clone())
+                    } else {
+                        let pks: Vec<_> = selected
+                            .iter()
+                            .map(|&idx| peers[idx].info.public_key.clone())
+                            .collect();
+                        Recipients::Some(pks)
                     };
 
                     // Attempt to send the message (always use low priority for FIFO ordering)
@@ -557,14 +528,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let receivers_with_pending: Vec<u8> = pending_by_receiver.keys().cloned().collect();
 
                     for to_idx in receivers_with_pending {
-                        // Safety check: ensure receiver index is valid
-                        if to_idx as usize >= peers.len() {
-                            continue;
-                        }
-
                         let receiver = &mut peers[to_idx as usize].network.receiver;
 
-                        // Try to receive one message with a timeout
+                        // Try to receive a message with a timeout
                         commonware_macros::select! {
                             result = receiver.recv() => {
                                 let Ok((sender_pk, message)) = result else {
@@ -584,8 +550,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                                 // Find message in expected queue
                                 if let Some(pos) = queue.iter().position(|m| m == &message) {
-                                    // Remove all messages up to and including this one
-                                    // Messages before it were dropped (implicitly), this one is received
+                                    // Remove all messages up to and including this one so we error
+                                    // if they are received in the future (i.e. out of order).
                                     for _ in 0..=pos {
                                         queue.pop_front();
                                     }
@@ -626,11 +592,11 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     // Normalize parameters to valid ranges
                     let peer_idx = (peer_idx as usize) % peers.len();
                     let index = index % MAX_INDEX;
-                    let num_peers = (peer_set_size as usize).clamp(1, topology.peers.len());
+                    let peer_set_size = (peer_set_size as usize).clamp(1, topology.peers.len());
 
                     // Build a random subset of peer IDs (using a set to avoid duplicates)
                     let mut peer_ids = HashSet::new();
-                    for _ in 0..num_peers {
+                    for _ in 0..peer_set_size {
                         let id = context.gen::<usize>() % topology.peers.len();
                         peer_ids.insert(id as PeerId);
                     }
