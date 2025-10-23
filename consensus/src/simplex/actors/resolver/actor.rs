@@ -24,7 +24,10 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_utils::set::Set;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::{
+    encoding::{EncodeLabelSet, EncodeLabelValue},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
+};
 use rand::{seq::IteratorRandom, CryptoRng, Rng};
 use std::{
     cmp::Ordering,
@@ -34,10 +37,30 @@ use std::{
 use tracing::{debug, warn};
 
 /// Task in the required set.
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, EncodeLabelValue)]
 enum Task {
     Notarization,
     Nullification,
+}
+
+/// Metric label that indicates the type of task.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TaskLabel {
+    task: Task,
+}
+
+impl TaskLabel {
+    fn notarization() -> &'static Self {
+        &Self {
+            task: Task::Notarization,
+        }
+    }
+
+    fn nullification() -> &'static Self {
+        &Self {
+            task: Task::Nullification,
+        }
+    }
 }
 
 /// Entry in the required set.
@@ -130,9 +153,9 @@ pub struct Actor<
     fetch_concurrent: usize,
     requester: requester::Requester<E, P>,
 
-    unfulfilled: Gauge,
+    unfulfilled: Family<TaskLabel, Gauge>,
     outstanding: Gauge,
-    served: Counter,
+    served: Family<TaskLabel, Counter>,
 }
 
 impl<
@@ -156,9 +179,9 @@ impl<
         requester.reconcile(participants.as_ref());
 
         // Initialize metrics
-        let unfulfilled = Gauge::default();
+        let unfulfilled = Family::default();
         let outstanding = Gauge::default();
-        let served = Counter::default();
+        let served = Family::default();
         context.register(
             "unfulfilled",
             "unfulfilled notarizations/nullifications",
@@ -330,8 +353,23 @@ impl<
         let mut current_view = 0;
         let mut finalized_view = 0;
         loop {
+            // Record unfulfilled metric by task type
+            let mut unfulfilled_notarizations = 0;
+            let mut unfulfilled_nullifications = 0;
+            for entry in &self.required {
+                match entry.task {
+                    Task::Notarization => unfulfilled_notarizations += 1,
+                    Task::Nullification => unfulfilled_nullifications += 1,
+                }
+            }
+            self.unfulfilled
+                .get_or_create(TaskLabel::notarization())
+                .set(unfulfilled_notarizations);
+            self.unfulfilled
+                .get_or_create(TaskLabel::nullification())
+                .set(unfulfilled_nullifications);
+
             // Record outstanding metric
-            self.unfulfilled.set(self.required.len() as i64);
             self.outstanding.set(self.requester.len() as i64);
 
             // Set timeout for retry
@@ -472,7 +510,7 @@ impl<
                                 if let Some(notarization) = self.notarizations.get(&view) {
                                     notarizations.push(view);
                                     notarizations_found.push(notarization.clone());
-                                    self.served.inc();
+                                    self.served.get_or_create(TaskLabel::notarization()).inc();
                                 } else {
                                     missing_notarizations.push(view);
                                 }
@@ -483,7 +521,7 @@ impl<
                                 if let Some(nullification) = self.nullifications.get(&view) {
                                     nullifications.push(view);
                                     nullifications_found.push(nullification.clone());
-                                    self.served.inc();
+                                    self.served.get_or_create(TaskLabel::nullification()).inc();
                                 } else {
                                     missing_nullifications.push(view);
                                 }
