@@ -30,6 +30,19 @@ pub enum PartitionStrategy {
     Linear,
 }
 
+impl PartialEq for PartitionStrategy {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PartitionStrategy::Connected, PartitionStrategy::Connected) => true,
+            (PartitionStrategy::Isolated, PartitionStrategy::Isolated) => true,
+            (PartitionStrategy::TwoPartitionsWithByzantine, PartitionStrategy::TwoPartitionsWithByzantine) => true,
+            (PartitionStrategy::ManyPartitionsWithByzantine, PartitionStrategy::ManyPartitionsWithByzantine) => true,
+            (PartitionStrategy::Linear, PartitionStrategy::Linear) => true,
+            _ => false,
+        }
+    }
+}
+
 impl PartitionStrategy {
     pub fn create(&self) -> Option<fn(usize, usize, usize) -> bool> {
         match self {

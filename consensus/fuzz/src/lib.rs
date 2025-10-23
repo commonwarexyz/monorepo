@@ -33,7 +33,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{max_faults, NZUsize, NZU32};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use governor::Quota;
 use std::{
@@ -65,10 +65,6 @@ where
 
     fn namespace() -> Vec<u8> {
         b"consensus_fuzz".to_vec()
-    }
-
-    fn node_count() -> u32 {
-        4
     }
 
     fn required_containers() -> u64 {
@@ -128,14 +124,35 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     }
 }
 
-#[derive(Debug, Arbitrary, Clone)]
+#[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub seed: u64,
     pub partition: PartitionStrategy,
+    pub configuration: (u32, u32, u32), // (all nodes, correct nodes, faulty nodes)
+}
+
+impl Arbitrary<'_> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // (all nodes, correct nodes, faulty nodes)
+        let test_cases = [(3, 2, 1), (4, 3, 1)];
+
+        let configuration = if test_cases.is_empty() {
+            return Err(arbitrary::Error::NotEnoughData);
+        } else {
+            let index = u.int_in_range(0..=(test_cases.len() - 1))?;
+            test_cases[index]
+        };
+
+        Ok(Self {
+            seed: u.arbitrary()?,
+            partition: u.arbitrary()?,
+            configuration,
+        })
+    }
 }
 
 fn run_fuzz<P: Simplex>(input: FuzzInput) {
-    let n = P::node_count();
+    let (n, _, f) = input.configuration;
     let required_containers = P::required_containers();
     let namespace = P::namespace();
     let cfg = deterministic::Config::new().with_seed(input.seed);
@@ -154,7 +171,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         network.start();
 
         // Register participants
-        let (mut validator_keys, validators, mut signing_schemes, _) = P::fixture(&mut context, n);
+        let (validator_keys, validators, signing_schemes, _) = P::fixture(&mut context, n);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
         // Link validators.
@@ -177,40 +194,41 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
 
-        // Start a consensus engine for the fuzzing actor (first validator).
-        let ed25519_key = validator_keys.remove(0);
-        let scheme = signing_schemes.remove(0);
-        let validator = validators[0].clone(); // Don't remove from the validator list
-        let context = context.with_label(&format!("validator-{}", ed25519_key.public_key()));
-        let reporter_config = reporter::Config {
-            namespace: namespace.clone(),
-            participants: validators.clone().into(),
-            scheme: scheme.clone(),
-        };
-        let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-
-        let (pending, _recovered, _resolver) = registrations
-            .remove(&validator)
-            .expect("validator should be registered");
-        let actor = Disrupter::<_, _, Sha256Digest>::new(
-            context.with_label("fuzzing_actor"),
-            ed25519_key,
-            scheme,
-            reporter,
-            namespace.clone(),
-            input.seed,
-        );
-        actor.start(pending);
-
-        // Start regular consensus engines for the remaining validators.
-        for (idx_key, private_key) in validator_keys.into_iter().enumerate() {
-            let validator = private_key.public_key();
+        for i in 0..f as usize {
+            let private_key = validator_keys[i].clone();
+            let scheme = signing_schemes[i].clone();
+            let validator = validators[i].clone();
             let context = context.with_label(&format!("validator-{}", private_key.public_key()));
-            let idx_scheme = idx_key; // We already removed the first scheme, so indices align
             let reporter_config = reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone().into(),
-                scheme: signing_schemes[idx_scheme].clone(),
+                scheme: scheme.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+
+            let (pending, _recovered, _resolver) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
+            let actor = Disrupter::<_, _, Sha256Digest>::new(
+                context.with_label("fuzzing_actor"),
+                private_key,
+                scheme,
+                reporter,
+                namespace.clone(),
+                input.seed,
+            );
+            actor.start(pending);
+        }
+
+        // Start regular consensus engines for the remaining correct validators.
+        for i in (f as usize)..(n as usize) {
+            let private_key = &validator_keys[i];
+            let validator = validators[i].clone();
+            let context = context.with_label(&format!("validator-{}", private_key.public_key()));
+            let reporter_config = reporter::Config {
+                namespace: namespace.clone(),
+                participants: validators.clone().into(),
+                scheme: signing_schemes[i].clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             reporters.push(reporter.clone());
@@ -233,7 +251,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 me: validator.clone(),
                 blocker,
                 participants: validators.clone().into(),
-                scheme: signing_schemes[idx_scheme].clone(),
+                scheme: signing_schemes[i].clone(),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -258,28 +276,26 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        match input.partition {
-            PartitionStrategy::Connected => {
-                // Wait for all engines to finish
-                let mut finalizers = Vec::new();
-                for reporter in reporters.iter_mut() {
-                    let (mut latest, mut monitor): (View, Receiver<View>) =
-                        reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
-                        }
-                    }));
-                }
-                join_all(finalizers).await;
+        if input.partition == PartitionStrategy::Connected && max_faults(n) == f {
+            // Wait for all engines to finish if there are at least 3 correct validators
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
             }
-            _ => {
-                context.sleep(Duration::from_secs(5)).await;
-            }
+            join_all(finalizers).await;
+        } else {
+            // Just wait for a while if the validators are not fully connected
+            // or if there are only 2 correct validators
+            context.sleep(Duration::from_secs(10)).await;
         }
 
-        let replica_states = extract_simplex_state(reporters);
-        check_invariants(n, replica_states);
+        let states = extract_simplex_state(reporters);
+        check_invariants(n, states);
     });
 }
 
