@@ -32,7 +32,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
 
     pub async fn update(&mut self, current: View, leader: P, finalized: View) -> bool {
         let (active, active_receiver) = oneshot::channel();
-        if let Err(e) = self
+        if let Err(err) = self
             .sender
             .send(Message::Update {
                 current,
@@ -42,21 +42,21 @@ impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
             })
             .await
         {
-            error!(error = %e, "failed to send update message");
+            error!(?err, "failed to send update message");
             return false;
         }
         match active_receiver.await {
             Ok(active) => active,
-            Err(e) => {
-                error!(error = %e, "failed to receive active response");
+            Err(err) => {
+                error!(?err, "failed to receive active response");
                 false
             }
         }
     }
 
     pub async fn constructed(&mut self, message: Voter<S, D>) {
-        if let Err(e) = self.sender.send(Message::Constructed(message)).await {
-            error!(error = %e, "failed to send constructed message");
+        if let Err(err) = self.sender.send(Message::Constructed(message)).await {
+            error!(?err, "failed to send constructed message");
         }
     }
 }
