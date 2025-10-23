@@ -205,12 +205,12 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let active_participants = Set::from_iter(dealers);
+        let dealers = Set::from_iter(dealers);
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
             share: current_share.clone(),
-            participants: active_participants.clone(),
+            participants: dealers.clone(),
         };
         orchestrator
             .report(orchestrator::Message::Enter(transition))
@@ -224,7 +224,7 @@ where
             current_public,
             current_share,
             &mut self.signer,
-            active_participants,
+            dealers,
             Set::from_iter(players),
             &mut dkg_mux,
             self.rate_limit,
