@@ -215,29 +215,6 @@ impl<
         Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-
-        assert!(loc < self.op_count());
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        Ok(self.log.read(*loc).await?.into_value())
-    }
-
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
@@ -255,6 +232,11 @@ impl<
     /// yet committed.
     pub fn op_count(&self) -> Location {
         self.mmr.leaves()
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -402,7 +384,7 @@ impl<
         // previous commit becoming inactive.
         let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
-            if self.snapshot.keys() == 0 {
+            if self.is_empty() {
                 self.inactivity_floor_loc = self.op_count();
                 info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
@@ -792,7 +774,7 @@ pub(super) mod test {
             // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
-            assert_eq!(db.snapshot.keys(), 0);
+            assert!(db.is_empty());
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();

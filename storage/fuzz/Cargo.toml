@@ -98,8 +98,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "adb_current_operations"
-path = "fuzz_targets/adb_current_operations.rs"
+name = "current_unordered_operations"
+path = "fuzz_targets/current_unordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_ordered_operations"
+path = "fuzz_targets/current_ordered_operations.rs"
 test = false
 doc = false
 bench = false
