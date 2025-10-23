@@ -27,7 +27,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::futures::{AbortablePool, Aborter};
 use core::{future::Future, panic};
 use futures::{
     channel::{mpsc, oneshot},
@@ -38,7 +38,7 @@ use prometheus_client::metrics::{
 };
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
     pin::Pin,
     sync::{atomic::AtomicI64, Arc},
@@ -60,12 +60,12 @@ enum Action {
 }
 
 /// A outstanding request to the automaton.
-struct Request<D: Digest, R> {
+struct Request<D: Digest, R>(
     /// Attached context for the pending item.
-    context: Context<D>,
+    Context<D>,
     /// Oneshot receiver that the automaton is expected to respond over.
-    receiver: oneshot::Receiver<R>,
-}
+    oneshot::Receiver<R>,
+);
 
 /// Adapter that polls an [Option<Request<D, R>>] in place.
 struct Waiter<'a, D: Digest, R>(&'a mut Option<Request<D, R>>);
@@ -77,8 +77,8 @@ impl<'a, D: Digest, R> Future for Waiter<'a, D, R> {
         let Waiter(slot) = self.get_mut();
         match slot.as_mut() {
             None => Poll::Pending,
-            Some(p) => match Pin::new(&mut p.receiver).poll(cx) {
-                Poll::Ready(res) => Poll::Ready((p.context.clone(), res)),
+            Some(Request(ctx, ref mut receiver)) => match Pin::new(receiver).poll(cx) {
+                Poll::Ready(res) => Poll::Ready((ctx.clone(), res)),
                 Poll::Pending => Poll::Pending,
             },
         }
@@ -103,9 +103,11 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     requested_proposal_verify: bool,
     verified_proposal: bool,
 
-    // True if-and-only-if the proposal has been certified as safe to finalize by the automaton.
-    requested_proposal_certify: bool,
-    certified_proposal: Option<bool>, // None if not responded yet
+    // Some if the automaton has been requested to certify the proposal.
+    // When the round is pruned, the aborter is dropped and automatically cancels the request.
+    certify_handle: Option<Aborter>,
+    // None if not responded yet
+    certified_proposal: Option<bool>,
 
     requested_proposal_build: bool,
     proposal: Option<Proposal<D>>,
@@ -161,7 +163,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             requested_proposal_verify: false,
             verified_proposal: false,
 
-            requested_proposal_certify: false,
+            certify_handle: None,
             certified_proposal: None,
 
             proposal: None,
@@ -438,7 +440,7 @@ pub struct Actor<
     notarization_latency: Histogram,
     finalization_latency: Histogram,
     recover_latency: histogram::Timed<E>,
-    pending_certifications: Vec<View>,
+    certification_candidates: BTreeSet<View>,
 }
 
 impl<
@@ -541,7 +543,7 @@ impl<
                 notarization_latency,
                 finalization_latency,
                 recover_latency: histogram::Timed::new(recover_latency, clock),
-                pending_certifications: Vec::new(),
+                certification_candidates: BTreeSet::new(),
             },
             mailbox,
         )
@@ -717,7 +719,7 @@ impl<
             parent: (parent_view, parent_payload),
         };
         let receiver = self.automaton.propose(context.clone()).await;
-        Some(Request { context, receiver })
+        Some(Request(context, receiver))
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -975,14 +977,14 @@ impl<
         let round = self.views.get_mut(&context.view()).unwrap();
         round.requested_proposal_verify = true;
         let receiver = self.automaton.verify(context.clone(), payload).await;
-        Some(Request { context, receiver })
+        Some(Request(context, receiver))
     }
 
     async fn certify(&mut self, view: View) -> Option<Request<D, bool>> {
         let round = self.views.get_mut(&view)?;
 
-        // Request certification only once.
-        if round.requested_proposal_certify || round.certified_proposal.is_some() {
+        // Request certification only once
+        if round.certify_handle.is_some() || round.certified_proposal.is_some() {
             return None;
         }
 
@@ -1009,14 +1011,8 @@ impl<
             .certify(context.clone(), proposal.payload)
             .await;
 
-        // Set that we requested certification
-        self.views
-            .get_mut(&view)
-            .unwrap()
-            .requested_proposal_certify = true;
-
-        // Return request
-        Some(Request { context, receiver })
+        // Return request. We'll store the handle when pushing to the pool.
+        Some(Request(context, receiver))
     }
 
     /// Handles the successful verification of a proposal.
@@ -1227,13 +1223,12 @@ impl<
                     .await
                     .expect("unable to append to journal");
             }
+
+            // Record that this view may be eligible for certification.
+            self.certification_candidates.insert(view);
         }
 
         // Do not yet move to the next view, we need to wait for certification.
-
-        // Queue certification attempt for this view. We'll enqueue the actual
-        // automaton request in the main loop to avoid holding &mut self across await.
-        self.pending_certifications.push(view);
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1848,18 +1843,8 @@ impl<
             .update(observed_view, leader, self.last_finalized)
             .await;
 
-        // Initialize certification pool and backfill any missing certifications after startup
-        let mut certify_pool: FuturesPool<(Context<D>, Result<bool, oneshot::Canceled>)> =
-            Default::default();
-        {
-            let views_to_scan: Vec<View> = self.views.keys().cloned().collect();
-            for view in views_to_scan {
-                if let Some(req) = self.certify(view).await {
-                    let ctx = req.context.clone();
-                    certify_pool.push(async move { (ctx, req.receiver.await) });
-                }
-            }
-        }
+        // Seed candidates with currently tracked views.
+        self.certification_candidates = self.views.keys().copied().collect();
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
@@ -1868,6 +1853,8 @@ impl<
         let mut prev_view: View = self.view;
         let mut pending_propose: Option<Request<D, D>> = None;
         let mut pending_verify: Option<Request<D, bool>> = None;
+        let mut certify_pool: AbortablePool<(Context<D>, Result<bool, oneshot::Canceled>)> =
+            Default::default();
         loop {
             // Drop any pending items if we have moved to a new view
             if prev_view != self.view {
@@ -1887,23 +1874,30 @@ impl<
             }
 
             // Opportunistically enqueue certification requests (keep across view changes)
-            if let Some(req) = self.certify(self.view).await {
-                let ctx = req.context.clone();
-                certify_pool.push(async move { (ctx, req.receiver.await) });
+            if let Some(Request(ctx, receiver)) = self.certify(self.view).await {
+                let v = ctx.view();
+                let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                if let Some(round) = self.views.get_mut(&v) {
+                    round.certify_handle = Some(handle);
+                }
             }
 
             // Drain pending certifications triggered by notarizations
-            while let Some(v) = self.pending_certifications.pop() {
-                if let Some(req) = self.certify(v).await {
-                    let ctx = req.context.clone();
-                    certify_pool.push(async move { (ctx, req.receiver.await) });
+            while let Some(v) = self.certification_candidates.pop_first() {
+                if let Some(Request(ctx, receiver)) = self.certify(v).await {
+                    let view = ctx.view();
+                    let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                    self.views
+                        .get_mut(&view)
+                        .expect("missing round")
+                        .certify_handle = Some(handle);
                 }
             }
 
             // Prepare waiters
             let propose_wait = Waiter(&mut pending_propose);
             let verify_wait = Waiter(&mut pending_verify);
-            let cert_next = certify_pool.next_completed();
+            let certify_wait = certify_pool.next_completed();
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -1984,16 +1978,31 @@ impl<
                         continue;
                     }
                 },
-                (context, certified) = cert_next => {
-                    // Return early if the proposal errors
-                    if let Err(err) = certified {
-                        debug!(?err, round = ?context.round, "failed to certify proposal");
+                result = certify_wait => {
+                    // Aborted futures are expected when old views are pruned.
+                    let Ok((context, certified)) = result else {
                         continue;
-                    }
+                    };
 
-                    // Handle certified proposal
+                    // Handle response to our certification request.
                     view = context.view();
-                    self.certified(view, certified.unwrap()).await;
+                    match certified {
+                        Ok(certified) => {
+                            self.certified(view, certified).await;
+                        }
+                        Err(err) => {
+                            debug!(
+                                ?err,
+                                round = ?context.round,
+                                "failed to certify proposal"
+                            );
+                            // Retry certification
+                            if let Some(round) = self.views.get_mut(&view) {
+                                round.certify_handle = None;
+                            }
+                            self.certification_candidates.insert(view);
+                        }
+                    };
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
