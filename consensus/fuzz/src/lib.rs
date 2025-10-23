@@ -136,9 +136,7 @@ impl Arbitrary<'_> for FuzzInput {
         // (all nodes, correct nodes, faulty nodes)
         let test_cases = [(3, 2, 1), (4, 3, 1)];
 
-        let configuration = if test_cases.is_empty() {
-            return Err(arbitrary::Error::NotEnoughData);
-        } else {
+        let configuration = {
             let index = u.int_in_range(0..=(test_cases.len() - 1))?;
             test_cases[index]
         };
