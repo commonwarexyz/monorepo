@@ -868,7 +868,10 @@ impl<
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
+        try_join!(
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+        )?;
 
         Ok(())
     }
