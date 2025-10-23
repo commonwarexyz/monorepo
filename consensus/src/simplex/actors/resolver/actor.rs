@@ -85,29 +85,35 @@ impl PartialOrd for Entry {
     }
 }
 
-/// Tracks required entries with counters by task type.
+/// Tracks required entries with metrics by task type.
 struct Required {
     entries: BTreeSet<Entry>,
-    notarization_count: usize,
-    nullification_count: usize,
+    unfulfilled: Family<TaskLabel, Gauge>,
 }
 
 impl Required {
-    fn new() -> Self {
+    fn new(metrics: &impl Metrics) -> Self {
+        let unfulfilled = Family::default();
+        metrics.register(
+            "unfulfilled",
+            "unfulfilled notarizations/nullifications",
+            unfulfilled.clone(),
+        );
+
         Self {
             entries: BTreeSet::new(),
-            notarization_count: 0,
-            nullification_count: 0,
+            unfulfilled,
         }
     }
 
     fn insert(&mut self, task: Task, view: View) -> bool {
         let inserted = self.entries.insert(Entry { task, view });
         if inserted {
-            match task {
-                Task::Notarization => self.notarization_count += 1,
-                Task::Nullification => self.nullification_count += 1,
-            }
+            let label = match task {
+                Task::Notarization => TaskLabel::notarization(),
+                Task::Nullification => TaskLabel::nullification(),
+            };
+            self.unfulfilled.get_or_create(label).inc();
         }
         inserted
     }
@@ -115,10 +121,11 @@ impl Required {
     fn remove(&mut self, task: Task, view: View) -> bool {
         let removed = self.entries.remove(&Entry { task, view });
         if removed {
-            match task {
-                Task::Notarization => self.notarization_count -= 1,
-                Task::Nullification => self.nullification_count -= 1,
-            }
+            let label = match task {
+                Task::Notarization => TaskLabel::notarization(),
+                Task::Nullification => TaskLabel::nullification(),
+            };
+            self.unfulfilled.get_or_create(label).dec();
         }
         removed
     }
@@ -138,8 +145,16 @@ impl Required {
             retain
         });
 
-        self.notarization_count -= removed_notarizations;
-        self.nullification_count -= removed_nullifications;
+        if removed_notarizations > 0 {
+            self.unfulfilled
+                .get_or_create(TaskLabel::notarization())
+                .dec_by(removed_notarizations);
+        }
+        if removed_nullifications > 0 {
+            self.unfulfilled
+                .get_or_create(TaskLabel::nullification())
+                .dec_by(removed_nullifications);
+        }
     }
 
     fn sample<R: Rng>(&self, inflight: &Inflight, rng: &mut R, count: usize) -> Vec<Entry> {
@@ -150,14 +165,6 @@ impl Required {
             .filter(|entry| !inflight.contains(entry))
             .cloned()
             .choose_multiple(rng, count)
-    }
-
-    fn notarization_count(&self) -> usize {
-        self.notarization_count
-    }
-
-    fn nullification_count(&self) -> usize {
-        self.nullification_count
     }
 }
 
@@ -229,7 +236,6 @@ pub struct Actor<
     fetch_concurrent: usize,
     requester: requester::Requester<E, P>,
 
-    unfulfilled: Family<TaskLabel, Gauge>,
     outstanding: Gauge,
     served: Family<TaskLabel, Counter>,
 }
@@ -255,20 +261,16 @@ impl<
         requester.reconcile(participants.as_ref());
 
         // Initialize metrics
-        let unfulfilled = Family::default();
         let outstanding = Gauge::default();
         let served = Family::default();
-        context.register(
-            "unfulfilled",
-            "unfulfilled notarizations/nullifications",
-            unfulfilled.clone(),
-        );
         context.register("outstanding", "outstanding requests", outstanding.clone());
         context.register(
             "served",
             "served notarizations/nullifications",
             served.clone(),
         );
+
+        let required = Required::new(&context);
 
         // Initialize mailbox
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -286,7 +288,7 @@ impl<
                 nullifications: BTreeMap::new(),
                 activity_timeout: cfg.activity_timeout,
 
-                required: Required::new(),
+                required,
                 inflight: Inflight::new(),
                 retry: None,
 
@@ -297,7 +299,6 @@ impl<
                 fetch_concurrent: cfg.fetch_concurrent,
                 requester,
 
-                unfulfilled,
                 outstanding,
                 served,
             },
@@ -426,14 +427,6 @@ impl<
         let mut current_view = 0;
         let mut finalized_view = 0;
         loop {
-            // Record unfulfilled metric by task type
-            self.unfulfilled
-                .get_or_create(TaskLabel::notarization())
-                .set(self.required.notarization_count() as i64);
-            self.unfulfilled
-                .get_or_create(TaskLabel::nullification())
-                .set(self.required.nullification_count() as i64);
-
             // Record outstanding metric
             self.outstanding.set(self.requester.len() as i64);
 
