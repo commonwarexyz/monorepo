@@ -19,7 +19,7 @@ pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The epoch to transition to.
     pub epoch: Epoch,
     /// The new public polynomial for the epoch.
-    pub poly: Public<V>,
+    pub poly: Option<Public<V>>,
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
     /// The new participants for the epoch.

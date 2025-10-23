@@ -1,9 +1,37 @@
 //! Signing scheme implementations for `simplex`.
+//!
+//! # Attributable Schemes and Liveness/Fault Evidence
+//!
+//! Signing schemes differ in whether per-validator activities can be used as evidence of either
+//! liveness or of committing a fault:
+//!
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be presented
+//!   to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
+//!   indices alongside individual signatures, enabling secure per-validator activity tracking and
+//!   conflict detection.
+//!
+//! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
+//!   to some third party as evidence of either liveness or of committing a fault because they can be forged
+//!   by other players (often after some quorum of partial signatures are collected). With [`bls12381_threshold`],
+//!   possession of any `t` valid partial signatures can be used to forge a partial signature for any other player.
+//!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
+//!   but can't be used by an external observer.
+//!
+//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely
+//! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
+//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
+//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+      pub mod reporter;
+    }
+}
 
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
@@ -115,6 +143,15 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Extracts randomness seed, if provided by the scheme, derived from the certificate
     /// for the given round.
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+
+    /// Returns whether per-validator fault evidence can be safely exposed.
+    ///
+    /// Schemes where individual signatures can be safely reported as fault evidence should
+    /// return `true`.
+    ///
+    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
+    /// activities.
+    fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

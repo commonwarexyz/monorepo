@@ -411,6 +411,9 @@ impl<D: Digest> Proof<D> {
         let mut peak_digests: Vec<D> = Vec::new();
         let mut proof_digests_used = 0;
         let mut elements_iter = elements.iter();
+        if !Position::is_mmr_size(self.size) {
+            return Err(ReconstructionError::InvalidSize);
+        }
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {

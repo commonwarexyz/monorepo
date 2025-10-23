@@ -119,8 +119,8 @@ where
         // Add operations to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            if let Err(e) = DB::add_operations(&mut *database, new_operations.clone()).await {
-                error!(error = %e, "failed to add operations to database");
+            if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
+                error!(?err, "failed to add operations to database");
             }
             DB::root(&*database, &mut Standard::new())
         };
@@ -216,9 +216,9 @@ where
 
     drop(database);
 
-    let (proof, operations) = result.map_err(|e| {
-        warn!(error = %e, "failed to generate historical proof");
-        Error::Database(e)
+    let (proof, operations) = result.map_err(|err| {
+        warn!(?err, "failed to generate historical proof");
+        Error::Database(err)
     })?;
 
     debug!(
@@ -309,8 +309,8 @@ where
                         // Parse the message.
                         let message = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
-                            Err(e) => {
-                                warn!(client_addr = %client_addr, error = %e, "failed to parse message");
+                            Err(err) => {
+                                warn!(client_addr = %client_addr, ?err, "failed to parse message");
                                 state.error_counter.inc();
                                 continue;
                             }
@@ -323,14 +323,14 @@ where
                             let mut response_sender = response_sender.clone();
                             move |_| async move {
                                 let response = handle_message::<DB>(&state, message).await;
-                                if let Err(e) = response_sender.send(response).await {
-                                    warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                                if let Err(err) = response_sender.send(response).await {
+                                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
                                 }
                             }
                         });
                     }
-                    Err(e) => {
-                        info!(client_addr = %client_addr, error = %e, "recv failed (client likely disconnected)");
+                    Err(err) => {
+                        info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
                         state.error_counter.inc();
                         break Ok(());
                     }
@@ -341,8 +341,8 @@ where
                 if let Some(response) = outgoing {
                     // We have a response to send to the client.
                     let response_data = response.encode().to_vec();
-                    if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-                        info!(client_addr = %client_addr, error = %e, "send failed (client likely disconnected)");
+                    if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                        info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
                         state.error_counter.inc();
                         break Ok(());
                     }
@@ -427,8 +427,8 @@ where
         select! {
             _ = context.sleep_until(next_op_time) => {
                 // Add operations to the database
-                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
-                    warn!(error = %e, "failed to add additional operations");
+                if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
+                    warn!(?err, "failed to add additional operations");
                 }
                 next_op_time = context.current() + config.op_interval;
             },
@@ -437,15 +437,15 @@ where
                     Ok((client_addr, sink, stream)) => {
                         let state = state.clone();
                         context.with_label("client").spawn(move|context|async move {
-                            if let Err(e) =
+                            if let Err(err) =
                                 handle_client::<DB, _>(context, state, sink, stream, client_addr).await
                             {
-                                error!(client_addr = %client_addr, error = %e, "❌ error handling client");
+                                error!(client_addr = %client_addr, ?err, "❌ error handling client");
                             }
                         });
                     }
-                    Err(e) => {
-                        error!(error = %e, "❌ failed to accept client");
+                    Err(err) => {
+                        error!(?err, "❌ failed to accept client");
                     }
                 }
             }
@@ -621,8 +621,8 @@ fn main() {
             DatabaseType::Immutable => run_immutable(context, config).await,
         };
 
-        if let Err(e) = result {
-            error!(error = %e, "❌ server failed");
+        if let Err(err) = result {
+            error!(?err, "❌ server failed");
         }
     });
 }

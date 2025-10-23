@@ -137,4 +137,6 @@ pub enum Error {
     BitOutOfBounds(u64, u64),
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
+    #[error("data corrupted: {0}")]
+    DataCorrupted(&'static str),
 }

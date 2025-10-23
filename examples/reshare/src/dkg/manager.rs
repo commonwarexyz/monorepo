@@ -116,6 +116,8 @@ struct DealerMetadata<C: Signer, V: Variant> {
 
 /// A result of a DKG/reshare round.
 pub enum RoundResult<V: Variant> {
+    /// DKG failed or hasn't happened yet; No group polynomial or share available.
+    None,
     /// The new group polynomial, if the manager is not a [Player].
     Polynomial(Public<V>),
     /// The new group polynomial and the local share, if the manager is a [Player].
@@ -141,7 +143,7 @@ where
         context: &mut E,
         namespace: Vec<u8>,
         epoch: Epoch,
-        public: Public<V>,
+        public: Option<Public<V>>,
         share: Option<group::Share>,
         signer: &'ctx mut C,
         dealers: Set<C::PublicKey>,
@@ -153,7 +155,7 @@ where
         let mut player = players.position(&signer.public_key()).map(|signer_index| {
             let player = Player::new(
                 signer.public_key(),
-                Some(public.clone()),
+                public.clone(),
                 dealers.clone(),
                 players.clone(),
                 CONCURRENCY,
@@ -162,7 +164,7 @@ where
             (signer_index as u32, player)
         });
         let mut arbiter = Arbiter::new(
-            Some(public.clone()),
+            public.clone(),
             dealers.clone(),
             players.clone(),
             CONCURRENCY,
@@ -210,9 +212,11 @@ where
                 None
             }
         } else {
-            share.as_ref().map(|share| {
+            // Deal if the participant has a share or if this is an initial DKG (no public polynomial).
+            let is_dealer = dealers.position(&signer.public_key()).is_some();
+            is_dealer.then(|| {
                 let (dealer, commitment, shares) =
-                    Dealer::new(context, Some(share.clone()), players.clone());
+                    Dealer::new(context, share.clone(), players.clone());
                 DealerMetadata {
                     dealer,
                     commitment,
@@ -226,14 +230,19 @@ where
         let (s, r) = mux.register(epoch).await.unwrap();
 
         let rate_limiter = RateLimiter::hashmap_with_clock(send_rate_limit, context.deref());
+        let previous = public
+            .map(|public| {
+                share.map_or(RoundResult::Polynomial(public.clone()), |share| {
+                    RoundResult::Output(Output { public, share })
+                })
+            })
+            .unwrap_or(RoundResult::None);
 
         Self {
             namespace,
             signer,
             epoch,
-            previous: share.map_or(RoundResult::Polynomial(public.clone()), |share| {
-                RoundResult::Output(Output { public, share })
-            }),
+            previous,
             dealers,
             players,
             sender: s,
@@ -351,16 +360,19 @@ where
         while let Some(msg) = self.receiver.recv().now_or_never() {
             let (peer, msg) = msg.expect("receiver closed");
 
-            let msg =
+            let Ok(msg) =
                 Dkg::<V, C::Signature>::decode_cfg(&mut msg.as_ref(), &(self.players.len() as u32))
-                    .unwrap();
+            else {
+                debug!(round, "failed to decode DKG message");
+                continue;
+            };
             if msg.round != round {
                 warn!(
                     round,
                     msg_round = msg.round,
                     "ignoring message for different round"
                 );
-                return;
+                continue;
             }
 
             match msg.payload {
@@ -374,18 +386,18 @@ where
                     }) = &mut self.dealer_meta
                     else {
                         warn!(round, "ignoring ack; not a dealer");
-                        return;
+                        continue;
                     };
 
                     // Verify index matches
                     let Some(player) = self.players.get(ack.player as usize) else {
                         warn!(round, index = ack.player, "invalid ack index");
-                        return;
+                        continue;
                     };
 
                     if player != &peer {
                         warn!(round, index = ack.player, "mismatched ack index");
-                        return;
+                        continue;
                     }
 
                     // Verify signature on incoming ack
@@ -397,13 +409,13 @@ where
                         commitment,
                     ) {
                         warn!(round, index = ack.player, "invalid ack signature");
-                        return;
+                        continue;
                     }
 
                     // Store ack
                     if let Err(e) = dealer.ack(peer) {
                         debug!(round, index = ack.player, error = ?e, "failed to store ack");
-                        return;
+                        continue;
                     }
                     info!(round, index = ack.player, "stored ack");
 
@@ -428,13 +440,13 @@ where
                 Payload::Share(Share { commitment, share }) => {
                     let Some((signer_index, ref mut player)) = self.player else {
                         warn!(round, "ignoring share; not a player");
-                        return;
+                        continue;
                     };
 
                     // Store share
                     if let Err(e) = player.share(peer.clone(), commitment.clone(), share.clone()) {
                         debug!(round, error = ?e, "failed to store share");
-                        return;
+                        continue;
                     }
 
                     // Persist the share to storage.
