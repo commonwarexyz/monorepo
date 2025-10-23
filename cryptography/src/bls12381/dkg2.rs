@@ -45,6 +45,20 @@ pub fn recover_public_with_weights<V: Variant>(
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("missing dealer's share from the previous round")]
+    MissingDealerShare,
+    #[error("player is not present in the list of players")]
+    UnknownPlayer,
+    #[error("dealer is not present in the previous list of players")]
+    UnknownDealer,
+    #[error("dkg failed for some reason")]
+    DkgFailed,
+    #[error("not enough dealers: {0}")]
+    InsufficientDealers(usize),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     round: u32,
@@ -82,20 +96,6 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
         self.players.write(buf);
         self.public.write(buf);
     }
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("missing dealer's share from the previous round")]
-    MissingDealerShare,
-    #[error("player is not present in the list of players")]
-    UnknownPlayer,
-    #[error("dealer is not present in the previous list of players")]
-    UnknownDealer,
-    #[error("dkg failed for some reason")]
-    DkgFailed,
-    #[error("not enough dealers: {0}")]
-    InsufficientDealers(usize),
 }
 
 #[derive(Clone)]
@@ -230,6 +230,53 @@ impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
 }
 
 #[derive(Clone)]
+pub struct DealerPubMsg<V: Variant> {
+    commitment: Public<V>,
+}
+
+impl<V: Variant> EncodeSize for DealerPubMsg<V> {
+    fn encode_size(&self) -> usize {
+        self.commitment.encode_size()
+    }
+}
+
+impl<V: Variant> Write for DealerPubMsg<V> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.commitment.write(buf);
+    }
+}
+
+#[derive(Clone)]
+pub struct DealerPrivMsg {
+    share: Scalar,
+}
+
+impl DealerPrivMsg {
+    fn expected_element<E: Element>(&self) -> E {
+        let mut out = E::one();
+        out.mul(&self.share);
+        out
+    }
+}
+
+impl EncodeSize for DealerPrivMsg {
+    fn encode_size(&self) -> usize {
+        self.share.encode_size()
+    }
+}
+
+impl Write for DealerPrivMsg {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.share.write(buf);
+    }
+}
+
+#[derive(Clone)]
+pub struct PlayerAck<P: PublicKey> {
+    sig: P::Signature,
+}
+
+#[derive(Clone)]
 enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
     Reveal(Scalar),
@@ -250,6 +297,92 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
             return None;
         }
         Some(players.iter().zip(self.results.iter()))
+    }
+}
+
+fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
+    let mut transcript = Transcript::new(NAMESPACE);
+    transcript.commit(round_info.encode());
+    transcript
+}
+
+fn transcript_for_dealer<V: Variant, P: PublicKey>(
+    transcript: &Transcript,
+    dealer: &P,
+    pub_msg: &DealerPubMsg<V>,
+) -> Transcript {
+    let mut out = transcript.fork(b"dealer");
+    out.commit(dealer.encode());
+    out.commit(pub_msg.encode());
+    out
+}
+
+pub struct Dealer<V: Variant, P: PublicKey> {
+    round_info: RoundInfo<V, P>,
+    pub_msg: DealerPubMsg<V>,
+    results: Vec<AckOrReveal<P>>,
+    transcript: Transcript,
+}
+
+impl<V: Variant, P: PublicKey> Dealer<V, P> {
+    pub fn start(
+        mut rng: impl CryptoRngCore,
+        round_info: RoundInfo<V, P>,
+        me: P,
+        share: Option<Share>,
+    ) -> Result<(Self, DealerPubMsg<V>, Vec<(P, DealerPrivMsg)>), Error> {
+        let share = round_info.dealer_share(&mut rng, share.map(|x| x.private))?;
+        let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
+        let reveals = round_info
+            .players
+            .iter()
+            .enumerate()
+            .map(|(i, pk)| (pk.clone(), my_poly.evaluate(i as u32).value))
+            .collect::<BTreeMap<_, _>>();
+        let results = reveals
+            .values()
+            .cloned()
+            .map(AckOrReveal::Reveal)
+            .collect::<Vec<_>>();
+        let priv_msgs = reveals
+            .iter()
+            .map(|(pk, share)| {
+                (
+                    pk.clone(),
+                    DealerPrivMsg {
+                        share: share.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let commitment = Poly::commit(my_poly);
+        let pub_msg = DealerPubMsg { commitment };
+        let transcript = {
+            let t = transcript_for_round(&round_info);
+            transcript_for_dealer(&t, &me, &pub_msg)
+        };
+        let this = Self {
+            round_info,
+            pub_msg: pub_msg.clone(),
+            results,
+            transcript,
+        };
+        Ok((this, pub_msg, priv_msgs))
+    }
+
+    pub fn receive_player_ack(&mut self, player: P, ack: PlayerAck<P>) -> Result<(), Error> {
+        let index = self.round_info.player_index(&player)?;
+        if self.transcript.verify(&player, &ack.sig) {
+            self.results[index as usize] = AckOrReveal::Ack(ack);
+        }
+        Ok(())
+    }
+
+    pub fn finalize(self) -> DealerLog<V, P> {
+        DealerLog {
+            pub_msg: self.pub_msg,
+            results: self.results,
+        }
     }
 }
 
@@ -348,70 +481,6 @@ pub fn observe<V: Variant, P: PublicKey>(
     ObserveInner::<V, P>::reckon(round_info, selected).map(|x| x.output)
 }
 
-#[derive(Clone)]
-pub struct DealerPubMsg<V: Variant> {
-    commitment: Public<V>,
-}
-
-impl<V: Variant> EncodeSize for DealerPubMsg<V> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-    }
-}
-
-impl<V: Variant> Write for DealerPubMsg<V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-    }
-}
-
-#[derive(Clone)]
-pub struct DealerPrivMsg {
-    share: Scalar,
-}
-
-impl DealerPrivMsg {
-    fn expected_element<E: Element>(&self) -> E {
-        let mut out = E::one();
-        out.mul(&self.share);
-        out
-    }
-}
-
-impl EncodeSize for DealerPrivMsg {
-    fn encode_size(&self) -> usize {
-        self.share.encode_size()
-    }
-}
-
-impl Write for DealerPrivMsg {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.write(buf);
-    }
-}
-
-#[derive(Clone)]
-pub struct PlayerAck<P: PublicKey> {
-    sig: P::Signature,
-}
-
-fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
-    let mut transcript = Transcript::new(NAMESPACE);
-    transcript.commit(round_info.encode());
-    transcript
-}
-
-fn transcript_for_dealer<V: Variant, P: PublicKey>(
-    transcript: &Transcript,
-    dealer: &P,
-    pub_msg: &DealerPubMsg<V>,
-) -> Transcript {
-    let mut out = transcript.fork(b"dealer");
-    out.commit(dealer.encode());
-    out.commit(pub_msg.encode());
-    out
-}
-
 pub struct Player<V: Variant, S: PrivateKey> {
     me: S,
     round_info: RoundInfo<V, S::PublicKey>,
@@ -494,75 +563,6 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             private,
         };
         Ok((output, share))
-    }
-}
-
-pub struct Dealer<V: Variant, P: PublicKey> {
-    round_info: RoundInfo<V, P>,
-    pub_msg: DealerPubMsg<V>,
-    results: Vec<AckOrReveal<P>>,
-    transcript: Transcript,
-}
-
-impl<V: Variant, P: PublicKey> Dealer<V, P> {
-    pub fn start(
-        mut rng: impl CryptoRngCore,
-        round_info: RoundInfo<V, P>,
-        me: P,
-        share: Option<Share>,
-    ) -> Result<(Self, DealerPubMsg<V>, Vec<(P, DealerPrivMsg)>), Error> {
-        let share = round_info.dealer_share(&mut rng, share.map(|x| x.private))?;
-        let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
-        let reveals = round_info
-            .players
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), my_poly.evaluate(i as u32).value))
-            .collect::<BTreeMap<_, _>>();
-        let results = reveals
-            .values()
-            .cloned()
-            .map(AckOrReveal::Reveal)
-            .collect::<Vec<_>>();
-        let priv_msgs = reveals
-            .iter()
-            .map(|(pk, share)| {
-                (
-                    pk.clone(),
-                    DealerPrivMsg {
-                        share: share.clone(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        let commitment = Poly::commit(my_poly);
-        let pub_msg = DealerPubMsg { commitment };
-        let transcript = {
-            let t = transcript_for_round(&round_info);
-            transcript_for_dealer(&t, &me, &pub_msg)
-        };
-        let this = Self {
-            round_info,
-            pub_msg: pub_msg.clone(),
-            results,
-            transcript,
-        };
-        Ok((this, pub_msg, priv_msgs))
-    }
-
-    pub fn receive_player_ack(&mut self, player: P, ack: PlayerAck<P>) -> Result<(), Error> {
-        let index = self.round_info.player_index(&player)?;
-        if self.transcript.verify(&player, &ack.sig) {
-            self.results[index as usize] = AckOrReveal::Ack(ack);
-        }
-        Ok(())
-    }
-
-    pub fn finalize(self) -> DealerLog<V, P> {
-        DealerLog {
-            pub_msg: self.pub_msg,
-            results: self.results,
-        }
     }
 }
 
