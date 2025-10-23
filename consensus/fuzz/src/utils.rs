@@ -35,8 +35,14 @@ impl PartialEq for PartitionStrategy {
         match (self, other) {
             (PartitionStrategy::Connected, PartitionStrategy::Connected) => true,
             (PartitionStrategy::Isolated, PartitionStrategy::Isolated) => true,
-            (PartitionStrategy::TwoPartitionsWithByzantine, PartitionStrategy::TwoPartitionsWithByzantine) => true,
-            (PartitionStrategy::ManyPartitionsWithByzantine, PartitionStrategy::ManyPartitionsWithByzantine) => true,
+            (
+                PartitionStrategy::TwoPartitionsWithByzantine,
+                PartitionStrategy::TwoPartitionsWithByzantine,
+            ) => true,
+            (
+                PartitionStrategy::ManyPartitionsWithByzantine,
+                PartitionStrategy::ManyPartitionsWithByzantine,
+            ) => true,
             (PartitionStrategy::Linear, PartitionStrategy::Linear) => true,
             _ => false,
         }
