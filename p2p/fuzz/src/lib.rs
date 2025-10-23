@@ -25,7 +25,7 @@ const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
 const MAX_MSG_SIZE: usize = 1024 * 1024;
 const MAX_INDEX: u8 = 10;
-const PEER_SUBSET_NUMBER: usize = 5;
+const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION: u64 = 1000;
 
@@ -107,6 +107,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 /// Information about a peer in the network.
+#[derive(Clone)]
 pub struct PeerInfo {
     /// The peer's private key.
     pub private_key: ed25519::PrivateKey,
@@ -174,22 +175,17 @@ pub trait NetworkScheme: Send + 'static {
         base_port: u16,
     ) -> impl Future<Output = PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle>>;
 
-    /// Registers a subset of peers under a specific index with the oracle.
-    ///
-    /// This allows the network to track and communicate with specific peer groups.
-    /// Different indices can have different peer subsets.
+    /// Registers a peer set with the oracle.
     ///
     /// # Parameters
     ///
     /// * `oracle` - The network oracle to register peers with
-    /// * `index` - The index to register this peer subset under
-    /// * `peers` - Information about all peers
-    /// * `subset` - The public keys of the peers to register under this index
+    /// * `index` - The index to register this peer set under
+    /// * `peers` - The peers
     fn register_peers<'a>(
         oracle: &'a mut Self::Oracle,
         index: u64,
         peers: &'a [PeerInfo],
-        subset: Vec<ed25519::PublicKey>,
     ) -> impl Future<Output = ()>;
 }
 
@@ -209,19 +205,20 @@ impl NetworkScheme for Discovery {
         base_port: u16,
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Collect all peer public keys for potential discovery
-        let addresses = peers
+        let peer_pks = peers
             .iter()
             .map(|p| p.public_key.clone())
             .collect::<Vec<_>>();
 
         // Set up bootstrappers: all peers except peer 0 bootstrap from peer 0
-        let mut bootstrappers = Vec::new();
-        if peer_idx > 0 {
-            bootstrappers.push((
-                addresses[0].clone(),
+        let bootstrappers = if peer_idx > 0 {
+            vec![(
+                peer_pks[0].clone(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
-            ));
-        }
+            )]
+        } else {
+            Vec::new()
+        };
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
@@ -235,7 +232,8 @@ impl NetworkScheme for Discovery {
         // Override some settings for fuzzing environment
         config.mailbox_size = 100; // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets = PEER_SUBSET_NUMBER; // Track multiple peer subsets
+                                         // Maximum number of peer sets to track
+        config.tracked_peer_sets = TRACKED_PEER_SETS;
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
@@ -243,8 +241,8 @@ impl NetworkScheme for Discovery {
 
         // Pre-register some peer subsets to seed the network
         // Each index gets a randomized subset of 3 peers
-        for index in 0..PEER_SUBSET_NUMBER {
-            let mut addrs = addresses.clone();
+        for index in 0..TRACKED_PEER_SETS {
+            let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
             let subset = addrs[..3].to_vec();
             oracle.register(index as u64, subset).await;
@@ -264,15 +262,10 @@ impl NetworkScheme for Discovery {
         }
     }
 
-    async fn register_peers<'a>(
-        oracle: &'a mut Self::Oracle,
-        index: u64,
-        _peers: &'a [PeerInfo],
-        subset: Vec<ed25519::PublicKey>,
-    ) {
-        // Register the peer subset - for discovery, we only need public keys
-        // since peers will discover addresses through the discovery protocol
-        let _ = oracle.register(index, subset).await;
+    async fn register_peers<'a>(oracle: &'a mut Self::Oracle, index: u64, peers: &'a [PeerInfo]) {
+        // Discovery only needs public keys (addresses discovered via protocol)
+        let peer_pks: Vec<_> = peers.iter().map(|p| p.public_key.clone()).collect();
+        let _ = oracle.register(index, peer_pks).await;
     }
 }
 
@@ -300,7 +293,7 @@ impl NetworkScheme for Lookup {
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets = 2 * PEER_SUBSET_NUMBER;
+        config.tracked_peer_sets = 2 * TRACKED_PEER_SETS;
 
         // Create the network and oracle
         let (mut network, mut oracle) =
@@ -315,12 +308,12 @@ impl NetworkScheme for Lookup {
 
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..PEER_SUBSET_NUMBER
-        for index in 0..PEER_SUBSET_NUMBER {
+        for index in 0..TRACKED_PEER_SETS {
             oracle.register(index as u64, peer_list.clone()).await;
         }
 
         // Register randomized subsets of 3 peers for indices PEER_SUBSET_NUMBER..2*PEER_SUBSET_NUMBER
-        for index in PEER_SUBSET_NUMBER..(PEER_SUBSET_NUMBER * 2) {
+        for index in TRACKED_PEER_SETS..(TRACKED_PEER_SETS * 2) {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
             let subset = peers[..3].to_vec();
@@ -341,22 +334,11 @@ impl NetworkScheme for Lookup {
         }
     }
 
-    async fn register_peers<'a>(
-        oracle: &'a mut Self::Oracle,
-        index: u64,
-        peers: &'a [PeerInfo],
-        subset: Vec<ed25519::PublicKey>,
-    ) {
-        // For lookup, we need to map public keys to addresses
-        // Filter out any keys that aren't in the peer list
-        let peer_list: Vec<_> = subset
+    async fn register_peers<'a>(oracle: &'a mut Self::Oracle, index: u64, peers: &'a [PeerInfo]) {
+        // Lookup needs both public keys and addresses
+        let peer_list: Vec<_> = peers
             .iter()
-            .filter_map(|pk| {
-                peers
-                    .iter()
-                    .find(|p| &p.public_key == pk)
-                    .map(|p| (p.public_key.clone(), p.address))
-            })
+            .map(|p| (p.public_key.clone(), p.address))
             .collect();
         let _ = oracle.register(index, peer_list).await;
     }
@@ -387,7 +369,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|mut context| async move {
         let base_port = 63000;  // Arbitrary starting port for localhost testing
-        
+
         // Build peer_infos and reverse lookup map together
         let mut pk_to_idx = HashMap::new();
         let mut peer_infos = Vec::new();
@@ -396,9 +378,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             let private_key = ed25519::PrivateKey::from_seed(context.gen());
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-            
-            pk_to_idx.insert(public_key.clone(), i as u8);
-            
+
+            pk_to_idx.insert(public_key.clone(), i);
+
             peer_infos.push(PeerInfo {
                 private_key,
                 public_key,
@@ -604,19 +586,21 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let num_peers = (num_peers as usize).clamp(1, peers.len());
 
                     // Build a random subset of peers (using a set to avoid duplicates)
-                    let mut peer_set = HashSet::new();
+                    let mut peer_indices = HashSet::new();
                     for _ in 0..num_peers {
-                        let idx = context.gen::<usize>() % peers.len();
-                        peer_set.insert(peers[idx].info.public_key.clone());
+                        let idx = context.gen::<usize>() % peer_infos.len();
+                        peer_indices.insert(idx);
                     }
-                    let peer_subset: Vec<_> = peer_set.into_iter().collect();
+                    let peer_subset: Vec<_> = peer_indices
+                        .iter()
+                        .map(|&idx| peer_infos[idx].clone())
+                        .collect();
 
                     // Register this subset with the oracle
                     N::register_peers(
                         &mut peers[peer_idx].network.oracle,
                         index as u64,
-                        &peer_infos,
-                        peer_subset,
+                        &peer_subset,
                     )
                     .await;
                 }

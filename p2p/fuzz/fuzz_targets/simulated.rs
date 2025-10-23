@@ -12,7 +12,7 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{hash_map, HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -148,11 +148,11 @@ fn fuzz(input: FuzzInput) {
                     let idx = (peer_idx as usize) % peer_pks.len();
 
                     // Only register if not already registered
-                    if !channels.contains_key(&(idx, channel_id)) {
+                    if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
                         if let Ok((sender, receiver)) =
                             oracle.register(peer_pks[idx].clone(), channel_id as u64).await
                         {
-                            channels.insert((idx, channel_id), (sender, receiver));
+                            e.insert((sender, receiver));
                         }
                     }
                 }
