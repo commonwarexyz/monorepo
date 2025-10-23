@@ -110,7 +110,6 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         utils::requester,
     };
-    use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
@@ -167,7 +166,6 @@ mod tests {
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
-        coordinator: p2p::mocks::Coordinator<K>,
         secret: E,
         scheme_provider: P,
     ) -> (
@@ -200,7 +198,7 @@ mod tests {
         let backfill = oracle.register(secret.public_key(), 1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: secret.public_key(),
-            coordinator,
+            peer_provider: oracle.control(secret.public_key()),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 public_key: secret.public_key(),
@@ -327,11 +325,15 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
+            // Register all participants ahead of time.
+            for secret in schemes.iter() {
+                let _ = oracle.register(secret.public_key(), 0).await;
+            }
+
             for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     signing_schemes[i].clone().into(),
                 )
@@ -435,7 +437,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(vec![]),
                     secret.clone(),
                     signing_schemes[i].clone().into(),
                 )
@@ -483,7 +484,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     signing_schemes[i].clone().into(),
                 )
@@ -551,7 +551,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     signing_schemes[i].clone().into(),
                 )
@@ -611,7 +610,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     signing_schemes[i].clone().into(),
                 )
@@ -709,7 +707,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 secret,
                 signing_schemes[0].clone().into(),
             )
@@ -766,7 +763,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 secret,
                 signing_schemes[0].clone().into(),
             )
@@ -838,7 +834,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 secret,
                 signing_schemes[0].clone().into(),
             )
@@ -886,13 +881,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(peers),
                 secret,
                 signing_schemes[0].clone().into(),
             )
@@ -947,7 +941,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 secret,
                 signing_schemes[0].clone().into(),
             )

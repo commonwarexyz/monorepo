@@ -137,6 +137,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                 self.directory.add_set(index, peers);
             }
+            Message::PeerSet { index, responder } => {
+                // Send the peer set at the given index.
+                let _ = responder.send(self.directory.get_set(&index).cloned());
+            }
+            Message::LatestPeerSet { responder } => {
+                let _ = responder.send(self.directory.latest_set_index());
+            }
             Message::Connect {
                 public_key,
                 dialer,

@@ -1,5 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
+use std::ops::Deref;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
@@ -54,6 +55,14 @@ impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.ordered[index]
+    }
+}
+
+impl<P: PublicKey> Deref for Set<P> {
+    type Target = Ordered<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ordered
     }
 }
 

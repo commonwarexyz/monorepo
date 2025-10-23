@@ -11,8 +11,6 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     ed25519, PublicKey, Signer,
 };
-use commonware_resolver::p2p;
-use commonware_utils::set::Ordered;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -119,29 +117,5 @@ impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
         EdScheme::new(transition.participants.clone(), self.signer.clone())
-    }
-}
-
-#[derive(Clone)]
-pub struct Coordinator<P> {
-    pub participants: Ordered<P>,
-}
-
-impl<P> Coordinator<P> {
-    pub fn new(participants: Ordered<P>) -> Self {
-        Self { participants }
-    }
-}
-
-impl<P: PublicKey> p2p::Coordinator for Coordinator<P> {
-    type PublicKey = P;
-
-    fn peers(&self) -> &[Self::PublicKey] {
-        self.participants.as_ref()
-    }
-
-    fn peer_set_id(&self) -> u64 {
-        // In this example, we only have one static peer set.
-        0
     }
 }
