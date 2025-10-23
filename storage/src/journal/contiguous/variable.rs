@@ -194,6 +194,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Validate and repair offsets journal to match data journal
         let (oldest_retained_pos, size) =
             Self::repair_journals(&mut data, &mut offsets, items_per_section).await?;
+        assert!(
+            oldest_retained_pos.is_multiple_of(items_per_section),
+            "oldest_retained_pos must be section aligned"
+        );
 
         Ok(Self {
             data,
@@ -897,6 +901,49 @@ mod tests {
             assert_eq!(journal.read(20).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that repair can return a size that is not section-aligned when data is lost
+    /// but the offsets journal survives with partial section contents.
+    ///
+    /// This directly demonstrates that `(size, size)` returned from the empty-data branch of
+    /// `repair_journals` is not guaranteed to be aligned to `items_per_section`.
+    #[test_traced]
+    #[should_panic(expected = "oldest_retained_pos must be section aligned")]
+    fn test_variable_repair_returns_misaligned_size_after_data_loss() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                data_partition: "misaligned_repair_data_loss".to_string(),
+                offsets_partition: "misaligned_repair_data_loss_offsets".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Append fewer than items_per_section entries so the last section is partial.
+            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..5u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Simulate pruning of all data and crash before offsets pruned.
+            context
+                .remove(&cfg.data_partition, None)
+                .await
+                .expect("remove data partition");
+
+            // Reinitialize journal
+            Variable::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .expect("re-init after data loss");
         });
     }
 
