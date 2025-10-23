@@ -108,7 +108,7 @@
             users of threshold <code>consensus::simplex</code> to reconfigure the validator committee securely.
         </p>
         <div class="image-container">
-            <img src ="/imgs/reshare.png" alt="Reshare Flow" />
+            <img src="/imgs/reshare.png" alt="Reshare Flow" />
             <div class="image-caption">Figure 1: Validator committees reshare their keys in preparation for a committee switchover at each epoch boundary.</div>
         </div>
         <p>
@@ -139,9 +139,10 @@
             perfect platform to perform progressive BLS key reshare to reconfigure the committee, defining an
             in-protocol border between different committees' active block heights.
         </p>
+        // TODO: add a diagram of the epoching process
         <p>
             This approach was derived from <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to
-            Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
+                    Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
             Roughgarden and Ertem Nusret Tas.
         </p>
 
@@ -170,11 +171,11 @@
         </div>
         <p>
             Driving resharing through the replicated log provides:
-            <ol>
-                <li><b>accountability</b>: cryptographic receipts for every dealer's outcome are included in the replicated log.</li>
-                <li><b>availability</b>: the network keeps producing blocks while it prepares the next quorum, so reconfiguration/reshare does not compete with liveness.</li>
-                <li><b>recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channeled communication.</li>
-            </ol>
+        <ol>
+            <li><b>accountability</b>: cryptographic receipts for every dealer's outcome are included in the replicated log.</li>
+            <li><b>availability</b>: the network keeps producing blocks while it prepares the next quorum, so reconfiguration/reshare does not compete with liveness.</li>
+            <li><b>recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channeled communication.</li>
+        </ol>
         </p>
 
         <h2>Bootstrapping a Threshold Committee</h2>
