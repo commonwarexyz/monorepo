@@ -260,7 +260,7 @@ impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DealerPubMsg<V: Variant> {
     commitment: Public<V>,
 }
@@ -293,6 +293,12 @@ impl<V: Variant> Read for DealerPubMsg<V> {
 #[derive(Clone)]
 pub struct DealerPrivMsg {
     share: Scalar,
+}
+
+impl std::fmt::Debug for DealerPrivMsg {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "DealerPrivMsg(REDACTED)")
+    }
 }
 
 impl DealerPrivMsg {
@@ -328,7 +334,7 @@ impl Read for DealerPrivMsg {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -362,6 +368,15 @@ impl<P: PublicKey> Read for PlayerAck<P> {
 enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
     Reveal(Scalar),
+}
+
+impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AckOrReveal::Ack(x) => write!(f, "Ack({:?})", x),
+            AckOrReveal::Reveal(_) => write!(f, "Reveal(REDACTED)"),
+        }
+    }
 }
 
 impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
@@ -404,7 +419,7 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<P>>,
@@ -449,6 +464,60 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SignedDealerLog<V: Variant, S: PrivateKey> {
+    log: DealerLog<V, S::PublicKey>,
+    sig: S::Signature,
+}
+
+impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
+    fn sign(
+        sk: &S,
+        round_info: &RoundInfo<V, S::PublicKey>,
+        log: DealerLog<V, S::PublicKey>,
+    ) -> Self {
+        let sig = transcript_for_round(round_info).sign(sk);
+        Self { log, sig }
+    }
+
+    pub fn check(
+        self,
+        dealer: &S::PublicKey,
+        round_info: &RoundInfo<V, S::PublicKey>,
+    ) -> Option<DealerLog<V, S::PublicKey>> {
+        if !transcript_for_round(round_info).verify(dealer, &self.sig) {
+            return None;
+        }
+        Some(self.log)
+    }
+}
+
+impl<V: Variant, S: PrivateKey> EncodeSize for SignedDealerLog<V, S> {
+    fn encode_size(&self) -> usize {
+        self.log.encode_size() + self.sig.encode_size()
+    }
+}
+impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.log.write(buf);
+        self.sig.write(buf);
+    }
+}
+
+impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            log: Read::read_cfg(buf, cfg)?,
+            sig: ReadExt::read(buf)?,
+        })
+    }
+}
+
 fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
     let mut transcript = Transcript::new(NAMESPACE);
     transcript.commit(round_info.encode());
@@ -466,20 +535,21 @@ fn transcript_for_dealer<V: Variant, P: PublicKey>(
     out
 }
 
-pub struct Dealer<V: Variant, P: PublicKey> {
-    round_info: RoundInfo<V, P>,
+pub struct Dealer<V: Variant, S: PrivateKey> {
+    me: S,
+    round_info: RoundInfo<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
-    results: Vec<AckOrReveal<P>>,
+    results: Vec<AckOrReveal<S::PublicKey>>,
     transcript: Transcript,
 }
 
-impl<V: Variant, P: PublicKey> Dealer<V, P> {
+impl<V: Variant, S: PrivateKey> Dealer<V, S> {
     pub fn start(
         mut rng: impl CryptoRngCore,
-        round_info: RoundInfo<V, P>,
-        me: P,
+        round_info: RoundInfo<V, S::PublicKey>,
+        me: S,
         share: Option<Share>,
-    ) -> Result<(Self, DealerPubMsg<V>, Vec<(P, DealerPrivMsg)>), Error> {
+    ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         let share = round_info.dealer_share(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
         let reveals = round_info
@@ -508,9 +578,10 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
             let t = transcript_for_round(&round_info);
-            transcript_for_dealer(&t, &me, &pub_msg)
+            transcript_for_dealer(&t, &me.public_key(), &pub_msg)
         };
         let this = Self {
+            me,
             round_info,
             pub_msg: pub_msg.clone(),
             results,
@@ -519,7 +590,11 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
         Ok((this, pub_msg, priv_msgs))
     }
 
-    pub fn receive_player_ack(&mut self, player: P, ack: PlayerAck<P>) -> Result<(), Error> {
+    pub fn receive_player_ack(
+        &mut self,
+        player: S::PublicKey,
+        ack: PlayerAck<S::PublicKey>,
+    ) -> Result<(), Error> {
         let index = self.round_info.player_index(&player)?;
         if self.transcript.verify(&player, &ack.sig) {
             self.results[index as usize] = AckOrReveal::Ack(ack);
@@ -527,11 +602,12 @@ impl<V: Variant, P: PublicKey> Dealer<V, P> {
         Ok(())
     }
 
-    pub fn finalize(self) -> DealerLog<V, P> {
-        DealerLog {
+    pub fn finalize(self) -> SignedDealerLog<V, S> {
+        let log = DealerLog {
             pub_msg: self.pub_msg,
             results: self.results,
-        }
+        };
+        SignedDealerLog::sign(&self.me, &self.round_info, log)
     }
 }
 
@@ -822,14 +898,15 @@ mod test {
 
                 for dealer_idx in &round.dealers {
                     // 4.3.1 Generate the messages intended for the other players
-                    let dealer_pub = keys[&dealer_idx].public_key();
+                    let dealer_priv = keys[&dealer_idx].clone();
+                    let dealer_pub = dealer_priv.public_key();
                     // Get share from previous round if this dealer was a player
                     let share = shares.get(&dealer_pub).cloned();
                     let (mut dealer, pub_msg, priv_msgs) =
-                        Dealer::<MinSig, ed25519::PublicKey>::start(
+                        Dealer::<MinSig, ed25519::PrivateKey>::start(
                             &mut rng,
                             round_info.clone(),
-                            dealer_pub.clone(),
+                            dealer_priv.clone(),
                             share,
                         )
                         .expect("Failed to start dealer");
@@ -845,7 +922,11 @@ mod test {
                             .expect("should be able to accept ack");
                     }
 
-                    log.insert(dealer_pub, dealer.finalize());
+                    let checked_log = dealer
+                        .finalize()
+                        .check(&dealer_pub, &round_info)
+                        .expect("check should succeed");
+                    log.insert(dealer_pub, checked_log);
                 }
 
                 // 4.5 Run the observer to get an output.
