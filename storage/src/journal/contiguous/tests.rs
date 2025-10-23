@@ -136,6 +136,7 @@ where
     journal.close().await.unwrap();
     let journal = factory("oldest_after_prune".to_string()).await.unwrap();
     assert_eq!(journal.oldest_retained_pos().await.unwrap().unwrap(), 30);
+
     journal.destroy().await.unwrap();
 }
 
