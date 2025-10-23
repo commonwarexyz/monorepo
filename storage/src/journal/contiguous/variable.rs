@@ -5,8 +5,7 @@
 
 use super::Contiguous;
 use crate::journal::{fixed, variable, Error};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, FixedSize, Read, Write};
+use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use futures::{stream, Stream, StreamExt as _};
@@ -17,41 +16,6 @@ use std::{
 use tracing::info;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
-
-/// Location of an item in the variable journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Location {
-    /// Section number where the item is stored
-    section: u64,
-
-    /// Offset within the section (u32, aligned to 16 bytes)
-    offset: u32,
-}
-
-impl Write for Location {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.section);
-        buf.put_u32(self.offset);
-    }
-}
-
-impl FixedSize for Location {
-    const SIZE: usize = u64::SIZE + u32::SIZE;
-}
-
-impl Read for Location {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::InvalidLength(buf.remaining()));
-        }
-        Ok(Self {
-            section: buf.get_u64(),
-            offset: buf.get_u32(),
-        })
-    }
-}
 
 /// Calculate the section number for a given position.
 ///
@@ -151,8 +115,9 @@ pub struct Variable<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
-    /// Index mapping positions to (section, offset) pairs within the data journal.
-    locations: fixed::Journal<E, Location>,
+    /// Index mapping positions to byte offsets within the data journal.
+    /// The section can be calculated from the position using items_per_section.
+    locations: fixed::Journal<E, u32>,
 
     /// The number of items per section.
     ///
@@ -259,11 +224,13 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             return Err(Error::InvalidRewind(size));
         }
 
-        // Read the location of the first item to discard (at position 'size').
-        let discard_location = self.locations.read(size).await?;
+        // Read the offset of the first item to discard (at position 'size').
+        let discard_offset = self.locations.read(size).await?;
+        let discard_section =
+            position_to_section(size, self.oldest_retained_pos, self.items_per_section);
 
         self.data
-            .rewind_to_offset(discard_location.section, discard_location.offset)
+            .rewind_to_offset(discard_section, discard_offset)
             .await?;
         self.locations.rewind(size).await?;
 
@@ -296,8 +263,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Append to data journal, get offset
         let (offset, _size) = self.data.append(section, item).await?;
 
-        // Append location to locations journal
-        let locations_pos = self.locations.append(Location { section, offset }).await?;
+        // Append offset to locations journal
+        let locations_pos = self.locations.append(offset).await?;
         assert_eq!(locations_pos, self.size);
 
         // Return the current position
@@ -391,11 +358,13 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             return Ok(Box::pin(stream::empty()));
         }
 
-        // Use locations index to find section/offset to start from
-        let location = self.locations.read(start_pos).await?;
+        // Use locations index to find offset to start from, calculate section from position
+        let start_offset = self.locations.read(start_pos).await?;
+        let start_section =
+            position_to_section(start_pos, self.oldest_retained_pos, self.items_per_section);
         let data_stream = self
             .data
-            .replay(location.section, location.offset, buffer_size)
+            .replay(start_section, start_offset, buffer_size)
             .await?;
 
         // Transform the stream to include position information
@@ -427,11 +396,13 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             return Err(Error::ItemPruned(position));
         }
 
-        // Read location from index
-        let location = self.locations.read(position).await?;
+        // Read offset from index and calculate section from position
+        let offset = self.locations.read(position).await?;
+        let section =
+            position_to_section(position, self.oldest_retained_pos, self.items_per_section);
 
-        // Read item from data journal using the location
-        self.data.get(location.section, location.offset).await
+        // Read item from data journal
+        self.data.get(section, offset).await
     }
 
     /// Sync only the data journal to storage, without syncing the locations index.
@@ -499,7 +470,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn repair_journals(
         data: &mut variable::Journal<E, V>,
-        locations: &mut fixed::Journal<E, Location>,
+        locations: &mut fixed::Journal<E, u32>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
@@ -617,7 +588,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         } else if locations_size < data_size {
             // We must have crashed after writing the data journal but before writing the locations
             // journal.
-            Self::add_missing_locations(data, locations, locations_size).await?;
+            Self::add_missing_locations(data, locations, locations_size, items_per_section).await?;
         }
 
         assert_eq!(locations.size().await?, data_size);
@@ -643,8 +614,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// - `locations_size < data.size()` (locations is behind data)
     async fn add_missing_locations(
         data: &variable::Journal<E, V>,
-        locations: &mut fixed::Journal<E, Location>,
+        locations: &mut fixed::Journal<E, u32>,
         locations_size: u64,
+        items_per_section: u64,
     ) -> Result<(), Error> {
         assert!(
             !data.blobs.is_empty(),
@@ -656,8 +628,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             if let Some(oldest) = locations.oldest_retained_pos().await? {
                 if oldest < locations_size {
                     // Locations has items -- resume from last indexed position
-                    let last_loc = locations.read(locations_size - 1).await?;
-                    (last_loc.section, last_loc.offset, true)
+                    let last_offset = locations.read(locations_size - 1).await?;
+                    let last_section =
+                        position_to_section(locations_size - 1, oldest, items_per_section);
+                    (last_section, last_offset, true)
                 } else {
                     // Locations fully pruned but data has items -- start from first data section
                     // SAFETY: data.blobs is non-empty (checked above)
@@ -681,7 +655,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         let mut skipped_first = false;
         while let Some(result) = stream.next().await {
-            let (section, offset, _size, _item) = result?;
+            let (_section, offset, _size, _item) = result?;
 
             // Skip first item if resuming from last indexed location
             if skip_first && !skipped_first {
@@ -689,7 +663,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 continue;
             }
 
-            locations.append(Location { section, offset }).await?;
+            locations.append(offset).await?;
         }
 
         Ok(())
