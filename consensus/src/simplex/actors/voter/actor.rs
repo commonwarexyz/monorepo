@@ -104,7 +104,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // True if-and-only-if the proposal has been certified as safe to finalize by the automaton.
     requested_proposal_certify: bool,
-    certified_proposal: bool,
+    certified_proposal: Option<bool>, // None if not responded yet
 
     requested_proposal_build: bool,
     proposal: Option<Proposal<D>>,
@@ -161,7 +161,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             verified_proposal: false,
 
             requested_proposal_certify: false,
-            certified_proposal: false,
+            certified_proposal: None,
 
             proposal: None,
 
@@ -589,7 +589,7 @@ impl<
 
         // Otherwise, check that the proposal is certified. If so, it must have a notarization.
         let round = self.views.get(&view)?;
-        if round.certified_proposal {
+        if round.certified_proposal == Some(true) {
             let result = self
                 .is_notarized(view)
                 .expect("certified proposal should be notarized");
@@ -1047,10 +1047,10 @@ impl<
     }
 
     /// Handles the successful certification of a proposal.
-    async fn certified(&mut self, view: View) {
+    async fn certified(&mut self, view: View, success: bool) {
         // Mark proposal as certified
         let round = self.views.get_mut(&view).unwrap();
-        round.certified_proposal = true;
+        round.certified_proposal = Some(success);
 
         // We should have a notarization for this view,
         // otherwise we would not have asked for certification in the first place.
@@ -1058,6 +1058,15 @@ impl<
             .notarization
             .as_ref()
             .expect("certified proposal should have notarization");
+
+        // Persist certification result for recovery
+        if let Some(journal) = self.journal.as_mut() {
+            let msg = Voter::Certification(Rnd::new(self.epoch, view), success);
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append to journal");
+        }
 
         // Enter next view
         let seed = self
@@ -1390,7 +1399,7 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if !round.certified_proposal {
+        if round.certified_proposal != Some(true) {
             // Ensure the proposal has been certified as safe to finalize
             return None;
         }
@@ -1791,6 +1800,9 @@ impl<
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_finalization = true;
                     }
+                    Voter::Certification(_round, success) => {
+                        self.certified(view, success).await;
+                    }
                 }
             }
         }
@@ -1940,22 +1952,15 @@ impl<
                     // Clear certify waiter
                     pending_certify = None;
 
-                    // Return early if the proposal is not certified
-                    match certified {
-                        Ok(true) => {},
-                        Ok(false) => {
-                            debug!(round = ?context.round, "proposal is not certified");
-                            continue;
-                        }
-                        Err(err) => {
-                            debug!(?err, round = ?context.round, "failed to certify proposal");
-                            continue;
-                        }
-                    };
+                    // Return early if the proposal errors
+                    if let Err(err) = certified {
+                        debug!(?err, round = ?context.round, "failed to certify proposal");
+                        continue;
+                    }
 
                     // Handle certified proposal
                     view = context.view();
-                    self.certified(view).await;
+                    self.certified(view, certified.unwrap()).await;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
@@ -2003,7 +2008,7 @@ impl<
                             trace!(view, "received nullification from resolver");
                             self.handle_nullification(nullification).await;
                         },
-                        Voter::Finalization(_) => {
+                        Voter::Finalization(_) | Voter::Certification(_, _)=> {
                             unreachable!("unexpected message type");
                         }
                     }
@@ -2052,7 +2057,7 @@ impl<
                                 .inc();
                             self.finalization(finalization).await
                         }
-                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) | Voter::Certification(_, _) => {
                             warn!(?sender, "blocking peer for invalid message type");
                             self.blocker.block(sender).await;
                             continue;
