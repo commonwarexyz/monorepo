@@ -96,11 +96,9 @@
 
 use crate::{
     index::{Cursor, Index as _, Unordered as Index},
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::Location,
+    multijournal::{Config as VConfig, Journal as VJournal},
     store::operation::Variable as Operation,
     translator::Translator,
 };
