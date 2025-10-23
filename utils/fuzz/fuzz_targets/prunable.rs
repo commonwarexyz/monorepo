@@ -54,28 +54,21 @@ fn fuzz(input: FuzzInput) {
                 }
             }
             Operation::PopBit => {
-                if !prunable.is_empty() {
+                if !prunable.is_empty() && prunable.len() != prunable.pruned_bits() {
                     prunable.pop();
                 }
             }
             Operation::PruneToBit { bit } => {
                 let len = prunable.len();
-                let pruned_bites = prunable.pruned_bits();
-                let pruned_chunks = prunable.pruned_chunks();
+                let pruned_bits = prunable.pruned_bits();
                 let bit = if len != 0 { bit % len } else { 0 };
-                println!(
-                    "Pruning to bit {} len {} pruned bit {} pruned chunks {}",
-                    bit, len, pruned_bites, pruned_chunks
-                );
-                if bit > pruned_bites {
+                if bit > pruned_bits {
                     prunable.prune_to_bit(bit);
                 }
             }
             Operation::GetBit(bit) => {
-                let len = prunable.len();
-                if len > 0 {
-                    let bit = bit % len;
-                    let _ = prunable.get_bit(bit);
+                if *bit >= prunable.pruned_bits() && *bit < prunable.len() {
+                    let _ = prunable.get_bit(*bit);
                 };
             }
         }
