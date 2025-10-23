@@ -7,7 +7,7 @@ use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Debug, Clone)]
 enum OrdinalOperation {
     Put { index: u64, value: Vec<u8> },
     Get { index: u64 },
@@ -21,6 +21,48 @@ enum OrdinalOperation {
     PutSparse { indices: Vec<u64> },
     PutLargeBatch { start: u32, count: u8 },
     ReopenAfterOperations,
+}
+
+const MAX_SPARSE_INDICES: usize = 10;
+
+impl<'a> Arbitrary<'a> for OrdinalOperation {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        match choice % 11 {
+            0 => Ok(OrdinalOperation::Put {
+                index: u.arbitrary()?,
+                value: u.arbitrary()?,
+            }),
+            1 => Ok(OrdinalOperation::Get {
+                index: u.arbitrary()?,
+            }),
+            2 => Ok(OrdinalOperation::Has {
+                index: u.arbitrary()?,
+            }),
+            3 => Ok(OrdinalOperation::NextGap {
+                index: u.arbitrary()?,
+            }),
+            4 => Ok(OrdinalOperation::Sync),
+            5 => Ok(OrdinalOperation::Prune {
+                min: u.arbitrary()?,
+            }),
+            6 => Ok(OrdinalOperation::Close),
+            7 => Ok(OrdinalOperation::Destroy),
+            8 => {
+                let num_indices = u.int_in_range(1..=MAX_SPARSE_INDICES)?;
+                let indices = (0..num_indices)
+                    .map(|_| u.arbitrary())
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(OrdinalOperation::PutSparse { indices })
+            }
+            9 => Ok(OrdinalOperation::PutLargeBatch {
+                start: u.arbitrary()?,
+                count: u.arbitrary()?,
+            }),
+            10 => Ok(OrdinalOperation::ReopenAfterOperations),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug)]
@@ -165,7 +207,7 @@ fn fuzz(input: FuzzInput) {
                 OrdinalOperation::PutSparse { indices } => {
                     if let Some(ordinal) = store.as_mut() {
                         // Put values at sparse indices to test gap handling
-                        for (i, &index) in indices.iter().take(10).enumerate() {
+                        for (i, &index) in indices.iter().enumerate() {
                             let mut value = [0u8; 32];
                             value[0] = i as u8;
                             let value = FixedBytes::new(value);

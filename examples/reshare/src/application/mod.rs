@@ -10,4 +10,4 @@ mod ingress;
 pub use ingress::{Mailbox, Message};
 
 mod scheme;
-pub use scheme::{Coordinator, Scheme, SchemeProvider};
+pub use scheme::{Coordinator, EdScheme, EpochSchemeProvider, SchemeProvider, ThresholdScheme};

@@ -488,6 +488,7 @@ pub enum Error {
 - Use `///` for public items with clear descriptions
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
+- Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
 
 ### Naming Conventions
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)

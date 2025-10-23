@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -53,14 +53,14 @@ impl Write for Message {
 }
 
 impl Read for Message {
-    type Cfg = RangeCfg<usize>;
+    type Cfg = usize; // Maximum amount of data to read
 
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
             PING_MESSAGE_PREFIX => Ok(Message::Ping),
             DATA_MESSAGE_PREFIX => {
-                let data = Data::read_cfg(buf, range)?;
+                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
                 Ok(Message::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -75,6 +75,7 @@ impl Read for Message {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_codec::{Decode as _, Encode as _, Error};
 
     #[test]
     fn test_max_payload_overhead() {
@@ -88,5 +89,35 @@ mod tests {
             payload.encode_size(),
             message_len + MAX_PAYLOAD_DATA_OVERHEAD
         );
+    }
+
+    #[test]
+    fn test_decode_data_within_limit() {
+        let payload = Message::Data(Data {
+            channel: 7,
+            message: Bytes::from_static(b"ping"),
+        });
+        let encoded = payload.encode().freeze();
+
+        let decoded = Message::decode_cfg(encoded, &4).expect("within limit");
+        match decoded {
+            Message::Data(data) => {
+                assert_eq!(data.channel, 7);
+                assert_eq!(data.message, Bytes::from_static(b"ping"));
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_data_exceeding_limit() {
+        let payload = Message::Data(Data {
+            channel: 9,
+            message: Bytes::from_static(b"hello"),
+        });
+        let encoded = payload.encode().freeze();
+
+        let result = Message::decode_cfg(encoded, &4);
+        assert!(matches!(result, Err(Error::InvalidLength(5))));
     }
 }

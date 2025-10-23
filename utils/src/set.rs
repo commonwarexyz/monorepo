@@ -15,24 +15,24 @@ use core::{
 /// After construction, the contained [Vec] is sealed and cannot be modified. To unseal the
 /// inner [Vec], use the [`Into<Vec<T>>`] impl.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Set<T>(Vec<T>);
+pub struct Ordered<T>(Vec<T>);
 
-impl<T> Set<T> {
-    /// Constructs a new [Set] array from an iterator, sorting and deduplicating the items
+impl<T> Ordered<T> {
+    /// Constructs a new [Ordered] array from an iterator, sorting and deduplicating the items
     /// using the mapped key.
-    pub fn new_by_key<K: Ord>(items: impl IntoIterator<Item = T>, f: impl Fn(&T) -> K) -> Self {
+    pub fn new_by_key<K: Ord>(items: impl IntoIterator<Item = T>, f: impl Fn(&T) -> &K) -> Self {
         let mut items: Vec<_> = items.into_iter().collect();
-        items.sort_by_key(&f);
-        items.dedup_by_key(|i| f(i));
+        items.sort_by(|l, r| f(l).cmp(f(r)));
+        items.dedup_by(|l, r| f(l) == f(r));
         Self(items)
     }
 
-    /// Returns the size of the [Set].
+    /// Returns the size of the [Ordered].
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns true if the [Set] is empty.
+    /// Returns true if the [Ordered] is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -42,7 +42,7 @@ impl<T> Set<T> {
         self.0.get(index)
     }
 
-    /// Returns the position of a given item in the [Set], if it exists.
+    /// Returns the position of a given item in the [Ordered], if it exists.
     pub fn position(&self, item: &T) -> Option<usize>
     where
         T: Ord,
@@ -56,19 +56,19 @@ impl<T> Set<T> {
     }
 }
 
-impl<T: Write> Write for Set<T> {
+impl<T: Write> Write for Ordered<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 }
 
-impl<T: EncodeSize> EncodeSize for Set<T> {
+impl<T: EncodeSize> EncodeSize for Ordered<T> {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
     }
 }
 
-impl<T: Read> Read for Set<T> {
+impl<T: Read> Read for Ordered<T> {
     type Cfg = (RangeCfg<usize>, T::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -76,14 +76,14 @@ impl<T: Read> Read for Set<T> {
     }
 }
 
-impl<T: Ord> FromIterator<T> for Set<T> {
+impl<T: Ord> FromIterator<T> for Ordered<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let items: Vec<_> = iter.into_iter().collect();
         items.into()
     }
 }
 
-impl<T: Ord> From<Vec<T>> for Set<T> {
+impl<T: Ord> From<Vec<T>> for Ordered<T> {
     fn from(mut items: Vec<T>) -> Self {
         items.sort();
         items.dedup();
@@ -91,7 +91,7 @@ impl<T: Ord> From<Vec<T>> for Set<T> {
     }
 }
 
-impl<T> IntoIterator for Set<T> {
+impl<T> IntoIterator for Ordered<T> {
     type Item = T;
     #[cfg(not(feature = "std"))]
     type IntoIter = alloc::vec::IntoIter<T>;
@@ -103,7 +103,7 @@ impl<T> IntoIterator for Set<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a Set<T> {
+impl<'a, T> IntoIterator for &'a Ordered<T> {
     type Item = &'a T;
     type IntoIter = core::slice::Iter<'a, T>;
 
@@ -112,7 +112,7 @@ impl<'a, T> IntoIterator for &'a Set<T> {
     }
 }
 
-impl<T> Index<usize> for Set<T> {
+impl<T> Index<usize> for Ordered<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -120,7 +120,7 @@ impl<T> Index<usize> for Set<T> {
     }
 }
 
-impl<T> Index<Range<usize>> for Set<T> {
+impl<T> Index<Range<usize>> for Ordered<T> {
     type Output = [T];
 
     fn index(&self, index: Range<usize>) -> &Self::Output {
@@ -128,13 +128,13 @@ impl<T> Index<Range<usize>> for Set<T> {
     }
 }
 
-impl<T> AsRef<[T]> for Set<T> {
+impl<T> AsRef<[T]> for Ordered<T> {
     fn as_ref(&self) -> &[T] {
         &self.0
     }
 }
 
-impl<T: fmt::Display> fmt::Display for Set<T> {
+impl<T: fmt::Display> fmt::Display for Ordered<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[")?;
         for (i, item) in self.0.iter().enumerate() {
@@ -147,8 +147,8 @@ impl<T: fmt::Display> fmt::Display for Set<T> {
     }
 }
 
-impl<T: Ord> From<Set<T>> for Vec<T> {
-    fn from(set: Set<T>) -> Self {
+impl<T: Ord> From<Ordered<T>> for Vec<T> {
+    fn from(set: Ordered<T>) -> Self {
         set.0
     }
 }
@@ -162,7 +162,7 @@ mod test {
         const CASE: [u8; 12] = [1, 3, 2, 5, 4, 3, 1, 7, 9, 6, 8, 4];
         const EXPECTED: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-        let sorted: Set<_> = CASE.into_iter().collect();
+        let sorted: Ordered<_> = CASE.into_iter().collect();
         assert_eq!(sorted.iter().copied().collect::<Vec<_>>(), EXPECTED);
 
         let unsealed: Vec<_> = sorted.into();
@@ -170,7 +170,7 @@ mod test {
 
         struct Example(u8);
         let examples = CASE.into_iter().map(Example).collect::<Vec<_>>();
-        let sorted_examples = Set::new_by_key(examples, |e| e.0);
+        let sorted_examples = Ordered::new_by_key(examples, |e| &e.0);
         assert_eq!(
             sorted_examples.iter().map(|e| e.0).collect::<Vec<_>>(),
             EXPECTED
@@ -180,12 +180,12 @@ mod test {
     #[test]
     fn test_sorted_unique_codec_roundtrip() {
         const CASE: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let sorted: Set<_> = CASE.into_iter().collect();
+        let sorted: Ordered<_> = CASE.into_iter().collect();
 
         let mut buf = Vec::with_capacity(sorted.encode_size());
         sorted.write(&mut buf);
         let decoded =
-            Set::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=9), ())).unwrap();
+            Ordered::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=9), ())).unwrap();
 
         assert_eq!(sorted, decoded);
     }
@@ -203,7 +203,7 @@ mod test {
         }
         let examples = CASE.into_iter().map(Example).collect::<Vec<_>>();
 
-        let sorted: Set<_> = examples.into_iter().collect();
+        let sorted: Ordered<_> = examples.into_iter().collect();
         assert_eq!(
             sorted.to_string(),
             "[ex(1), ex(2), ex(3), ex(4), ex(5), ex(6), ex(7), ex(8), ex(9)]"

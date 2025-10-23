@@ -5,6 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
 use futures::channel::oneshot;
 use std::net::SocketAddr;
 
@@ -14,7 +15,7 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register {
         index: u64,
-        peers: Vec<(C, SocketAddr)>,
+        peers: Ordered<(C, SocketAddr)>,
     },
 
     // ---------- Used by blocker ----------
@@ -168,10 +169,10 @@ impl<C: PublicKey> Oracle<C> {
     ///
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
-    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
+    /// * `peers` - Vector of authorized peers at an `index`.
     ///   Each element is a tuple containing the public key and the socket address of the peer.
     ///   The peer must be dialable at and dial from the given socket address.
-    pub async fn register(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
+    pub async fn register(&mut self, index: u64, peers: Ordered<(C, SocketAddr)>) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
 }

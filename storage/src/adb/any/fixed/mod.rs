@@ -215,9 +215,11 @@ where
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-/// [crate::mmr::MAX_LOCATION].
-/// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+/// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+///   [crate::mmr::MAX_LOCATION].
+/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
+///   number of operations in the log.
+/// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
 async fn historical_proof<E, O, H>(
     mmr: &Mmr<E, H>,
     log: &Journal<E, O>,
@@ -230,6 +232,10 @@ where
     O: OperationTrait,
     H: CHasher,
 {
+    let size = Location::new_unchecked(log.size().await?);
+    if op_count > size {
+        return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
+    }
     if start_loc >= op_count {
         return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
     }

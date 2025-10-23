@@ -15,7 +15,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};
 use std::{
@@ -32,7 +32,7 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 #[derive(Clone, Debug)]
 pub struct Config<P: PublicKey, S: Scheme> {
     pub namespace: Vec<u8>,
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
     pub scheme: S,
 }
 

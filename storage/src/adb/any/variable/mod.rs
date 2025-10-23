@@ -1672,11 +1672,11 @@ pub(super) mod test {
             assert!(db.get_loc(Location::new_unchecked(1)).await.unwrap().is_some());
             assert!(db.get_loc(Location::new_unchecked(2)).await.unwrap().is_some());
 
-            // Test getting exactly at boundary 
+            // Test getting exactly at boundary
             let op_count = *db.op_count();
             let result = db.get_loc(Location::new_unchecked(op_count)).await;
             assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size))
                     if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
             );
 
@@ -1711,7 +1711,7 @@ pub(super) mod test {
             let op_count = *db.op_count();
             let result = db.get_from_loc(&key, Location::new_unchecked(op_count)).await;
             assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) 
+                matches!(result, Err(Error::LocationOutOfBounds(loc, size))
                     if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
             );
 
@@ -1742,7 +1742,7 @@ pub(super) mod test {
             // Try to prune beyond the inactivity floor
             let result = db.prune(beyond_floor).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor)) 
+                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor))
                     if loc == beyond_floor && floor == inactivity_floor)
             );
 

@@ -1,4 +1,10 @@
 //! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! [`Scheme`] is **non-attributable**: exposing partial signatures
+//! as evidence of either liveness or of committing a fault is not safe. With threshold signatures,
+//! any `t` valid partial signatures can be used to forge a partial signature for any other player,
+//! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
+//! (as it must be sent by said participant) but can't be used by an external observer.
 
 use crate::{
     simplex::{
@@ -550,6 +556,10 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
         Some(Seed::new(round, certificate.seed_signature))
+    }
+
+    fn is_attributable(&self) -> bool {
+        false
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}

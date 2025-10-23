@@ -67,7 +67,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, set::Ordered};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -118,7 +118,10 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)]).await;
+//!     oracle.register(
+//!         0,
+//!         Ordered::new_by_key([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)], |(pk, _)| pk)
+//!     ).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -171,7 +174,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{set::Ordered, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -243,7 +246,9 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, peers.clone()).await;
+            oracle
+                .register(0, Ordered::new_by_key(peers.clone(), |(pk, _)| pk))
+                .await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -513,9 +518,14 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
-                oracle.register(0, vec![peers[0].clone()]).await;
                 oracle
-                    .register(1, vec![peers[1].clone(), peers[2].clone()])
+                    .register(0, Ordered::new_by_key([peers[0].clone()], |(pk, _)| pk))
+                    .await;
+                oracle
+                    .register(
+                        1,
+                        Ordered::new_by_key([peers[1].clone(), peers[2].clone()], |(pk, _)| pk),
+                    )
                     .await;
                 oracle
                     .register(2, peers.iter().skip(2).cloned().collect())
@@ -588,10 +598,12 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((peer_sk, peer_pk, peer_addr));
             }
-            let peers = peers_and_sks
-                .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect::<Vec<_>>();
+            let peers = {
+                let iter = peers_and_sks
+                    .iter()
+                    .map(|(_, pk, addr)| (pk.clone(), *addr));
+                Ordered::new_by_key(iter, |(pk, _)| pk)
+            };
 
             // Create network
             let (sk, _, addr) = peers_and_sks[0].clone();
@@ -641,10 +653,12 @@ mod tests {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((sk, pk, addr));
             }
-            let peers = peers_and_sks
-                .iter()
-                .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect::<Vec<_>>();
+            let peers = {
+                let iter = peers_and_sks
+                    .iter()
+                    .map(|(_, pk, addr)| (pk.clone(), *addr));
+                Ordered::new_by_key(iter, |(pk, _)| pk)
+            };
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 

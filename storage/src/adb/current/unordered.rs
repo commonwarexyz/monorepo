@@ -4,28 +4,26 @@
 use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
-        current::{verify_key_value_proof, Config, KeyValueProofInfo},
+        current::{verify_key_value_proof, Config},
         Error,
     },
     index::{Index as _, Unordered as Index},
     mmr::{
         bitmap::BitMap,
-        grafting::{
-            Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
-        },
+        grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
     store::{operation::Fixed as Operation, Db},
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
-use tracing::{debug, info};
+use tracing::info;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -43,18 +41,34 @@ pub struct Current<
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: BitMap<H, N>,
+    status: BitMap<H, N>,
 
     /// The location of the last commit operation.
-    pub last_commit_loc: Option<Location>,
+    last_commit_loc: Option<Location>,
 
     context: E,
 
     bitmap_metadata_partition: String,
+}
+
+/// The information required to verify a key value proof from a Current adb.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+    /// The key whose value is being proven.
+    pub key: K,
+
+    /// The value of the key.
+    pub value: V,
+
+    /// The location of the operation that assigned this value to the key.
+    pub loc: Location,
+
+    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    pub chunk: [u8; N],
 }
 
 impl<
@@ -157,6 +171,13 @@ impl<
             hasher: Standard::<H>::new(),
         };
         let last_commit_loc = status.len().checked_sub(1).map(Location::new_unchecked);
+        assert!(
+            last_commit_loc.is_none()
+                || matches!(
+                    any.log.read(*last_commit_loc.unwrap()).await?,
+                    Operation::CommitFloor(_)
+                )
+        );
 
         Ok(Self {
             any,
@@ -173,6 +194,11 @@ impl<
         self.any.op_count()
     }
 
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.any.is_empty()
+    }
+
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
     pub fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
@@ -183,13 +209,6 @@ impl<
         self.any.get(key).await
     }
 
-    /// Get the value of the operation with location `loc` in the db. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        self.any.get_loc(loc).await
-    }
-
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
@@ -198,9 +217,8 @@ impl<
         BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
@@ -307,6 +325,9 @@ impl<
         self.status.sync(&mut grafter).await?;
 
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
+
+        // Write the pruned portion of the bitmap to disk, which is required for
+        // recovery. Active part is not persisted but restored by reply on restart.
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -452,62 +473,15 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let Ok(op_count) = Location::try_from(proof.size) else {
-            debug!("verification failed, invalid proof size");
-            return false;
-        };
-        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
-            debug!("verification failed, end_loc overflow");
-            return false;
-        };
-        if end_loc > op_count {
-            debug!(
-                loc = ?end_loc,
-                ?op_count, "proof verification failed, invalid range"
-            );
-            return false;
-        }
-
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / BitMap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier = GraftingVerifier::<H>::new(
+        super::verify_range_proof(
+            hasher,
             Self::grafting_height(),
-            Location::new_unchecked(start_chunk_loc),
-            chunk_vec,
-        );
-
-        let next_bit = *op_count % BitMap::<H, N>::CHUNK_SIZE_BITS;
-        if next_bit == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
-        }
-
-        // The proof must contain the partial chunk digest as its last hash.
-        if proof.digests.is_empty() {
-            debug!("proof has no digests");
-            return false;
-        }
-        let mut proof = proof.clone();
-        let last_chunk_digest = proof.digests.pop().unwrap();
-
-        // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_loc) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
-        };
-
-        let reconstructed_root = BitMap::<H, N>::partial_chunk_root(
-            hasher.inner(),
-            &mmr_root,
-            next_bit,
-            &last_chunk_digest,
-        );
-
-        reconstructed_root == *root
+            proof,
+            start_loc,
+            ops,
+            chunks,
+            root,
+        )
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
@@ -530,9 +504,6 @@ impl<
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
-        if !loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(loc).into());
-        }
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
@@ -566,15 +537,15 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(info.key, info.value).encode();
-        verify_key_value_proof::<H, N>(
+        let element = Operation::Update(info.key, info.value);
+        verify_key_value_proof::<H, Operation<K, V>, N>(
             hasher,
+            Self::grafting_height(),
             proof,
             info.loc,
             &info.chunk,
             root,
-            &element,
-            Self::grafting_height(),
+            element,
         )
     }
 
@@ -671,23 +642,23 @@ impl<
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
-        self.any.op_count()
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
+        self.inactivity_floor_loc()
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
-        self.any.get(key).await.map_err(Into::into)
+        self.get(key).await.map_err(Into::into)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
-        self.any.update(key, value).await.map_err(Into::into)
+        self.update(key, value).await.map_err(Into::into)
     }
 
     async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
-        self.any.delete(key).await.map(|_| ()).map_err(Into::into)
+        self.delete(key).await.map(|_| ()).map_err(Into::into)
     }
 
     async fn commit(&mut self) -> Result<(), crate::store::Error> {
@@ -713,7 +684,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{store::operation::FixedOperation as _, translator::TwoCap};
+    use crate::{mmr::mem::Mmr, store::operation::FixedOperation as _, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -765,6 +736,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
+            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
