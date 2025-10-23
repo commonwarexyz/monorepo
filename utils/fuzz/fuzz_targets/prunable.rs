@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::bitmap::Prunable;
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 4;
+const MAX_OPERATIONS: usize = 10;
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum Operation {
@@ -35,23 +35,25 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn fuzz(input: FuzzInput) {
     let mut prunable = Prunable::<4>::new();
 
-    for (_, operation) in input.operations.iter().enumerate() {
+    for operation in input.operations.iter() {
         match operation {
             Operation::PushBit(bit) => {
                 prunable.push(*bit);
             }
             Operation::PushByte(byte) => {
-                if prunable.len() % 8 == 0 {
+                if prunable.len().is_multiple_of(8) {
                     prunable.push_byte(*byte);
                 }
             }
             Operation::PushChunk(chunk) => {
-                if prunable.len() % Prunable::<4>::CHUNK_SIZE_BITS == 0 {
-                    prunable.push_chunk(&chunk);
+                if prunable
+                    .len()
+                    .is_multiple_of(Prunable::<4>::CHUNK_SIZE_BITS)
+                {
+                    prunable.push_chunk(chunk);
                 }
             }
             Operation::PopBit => {
-                assert_eq!(prunable.is_empty(), prunable.len() == 0, "pop bit on empty");
                 if !prunable.is_empty() {
                     prunable.pop();
                 }
