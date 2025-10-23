@@ -128,6 +128,14 @@ where
     assert!(oldest > prev_oldest);
     assert_eq!(oldest, 20);
 
+    // Prune all
+    journal.prune(30).await.unwrap();
+    assert_eq!(journal.oldest_retained_pos().await.unwrap().unwrap(), 30);
+
+    // Close and reopen
+    journal.close().await.unwrap();
+    let journal = factory("oldest_after_prune".to_string()).await.unwrap();
+    assert_eq!(journal.oldest_retained_pos().await.unwrap().unwrap(), 30);
     journal.destroy().await.unwrap();
 }
 
@@ -258,6 +266,16 @@ where
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
+
+    journal.prune(20).await.unwrap();
+    let size_after_all = journal.size().await.unwrap();
+    assert_eq!(size_after, size_after_all);
+
+    journal.close().await.unwrap();
+
+    let journal = factory("prune_all_retains_size".to_string()).await.unwrap();
+    let size_after_close = journal.size().await.unwrap();
+    assert_eq!(size_after_close, size_after_all);
 
     journal.destroy().await.unwrap();
 }
