@@ -137,7 +137,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{bitmap::BitMap, hex, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -719,7 +719,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
-                blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], 10)
+                blob.write_at(hex!("0xFFFFFFFF").to_vec(), 10)
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();

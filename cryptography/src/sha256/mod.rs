@@ -163,7 +163,10 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::hex;
 
-    const HELLO_DIGEST: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
+        hex!("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
+        hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
     #[test]
     fn test_sha256() {
@@ -174,17 +177,17 @@ mod tests {
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test simple hasher
         let hash = Sha256::hash(msg);
-        assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
+        assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
     #[test]
@@ -203,15 +206,7 @@ mod tests {
     #[test]
     fn test_sha256_empty() {
         let empty_digest = Sha256::empty();
-
-        // SHA-256 hash of empty string:
-        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let expected_bytes = [
-            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
-            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
-            0x78, 0x52, 0xb8, 0x55,
-        ];
-        let expected_digest = Digest::from(expected_bytes);
+        let expected_digest = Digest::from(EMPTY_DIGEST);
 
         assert_eq!(empty_digest, expected_digest);
     }
