@@ -415,8 +415,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// occurs after calling this method but before calling `sync`.
     pub async fn sync_data(&mut self) -> Result<(), Error> {
         let section = self.current_section();
-        self.data.sync(section).await?;
-        Ok(())
+        self.data.sync(section).await
     }
 
     /// Sync all pending writes to storage.
