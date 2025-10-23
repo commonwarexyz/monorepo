@@ -960,6 +960,27 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
+    pub fn test_any_variable_db_commit_on_empty_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+            db.commit(None).await.unwrap();
+            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
     pub fn test_any_variable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
