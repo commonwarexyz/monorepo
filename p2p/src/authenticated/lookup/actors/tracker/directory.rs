@@ -2,7 +2,7 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::set::OrderedAssociated;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -40,7 +40,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     peers: HashMap<C, Record>,
 
     /// The peer sets
-    sets: BTreeMap<u64, Vec<C>>,
+    sets: BTreeMap<u64, Ordered<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
@@ -135,7 +135,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             };
             record.increment();
         }
-        let peers: Vec<_> = peers.into_iter().map(|(peer, _)| peer).collect();
+        let peers: Ordered<_> = peers.into_iter().map(|(peer, _)| peer).collect();
         self.sets.insert(index, peers);
 
         // Remove oldest entries if necessary
@@ -156,6 +156,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
         deleted_peers
+    }
+
+    /// Gets a peer set by index.
+    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+        self.sets.get(index)
+    }
+
+    /// Returns the latest peer set index.
+    pub fn latest_set_index(&self) -> Option<u64> {
+        self.sets.keys().last().copied()
     }
 
     /// Attempt to reserve a peer for the dialer.

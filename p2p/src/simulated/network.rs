@@ -202,6 +202,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
+            ingress::Message::PeerSet { response, .. } => {
+                let _ = response.send(Some(self.peers.keys().cloned().collect()));
+            }
+            ingress::Message::LatestPeerSet { response } => {
+                let _ = response.send(Some(0));
+            }
             ingress::Message::LimitBandwidth {
                 public_key,
                 egress_cap,

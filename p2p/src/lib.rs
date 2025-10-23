@@ -12,6 +12,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
 use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
@@ -64,6 +65,21 @@ pub trait Receiver: Debug + Send + 'static {
     fn recv(
         &mut self,
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+}
+
+/// Interface for fetching an ordered list of connected peers, given a set id.
+pub trait PeerSetProvider: Debug + Send + 'static {
+    /// Public key type used to identify peers.
+    type PublicKey: PublicKey;
+
+    /// Fetch the ordered set of peers for a given ID.
+    fn peer_set(
+        &mut self,
+        id: u64,
+    ) -> impl Future<Output = Option<Ordered<Self::PublicKey>>> + Send;
+
+    /// Fetch the latest peer set ID.
+    fn latest_peer_set(&mut self) -> impl Future<Output = Option<u64>> + Send;
 }
 
 /// Interface for blocking other peers.

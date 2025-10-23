@@ -1,6 +1,7 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -14,6 +15,12 @@ pub enum Message<P: PublicKey> {
         channel: Channel,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+    },
+    PeerSet {
+        response: oneshot::Sender<Option<Ordered<P>>>,
+    },
+    LatestPeerSet {
+        response: oneshot::Sender<Option<u64>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -196,13 +203,35 @@ impl<P: PublicKey> Oracle<P> {
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Control<P: PublicKey> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
     sender: mpsc::UnboundedSender<Message<P>>,
+}
+
+impl<P: PublicKey> crate::PeerSetProvider for Control<P> {
+    type PublicKey = P;
+
+    async fn peer_set(&mut self, _id: u64) -> Option<Ordered<Self::PublicKey>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::PeerSet { response: sender })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn latest_peer_set(&mut self) -> Option<u64> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::LatestPeerSet { response: sender })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
 }
 
 impl<P: PublicKey> crate::Blocker for Control<P> {

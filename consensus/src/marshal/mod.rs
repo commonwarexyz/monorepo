@@ -110,7 +110,6 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         utils::requester,
     };
-    use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
@@ -166,7 +165,6 @@ mod tests {
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
-        coordinator: p2p::mocks::Coordinator<K>,
         validator: K,
         scheme_provider: P,
     ) -> (
@@ -199,7 +197,7 @@ mod tests {
         let backfill = oracle.register(validator.clone(), 1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            coordinator,
+            peer_provider: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -324,11 +322,15 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
+            // Register all participants ahead of time.
+            for validator in participants.iter() {
+                let _ = oracle.register(validator.clone(), 0).await;
+            }
+
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -436,7 +438,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(vec![]),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -488,7 +489,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -560,7 +560,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -624,7 +623,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -726,7 +724,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -787,7 +784,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -863,7 +859,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -921,7 +916,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(participants),
                 me,
                 schemes[0].clone().into(),
             )
@@ -980,7 +974,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )

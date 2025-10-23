@@ -1,7 +1,7 @@
 //! Validator node service entrypoint.
 
 use crate::{
-    application::{Coordinator, EpochSchemeProvider, SchemeProvider},
+    application::{EpochSchemeProvider, SchemeProvider},
     engine,
     setup::{ParticipantConfig, PeerConfig},
 };
@@ -101,10 +101,9 @@ where
     let dkg = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
     // Create a static resolver for marshal
-    let coordinator = Coordinator::new(peer_config.all_peers());
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
-        coordinator: coordinator.clone(),
+        peer_provider: oracle.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
@@ -173,7 +172,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
-    use commonware_utils::{quorum, sequence::U64, set::Ordered, union};
+    use commonware_utils::{quorum, sequence::U64, union};
     use futures::channel::mpsc;
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -205,7 +204,12 @@ mod test {
         ),
     > {
         let mut registrations = HashMap::new();
-        let ordered_validators = validators.iter().cloned().collect::<Ordered<_>>();
+
+        // Register an unused channel for all validators _before_ starting resolver engines.
+        for validator in validators.iter() {
+            oracle.register(validator.clone(), 0xFF).await.unwrap();
+        }
+
         for validator in validators.iter() {
             let pending = oracle
                 .register(validator.clone(), PENDING_CHANNEL)
@@ -237,10 +241,9 @@ mod test {
                 .unwrap();
 
             // Create a static resolver for marshal
-            let coordinator = Coordinator::new(ordered_validators.clone());
             let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),
-                coordinator: coordinator.clone(),
+                peer_provider: oracle.control(validator.clone()),
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     me: Some(validator.clone()),
