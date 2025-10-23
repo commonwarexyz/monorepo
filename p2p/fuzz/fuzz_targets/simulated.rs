@@ -231,9 +231,14 @@ fn fuzz(input: FuzzInput) {
                                 let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
                                 let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
 
-                                // Verify message is at front of queue (messages per sender must be ordered)
-                                if queue.front() == Some(&message) {
-                                    queue.pop_front();
+                                // Find message in expected queue
+                                // Messages can be dropped, but if received they must be in order
+                                if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                    // Remove all messages up to and including this one
+                                    // Messages before it were implicitly dropped, this one is received
+                                    for _ in 0..=pos {
+                                        queue.pop_front();
+                                    }
 
                                     // Clean up empty queue
                                     if queue.is_empty() {
@@ -241,10 +246,8 @@ fn fuzz(input: FuzzInput) {
                                     }
                                 } else {
                                     panic!(
-                                        "Message out of order from sender {} to receiver {} on channel {}. Expected: {:?}, Got: {:?}",
-                                        sender_pk, to_idx, channel_id,
-                                        queue.front().map(|b| b.len()),
-                                        message.len()
+                                        "Unexpected message from sender {} to receiver {} on channel {}. Message len: {}",
+                                        sender_pk, to_idx, channel_id, message.len()
                                     );
                                 }
                             },
