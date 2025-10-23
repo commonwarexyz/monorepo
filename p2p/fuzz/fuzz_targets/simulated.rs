@@ -5,8 +5,7 @@ use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::{
-    simulated::{self},
-    Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
+    simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
@@ -18,6 +17,7 @@ use std::{
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
+const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
 
@@ -77,7 +77,7 @@ struct FuzzInput {
     operations: Vec<Operation>,
     /// Number of peers to create in the network.
     ///
-    /// Must be in the range [2, MAX_PEERS].
+    /// Must be in the range [MIN_PEERS, MAX_PEERS].
     num_peers: u8,
 }
 
@@ -89,7 +89,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         for _ in 0..num_operations {
             operations.push(u.arbitrary()?);
         }
-        let num_peers = u.int_in_range(2..=MAX_PEERS)? as u8;
+        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)? as u8;
         Ok(FuzzInput {
             seed,
             operations,

@@ -124,7 +124,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 pub struct PeerInfo {
     /// The peer's private key.
     pub private_key: ed25519::PrivateKey,
-    /// The peer's public key .
+    /// The peer's public key.
     pub public_key: ed25519::PublicKey,
     /// The network address where this peer can be reached.
     pub address: SocketAddr,
@@ -478,7 +478,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Randomly select num_recipients peers (at least 1, at most all available)
                     available.shuffle(&mut context);
-                    let count = ((num_recipients as usize) % available.len()).max(1);
+                    let count = ((num_recipients as usize) % available.len()) + 1;
                     let selected = &available[..count];
 
                     // Build Recipients based on count
@@ -613,12 +613,12 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                 NetworkOperation::BlockPeer { peer_idx, target_idx } => {
                     // Block a peer from sending messages to another peer
                     // Normalize indices to valid ranges
-                    let to_idx = (peer_idx as usize) % peers.len();
-                    let from_idx = (target_idx as usize) % peers.len();
+                    let blocker_idx = (peer_idx as usize) % peers.len();
+                    let blocked_idx = (target_idx as usize) % peers.len();
 
-                    // Block the target peer on the oracle
-                    let target_pk = peers[from_idx].info.public_key.clone();
-                    let _ = peers[to_idx].network.oracle.block(target_pk).await;
+                    // Block the target peer on the blocker's oracle
+                    let blocked_pk = peers[blocked_idx].info.public_key.clone();
+                    let _ = peers[blocker_idx].network.oracle.block(blocked_pk).await;
                 }
             }
         }
