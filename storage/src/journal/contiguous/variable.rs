@@ -405,34 +405,16 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         self.data.get(section, offset).await
     }
 
-    /// Sync only the data journal to storage, without syncing the offsets index.
+    /// Sync all pending writes to storage.
     ///
-    /// This is faster than `sync()` and can be used to ensure data durability without
-    /// the overhead of syncing the offsets index.
-    ///
-    /// We call `sync` when appending to a section, so the offsets journal will eventually be
-    /// synced as well, maintaining the invariant that all non-final sections are fully synced.
-    /// In other words, the journal will remain in a consistent, recoverable state even if a crash
-    /// occurs after calling this method but before calling `sync`.
-    pub async fn sync_data(&mut self) -> Result<(), Error> {
+    /// This syncs both the data journal and the offsets journal concurrently.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync only the current (final) section of the data journal.
         // All non-final sections are already synced per Invariant #1.
         let section = self.current_section();
-        if self.data.blobs.contains_key(&section) {
-            self.data.sync(section).await?;
-        }
-        Ok(())
-    }
 
-    /// Sync all pending writes to storage.
-    ///
-    /// This syncs both the data journal and the offsets journal.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync data journal
-        self.sync_data().await?;
-
-        // Sync offsets journal
-        self.offsets.sync().await?;
+        // Sync both journals concurrently
+        futures::try_join!(self.data.sync(section), self.offsets.sync())?;
 
         Ok(())
     }
@@ -581,8 +563,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         let offsets_size = offsets.size().await?;
         if offsets_size > data_size {
-            // We must have crashed after rewinding the journal and writing the rewound data
-            // journal but before writing the rewound offsets journal.
+            // We must have crashed after writing offsets but before writing data.
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
             offsets.rewind(data_size).await?;
         } else if offsets_size < data_size {
@@ -1479,14 +1460,14 @@ mod tests {
         });
     }
 
-    /// Test that offsets index is rebuilt from data after sync_data + crash.
+    /// Test that offsets index is rebuilt from data after sync writes data but not offsets.
     #[test_traced]
-    fn test_variable_sync_data_recovery() {
+    fn test_variable_concurrent_sync_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "sync_data_recovery".to_string(),
-                offsets_partition: "sync_data_recovery_offsets".to_string(),
+                data_partition: "concurrent_sync_recovery".to_string(),
+                offsets_partition: "concurrent_sync_recovery_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1503,10 +1484,11 @@ mod tests {
                 journal.append(i * 100).await.unwrap();
             }
 
-            // Sync data only (offsets lags behind)
-            journal.sync_data().await.unwrap();
+            // Manually sync only data to simulate crash during concurrent sync
+            let section = journal.current_section();
+            journal.data.sync(section).await.unwrap();
 
-            // Simulate a crash
+            // Simulate a crash (offsets not synced)
             drop(journal);
 
             let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
