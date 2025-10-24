@@ -3,16 +3,21 @@ use std::collections::BTreeMap;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::{
     bls12381::{
-        dkg2::{DealerLog, DealerPrivMsg, DealerPubMsg, Error, Output, Player, RoundInfo},
+        dkg2::{
+            DealerLog, DealerPrivMsg, DealerPubMsg, Error, Output, Player, PlayerAck, RoundInfo,
+        },
         primitives::{group::Share, variant::Variant},
     },
     PrivateKey, PublicKey,
 };
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
-    channel::oneshot::{self, Canceled},
-    select_biased, FutureExt,
+    channel::{
+        mpsc,
+        oneshot::{self, Canceled},
+    },
+    select_biased, FutureExt, SinkExt as _, StreamExt as _,
 };
 
 /// The output of a player after finalizing.
@@ -21,25 +26,32 @@ use futures::{
 /// contain the public output of the DKG, and the player's private share.
 pub type PlayerOutput<V: Variant, P: PublicKey> = Result<(Output<V, P>, Share), Error>;
 
-struct Message<V: Variant, P: PublicKey> {
-    logs: BTreeMap<P, DealerLog<V, P>>,
-    cb_in: oneshot::Sender<PlayerOutput<V, P>>,
+enum Message<V: Variant, P: PublicKey> {
+    Transmit,
+    Finalize {
+        logs: BTreeMap<P, DealerLog<V, P>>,
+        cb_in: oneshot::Sender<PlayerOutput<V, P>>,
+    },
 }
 
 /// A handle to send messages to a [Actor].
-pub struct Mailbox<V: Variant, P: PublicKey>(oneshot::Sender<Message<V, P>>);
+pub struct Mailbox<V: Variant, P: PublicKey>(mpsc::Sender<Message<V, P>>);
 
 impl<V, P> Mailbox<V, P>
 where
     V: Variant,
     P: PublicKey,
 {
+    pub async fn transmit(&mut self) -> Result<(), Canceled> {
+        self.0.send(Message::Transmit).await.map_err(|_| Canceled)
+    }
+
     pub async fn finalize(
-        self,
+        mut self,
         logs: BTreeMap<P, DealerLog<V, P>>,
     ) -> Result<PlayerOutput<V, P>, Canceled> {
         let (cb_in, cb_out) = oneshot::channel();
-        self.0.send(Message { logs, cb_in });
+        self.0.send(Message::Finalize { logs, cb_in });
         cb_out.await
     }
 }
@@ -58,9 +70,10 @@ where
     ctx: ContextCell<E>,
     to_dealers: S,
     from_dealers: R,
-    inbox: oneshot::Receiver<Message<V, C::PublicKey>>,
-    round_info: RoundInfo<V, C::PublicKey>,
-    me: C,
+    inbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    max_read_size: usize,
+    player: Player<V, C>,
+    acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
 }
 
 impl<E, V, C, S, R> Actor<E, V, C, S, R>
@@ -85,15 +98,19 @@ where
         round_info: RoundInfo<V, C::PublicKey>,
         me: C,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
-        let (outbox, inbox) = oneshot::channel();
+        let (outbox, inbox) = mpsc::channel(1);
         let mailbox = Mailbox(outbox);
+
+        let max_read_size = round_info.max_read_size();
+        let player = Player::new(round_info, me).expect("should be able to create player");
         let this = Self {
             ctx: ContextCell::new(ctx),
             to_dealers,
             from_dealers,
             inbox,
-            round_info,
-            me,
+            max_read_size,
+            player,
+            acks: BTreeMap::new(),
         };
         (this, mailbox)
     }
@@ -103,53 +120,78 @@ where
     }
 
     async fn run(mut self) {
-        let max_read_size = self.round_info.max_read_size();
-        let mut player =
-            Player::new(self.round_info, self.me).expect("should be able to create player");
-
         let mut stopped = self.ctx.stopped().fuse();
-
         // Exiting this loop is stopping the actor.
-        loop {
+        let finalize = loop {
             select_biased! {
                 // Context has stopped, so terminate the actor.
-                _ = stopped => break,
+                _ = stopped => break None,
                 // Some dealer sent us a message, or the network is dead.
                 msg = self.from_dealers.recv().fuse() => {
                     // The network is dead, just terminate the actor.
                     let Ok((dealer, mut msg_bytes)) = msg else {
-                        break;
+                        break None;
                     };
                     let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
                         &mut msg_bytes,
-                        &(max_read_size, ()),
+                        &(self.max_read_size, ()),
                     ) else {
                         // If we can't read the message, ignore it.
                         continue;
                     };
-                    if let Some(ack) = player.dealer_message(dealer.clone(), pub_msg, priv_msg) {
-                        if self
-                            .to_dealers
-                            .send(commonware_p2p::Recipients::One(dealer), ack.encode().freeze(), false)
-                            .await
-                            .is_err()
-                        {
-                            // If we fail to send a message, terminate the actor.
-                            break;
-                        }
-                    };
-                    // Do nothing if we don't produce an ack.
+                    self.dealer_message(dealer, pub_msg, priv_msg).await;
                 }
-                res = &mut self.inbox => {
-                    if let Ok(Message { logs, cb_in }) = res {
-                        let _ = cb_in.send(player.finalize(logs));
+                res = self.inbox.next() => {
+                    let Some(msg) = res else {
+                        break None;
                     };
-                    // Regardless of if we processed the finalizatio, or the inbox is closed,
-                    // it's time to terminate the actor.
-                    break;
+                    match msg {
+                        Message::Transmit => if self.transmit().await.is_err() {
+                            break None;
+                        },
+                        Message::Finalize { logs, cb_in } => break Some((logs, cb_in)),
+                    }
                 }
             }
+        };
+        if let Some((logs, cb_in)) = finalize {
+            self.finalize(logs, cb_in);
         }
         tracing::debug!("player shutting down");
+    }
+
+    async fn dealer_message(
+        &mut self,
+        dealer: C::PublicKey,
+        pub_msg: DealerPubMsg<V>,
+        priv_msg: DealerPrivMsg,
+    ) {
+        if let Some(ack) = self
+            .player
+            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+        {
+            self.acks.insert(dealer, ack);
+        };
+    }
+
+    async fn transmit(&mut self) -> Result<(), S::Error> {
+        for (dealer, ack) in &self.acks {
+            self.to_dealers
+                .send(
+                    Recipients::One(dealer.clone()),
+                    ack.encode().freeze(),
+                    false,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn finalize(
+        self,
+        logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
+        cb_in: oneshot::Sender<PlayerOutput<V, C::PublicKey>>,
+    ) {
+        let _ = cb_in.send(self.player.finalize(logs));
     }
 }

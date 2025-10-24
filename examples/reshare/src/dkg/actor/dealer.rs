@@ -127,7 +127,9 @@ where
                     };
                     match msg {
                         Message::Transmit => {
-                            self.transmit().await;
+                            if self.transmit().await.is_err() {
+                                break None;
+                            }
                         },
                         Message::Finalize { cb_in } => {
                             break Some(cb_in);
@@ -153,7 +155,7 @@ where
         self.unsent_priv_msgs.remove(&player);
     }
 
-    async fn transmit(&mut self) {
+    async fn transmit(&mut self) -> Result<(), S::Error> {
         for (target, priv_msg) in &self.unsent_priv_msgs {
             self.to_players
                 .send(
@@ -161,8 +163,9 @@ where
                     (self.pub_msg.clone(), priv_msg.clone()).encode().freeze(),
                     false,
                 )
-                .await;
+                .await?;
         }
+        Ok(())
     }
 
     fn finalize(self, cb_in: oneshot::Sender<SignedDealerLog<V, C>>) {
