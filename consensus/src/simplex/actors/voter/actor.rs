@@ -998,8 +998,10 @@ impl<
             .expect("notarized proposal should have a proposal");
 
         // Get the context for the proposal.
+        // Since we have a notarization, the parent does not need to be certified by us. It is
+        // implicitly certified by the fact that participants notarized the current proposal.
         let parent_view = proposal.parent;
-        let parent_payload = self.is_certified(parent_view)?;
+        let parent_payload = self.is_notarized(parent_view)?;
         let context = Context {
             round: proposal.round,
             parent: (parent_view, *parent_payload),
@@ -1058,14 +1060,10 @@ impl<
 
         // We should have a notarization for this view,
         // otherwise we would not have asked for certification in the first place.
-        let Some(notarization) = round.notarization.as_ref() else {
-            debug!(
-                view,
-                reason = "notarization missing",
-                "dropping certified result"
-            );
-            return;
-        };
+        let notarization = round
+            .notarization
+            .as_ref()
+            .expect("certified proposal should have a notarization");
 
         // Persist certification result for recovery
         if let Some(journal) = self.journal.as_mut() {
@@ -1871,15 +1869,6 @@ impl<
             // If needed, verify current view
             if pending_verify.is_none() {
                 pending_verify = self.peer_proposal().await;
-            }
-
-            // Opportunistically enqueue certification requests (keep across view changes)
-            if let Some(Request(ctx, receiver)) = self.certify(self.view).await {
-                let v = ctx.view();
-                let handle = certify_pool.push(async move { (ctx, receiver.await) });
-                if let Some(round) = self.views.get_mut(&v) {
-                    round.certify_handle = Some(handle);
-                }
             }
 
             // Drain pending certifications triggered by notarizations

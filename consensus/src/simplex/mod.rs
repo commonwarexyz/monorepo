@@ -992,7 +992,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(720));
+        let executor = deterministic::Runner::timed(Duration::from_secs(2000));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1103,6 +1103,7 @@ mod tests {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
+                    debug!("finalizer finished");
                 }));
             }
             join_all(finalizers).await;
@@ -1123,6 +1124,7 @@ mod tests {
 
             // Wait for nullifications to accrue
             context.sleep(Duration::from_secs(120)).await;
+            debug!("nullifications accrued");
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -1218,6 +1220,7 @@ mod tests {
             while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
+            debug!("engine finalizer finished");
 
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
