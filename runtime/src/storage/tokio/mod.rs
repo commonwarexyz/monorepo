@@ -60,6 +60,15 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
+        // Sync the storage directory to ensure the creation is durable
+        let storage_dir_file = fs::File::open(&self.cfg.storage_directory)
+            .await
+            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+        storage_dir_file
+            .sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
         // Open the file in read-write mode, create if it does not exist
         let mut file = fs::OpenOptions::new()
             .read(true)
