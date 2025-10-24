@@ -224,6 +224,14 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
             players,
         })
     }
+
+    /// Return the `usize` governing the size of reads.
+    ///
+    /// This will need to be passed to various structs when reading them from
+    /// bytes, to avoid allocating buffers that are too large for the round.
+    pub fn max_read_size(&self) -> usize {
+        self.threshold() as usize
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for RoundInfo<V, P> {

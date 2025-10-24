@@ -7,7 +7,6 @@ mod ingress;
 pub use ingress::{Mailbox, Message};
 
 mod types;
-pub use types::{DealOutcome, Dkg, Payload};
+pub use types::{Dkg, IdentifiedLog, Payload};
 
 mod manager;
-pub use manager::DkgManager;
