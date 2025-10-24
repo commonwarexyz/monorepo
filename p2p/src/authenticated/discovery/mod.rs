@@ -525,7 +525,7 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
-            let base_port = 3000;
+            let base_port = 3001;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
