@@ -80,10 +80,13 @@ impl<H: Hasher> Write for Chunk<H> {
 
 impl<H: Hasher> Read for Chunk<H> {
     /// The maximum size of the shard.
-    type Cfg = usize;
+    type Cfg = crate::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
+    fn read_cfg(
+        reader: &mut impl Buf,
+        &(max_bytes, _): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let shard = Vec::<u8>::read_range(reader, ..=max_bytes)?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<H>::read(reader)?;
         Ok(Self {
@@ -157,7 +160,6 @@ type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 /// Inner logic for [encode()]
 fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
     // Validate parameters
-    assert!(total > min);
     assert!(min > 0);
     let n = total as usize;
     let k = min as usize;
@@ -579,15 +581,6 @@ mod tests {
         for i in 0..total {
             assert!(!chunks[i as usize].verify(i + 1, &root));
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "assertion failed: total > min")]
-    fn test_invalid_total() {
-        let data = b"Test parameter validation";
-
-        // total <= min should panic
-        encode::<Sha256>(3, 3, data.to_vec()).unwrap();
     }
 
     #[test]
