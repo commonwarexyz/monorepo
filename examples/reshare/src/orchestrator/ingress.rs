@@ -5,7 +5,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
     PublicKey,
 };
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, SinkExt};
 
 /// Messages that can be sent to the orchestrator.
@@ -23,7 +23,7 @@ pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
     /// The new participants for the epoch.
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
 }
 
 /// Inbound communication channel for epoch transitions.

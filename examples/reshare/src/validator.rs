@@ -167,7 +167,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
-    use commonware_utils::{quorum, sequence::U64, union};
+    use commonware_utils::{quorum, sequence::U64, set::Ordered, union};
     use futures::channel::mpsc;
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -199,6 +199,7 @@ mod test {
         ),
     > {
         let mut registrations = HashMap::new();
+        let ordered_validators = validators.iter().cloned().collect::<Ordered<_>>();
         for validator in validators.iter() {
             let (pending_sender, pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
@@ -212,7 +213,7 @@ mod test {
             let (dkg_sender, dkg_receiver) = oracle.register(validator.clone(), 5).await.unwrap();
 
             // Create a static resolver for backfill
-            let coordinator = Coordinator::new(validators.to_vec());
+            let coordinator = Coordinator::new(ordered_validators.clone());
             let resolver_cfg = p2p_resolver::Config {
                 public_key: validator.clone(),
                 coordinator: coordinator.clone(),

@@ -9,11 +9,11 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 pub use ingress::{Mailbox, Message};
 
 pub struct Config<P: PublicKey, S: Scheme, B: Blocker, R: Reporter> {
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
     pub scheme: S,
 
     pub blocker: B,
