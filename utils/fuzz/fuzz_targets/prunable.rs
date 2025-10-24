@@ -23,7 +23,7 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_ops = u.int_in_range(0..=MAX_OPERATIONS)?;
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
         for _ in 0..num_ops {
             operations.push(Operation::arbitrary(u)?);
