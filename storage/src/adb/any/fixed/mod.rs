@@ -8,13 +8,12 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::Error,
+    adb::{operation::FixedOperation as OperationTrait, Error},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
 use commonware_codec::Encode as _;

@@ -10,7 +10,7 @@
 //! with the log on startup.
 
 use crate::{
-    adb::{align_mmr_and_locations, Error},
+    adb::{align_mmr_and_locations, operation::Keyless as Operation, Error},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
@@ -19,7 +19,6 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::Keyless as Operation,
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;

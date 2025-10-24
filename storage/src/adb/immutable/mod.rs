@@ -2,14 +2,13 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{any::fixed::sync::init_journal, Error},
+    adb::{any::fixed::sync::init_journal, operation::Variable, Error},
     index::{Index as _, Unordered as Index},
     journal::{fixed, variable},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};

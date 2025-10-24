@@ -294,23 +294,23 @@ mod tests {
         // Test init with duplicate validators
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.init(&vec![key(1), key(1), key(2), key(3)]);
+            safe_tip.init(&[key(1), key(1), key(2), key(3)]);
         }));
         assert!(result.is_err());
 
         // Test reconcile with size mismatch
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        safe_tip.init(&[key(1), key(2), key(3), key(4)]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.reconcile(&vec![key(1), key(2), key(3)]);
+            safe_tip.reconcile(&[key(1), key(2), key(3)]);
         }));
         assert!(result.is_err());
 
         // Test reconcile with duplicate validators
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        safe_tip.init(&[key(1), key(2), key(3), key(4)]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.reconcile(&vec![key(1), key(1), key(2), key(3)]);
+            safe_tip.reconcile(&[key(1), key(1), key(2), key(3)]);
         }));
         assert!(result.is_err());
 

@@ -5,7 +5,7 @@
 //! instead for better performance._
 
 use crate::{
-    adb::{align_mmr_and_locations, Error},
+    adb::{align_mmr_and_locations, operation::Variable as Operation, Error},
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -15,7 +15,6 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::Variable as Operation,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};

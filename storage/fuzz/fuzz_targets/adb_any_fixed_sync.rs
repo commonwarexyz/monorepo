@@ -6,10 +6,10 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
         any::fixed::{unordered::Any, Config},
+        operation::Fixed,
         sync,
     },
     mmr::StandardHasher as Standard,
-    store::operation::Fixed,
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};

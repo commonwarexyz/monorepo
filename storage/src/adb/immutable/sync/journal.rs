@@ -7,7 +7,10 @@
 //!   `size` from a replay that considers only `[range.start, range.end)`.
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
-use crate::{adb::sync, journal::variable, store::operation::Variable};
+use crate::{
+    adb::{operation::Variable, sync},
+    journal::variable,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;

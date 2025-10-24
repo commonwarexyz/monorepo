@@ -1,7 +1,11 @@
 use crate::{
-    adb::{self, any::fixed::unordered::Any, immutable::Immutable},
+    adb::{
+        self,
+        any::fixed::unordered::Any,
+        immutable::Immutable,
+        operation::{Fixed, Variable},
+    },
     mmr::{Location, Proof},
-    store::operation::{Fixed, Variable},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;

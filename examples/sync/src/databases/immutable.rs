@@ -7,9 +7,9 @@ use commonware_storage::{
     adb::{
         self,
         immutable::{self, Config},
+        operation,
     },
     mmr::{Location, Proof, StandardHasher as Standard},
-    store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
