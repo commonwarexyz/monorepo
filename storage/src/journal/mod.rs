@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+pub mod contiguous;
 pub mod fixed;
 pub mod variable;
 
@@ -64,4 +65,8 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("corruption detected: {0}")]
+    Corruption(String),
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
