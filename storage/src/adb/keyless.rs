@@ -10,7 +10,7 @@
 //! with the log on startup.
 
 use crate::{
-    adb::{align_mmr_and_locations, operation::Keyless as Operation, Error},
+    adb::{align_mmr_and_locations, operation::keyless::Operation, Error},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},

@@ -5,7 +5,7 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
-        operation::{Fixed as Operation, FixedOperation as OperationTrait},
+        operation::fixed::{unordered::Operation, FixedOperation},
         store::{self, Db},
         Error,
     },
@@ -603,7 +603,7 @@ impl<
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::{operation::Fixed as Operation, verify_proof},
+        adb::{operation::fixed::unordered::Operation, verify_proof},
         index::{Index as IndexTrait, Unordered as Index},
         mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,

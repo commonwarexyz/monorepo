@@ -5,7 +5,7 @@
 //! instead for better performance._
 
 use crate::{
-    adb::{align_mmr_and_locations, operation::Variable as Operation, Error},
+    adb::{align_mmr_and_locations, operation::variable::Operation, Error},
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},

@@ -9,8 +9,9 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
-        operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
+        operation::fixed::{
+            ordered::{KeyData, Operation},
+            FixedOperation,
         },
         store::{self, Db},
         Error,
