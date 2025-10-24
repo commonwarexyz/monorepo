@@ -2,7 +2,7 @@
 
 use crate::{
     application::Block,
-    dkg::{actor::RoundInfo, DealOutcome, Dkg, Payload},
+    dkg::{actor::RoundInfo, Dkg, IdentifiedLog, Payload},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::types::Epoch;
@@ -111,7 +111,7 @@ struct DealerMetadata<C: Signer, V: Variant> {
     /// Signed acknowledgements from contributors.
     acks: BTreeMap<u32, Ack<C::Signature>>,
     /// The constructed dealing for inclusion in a block, if any.
-    outcome: Option<DealOutcome<C, V>>,
+    outcome: Option<IdentifiedLog<V, C>>,
 }
 
 /// A result of a DKG/reshare round.

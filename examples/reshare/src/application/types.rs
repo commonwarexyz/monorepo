@@ -1,6 +1,6 @@
 //! Types for the `commonware-reshare` example application.
 
-use crate::dkg::DealOutcome;
+use crate::dkg::IdentifiedLog;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
@@ -23,7 +23,7 @@ where
     pub height: u64,
 
     /// An optional outcome of a dealing operation.
-    pub deal_outcome: Option<DealOutcome<C, V>>,
+    pub deal_outcome: Option<IdentifiedLog<V, C>>,
 }
 
 impl<H, C, V> Block<H, C, V>
@@ -36,7 +36,7 @@ where
     pub const fn new(
         parent: H::Digest,
         height: u64,
-        deal_outcome: Option<DealOutcome<C, V>>,
+        deal_outcome: Option<IdentifiedLog<V, C>>,
     ) -> Self {
         Self {
             parent,
@@ -83,7 +83,7 @@ where
         Ok(Self {
             parent: H::Digest::read(buf)?,
             height: u64::read(buf)?,
-            deal_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
+            deal_outcome: Read::read_cfg(buf, cfg)?,
         })
     }
 }
