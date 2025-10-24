@@ -1,12 +1,27 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{fs, sync::Mutex};
 
 #[cfg(not(unix))]
 mod fallback;
 #[cfg(unix)]
 mod unix;
+
+#[cfg(not(windows))]
+async fn open_dir_for_sync(path: &Path) -> Result<fs::File, Error> {
+    fs::File::open(path).await.map_err(|e| {
+        Error::BlobOpenFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -60,44 +75,50 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Sync the storage directory to ensure the creation is durable
-        let storage_dir_file = fs::File::open(&self.cfg.storage_directory)
-            .await
-            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-        storage_dir_file
-            .sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-
-        // Open the file in read-write mode, create if it does not exist
-        let mut file = fs::OpenOptions::new()
+        // Try to create a new file first
+        let (mut file, len, newly_created) = match fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
+            .create_new(true)
             .open(&path)
             .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+        {
+            Ok(file) => (file, 0, true),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // File already exists, just open it
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&path)
+                    .await
+                    .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+                let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+                (file, len, false)
+            }
+            Err(e) => return Err(Error::BlobOpenFailed(partition.into(), hex(name), e)),
+        };
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
-        // Get the file length
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        // Only sync if we created a new file
+        if newly_created {
+            // Sync the file to ensure it is durable
+            file.sync_all()
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
-        // Sync the file to ensure it is durable
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-
-        // Sync the parent directory to ensure the directory entry is durable
-        let parent_file = fs::File::open(parent)
-            .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-        parent_file
-            .sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            // Sync the parent directory to ensure the directory entry is durable.
+            #[cfg(unix)]
+            {
+                let parent_file = open_dir_for_sync(parent).await?;
+                parent_file
+                    .sync_all()
+                    .await
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            }
+        }
 
         #[cfg(unix)]
         {
@@ -126,27 +147,28 @@ impl crate::Storage for Storage {
                 .await
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
-            // Sync the partition directory to ensure the removal is durable
-            let parent_file = fs::File::open(&path)
-                .await
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
-            parent_file
-                .sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            // Sync the partition directory to ensure the removal is durable.
+            #[cfg(unix)]
+            {
+                let parent_file = open_dir_for_sync(&path).await?;
+                parent_file
+                    .sync_all()
+                    .await
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            }
         } else {
             fs::remove_dir_all(&path)
                 .await
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
-            // Sync the storage directory to ensure the removal is durable
-            let storage_dir = fs::File::open(&self.cfg.storage_directory)
-                .await
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
-            storage_dir
-                .sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), "partition".to_string(), e))?;
+            // Sync the storage directory to ensure the removal is durable.
+            #[cfg(unix)]
+            {
+                let storage_dir = open_dir_for_sync(&self.cfg.storage_directory).await?;
+                storage_dir.sync_all().await.map_err(|e| {
+                    Error::BlobSyncFailed(partition.into(), "partition".to_string(), e)
+                })?;
+            }
         }
         Ok(())
     }

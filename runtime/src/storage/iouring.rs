@@ -34,8 +34,9 @@ use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
-    io::Error as IoError,
+    io::{Error as IoError, ErrorKind},
     os::fd::AsRawFd,
+    path::Path,
     path::PathBuf,
     sync::Arc,
 };
@@ -90,36 +91,43 @@ impl crate::Storage for Storage {
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Sync the storage directory to ensure the creation is durable
-        let storage_dir_file = fs::File::open(&self.storage_directory)
-            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-        storage_dir_file
-            .sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-
-        // Open the file in read-write mode, create if it does not exist
-        let file = fs::OpenOptions::new()
+        // Try to create a new file first
+        let (file, len, newly_created) = match fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
+            .create_new(true)
             .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-
-        // Get the file length
-        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+        {
+            Ok(file) => (file, 0, true),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // File already exists, just open it
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&path)
+                    .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+                let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+                (file, len, false)
+            }
+            Err(e) => return Err(Error::BlobOpenFailed(partition.into(), hex(name), e)),
+        };
 
         // Create the blob
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
-        // Sync the blob to ensure it is durably created
-        blob.sync().await?;
 
-        // Sync the parent directory to ensure the creation of blob is durable
-        let parent_file = fs::File::open(parent)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-        parent_file
-            .sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+        // Only sync if we created a new file
+        if newly_created {
+            // Sync the blob to ensure it is durably created
+            blob.sync().await?;
+
+            // Sync the parent directory to ensure the creation of blob is durable
+            let parent_file = File::open(parent)
+                .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+            parent_file
+                .sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+        }
 
         Ok((blob, len))
     }
@@ -133,7 +141,7 @@ impl crate::Storage for Storage {
 
             // Sync the partition directory to ensure the removal is durable
             let parent_file =
-                fs::File::open(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+                File::open(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
             parent_file
                 .sync_all()
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
@@ -141,7 +149,7 @@ impl crate::Storage for Storage {
             fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable
-            let storage_dir_file = fs::File::open(&self.storage_directory)
+            let storage_dir_file = File::open(&self.storage_directory)
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
             storage_dir_file
                 .sync_all()
