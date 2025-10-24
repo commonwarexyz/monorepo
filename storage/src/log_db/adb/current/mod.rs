@@ -5,7 +5,7 @@
 //! are "grafted" together to minimize proof sizes.
 
 use crate::{
-    log_db::operation::FixedOperation as OperationTrait,
+    log_db::operation::fixed::FixedOperation as OperationTrait,
     mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
     translator::Translator,
 };

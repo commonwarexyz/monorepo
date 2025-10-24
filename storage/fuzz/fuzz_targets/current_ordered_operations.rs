@@ -140,6 +140,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops += 1;
                         }
                     }
+
                 }
 
                 CurrentOperation::Get { key } => {

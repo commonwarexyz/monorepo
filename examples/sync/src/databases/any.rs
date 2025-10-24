@@ -17,7 +17,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::log_db::operation::Fixed<Key, Value>;
+pub type Operation = commonware_storage::log_db::operation::fixed::unordered::Operation<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {

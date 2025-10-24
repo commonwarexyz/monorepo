@@ -9,7 +9,7 @@ use crate::{
             current::{verify_key_value_proof, Config},
             Error,
         },
-        operation::Fixed as Operation,
+        operation::fixed::unordered::Operation,
         KeyValueStore,
     },
     mmr::{
@@ -677,7 +677,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{log_db::operation::FixedOperation as _, mmr::mem::Mmr, translator::TwoCap};
+    use crate::{log_db::operation::fixed::FixedOperation as _, mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

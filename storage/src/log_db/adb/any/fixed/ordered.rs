@@ -11,8 +11,9 @@ use crate::{
         adb::any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, Error, SNAPSHOT_READ_BUFFER_SIZE,
         },
-        operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
+        operation::fixed::{
+            ordered::{KeyData, Operation},
+            FixedOperation as OperationTrait,
         },
         KeyValueStore,
     },
@@ -384,6 +385,29 @@ impl<
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         Ok(self.get_key_loc(key).await?.map(|(v, _, _)| v))
+    }
+
+    /// Get the value of the operation with location `loc` in the db.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` >= self.op_count().
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
+        }
+
+        assert!(loc < self.op_count());
+        if loc < self.inactivity_floor_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        Ok(self.log.read(*loc).await?.into_value())
     }
 
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.

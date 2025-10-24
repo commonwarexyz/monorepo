@@ -9,7 +9,7 @@ use crate::{
             current::Config,
             Error,
         },
-        operation::{FixedOrdered as Operation, OrderedKeyData},
+        operation::fixed::ordered::{KeyData, Operation},
         KeyValueStore,
     },
     mmr::{
@@ -620,7 +620,7 @@ impl<
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let element = Operation::Update(OrderedKeyData {
+        let element = Operation::Update(KeyData {
             key: info.key,
             value: info.value,
             next_key: info.next_key,
@@ -639,10 +639,7 @@ impl<
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
-    pub async fn get_span(
-        &self,
-        key: &K,
-    ) -> Result<Option<(Location, OrderedKeyData<K, V>)>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         self.any.get_span(key).await
     }
 
@@ -665,7 +662,7 @@ impl<
                     return false;
                 }
 
-                let element = Operation::Update(OrderedKeyData {
+                let element = Operation::Update(KeyData {
                     key: info.key,
                     value: info.value,
                     next_key: info.next_key,
@@ -829,7 +826,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{log_db::operation::FixedOperation, mmr::mem::Mmr, translator::OneCap};
+    use crate::{log_db::operation::fixed::FixedOperation as _, mmr::mem::Mmr, translator::OneCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

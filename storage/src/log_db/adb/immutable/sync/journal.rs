@@ -9,7 +9,7 @@
 
 use crate::{
     journal::variable,
-    log_db::{adb::sync, operation::Variable},
+    log_db::{adb::sync, operation::variable::Operation},
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -27,7 +27,7 @@ where
     V: Codec,
 {
     /// Underlying variable journal storing the operations.
-    inner: variable::Journal<E, Variable<K, V>>,
+    inner: variable::Journal<E, Operation<K, V>>,
 
     /// Logical operations per storage section.
     items_per_section: NonZeroU64,
@@ -52,7 +52,7 @@ where
     /// * `items_per_section` - Operations per section.
     /// * `size` - Logical next append location to report.
     pub fn new(
-        inner: variable::Journal<E, Variable<K, V>>,
+        inner: variable::Journal<E, Operation<K, V>>,
         items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
@@ -64,7 +64,7 @@ where
     }
 
     /// Return the inner [variable::Journal].
-    pub fn into_inner(self) -> variable::Journal<E, Variable<K, V>> {
+    pub fn into_inner(self) -> variable::Journal<E, Operation<K, V>> {
         self.inner
     }
 }
@@ -75,7 +75,7 @@ where
     K: Array,
     V: Codec,
 {
-    type Op = Variable<K, V>;
+    type Op = Operation<K, V>;
     type Error = crate::journal::Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
