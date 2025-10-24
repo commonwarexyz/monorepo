@@ -12,8 +12,8 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
+        store::Db,
     },
-    store::Db,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};

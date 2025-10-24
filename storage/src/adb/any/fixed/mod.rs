@@ -8,13 +8,12 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::Error,
+    adb::{operation::fixed::FixedOperation, Error},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
 use commonware_codec::Encode as _;
@@ -71,7 +70,7 @@ pub struct Config<T: Translator> {
 /// db will be as of the last committed operation.
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
-    O: OperationTrait,
+    O: FixedOperation,
     H: CHasher,
     T: Translator,
 >(
@@ -178,7 +177,7 @@ async fn prune_db<E, O, H>(
 ) -> Result<(), Error>
 where
     E: Storage + Clock + Metrics,
-    O: OperationTrait,
+    O: FixedOperation,
     H: CHasher,
 {
     let target_prune_pos = Position::try_from(target_prune_loc)?;
@@ -229,7 +228,7 @@ async fn historical_proof<E, O, H>(
 ) -> Result<(Proof<H::Digest>, Vec<O>), Error>
 where
     E: Storage + Clock + Metrics,
-    O: OperationTrait,
+    O: FixedOperation,
     H: CHasher,
 {
     let size = Location::new_unchecked(log.size().await?);
