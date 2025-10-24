@@ -1,10 +1,9 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    adb::{self, any::fixed::unordered::Any},
+    adb::{self, any::fixed::unordered::Any, operation::Fixed},
     index::Unordered as Index,
     journal::fixed,
     mmr::{Location, Position, StandardHasher},
-    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -278,6 +277,7 @@ mod tests {
                 },
                 Any,
             },
+            operation::{Fixed, FixedOperation as _},
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -287,7 +287,6 @@ mod tests {
         },
         journal::{self, fixed},
         mmr::iterator::nodes_to_pin,
-        store::operation::{Fixed, FixedOperation as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{

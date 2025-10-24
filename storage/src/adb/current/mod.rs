@@ -5,8 +5,8 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
+    adb::operation::FixedOperation as OperationTrait,
     mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
-    store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode};

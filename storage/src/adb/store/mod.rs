@@ -1,4 +1,5 @@
-//! A mutable key-value database that supports variable-sized values.
+//! A mutable key-value database that supports variable-sized values, but without authentication
+//! capabilities.
 //!
 //! # Terminology
 //!
@@ -38,7 +39,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     store::{Config, Store},
+//!     adb::store::{Config, Store},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -95,13 +96,13 @@
 //! ```
 
 use crate::{
+    adb::operation::Variable as Operation,
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::Location,
-    store::operation::Variable as Operation,
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
@@ -114,8 +115,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::{debug, warn};
-
-pub mod operation;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

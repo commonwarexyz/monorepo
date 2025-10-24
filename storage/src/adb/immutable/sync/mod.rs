@@ -2,12 +2,12 @@ use crate::{
     adb::{
         any::variable::sync::{get_size, init_journal},
         immutable,
+        operation::Variable,
         sync::{self, Journal as _},
         Error,
     },
     journal::variable,
     mmr::{Location, StandardHasher as Standard},
-    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -176,6 +176,7 @@ mod tests {
     use crate::{
         adb::{
             immutable,
+            operation::Variable,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -183,7 +184,6 @@ mod tests {
             },
         },
         mmr::{Location, StandardHasher as Standard},
-        store::operation::Variable,
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
