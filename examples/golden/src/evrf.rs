@@ -1,15 +1,10 @@
 use commonware_codec::Encode;
 use commonware_cryptography::bls12381::primitives::{
     group::{Element, Point, Scalar, DST},
+    ops::compute_public,
     variant::Variant,
 };
-use std::marker::PhantomData;
-
-pub struct EVRF<V: Variant> {
-    secret: Scalar,
-    scheme: PhantomData<V>,
-    beta: Scalar,
-}
+use rand_core::CryptoRngCore;
 
 #[derive(Eq, PartialEq)]
 pub struct Output<V: Variant> {
@@ -17,21 +12,30 @@ pub struct Output<V: Variant> {
     pub commitment: V::Public,
     pub zk_proof: (), // Optimization: the zk_proof should be per-share but per-broadcast-msg
 }
+pub struct EVRF<V: Variant> {
+    sk_i: Scalar,
+    pk_i: V::Public,
+    beta: Scalar,
+}
 
 impl<V: Variant> EVRF<V> {
-    pub fn new(secret: Scalar) -> Self {
+    pub fn new(sk_i: Scalar, beta: Scalar) -> Self {
         Self {
-            secret,
-            scheme: PhantomData,
-            beta: Scalar::one(),
+            pk_i: compute_public::<V>(&sk_i),
+            sk_i,
+            beta,
         }
     }
 
-    pub fn evaluate(&self, msg: &[u8], party: V::Public) -> Output<V> {
+    pub fn random<R: CryptoRngCore>(rng: &mut R, beta: Scalar) -> Self {
+        Self::new(Scalar::from_rand(rng), beta)
+    }
+
+    pub fn evaluate(&self, msg: &[u8], party_pki: V::Public) -> Output<V> {
         // Reference: Figure 3 (page 19)
         //(0) -> skipping
         //(1), (2), (3)
-        let k = self.gen_df_secret(party);
+        let k = self.gen_df_secret(party_pki);
         //(4), (6)
         let mut r = Self::compute_pad(b"PADDING_R1", msg, &k);
         //(5), (7)
@@ -61,7 +65,7 @@ impl<V: Variant> EVRF<V> {
     }
 
     fn gen_df_secret(&self, mut party: V::Public) -> Scalar {
-        party.mul(&self.secret);
+        party.mul(&self.sk_i);
         let s = party;
         // Internally calls blst_p*_compress, which returns the x coordinate with metadata encoding
         let s = s.encode();
@@ -86,8 +90,8 @@ mod test {
         let receiver_sk = Scalar::from(2u32);
         let receiver_pk = compute_public::<V>(&receiver_sk);
 
-        let sender_evrf = EVRF::<V>::new(sender_sk);
-        let receiver_evrf = EVRF::<V>::new(receiver_sk);
+        let sender_evrf = EVRF::<V>::new(sender_sk, Scalar::one());
+        let receiver_evrf = EVRF::<V>::new(receiver_sk, Scalar::one());
 
         let msg = b"hello world";
         let secret1 = sender_evrf.evaluate(msg, receiver_pk);

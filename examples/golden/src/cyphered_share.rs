@@ -1,9 +1,9 @@
-use crate::{error::Error, evrf::Output};
+use crate::evrf::Output;
 use commonware_cryptography::bls12381::primitives::{
     group::{Element, Scalar, Share as DKGShare},
     variant::Variant,
 };
-
+use std::cmp::Ord;
 use thiserror::Error as ThisError;
 
 #[derive(Debug, ThisError)]
@@ -14,10 +14,23 @@ pub enum ShareError {
     InvalidZkProof,
 }
 
+#[derive(Eq, PartialEq)]
 pub struct CypheredShare<V: Variant> {
     cyphered: DKGShare,
     commitment_r: V::Public,
     zk_proof: (),
+}
+
+impl<V: Variant> PartialOrd for CypheredShare<V> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.index().partial_cmp(&other.index())
+    }
+}
+
+impl<V: Variant> Ord for CypheredShare<V> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.index().cmp(&other.index())
+    }
 }
 
 impl<V: Variant> CypheredShare<V> {
@@ -37,14 +50,14 @@ impl<V: Variant> CypheredShare<V> {
         self.cyphered.index
     }
 
-    pub fn decrypt(&mut self, evrf_scalar: Scalar) -> Result<(), ShareError> {
+    pub fn decrypt(mut self, evrf_scalar: Scalar) -> Result<Scalar, ShareError> {
         let mut g = V::Public::one();
         g.mul(&evrf_scalar);
         if g != self.commitment_r {
             return Err(ShareError::InvalidEVRFScalar);
         }
         self.cyphered.private.sub(&evrf_scalar);
-        Ok(())
+        Ok(self.cyphered.private)
     }
 
     pub fn verify_zk_proof(

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{broadcast::BroadcastMsgError, share::ShareError};
+use crate::{broadcast::BroadcastMsgError, cyphered_share::ShareError, registry::RegistryError};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -8,4 +8,6 @@ pub enum Error {
     ShareError(#[from] ShareError),
     #[error("Error in broadcasted msg: {0}")]
     BroadcastMsgError(#[from] BroadcastMsgError),
+    #[error("Registry error: {0}")]
+    RegistryError(#[from] RegistryError),
 }
