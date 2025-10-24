@@ -1,0 +1,47 @@
+[package]
+name = "commonware-p2p-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-p2p = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-codec = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+governor = { workspace = true }
+
+[lib]
+bench = false
+
+[[bin]]
+name = "simulated"
+path = "fuzz_targets/simulated.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lookup"
+path = "fuzz_targets/lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "discovery"
+path = "fuzz_targets/discovery.rs"
+test = false
+doc = false
+bench = false
