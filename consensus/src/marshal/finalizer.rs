@@ -1,12 +1,12 @@
 use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use futures::{channel::mpsc, StreamExt};
 use tracing::{debug, error};
 
 // The key used to store the last indexed height in the metadata store.
-const LATEST_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
+const LATEST_KEY: FixedBytes<1> = fixed_bytes!("00");
 
 /// Requests the finalized blocks (in order) from the orchestrator, sends them to the application,
 /// waits for confirmation that the application has processed the block.

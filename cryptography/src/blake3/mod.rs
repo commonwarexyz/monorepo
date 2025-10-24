@@ -186,7 +186,10 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::hex;
 
-    const HELLO_DIGEST: &str = "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24";
+    const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
+        hex!("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24");
+    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
+        hex!("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");
 
     #[test]
     fn test_blake3() {
@@ -197,17 +200,17 @@ mod tests {
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
+        assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test simple hasher
         let hash = hash(msg);
-        assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
+        assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
     #[test]
@@ -226,15 +229,7 @@ mod tests {
     #[test]
     fn test_blake3_empty() {
         let empty_digest = Blake3::empty();
-
-        // BLAKE3 hash of empty string:
-        // af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
-        let expected_bytes = [
-            0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc,
-            0xc9, 0x49, 0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca,
-            0xe4, 0x1f, 0x32, 0x62,
-        ];
-        let expected_digest = Digest::from(expected_bytes);
+        let expected_digest = Digest::from(EMPTY_DIGEST);
 
         assert_eq!(empty_digest, expected_digest);
     }

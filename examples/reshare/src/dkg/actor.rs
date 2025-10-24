@@ -21,7 +21,7 @@ use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    hex, quorum,
+    fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,
 };
@@ -37,7 +37,7 @@ use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 use tracing::info;
 
-const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
+const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
 pub struct Config<C> {
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,

@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::sequence::U64;
+    use commonware_utils::{hex, sequence::U64};
     use rand::{Rng, RngCore};
 
     #[test_traced]
@@ -1079,7 +1079,7 @@ mod tests {
             assert!(all_keys.contains(&U64::new(0x3000)));
 
             // Test iterating with prefix 0x10
-            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            let prefix = hex!("0x00000000000010");
             let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
             assert_eq!(prefix_keys.len(), 3);
             assert!(prefix_keys.contains(&U64::new(0x1000)));
@@ -1088,14 +1088,14 @@ mod tests {
             assert!(!prefix_keys.contains(&U64::new(0x2000)));
 
             // Test iterating with prefix 0x20
-            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20];
+            let prefix = hex!("0x00000000000020");
             let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
             assert_eq!(prefix_keys.len(), 2);
             assert!(prefix_keys.contains(&U64::new(0x2000)));
             assert!(prefix_keys.contains(&U64::new(0x2001)));
 
             // Test with non-matching prefix
-            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+            let prefix = hex!("0x00000000000040");
             let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
             assert_eq!(prefix_keys.len(), 0);
 
@@ -1130,7 +1130,7 @@ mod tests {
             assert!(buffer.contains("keys 6"));
 
             // Remove keys with prefix 0x10
-            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            let prefix = hex!("0x00000000000010");
             metadata.remove_prefix(&prefix);
 
             // Check metrics after removal
@@ -1162,7 +1162,7 @@ mod tests {
             assert_eq!(metadata.keys(None).count(), 3);
 
             // Remove non-existing prefix
-            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+            let prefix = hex!("0x00000000000040");
             metadata.remove_prefix(&prefix);
 
             // Remove all remaining keys

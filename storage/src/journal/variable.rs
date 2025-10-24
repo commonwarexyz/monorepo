@@ -1339,7 +1339,7 @@ mod tests {
                 .expect("Failed to create blob");
 
             // Write incomplete size data (less than 4 bytes)
-            let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
+            let incomplete_data = hex!("0x0001").to_vec(); // Less than 4 bytes
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");

@@ -382,6 +382,7 @@ impl<const N: usize> EncodeSize for Prunable<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::Encode;
 
@@ -454,7 +455,7 @@ mod tests {
     #[test]
     fn test_push_chunk() {
         let mut prunable: Prunable<4> = Prunable::new();
-        let chunk = [0xAA, 0xBB, 0xCC, 0xDD];
+        let chunk = hex!("0xAABBCCDD");
 
         prunable.push_chunk(&chunk);
         assert_eq!(prunable.len(), 32); // 4 bytes * 8 bits
@@ -488,9 +489,9 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add multiple chunks (4 bytes each)
-        let chunk1 = [0x01, 0x02, 0x03, 0x04];
-        let chunk2 = [0x05, 0x06, 0x07, 0x08];
-        let chunk3 = [0x09, 0x0A, 0x0B, 0x0C];
+        let chunk1 = hex!("0x01020304");
+        let chunk2 = hex!("0x05060708");
+        let chunk3 = hex!("0x090A0B0C");
 
         prunable.push_chunk(&chunk1);
         prunable.push_chunk(&chunk2);
@@ -772,9 +773,9 @@ mod tests {
     #[test]
     fn test_get_chunk() {
         let mut prunable: Prunable<4> = Prunable::new();
-        let chunk1 = [0x11, 0x22, 0x33, 0x44];
-        let chunk2 = [0x55, 0x66, 0x77, 0x88];
-        let chunk3 = [0x99, 0xAA, 0xBB, 0xCC];
+        let chunk1 = hex!("0x11223344");
+        let chunk2 = hex!("0x55667788");
+        let chunk3 = hex!("0x99AABBCC");
 
         prunable.push_chunk(&chunk1);
         prunable.push_chunk(&chunk2);
@@ -830,7 +831,7 @@ mod tests {
         const CHUNK_SIZE: u64 = Prunable::<4>::CHUNK_SIZE_BITS;
 
         // Test 1: Pop a single chunk and verify it returns the correct data
-        let chunk1 = [0xAA, 0xBB, 0xCC, 0xDD];
+        let chunk1 = hex!("0xAABBCCDD");
         prunable.push_chunk(&chunk1);
         assert_eq!(prunable.len(), CHUNK_SIZE);
         let popped = prunable.pop_chunk();
@@ -839,9 +840,9 @@ mod tests {
         assert!(prunable.is_empty());
 
         // Test 2: Pop multiple chunks in reverse order
-        let chunk2 = [0x11, 0x22, 0x33, 0x44];
-        let chunk3 = [0x55, 0x66, 0x77, 0x88];
-        let chunk4 = [0x99, 0xAA, 0xBB, 0xCC];
+        let chunk2 = hex!("0x11223344");
+        let chunk3 = hex!("0x55667788");
+        let chunk4 = hex!("0x99AABBCC");
 
         prunable.push_chunk(&chunk2);
         prunable.push_chunk(&chunk3);
@@ -859,8 +860,8 @@ mod tests {
 
         // Test 3: Verify data integrity when popping chunks
         prunable = Prunable::new();
-        let first_chunk = [0xAA, 0xBB, 0xCC, 0xDD];
-        let second_chunk = [0x11, 0x22, 0x33, 0x44];
+        let first_chunk = hex!("0xAABBCCDD");
+        let second_chunk = hex!("0x11223344");
         prunable.push_chunk(&first_chunk);
         prunable.push_chunk(&second_chunk);
 
@@ -919,8 +920,8 @@ mod tests {
     #[test]
     fn test_write_read_non_empty() {
         let mut original: Prunable<4> = Prunable::new();
-        original.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        original.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
+        original.push_chunk(&hex!("0xAABBCCDD"));
+        original.push_chunk(&hex!("0x11223344"));
         original.push(true);
         original.push(false);
         original.push(true);
@@ -941,9 +942,9 @@ mod tests {
     #[test]
     fn test_write_read_with_pruning() {
         let mut original: Prunable<4> = Prunable::new();
-        original.push_chunk(&[0x01, 0x02, 0x03, 0x04]);
-        original.push_chunk(&[0x05, 0x06, 0x07, 0x08]);
-        original.push_chunk(&[0x09, 0x0A, 0x0B, 0x0C]);
+        original.push_chunk(&hex!("0x01020304"));
+        original.push_chunk(&hex!("0x05060708"));
+        original.push_chunk(&hex!("0x090A0B0C"));
 
         // Prune first chunk
         original.prune_to_bit(32);
@@ -959,8 +960,8 @@ mod tests {
         assert_eq!(decoded.len(), 96);
 
         // Verify remaining chunks match
-        assert_eq!(decoded.get_chunk_containing(32), &[0x05, 0x06, 0x07, 0x08]);
-        assert_eq!(decoded.get_chunk_containing(64), &[0x09, 0x0A, 0x0B, 0x0C]);
+        assert_eq!(decoded.get_chunk_containing(32), &hex!("0x05060708"));
+        assert_eq!(decoded.get_chunk_containing(64), &hex!("0x090A0B0C"));
     }
 
     #[test]
