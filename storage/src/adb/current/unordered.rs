@@ -5,7 +5,7 @@ use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
         current::{verify_key_value_proof, Config},
-        operation::Fixed as Operation,
+        operation::fixed::unordered::Operation,
         store::{self, Db},
         Error,
     },
@@ -675,7 +675,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::operation::FixedOperation as _, mmr::mem::Mmr, translator::TwoCap};
+    use crate::{adb::operation::fixed::FixedOperation as _, mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

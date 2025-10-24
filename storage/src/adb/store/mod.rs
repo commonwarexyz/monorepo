@@ -95,7 +95,7 @@
 //! ```
 
 use crate::{
-    adb::operation::Variable as Operation,
+    adb::operation::variable::Operation,
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},

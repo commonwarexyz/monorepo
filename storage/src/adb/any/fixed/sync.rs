@@ -1,6 +1,6 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    adb::{self, any::fixed::unordered::Any, operation::Fixed},
+    adb::{self, any::fixed::unordered::Any, operation::fixed::unordered::Operation},
     index::Unordered as Index,
     journal::fixed,
     mmr::{Location, Position, StandardHasher},
@@ -23,8 +23,8 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = Fixed<K, V>;
-    type Journal = fixed::Journal<E, Fixed<K, V>>;
+    type Op = Operation<K, V>;
+    type Journal = fixed::Journal<E, Operation<K, V>>;
     type Hasher = H;
     type Config = adb::any::fixed::Config<T>;
     type Digest = H::Digest;
@@ -277,7 +277,7 @@ mod tests {
                 },
                 Any,
             },
-            operation::{Fixed, FixedOperation as _},
+            operation::fixed::{unordered::Operation as Fixed, FixedOperation as _},
             sync::{
                 self,
                 engine::{Config, NextStep},
