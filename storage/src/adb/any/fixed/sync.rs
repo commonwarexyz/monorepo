@@ -1318,7 +1318,7 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = journal::fixed::Journal::<Context, Fixed<Digest, Digest>>::init(
+            let log = journal::fixed::Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
                 journal::fixed::Config {
                     partition: "sync_basic_log".into(),
@@ -1445,10 +1445,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1540,10 +1540,10 @@ mod tests {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Fixed::Update(key, value) = op {
+                    if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Fixed::Delete(key) = op {
+                    } else if let Operation::Delete(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1643,10 +1643,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }

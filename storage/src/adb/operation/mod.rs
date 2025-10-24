@@ -44,7 +44,7 @@ mod tests {
         adb::operation::{
             fixed::{
                 ordered::{KeyData as OrderedKeyData, Operation as FixedOrdered},
-                unordered::Operation as Fixed,
+                unordered::Operation as FixedUnordered,
                 FixedOperation as _,
             },
             keyless::Operation as Keyless,
@@ -59,13 +59,13 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = Fixed::Update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&key, update_op.key().unwrap());
 
-        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.key());
 
         let update_op = FixedOrdered::Update(OrderedKeyData {
@@ -87,13 +87,13 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = Fixed::Update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&value, update_op.value().unwrap());
 
-        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.value());
 
         let update_op = FixedOrdered::Update(OrderedKeyData {
@@ -115,13 +115,13 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = Fixed::Update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(value, update_op.into_value().unwrap());
 
-        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.into_value());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.into_value());
 
         let update_op = FixedOrdered::Update(OrderedKeyData {
@@ -143,38 +143,40 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = Fixed::Update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(&key, update_op.key().unwrap());
         assert_eq!(&value, update_op.value().unwrap());
 
-        let from = Fixed::<U64, U64>::decode(update_op.encode()).unwrap();
+        let from = FixedUnordered::<U64, U64>::decode(update_op.encode()).unwrap();
         assert_eq!(&key, from.key().unwrap());
         assert_eq!(&value, from.value().unwrap());
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
-        let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
-        let from = Fixed::<U64, U64>::decode(delete_op.encode()).unwrap();
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
+        let from = FixedUnordered::<U64, U64>::decode(delete_op.encode()).unwrap();
         assert_eq!(&key2, from.key().unwrap());
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new_unchecked(42));
-        let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
+        let from = FixedUnordered::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
-        assert!(matches!(from, Fixed::CommitFloor(loc) if loc == Location::new_unchecked(42)));
+        assert!(
+            matches!(from, FixedUnordered::CommitFloor(loc) if loc == Location::new_unchecked(42))
+        );
         assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation
         let mut invalid = delete_op.encode();
         invalid[U64::SIZE + 4] = 0xFF;
-        let decoded = Fixed::<U64, U64>::decode(invalid.as_ref());
+        let decoded = FixedUnordered::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
 
         // test invalid context byte detection
         let mut invalid = delete_op.encode();
         invalid[0] = 0xFF;
-        let decoded = Fixed::<U64, U64>::decode(invalid.as_ref());
+        let decoded = FixedUnordered::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
@@ -183,7 +185,7 @@ mod tests {
         // test invalid length detection
         let mut invalid = delete_op.encode().to_vec();
         invalid.pop();
-        let decoded = Fixed::<U64, U64>::decode(invalid.as_ref());
+        let decoded = FixedUnordered::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 
@@ -191,14 +193,14 @@ mod tests {
     fn test_operation_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = Fixed::Update(key.clone(), value.clone());
+        let update_op = FixedUnordered::Update(key.clone(), value.clone());
         assert_eq!(
             format!("{update_op}"),
             format!("[key:{key} value:{}]", hex(&value.encode()))
         );
 
         let key2 = U64::new(42);
-        let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
+        let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
 
         let key = U64::new(1234);
@@ -219,12 +221,12 @@ mod tests {
     fn test_operation_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
-        let update_op = Fixed::Update(key, value);
+        let update_op = FixedUnordered::Update(key, value);
 
         let encoded = update_op.encode();
-        assert_eq!(encoded.len(), Fixed::<U64, U64>::SIZE);
+        assert_eq!(encoded.len(), FixedUnordered::<U64, U64>::SIZE);
 
-        let decoded = Fixed::<U64, U64>::decode(encoded).unwrap();
+        let decoded = FixedUnordered::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
 
         let key = U64::new(1234);
