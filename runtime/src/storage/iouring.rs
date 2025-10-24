@@ -22,7 +22,7 @@
 
 use crate::{
     iouring::{self, should_retry},
-    Error,
+    Blob as _, Error,
 };
 use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
