@@ -22,6 +22,7 @@ members = [
     "examples/sync",
     "examples/vrf",
     "examples/reshare",
+    "examples/golden",
 
     # Fuzz builds
     "broadcast/fuzz",
@@ -33,7 +34,7 @@ members = [
     "runtime/fuzz",
     "stream/fuzz",
     "storage/fuzz",
-    "utils/fuzz"
+    "utils/fuzz",
 ]
 resolver = "2"
 
@@ -95,7 +96,7 @@ serde_yaml = "0.9.34"
 either = "1.13.0"
 opentelemetry = "0.28.0"
 opentelemetry-otlp = "0.28.0"
-opentelemetry_sdk =  "0.28.0"
+opentelemetry_sdk = "0.28.0"
 tracing-opentelemetry = "0.29.0"
 io-uring = "0.7.4"
 rayon = { version = "1.10.0", default-features = false }
