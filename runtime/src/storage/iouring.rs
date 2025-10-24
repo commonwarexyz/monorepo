@@ -83,10 +83,7 @@ impl crate::Storage for Storage {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
         // Construct the full path
         let blob_name = hex(name);
-        let path = self
-            .storage_directory
-            .join(partition)
-            .join(&blob_name);
+        let path = self.storage_directory.join(partition).join(&blob_name);
         let parent = path
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
@@ -113,7 +110,13 @@ impl crate::Storage for Storage {
                     .map_err(|e| Error::BlobOpenFailed(partition.into(), blob_name.clone(), e))?;
                 (created_file, true)
             }
-            Err(err) => return Err(Error::BlobOpenFailed(partition.into(), blob_name.clone(), err)),
+            Err(err) => {
+                return Err(Error::BlobOpenFailed(
+                    partition.into(),
+                    blob_name.clone(),
+                    err,
+                ))
+            }
         };
 
         // Get the file length
