@@ -1,11 +1,10 @@
-use super::*;
 use crate::broadcast::BroadcastMsg;
-use crate::cyphered_share::CypheredShare;
 use crate::error::Error;
 use crate::evrf::EVRF;
 use commonware_cryptography::bls12381::primitives::group::Element;
 use commonware_cryptography::bls12381::primitives::group::Scalar;
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use commonware_cryptography::bls12381::primitives::group::G1;
+use commonware_cryptography::bls12381::PublicKey;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error as ThisError;
 
@@ -20,23 +19,24 @@ pub enum RegistryError {
 }
 
 /// Short-lived registry: re-initied at every round
-pub struct Registry<V: Variant> {
+#[derive(Clone)]
+pub struct Registry {
     player_id: u32,
     dealer_broadcasted: HashSet<u32>,
-    player_pubkeys: HashMap<u32, V::Public>,
+    player_pubkeys: HashMap<u32, G1>,
     share: Scalar,
-    group_pubkey: V::Public,
+    group_pubkey: G1,
     ready: bool,
 }
 
-impl<V: Variant> Registry<V> {
+impl Registry {
     pub fn new(player_id: u32) -> Self {
         Self {
             player_id,
             dealer_broadcasted: Default::default(),
             player_pubkeys: Default::default(),
             share: Scalar::zero(),
-            group_pubkey: V::Public::zero(),
+            group_pubkey: G1::zero(),
             ready: false,
         }
     }
@@ -45,9 +45,9 @@ impl<V: Variant> Registry<V> {
     pub fn on_incoming_bmsg(
         &mut self,
         dealer: u32,
-        mut bmsg: BroadcastMsg<V>,
-        participants_pk_i: &HashMap<u32, V::Public>,
-        evrf: &EVRF<V>,
+        mut bmsg: BroadcastMsg,
+        participants_pk_i: &HashMap<u32, PublicKey>,
+        evrf: &EVRF,
     ) -> Result<(), Error> {
         if !self.dealer_broadcasted.insert(dealer) {
             return Err(RegistryError::DealerAlreadySeen(dealer).into());
@@ -62,7 +62,7 @@ impl<V: Variant> Registry<V> {
         let Some(dealer_pk) = participants_pk_i.get(&dealer) else {
             return Err(RegistryError::PubkeyNotFound(dealer).into());
         };
-        let evrf_output = evrf.evaluate(bmsg.msg(), *dealer_pk);
+        let evrf_output = evrf.evaluate(bmsg.msg(), dealer_pk);
 
         let decrypted = my_share.decrypt(evrf_output.scalar)?;
 
@@ -88,26 +88,23 @@ impl<V: Variant> Registry<V> {
         Some(&self.share)
     }
 
-    pub fn group_pubkey(&self) -> Option<&V::Public> {
+    pub fn group_pubkey(&self) -> Option<PublicKey> {
         if !self.ready {
             return None;
         }
-        Some(&self.group_pubkey)
+        Some(PublicKey::from(self.group_pubkey))
     }
 
-    pub fn player_pubkey(&self, k: u32) -> Option<&V::Public> {
+    pub fn player_pubkey(&self, k: u32) -> Option<PublicKey> {
         if !self.ready {
             return None;
         }
-        self.player_pubkeys.get(&k)
+        self.player_pubkeys.get(&k).map(|x| PublicKey::from(*x))
     }
 
-    fn update_share_commitments(&mut self, share_commitments: Vec<(u32, V::Public)>) {
+    fn update_share_commitments(&mut self, share_commitments: Vec<(u32, G1)>) {
         for (player, share_commitment) in share_commitments {
-            let entry = self
-                .player_pubkeys
-                .entry(player)
-                .or_insert(V::Public::zero());
+            let entry = self.player_pubkeys.entry(player).or_insert(G1::zero());
 
             entry.add(&share_commitment);
         }

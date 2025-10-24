@@ -1,7 +1,6 @@
 use crate::evrf::Output;
-use commonware_cryptography::bls12381::primitives::{
-    group::{Element, Scalar, Share as DKGShare},
-    variant::Variant,
+use commonware_cryptography::bls12381::primitives::group::{
+    Element, Scalar, Share as DKGShare, G1,
 };
 use std::cmp::Ord;
 use thiserror::Error as ThisError;
@@ -15,26 +14,26 @@ pub enum ShareError {
 }
 
 #[derive(Eq, PartialEq)]
-pub struct CypheredShare<V: Variant> {
+pub struct CypheredShare {
     cyphered: DKGShare,
-    commitment_r: V::Public,
+    commitment_r: G1,
     zk_proof: (),
 }
 
-impl<V: Variant> PartialOrd for CypheredShare<V> {
+impl PartialOrd for CypheredShare {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.index().partial_cmp(&other.index())
+        Some(self.cmp(other))
     }
 }
 
-impl<V: Variant> Ord for CypheredShare<V> {
+impl Ord for CypheredShare {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.index().cmp(&other.index())
     }
 }
 
-impl<V: Variant> CypheredShare<V> {
-    pub fn new(mut dkg_share: DKGShare, evrf: Output<V>) -> Self {
+impl CypheredShare {
+    pub fn new(mut dkg_share: DKGShare, evrf: Output) -> Self {
         let alpha = evrf.scalar;
         let commitment = evrf.commitment;
         let zk_proof = evrf.zk_proof;
@@ -51,7 +50,7 @@ impl<V: Variant> CypheredShare<V> {
     }
 
     pub fn decrypt(mut self, evrf_scalar: Scalar) -> Result<Scalar, ShareError> {
-        let mut g = V::Public::one();
+        let mut g = G1::one();
         g.mul(&evrf_scalar);
         if g != self.commitment_r {
             return Err(ShareError::InvalidEVRFScalar);
@@ -60,24 +59,19 @@ impl<V: Variant> CypheredShare<V> {
         Ok(self.cyphered.private)
     }
 
-    pub fn verify_zk_proof(
-        &self,
-        dealer: V::Public,
-        msg: &[u8],
-        receiver: V::Public,
-    ) -> Result<(), ShareError> {
+    pub fn verify_zk_proof(&self, dealer: G1, msg: &[u8], receiver: G1) -> Result<(), ShareError> {
         // TODO: implement ZK-proof validation (figure 3, execpt last step)
         Err(ShareError::InvalidZkProof)
     }
 
     /// R_{j,k} = g^{r_{j,k}}
-    pub fn commitment_random_scalar(&self) -> V::Public {
+    pub fn commitment_random_scalar(&self) -> G1 {
         self.commitment_r
     }
 
     /// g^{z_{j,k}}
-    pub fn commitment_cyphered_share(&self) -> V::Public {
-        let mut out = V::Public::one();
+    pub fn commitment_cyphered_share(&self) -> G1 {
+        let mut out = G1::one();
         out.mul(&self.cyphered.private);
         out
     }

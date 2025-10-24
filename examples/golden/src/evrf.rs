@@ -1,37 +1,30 @@
 use commonware_codec::Encode;
-use commonware_cryptography::bls12381::primitives::{
-    group::{Element, Point, Scalar, DST},
-    ops::compute_public,
-    variant::Variant,
+use commonware_cryptography::bls12381::{
+    primitives::{
+        group::{Element, Point, Scalar, DST, G1},
+        ops::compute_public,
+        variant::MinPk,
+    },
+    PublicKey,
 };
 use rand_core::CryptoRngCore;
 
 #[derive(Eq, PartialEq)]
-pub struct Output<V: Variant> {
+pub struct Output {
     pub scalar: Scalar,
-    pub commitment: V::Public,
+    pub commitment: G1,
     pub zk_proof: (), // Optimization: the zk_proof should be per-share but per-broadcast-msg
 }
-pub struct EVRF<V: Variant> {
+
+#[derive(Clone)]
+pub struct EVRF {
     sk_i: Scalar,
-    pk_i: V::Public,
+    pk_i: PublicKey,
     beta: Scalar,
 }
 
-impl<V: Variant> EVRF<V> {
-    pub fn new(sk_i: Scalar, beta: Scalar) -> Self {
-        Self {
-            pk_i: compute_public::<V>(&sk_i),
-            sk_i,
-            beta,
-        }
-    }
-
-    pub fn random<R: CryptoRngCore>(rng: &mut R, beta: Scalar) -> Self {
-        Self::new(Scalar::from_rand(rng), beta)
-    }
-
-    pub fn evaluate(&self, msg: &[u8], party_pki: V::Public) -> Output<V> {
+impl EVRF {
+    pub fn evaluate(&self, msg: &[u8], party_pki: &PublicKey) -> Output {
         // Reference: Figure 3 (page 19)
         //(0) -> skipping
         //(1), (2), (3)
@@ -44,7 +37,7 @@ impl<V: Variant> EVRF<V> {
         r.mul(&self.beta);
         r.add(&r2);
 
-        let mut c = V::Public::one();
+        let mut c = G1::one();
         c.mul(&r);
 
         Output {
@@ -53,9 +46,21 @@ impl<V: Variant> EVRF<V> {
             zk_proof: (),
         }
     }
+    pub fn new(sk_i: Scalar, beta: Scalar) -> Self {
+        let pk_i = PublicKey::from(compute_public::<MinPk>(&sk_i));
+        Self { pk_i, sk_i, beta }
+    }
+
+    pub fn random<R: CryptoRngCore>(rng: &mut R, beta: Scalar) -> Self {
+        Self::new(Scalar::from_rand(rng), beta)
+    }
+
+    pub fn pk_i(&self) -> &PublicKey {
+        &self.pk_i
+    }
 
     fn compute_pad(dst: DST, msg: &[u8], k: &Scalar) -> Scalar {
-        let mut out = V::Public::zero();
+        let mut out = G1::zero();
         out.map(dst, msg);
         out.mul(k);
         // Internally calls blst_p*_compress, which returns the x coordinate with metadata encoding
@@ -64,7 +69,8 @@ impl<V: Variant> EVRF<V> {
         Scalar::map(&[], &r[..])
     }
 
-    fn gen_df_secret(&self, mut party: V::Public) -> Scalar {
+    fn gen_df_secret(&self, party: &PublicKey) -> Scalar {
+        let mut party: G1 = *party.as_ref();
         party.mul(&self.sk_i);
         let s = party;
         // Internally calls blst_p*_compress, which returns the x coordinate with metadata encoding
@@ -76,35 +82,24 @@ impl<V: Variant> EVRF<V> {
 
 #[cfg(test)]
 mod test {
-    use commonware_cryptography::bls12381::primitives::{
-        ops::compute_public,
-        variant::{MinPk, MinSig},
-    };
 
     use super::*;
 
-    fn secret_random_match<V: Variant>() -> bool {
+    #[test]
+    fn test_df_secret() {
         let sender_sk = Scalar::from(42u32);
-        let sender_pk = compute_public::<V>(&sender_sk);
 
         let receiver_sk = Scalar::from(2u32);
-        let receiver_pk = compute_public::<V>(&receiver_sk);
 
-        let sender_evrf = EVRF::<V>::new(sender_sk, Scalar::one());
-        let receiver_evrf = EVRF::<V>::new(receiver_sk, Scalar::one());
+        let sender_evrf = EVRF::new(sender_sk, Scalar::one());
+        let sender_pk = &sender_evrf.pk_i;
+        let receiver_evrf = EVRF::new(receiver_sk, Scalar::one());
+        let receiver_pk = &receiver_evrf.pk_i;
 
         let msg = b"hello world";
         let secret1 = sender_evrf.evaluate(msg, receiver_pk);
         let secret2 = receiver_evrf.evaluate(msg, sender_pk);
 
-        secret1 == secret2
-    }
-
-    #[test]
-    fn test_df_secret() {
-        let out = secret_random_match::<MinPk>();
-        assert!(out);
-        let out = secret_random_match::<MinSig>();
-        assert!(out);
+        assert!(secret1 == secret2)
     }
 }

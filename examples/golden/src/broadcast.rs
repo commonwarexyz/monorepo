@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use crate::cyphered_share::CypheredShare;
 use crate::error::Error;
-use commonware_cryptography::bls12381::primitives::group::{Element, Scalar};
-use commonware_cryptography::bls12381::primitives::{poly, variant::Variant};
+use commonware_cryptography::bls12381::primitives::group::{Element, Scalar, G1};
+use commonware_cryptography::bls12381::primitives::poly;
+use commonware_cryptography::bls12381::primitives::variant::MinPk;
+use commonware_cryptography::bls12381::PublicKey;
 use thiserror::Error as ThisError;
 #[derive(Debug, ThisError)]
 pub enum BroadcastMsgError {
@@ -13,18 +15,16 @@ pub enum BroadcastMsgError {
     UnexpectedShares(u32),
     #[error("Invalid cyphertext")]
     InvalidCypherText,
-    #[error("Dealer broadcasted his own share {0}")]
-    DealerShareFound(u32),
 }
 
-pub struct BroadcastMsg<V: Variant> {
+pub struct BroadcastMsg {
     msg: Vec<u8>,
-    shares: Vec<CypheredShare<V>>,
-    poly: poly::Public<V>,
+    shares: Vec<CypheredShare>,
+    poly: poly::Public<MinPk>,
 }
 
-impl<V: Variant> BroadcastMsg<V> {
-    pub fn new(msg: Vec<u8>, shares: Vec<CypheredShare<V>>, poly: poly::Public<V>) -> Self {
+impl BroadcastMsg {
+    pub fn new(msg: Vec<u8>, shares: Vec<CypheredShare>, poly: poly::Public<MinPk>) -> Self {
         Self { msg, shares, poly }
     }
 
@@ -34,15 +34,14 @@ impl<V: Variant> BroadcastMsg<V> {
     pub fn validate(
         &self,
         dealer: u32,
-        participants: &HashMap<u32, V::Public>,
-    ) -> Result<Vec<(u32, V::Public)>, Error> {
+        participants: &HashMap<u32, PublicKey>,
+    ) -> Result<Vec<(u32, G1)>, Error> {
         let Some(dealer_pk) = participants.get(&dealer) else {
             return Err(BroadcastMsgError::PlayerNotFound(dealer).into());
         };
         let num_players = participants.len() as u32;
         let shares_len = self.shares.len() as u32;
-        if shares_len != num_players - 1 {
-            // dealer doesnt broadcast his own share
+        if shares_len != num_players {
             return Err(BroadcastMsgError::UnexpectedShares(shares_len).into());
         }
 
@@ -50,13 +49,10 @@ impl<V: Variant> BroadcastMsg<V> {
 
         for cs in &self.shares {
             let k = cs.index();
-            if k == dealer {
-                return Err(BroadcastMsgError::DealerShareFound(dealer).into());
-            }
             let Some(receiver_pk) = participants.get(&k) else {
                 return Err(BroadcastMsgError::PlayerNotFound(k).into());
             };
-            cs.verify_zk_proof(*dealer_pk, &self.msg, *receiver_pk)?;
+            cs.verify_zk_proof(*dealer_pk.as_ref(), &self.msg, *receiver_pk.as_ref())?;
 
             let x_jk = self.verify_validity_of_cyphertext(cs, k)?;
             out.push((k, x_jk));
@@ -69,7 +65,7 @@ impl<V: Variant> BroadcastMsg<V> {
         Ok(out)
     }
 
-    pub fn take_cyphered_share(&mut self, player: u32) -> Option<CypheredShare<V>> {
+    pub fn take_cyphered_share(&mut self, player: u32) -> Option<CypheredShare> {
         let position = self.shares.iter().position(|x| x.index() == player)?;
         let out = self.shares.remove(position);
         Some(out)
@@ -79,16 +75,12 @@ impl<V: Variant> BroadcastMsg<V> {
         &self.msg
     }
 
-    pub fn commitment_omega(&self) -> V::Public {
+    pub fn commitment_omega(&self) -> G1 {
         self.poly.get(0)
     }
 
     /// Step (9)
-    fn verify_validity_of_cyphertext(
-        &self,
-        cs: &CypheredShare<V>,
-        k: u32,
-    ) -> Result<V::Public, Error> {
+    fn verify_validity_of_cyphertext(&self, cs: &CypheredShare, k: u32) -> Result<G1, Error> {
         let g_z = cs.commitment_cyphered_share();
         let mut r = cs.commitment_random_scalar();
         let x = self.compute_share_committment(k);
@@ -102,8 +94,8 @@ impl<V: Variant> BroadcastMsg<V> {
     }
 
     /// X_{j,k}
-    fn compute_share_committment(&self, k: u32) -> V::Public {
-        let mut out = V::Public::zero();
+    fn compute_share_committment(&self, k: u32) -> G1 {
+        let mut out = G1::zero();
 
         for l in 0..self.poly.degree() + 1 {
             let mut coeff = self.poly.get(l);
