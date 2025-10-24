@@ -1,5 +1,4 @@
-//! A mutable key-value database that supports variable-sized values, but without authentication
-//! capabilities.
+//! A mutable key-value database that supports variable-sized values, but without authentication.
 //!
 //! # Terminology
 //!
