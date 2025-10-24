@@ -187,7 +187,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         // Wait for first actor to exit
         info!("network started");
-        let err = select! {
+        let mut shutdown = self.context.stopped();
+        let result = select! {
+            _ = &mut shutdown => {
+                debug!("shutdown");
+                Ok(())
+            },
             tracker = &mut tracker_task => {
                 debug!("tracker exited");
                 tracker
@@ -208,8 +213,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 debug!("dialer exited");
                 dialer
             },
-        }
-        .unwrap_err();
+        };
 
         // Ensure all tasks close
         tracker_task.abort();
@@ -218,7 +222,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         listener_task.abort();
         dialer_task.abort();
 
-        // Log error
-        warn!(error=?err, "network shutdown")
+        // Log error if not clean shutdown
+        if let Err(err) = result {
+            warn!(error=?err, "network shutdown")
+        }
     }
 }
