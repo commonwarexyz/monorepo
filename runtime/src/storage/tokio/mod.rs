@@ -1,10 +1,8 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(unix)]
+use std::path::Path;
+use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::{fs, sync::Mutex};
 
 #[cfg(not(unix))]
