@@ -6,7 +6,7 @@ use crate::{
         any::fixed::{init_mmr_and_log, ordered::Any, Config as AConfig},
         current::Config,
         operation::{FixedOrdered as Operation, OrderedKeyData},
-        store::Db,
+        store::{self, Db},
         Error,
     },
     index::Ordered as Index,
@@ -791,35 +791,35 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::adb::store::Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
         self.get(key).await.map_err(Into::into)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::adb::store::Error> {
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
         self.update(key, value).await.map_err(Into::into)
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), crate::adb::store::Error> {
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
         self.delete(key).await.map(|_| ()).map_err(Into::into)
     }
 
-    async fn commit(&mut self) -> Result<(), crate::adb::store::Error> {
+    async fn commit(&mut self) -> Result<(), store::Error> {
         self.commit().await.map_err(Into::into)
     }
 
-    async fn sync(&mut self) -> Result<(), crate::adb::store::Error> {
+    async fn sync(&mut self) -> Result<(), store::Error> {
         self.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::adb::store::Error> {
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
         self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    async fn close(self) -> Result<(), crate::adb::store::Error> {
+    async fn close(self) -> Result<(), store::Error> {
         self.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), crate::adb::store::Error> {
+    async fn destroy(self) -> Result<(), store::Error> {
         self.destroy().await.map_err(Into::into)
     }
 }
