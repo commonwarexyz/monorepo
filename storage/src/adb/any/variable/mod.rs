@@ -678,14 +678,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let steps_to_take = self.steps + 1;
-        for _ in 0..steps_to_take {
-            if self.is_empty() {
-                self.inactivity_floor_loc = self.op_count();
-                info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                self.raise_floor().await?;
             }
-            self.raise_floor().await?;
         }
         self.steps = 0;
 
