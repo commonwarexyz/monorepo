@@ -36,8 +36,7 @@ use std::{
     fs::{self, File},
     io::{Error as IoError, ErrorKind},
     os::fd::AsRawFd,
-    path::Path,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
