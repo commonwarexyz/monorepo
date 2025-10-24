@@ -277,7 +277,7 @@ mod tests {
                 },
                 Any,
             },
-            operation::fixed::{unordered::Operation as Fixed, FixedOperation as _},
+            operation::fixed::{unordered::Operation, FixedOperation as _},
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -355,17 +355,17 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Fixed::Update(key, _) => {
+                    Operation::Update(key, _) => {
                         if let Some((value, loc)) = target_db.get_key_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Fixed::Delete(key) => {
+                    Operation::Delete(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    Fixed::CommitFloor(_) => {
+                    Operation::CommitFloor(_) => {
                         // Ignore
                     }
                 }
@@ -415,7 +415,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Fixed::Update(key, value));
+                new_ops.push(Operation::Update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
