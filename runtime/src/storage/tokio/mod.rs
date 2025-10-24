@@ -10,15 +10,27 @@ mod fallback;
 #[cfg(unix)]
 mod unix;
 
-#[cfg(not(windows))]
-async fn open_dir_for_sync(path: &Path) -> Result<fs::File, Error> {
-    fs::File::open(path).await.map_err(|e| {
-        Error::BlobOpenFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e,
-        )
-    })
+/// Syncs a directory to ensure directory entry changes are durable.
+/// On Unix, directory metadata (file creation/deletion) must be explicitly
+/// fsynced. On Windows, this is a no-op.
+async fn sync_dir(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        let dir = fs::File::open(path).await.map_err(|e| {
+            Error::BlobOpenFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e,
+            )
+        })?;
+        dir.sync_all().await.map_err(|e| {
+            Error::BlobSyncFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e,
+            )
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -108,14 +120,7 @@ impl crate::Storage for Storage {
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
             // Sync the parent directory to ensure the directory entry is durable.
-            #[cfg(unix)]
-            {
-                let parent_file = open_dir_for_sync(parent).await?;
-                parent_file
-                    .sync_all()
-                    .await
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-            }
+            sync_dir(parent).await?;
         }
 
         #[cfg(unix)]
@@ -146,27 +151,14 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
             // Sync the partition directory to ensure the removal is durable.
-            #[cfg(unix)]
-            {
-                let parent_file = open_dir_for_sync(&path).await?;
-                parent_file
-                    .sync_all()
-                    .await
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-            }
+            sync_dir(&path).await?;
         } else {
             fs::remove_dir_all(&path)
                 .await
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable.
-            #[cfg(unix)]
-            {
-                let storage_dir = open_dir_for_sync(&self.cfg.storage_directory).await?;
-                storage_dir.sync_all().await.map_err(|e| {
-                    Error::BlobSyncFailed(partition.into(), "partition".to_string(), e)
-                })?;
-            }
+            sync_dir(&self.cfg.storage_directory).await?;
         }
         Ok(())
     }

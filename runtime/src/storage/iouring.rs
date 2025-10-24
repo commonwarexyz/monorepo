@@ -36,9 +36,28 @@ use std::{
     fs::{self, File},
     io::{Error as IoError, ErrorKind},
     os::fd::AsRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Syncs a directory to ensure directory entry changes are durable.
+/// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
+fn sync_dir(path: &Path) -> Result<(), Error> {
+    let dir = File::open(path).map_err(|e| {
+        Error::BlobOpenFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })?;
+    dir.sync_all().map_err(|e| {
+        Error::BlobSyncFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })
+}
 
 #[derive(Clone, Debug)]
 /// Configuration for a [Storage].
@@ -120,12 +139,8 @@ impl crate::Storage for Storage {
             // Sync the blob to ensure it is durably created
             blob.sync().await?;
 
-            // Sync the parent directory to ensure the creation of blob is durable
-            let parent_file = File::open(parent)
-                .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-            parent_file
-                .sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            // Sync the parent directory to ensure the directory entry is durable.
+            sync_dir(parent)?;
         }
 
         Ok((blob, len))
@@ -138,21 +153,13 @@ impl crate::Storage for Storage {
             fs::remove_file(blob_path)
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
-            // Sync the partition directory to ensure the removal is durable
-            let parent_file =
-                File::open(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
-            parent_file
-                .sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            // Sync the partition directory to ensure the removal is durable.
+            sync_dir(&path)?;
         } else {
             fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
-            // Sync the storage directory to ensure the removal is durable
-            let storage_dir_file = File::open(&self.storage_directory)
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
-            storage_dir_file
-                .sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), "partition".to_string(), e))?;
+            // Sync the storage directory to ensure the removal is durable.
+            sync_dir(&self.storage_directory)?;
         }
         Ok(())
     }
