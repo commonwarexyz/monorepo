@@ -14,26 +14,23 @@ mod unix;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
-/// fsynced. On Windows, this is a no-op.
+/// fsynced.
+#[cfg(unix)]
 async fn sync_dir(path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        let dir = fs::File::open(path).await.map_err(|e| {
-            Error::BlobOpenFailed(
-                path.to_string_lossy().to_string(),
-                "directory".to_string(),
-                e,
-            )
-        })?;
-        dir.sync_all().await.map_err(|e| {
-            Error::BlobSyncFailed(
-                path.to_string_lossy().to_string(),
-                "directory".to_string(),
-                e,
-            )
-        })?;
-    }
-    Ok(())
+    let dir = fs::File::open(path).await.map_err(|e| {
+        Error::BlobOpenFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })?;
+    dir.sync_all().await.map_err(|e| {
+        Error::BlobSyncFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })
 }
 
 #[derive(Clone)]
@@ -123,6 +120,7 @@ impl crate::Storage for Storage {
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
             // Sync the parent directory to ensure the directory entry is durable.
+            #[cfg(unix)]
             sync_dir(parent).await?;
         }
 
@@ -154,6 +152,7 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
             // Sync the partition directory to ensure the removal is durable.
+            #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
             fs::remove_dir_all(&path)
@@ -161,6 +160,7 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable.
+            #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
         }
         Ok(())
