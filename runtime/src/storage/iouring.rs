@@ -90,6 +90,13 @@ impl crate::Storage for Storage {
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
+        // Sync the storage directory to ensure the creation is durable
+        let storage_dir_file = fs::File::open(&self.storage_directory)
+            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+        storage_dir_file
+            .sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
         // Open the file in read-write mode, create if it does not exist
         let file = fs::OpenOptions::new()
             .read(true)
@@ -102,10 +109,19 @@ impl crate::Storage for Storage {
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        Ok((
-            Blob::new(partition.into(), name, file, self.io_sender.clone()),
-            len,
-        ))
+        // Create the blob
+        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        // Sync the blob to ensure it is durably created
+        blob.sync().await?;
+
+        // Sync the parent directory to ensure the creation of blob is durable
+        let parent_file = fs::File::open(parent)
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+        parent_file
+            .sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
+        Ok((blob, len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -114,8 +130,22 @@ impl crate::Storage for Storage {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+
+            // Sync the partition directory to ensure the removal is durable
+            let parent_file =
+                fs::File::open(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            parent_file
+                .sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
         } else {
-            fs::remove_dir_all(path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+
+            // Sync the storage directory to ensure the removal is durable
+            let storage_dir_file = fs::File::open(&self.storage_directory)
+                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+            storage_dir_file
+                .sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), "partition".to_string(), e))?;
         }
         Ok(())
     }

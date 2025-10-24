@@ -452,6 +452,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
+    ///
+    /// An Ok result indicates the blob is durably created (or already exists).
     fn open(
         &self,
         partition: &str,
@@ -461,6 +463,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// Remove a blob from a given partition.
     ///
     /// If no `name` is provided, the entire partition is removed.
+    ///
+    /// An Ok result indicates the blob is durably removed.
     fn remove(
         &self,
         partition: &str,

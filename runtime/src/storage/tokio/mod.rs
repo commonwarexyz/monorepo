@@ -76,6 +76,20 @@ impl crate::Storage for Storage {
         // Get the file length
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
 
+        // Sync the file to ensure it is durable
+        file.sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
+        // Sync the parent directory to ensure the directory entry is durable
+        let parent_file = fs::File::open(parent)
+            .await
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+        parent_file
+            .sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
         #[cfg(unix)]
         {
             // Convert to a blocking std::fs::File
@@ -102,10 +116,28 @@ impl crate::Storage for Storage {
             fs::remove_file(blob_path)
                 .await
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
-        } else {
-            fs::remove_dir_all(path)
+
+            // Sync the partition directory to ensure the removal is durable
+            let parent_file = fs::File::open(&path)
                 .await
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
+            parent_file
+                .sync_all()
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+        } else {
+            fs::remove_dir_all(&path)
+                .await
+                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+
+            // Sync the storage directory to ensure the removal is durable
+            let storage_dir = fs::File::open(&self.cfg.storage_directory)
+                .await
+                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+            storage_dir
+                .sync_all()
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), "partition".to_string(), e))?;
         }
         Ok(())
     }
