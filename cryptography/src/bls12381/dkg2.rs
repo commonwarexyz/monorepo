@@ -10,7 +10,7 @@ use crate::{
     PrivateKey, PublicKey,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
-use commonware_utils::{max_faults, quorum, set::Set};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -62,7 +62,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     round: u32,
-    players: Set<P>,
+    players: Ordered<P>,
     public: Public<V>,
 }
 
@@ -117,8 +117,8 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u32,
     previous: Option<Output<V, P>>,
-    dealers: Set<P>,
-    players: Set<P>,
+    dealers: Ordered<P>,
+    players: Ordered<P>,
 }
 
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
@@ -196,8 +196,8 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     pub fn new(
         previous: Option<Output<V, P>>,
-        dealers: Set<P>,
-        players: Set<P>,
+        dealers: Ordered<P>,
+        players: Ordered<P>,
     ) -> Result<Self, Error> {
         assert!(dealers.len() <= u32::MAX as usize);
         assert!(players.len() <= u32::MAX as usize);
@@ -463,7 +463,7 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     fn zip_players<'a, 'b>(
         &'a self,
-        players: &'b Set<P>,
+        players: &'b Ordered<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
         if self.results.len() != players.len() {
             return None;
@@ -879,12 +879,12 @@ mod test {
                     .dealers
                     .iter()
                     .map(|&idx| keys[&idx].public_key())
-                    .collect::<Set<_>>();
+                    .collect::<Ordered<_>>();
                 let player_set = round
                     .players
                     .iter()
                     .map(|&idx| keys[&idx].public_key())
-                    .collect::<Set<_>>();
+                    .collect::<Ordered<_>>();
 
                 let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
                     std::mem::take(&mut previous_output),
