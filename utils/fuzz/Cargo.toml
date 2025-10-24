@@ -72,3 +72,10 @@ path = "fuzz_targets/historical_bitmap.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "prunable"
+path = "fuzz_targets/prunable.rs"
+test = false
+doc = false
+bench = false
