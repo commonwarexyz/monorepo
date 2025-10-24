@@ -1,8 +1,10 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-#[cfg(unix)]
-use std::path::Path;
-use std::{io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{fs, sync::Mutex};
 
 #[cfg(not(unix))]
@@ -29,8 +31,9 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
                 "directory".to_string(),
                 e,
             )
-        })
+        })?;
     }
+    Ok(())
 }
 
 #[derive(Clone)]
