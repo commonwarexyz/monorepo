@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::bitmap::Prunable;
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 10;
+const MAX_OPERATIONS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum ChunkSize {
