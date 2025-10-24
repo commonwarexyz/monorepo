@@ -731,6 +731,9 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
     ) -> Option<PlayerAck<S::PublicKey>> {
+        if self.view.contains_key(&dealer) {
+            return None;
+        }
         self.round_info.dealer_index(&dealer).ok()?;
         if pub_msg.commitment.degree() != self.round_info.degree() {
             return None;
