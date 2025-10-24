@@ -60,8 +60,9 @@ use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
+    future::BoxFuture,
     task::{waker, ArcWake},
-    Future,
+    Future, FutureExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -82,7 +83,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::trace;
+use tracing::{info_span, trace, Instrument};
 
 #[derive(Debug)]
 struct Metrics {
@@ -191,6 +192,9 @@ pub struct Config {
 
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// Whether or not spawned tasks should be [Instrument]ed with [tracing] spans.
+    instrument: bool,
 }
 
 impl Config {
@@ -201,6 +205,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
+            instrument: false,
         }
     }
 
@@ -223,6 +228,11 @@ impl Config {
     /// See [Config]
     pub fn with_catch_panics(mut self, catch_panics: bool) -> Self {
         self.catch_panics = catch_panics;
+        self
+    }
+    /// See [Config]
+    pub fn with_instrument(mut self, instrument: bool) -> Self {
+        self.instrument = instrument;
         self
     }
 
@@ -758,6 +768,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
+    instrumented: bool,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -770,6 +781,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            instrumented: self.instrumented,
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -820,6 +832,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                instrumented: cfg.instrument,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -875,6 +888,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                instrumented: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -933,7 +947,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = f(self);
+        let future: BoxFuture<T> = if self.instrumented {
+            f(self)
+                .instrument(info_span!("task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,

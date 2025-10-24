@@ -517,8 +517,9 @@ pub trait Blob: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
-    use commonware_macros::select;
+    use commonware_macros::{select, test_collect_traces};
     use futures::{
         channel::{mpsc, oneshot},
         future::{pending, ready},
@@ -2595,5 +2596,75 @@ mod tests {
             // Wait for the client task to complete
             client_handle.await.unwrap();
         });
+    }
+
+    fn test_instrument_tasks<E>(executor: E, trace_store: TraceStorage)
+    where
+        E: Runner,
+        E::Context: Spawner + Metrics,
+    {
+        executor.start(|context| async move {
+            context
+                .with_label("test")
+                .spawn(|context| async move {
+                    tracing::info!(field = "test field", "test log");
+
+                    context
+                        .with_label("inner")
+                        .spawn(|_| async move {
+                            tracing::info!("inner log");
+                        })
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        });
+
+        let info_traces = trace_store.get_by_level(Level::INFO);
+        assert_eq!(info_traces.len(), 2);
+
+        // Outer log (single span)
+        assert!(info_traces.event_matches(0, |event| {
+            event.metadata.content == "test log"
+                && event.metadata.fields.len() == 1
+                && event.metadata.has_field_exact("field", "test field")
+                && event.spans.len() == 1
+                && event.span_matches(0, |span| {
+                    span.content == "task"
+                        && span.fields.len() == 1
+                        && span.has_field_exact("name", "test")
+                })
+        }));
+
+        // Inner log (nested span)
+        assert!(info_traces.event_matches(1, |event| {
+            event.metadata.content == "inner log"
+                && event.metadata.fields.is_empty()
+                && event.spans.len() == 2
+                && event.span_matches(0, |span| {
+                    span.content == "task"
+                        && span.fields.len() == 1
+                        && span.has_field_exact("name", "test_inner")
+                })
+                && event.span_matches(1, |span| {
+                    span.content == "task"
+                        && span.fields.len() == 1
+                        && span.has_field_exact("name", "test")
+                })
+        }));
+    }
+
+    #[test_collect_traces]
+    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
+        let executor =
+            deterministic::Runner::new(deterministic::Config::default().with_instrument(true));
+        test_instrument_tasks(executor, traces);
+    }
+
+    #[test_collect_traces]
+    fn test_tokio_instrument_tasks(traces: TraceStorage) {
+        let executor = tokio::Runner::new(tokio::Config::default().with_instrument(true));
+        test_instrument_tasks(executor, traces);
     }
 }

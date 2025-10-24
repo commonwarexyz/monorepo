@@ -21,6 +21,7 @@ use crate::{
     Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
+use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -38,6 +39,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
+use tracing::{info_span, Instrument};
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -121,6 +123,9 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
+
+    /// Whether or not spawned tasks should be [Instrument]ed with [tracing] spans.
+    instrument: bool,
 }
 
 impl Config {
@@ -135,6 +140,7 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
+            instrument: false,
         }
     }
 
@@ -172,6 +178,11 @@ impl Config {
     /// See [Config]
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
+        self
+    }
+    /// See [Config]
+    pub fn with_instrument(mut self, instrument: bool) -> Self {
+        self.instrument = instrument;
         self
     }
 
@@ -340,6 +351,7 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
+            instrumented: self.cfg.instrument,
             executor: executor.clone(),
             network,
             tree: Tree::root(),
@@ -373,6 +385,7 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
+    instrumented: bool,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -385,6 +398,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            instrumented: self.instrumented,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -420,7 +434,7 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (_, metric) = spawn_metrics!(self);
+        let (label, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
@@ -434,7 +448,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = f(self);
+        let future: BoxFuture<T> = if self.instrumented {
+            f(self)
+                .instrument(info_span!("task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,

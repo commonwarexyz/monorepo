@@ -35,6 +35,7 @@ sysinfo = { workspace = true }
 [features]
 default = []
 external = ["pin-project"]
+test-utils = []
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 
