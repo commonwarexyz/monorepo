@@ -540,7 +540,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                                 // Identify the sender by their public key
                                 let Some(&from_idx) = topology.pk_to_id.get(&sender_pk) else {
-                                    panic!("Received message from unknown sender: {}", sender_pk);
+                                    panic!("Received message from unknown sender: {sender_pk:?}");
                                 };
 
                                 // Find the expected queue for this sender-receiver pair
