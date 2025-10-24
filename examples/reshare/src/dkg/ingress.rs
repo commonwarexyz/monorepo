@@ -2,7 +2,7 @@
 //!
 //! [Actor]: super::Actor
 
-use crate::{application::Block, dkg::DealOutcome};
+use crate::{application::Block, dkg::IdentifiedLog};
 use commonware_consensus::Reporter;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use futures::{
@@ -20,11 +20,11 @@ where
     C: Signer,
     V: Variant,
 {
-    /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
+    /// A request for the [Actor]'s next [IdentifiedLog] for inclusion within a block.
     ///
     /// [Actor]: super::Actor
     Act {
-        response: oneshot::Sender<Option<DealOutcome<C, V>>>,
+        response: oneshot::Sender<Option<IdentifiedLog<V, C>>>,
     },
 
     /// A new block has been finalized.
@@ -61,7 +61,7 @@ where
     /// Request the [Actor]'s next payload for inclusion within a block.
     ///
     /// [Actor]: super::Actor
-    pub async fn act(&mut self) -> Option<DealOutcome<C, V>> {
+    pub async fn act(&mut self) -> Option<IdentifiedLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
         let message = Message::Act {
             response: response_tx,
