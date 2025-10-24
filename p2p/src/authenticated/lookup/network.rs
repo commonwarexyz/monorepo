@@ -207,13 +207,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             },
         };
 
-        // Ensure all tasks close
-        tracker_task.abort();
-        router_task.abort();
-        spawner_task.abort();
-        listener_task.abort();
-        dialer_task.abort();
-
         // Log error if not clean shutdown
         if let Err(err) = result {
             warn!(error=?err, "network shutdown")
