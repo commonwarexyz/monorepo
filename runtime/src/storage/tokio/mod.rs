@@ -88,6 +88,7 @@ impl crate::Storage for Storage {
             .read(true)
             .write(true)
             .create_new(true)
+            .truncate(false)
             .open(&path)
             .await
         {

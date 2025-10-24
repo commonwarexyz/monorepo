@@ -114,6 +114,7 @@ impl crate::Storage for Storage {
             .read(true)
             .write(true)
             .create_new(true)
+            .truncate(false)
             .open(&path)
         {
             Ok(file) => (file, 0, true),
