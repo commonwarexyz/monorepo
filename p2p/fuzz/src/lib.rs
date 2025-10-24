@@ -10,7 +10,7 @@ use commonware_p2p::{
     Blocker, Channel, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
-use commonware_utils::NZU32;
+use commonware_utils::{set::Ordered, NZU32};
 use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -251,7 +251,7 @@ impl NetworkScheme for Discovery {
         for index in 0..peer.topo.tracked_peer_sets {
             let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
-            let subset = addrs[..3].to_vec();
+            let subset = addrs[..3].to_vec().into();
             oracle.register(index as u64, subset).await;
         }
 
@@ -276,7 +276,7 @@ impl NetworkScheme for Discovery {
         peer_ids: &'a [PeerId],
     ) {
         // Discovery only needs public keys (addresses discovered via protocol)
-        let peer_pks: Vec<_> = peer_ids
+        let peer_pks: Ordered<_> = peer_ids
             .iter()
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .collect();
@@ -323,7 +323,9 @@ impl NetworkScheme for Lookup {
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
-            oracle.register(index as u64, peer_list.clone()).await;
+            oracle
+                .register(index as u64, peer_list.clone().into())
+                .await;
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS
@@ -331,7 +333,7 @@ impl NetworkScheme for Lookup {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
             let subset = peers[..3].to_vec();
-            oracle.register(index as u64, subset).await;
+            oracle.register(index as u64, subset.into()).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -355,7 +357,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Vec<_> = peer_ids
+        let peer_list: Ordered<_> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
