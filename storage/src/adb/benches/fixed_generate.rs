@@ -7,8 +7,10 @@ use commonware_runtime::{
     ThreadPool,
 };
 use commonware_storage::{
-    adb::any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-    store::Db,
+    adb::{
+        any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
+        store::Db,
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};

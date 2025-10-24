@@ -48,7 +48,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::{max_faults, quorum, set::Set};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use std::collections::{BTreeMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
@@ -71,8 +71,8 @@ pub struct Arbiter<P: PublicKey, V: Variant> {
     player_threshold: u32,
     concurrency: usize,
 
-    dealers: Set<P>,
-    players: Set<P>,
+    dealers: Ordered<P>,
+    players: Ordered<P>,
 
     #[allow(clippy::type_complexity)]
     commitments: BTreeMap<u32, (poly::Public<V>, Vec<u32>, Vec<Share>)>,
@@ -83,8 +83,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public<V>>,
-        dealers: Set<P>,
-        players: Set<P>,
+        dealers: Ordered<P>,
+        players: Ordered<P>,
         concurrency: usize,
     ) -> Self {
         Self {

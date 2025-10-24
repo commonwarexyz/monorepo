@@ -7,7 +7,7 @@ use crate::{
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -26,7 +26,7 @@ pub struct Config<
 
     /// List of validators for the consensus engine, this is static for the
     /// lifetime of the engine (i.e. the epoch).
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
 
     /// Signing scheme for the consensus engine.
     ///

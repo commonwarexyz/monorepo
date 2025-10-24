@@ -13,7 +13,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum};
+use commonware_utils::{from_hex, hex, quorum, set::Ordered};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -83,7 +83,7 @@ impl PeerConfig {
         quorum(self.num_participants_per_epoch)
     }
 
-    pub fn all_peers(&self) -> Vec<PublicKey> {
+    pub fn all_peers(&self) -> Ordered<PublicKey> {
         self.active
             .iter()
             .chain(self.inactive.iter())
