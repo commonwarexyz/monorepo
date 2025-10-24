@@ -1,6 +1,6 @@
-use super::{Mailbox, Message};
+use super::{manager::DkgManager, Mailbox, Message};
 use crate::{
-    dkg::{manager::RoundResult, DealOutcome, DkgManager},
+    dkg::{manager::RoundResult, IdentifiedLog},
     orchestrator::{self, EpochTransition},
     setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
@@ -12,10 +12,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{player::Output, types::Ack},
-        primitives::{group::Share, poly::Public, variant::Variant},
+        dkg2::RoundInfo,
+        primitives::{group::Share, variant::Variant},
     },
-    Hasher, Signer,
+    Hasher, PublicKey, Signer,
 };
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -37,7 +37,11 @@ use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 use tracing::info;
 
-const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
+mod dealer;
+
+mod player;
+
+const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
 
 pub struct Config<C, P> {
     pub manager: P,
@@ -607,6 +611,7 @@ impl<V: Variant> Read for EpochState<V> {
 
 #[allow(clippy::type_complexity)]
 pub(crate) struct RoundInfo<V: Variant, C: Signer> {
+    pub deal: Option<(Public<V>, Set<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
     pub deal: Option<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>,
     pub received_shares: Vec<(C::PublicKey, Public<V>, Share)>,
     pub local_outcome: Option<DealOutcome<C, V>>,

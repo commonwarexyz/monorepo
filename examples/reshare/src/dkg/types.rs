@@ -1,135 +1,16 @@
 //! Types for the DKG/reshare protocol.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::{
         dkg::types::{Ack, Share},
-        primitives::{group, poly::Public, variant::Variant},
+        dkg2::DealerLog,
+        primitives::variant::Variant,
     },
+    transcript::Transcript,
     Signature, Signer, Verifier,
 };
-
-/// The result of a resharing operation from the local [Dealer].
-///
-/// [Dealer]: commonware_cryptography::bls12381::dkg::Dealer
-#[derive(Clone)]
-pub struct DealOutcome<C: Signer, V: Variant> {
-    /// The public key of the dealer.
-    pub dealer: C::PublicKey,
-
-    /// The dealer's signature over the resharing round, commitment, acks, and reveals.
-    pub dealer_signature: C::Signature,
-
-    /// The round of the resharing operation.
-    pub round: u64,
-
-    /// The new group public key polynomial.
-    pub commitment: Public<V>,
-
-    /// All signed acknowledgements from participants.
-    pub acks: Vec<Ack<C::Signature>>,
-
-    /// Any revealed secret shares.
-    pub reveals: Vec<group::Share>,
-}
-
-impl<C: Signer, V: Variant> DealOutcome<C, V> {
-    /// Creates a new [DealOutcome], signing its inner payload with the [commonware_cryptography::bls12381::dkg::Dealer]'s [Signer].
-    pub fn new(
-        dealer_signer: &C,
-        namespace: &[u8],
-        round: u64,
-        commitment: Public<V>,
-        acks: Vec<Ack<C::Signature>>,
-        reveals: Vec<group::Share>,
-    ) -> Self {
-        // Sign the resharing outcome
-        let payload = Self::signature_payload_from_parts(round, &commitment, &acks, &reveals);
-        let dealer_signature = dealer_signer.sign(Some(namespace), payload.as_ref());
-
-        Self {
-            dealer: dealer_signer.public_key(),
-            dealer_signature,
-            round,
-            commitment,
-            acks,
-            reveals,
-        }
-    }
-
-    /// Verifies the [DealOutcome]'s signature.
-    pub fn verify(&self, namespace: &[u8]) -> bool {
-        let payload = Self::signature_payload_from_parts(
-            self.round,
-            &self.commitment,
-            &self.acks,
-            &self.reveals,
-        );
-        self.dealer
-            .verify(Some(namespace), &payload, &self.dealer_signature)
-    }
-
-    /// Returns the payload that was signed by the dealer, formed from raw parts.
-    fn signature_payload_from_parts(
-        round: u64,
-        commitment: &Public<V>,
-        acks: &[Ack<C::Signature>],
-        reveals: &Vec<group::Share>,
-    ) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(
-            UInt(round).encode_size()
-                + commitment.encode_size()
-                + acks.encode_size()
-                + reveals.encode_size(),
-        );
-        UInt(round).write(&mut buf);
-        commitment.write(&mut buf);
-        acks.write(&mut buf);
-        reveals.write(&mut buf);
-        buf
-    }
-}
-
-impl<C: Signer, V: Variant> Write for DealOutcome<C, V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.dealer.write(buf);
-        self.dealer_signature.write(buf);
-        UInt(self.round).write(buf);
-        self.commitment.write(buf);
-        self.acks.write(buf);
-        self.reveals.write(buf);
-    }
-}
-
-impl<C: Signer, V: Variant> EncodeSize for DealOutcome<C, V> {
-    fn encode_size(&self) -> usize {
-        self.dealer.encode_size()
-            + self.dealer_signature.encode_size()
-            + UInt(self.round).encode_size()
-            + self.commitment.encode_size()
-            + self.acks.encode_size()
-            + self.reveals.encode_size()
-    }
-}
-
-impl<C: Signer, V: Variant> Read for DealOutcome<C, V> {
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            dealer: C::PublicKey::read(buf)?,
-            dealer_signature: C::Signature::read(buf)?,
-            round: UInt::read(buf)?.into(),
-            commitment: Public::<V>::read_cfg(buf, cfg)?,
-            acks: Vec::<Ack<C::Signature>>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
-            reveals: Vec::<group::Share>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
-        })
-    }
-}
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
 /// typically sent over a dedicated DKG communication channel.
