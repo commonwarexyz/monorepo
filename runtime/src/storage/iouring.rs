@@ -36,7 +36,7 @@ use std::{
     fs::{self, File},
     io::Error as IoError,
     os::fd::AsRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -82,44 +82,56 @@ impl crate::Storage for Storage {
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
         // Construct the full path
-        let path = self.storage_directory.join(partition).join(hex(name));
+        let blob_name = hex(name);
+        let path = self
+            .storage_directory
+            .join(partition)
+            .join(&blob_name);
         let parent = path
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
         // Create the partition directory if it does not exist
+        let partition_existed = parent.exists();
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-
-        // Sync the storage directory to ensure the creation is durable
-        let storage_dir_file = fs::File::open(&self.storage_directory)
-            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-        storage_dir_file
-            .sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+        if !partition_existed {
+            sync_directory(&self.storage_directory).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Error::PartitionCreationFailed(partition.into()),
+                _ => Error::BlobSyncFailed(partition.into(), blob_name.clone(), err),
+            })?;
+        }
 
         // Open the file in read-write mode, create if it does not exist
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+        let (file, created) = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => (file, false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let created_file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|e| Error::BlobOpenFailed(partition.into(), blob_name.clone(), e))?;
+                (created_file, true)
+            }
+            Err(err) => return Err(Error::BlobOpenFailed(partition.into(), blob_name.clone(), err)),
+        };
 
         // Get the file length
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         // Create the blob
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
-        // Sync the blob to ensure it is durably created
-        blob.sync().await?;
-
-        // Sync the parent directory to ensure the creation of blob is durable
-        let parent_file = fs::File::open(parent)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-        parent_file
-            .sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+        if created {
+            // Sync the blob to ensure it is durably created
+            blob.sync().await?;
+            // Sync the parent directory to ensure the creation of blob is durable
+            sync_directory(parent).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => {
+                    Error::BlobOpenFailed(partition.into(), blob_name.clone(), err)
+                }
+                _ => Error::BlobSyncFailed(partition.into(), blob_name.clone(), err),
+            })?;
+        }
 
         Ok((blob, len))
     }
@@ -127,25 +139,24 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
-            let blob_path = path.join(hex(name));
+            let blob_name = hex(name);
+            let blob_path = path.join(&blob_name);
             fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+                .map_err(|_| Error::BlobMissing(partition.into(), blob_name.clone()))?;
 
             // Sync the partition directory to ensure the removal is durable
-            let parent_file =
-                fs::File::open(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
-            parent_file
-                .sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            sync_directory(&path).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::BlobSyncFailed(partition.into(), blob_name.clone(), err),
+            })?;
         } else {
             fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable
-            let storage_dir_file = fs::File::open(&self.storage_directory)
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
-            storage_dir_file
-                .sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), "partition".to_string(), e))?;
+            sync_directory(&self.storage_directory).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::BlobSyncFailed(partition.into(), "partition".to_string(), err),
+            })?;
         }
         Ok(())
     }
@@ -173,6 +184,11 @@ impl crate::Storage for Storage {
 
         Ok(blobs)
     }
+}
+
+fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+    let file = std::fs::OpenOptions::new().read(true).open(path)?;
+    file.sync_all()
 }
 
 pub struct Blob {
