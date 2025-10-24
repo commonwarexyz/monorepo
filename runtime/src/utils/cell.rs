@@ -102,6 +102,10 @@ where
         Self::Present(self.into().shared(blocking))
     }
 
+    fn instrumented(self) -> Self {
+        Self::Present(self.into().instrumented())
+    }
+
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
