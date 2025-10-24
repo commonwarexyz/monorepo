@@ -274,7 +274,7 @@ where
 
     journal.close().await.unwrap();
 
-    let journal = factory("prune_all_retains_size".to_string()).await.unwrap();
+    let journal = factory("prune_retains_size".to_string()).await.unwrap();
     let size_after_close = journal.size().await.unwrap();
     assert_eq!(size_after_close, size_after_all);
 
