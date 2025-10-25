@@ -12,7 +12,7 @@
   - [X] accumulates the decrypted share, summing it to the previously accumulated shares
 - [X] implement logic for dealer to create shares and broadcast message
 - [X] Implement TLE test with golden-dkg
-- [ ] Implement live-round: leader rotation mechanism in which
+- [ ] Implement live-round: leader rotation mechanism in which (hotstuff)
   - [ ] leader broadcasts a message (maybe a counter)
   - [ ] each replica signs the message using its share
   - [ ] upon receiving 2f+1 signatures, the leader recover the threshold signature, verifies it against the group public key and broadcasts it 
