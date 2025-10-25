@@ -367,24 +367,39 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
 
-    fn generate_private_keys(n: usize) -> Vec<PrivateKey> {
-        let mut keys: Vec<_> = (0..n).map(|i| PrivateKey::from_seed(i as u64)).collect();
+    fn generate_private_keys(n: usize) -> Vec<ed25519::PrivateKey> {
+        let mut keys: Vec<_> = (0..n)
+            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+            .collect();
         keys.sort_by_key(|key| key.public_key());
         keys
     }
 
-    fn participants(keys: &[PrivateKey]) -> Vec<PublicKey> {
+    fn participants(keys: &[ed25519::PrivateKey]) -> Vec<ed25519::PublicKey> {
         keys.iter().map(|key| key.public_key()).collect()
     }
 
-    fn schemes(n: usize) -> (Vec<Scheme>, Vec<PublicKey>) {
+    fn schemes(n: usize) -> (Vec<Scheme<ed25519::PublicKey>>, Vec<ed25519::PublicKey>) {
         let keys = generate_private_keys(n);
-        let participants = participants(&keys);
+        let public_keys = participants(&keys);
+
+        // Create participants as tuples (P, ed25519::PublicKey)
+        let participants: Vec<_> = public_keys
+            .iter()
+            .cloned()
+            .map(|p| (p.clone(), p))
+            .collect();
+
         let schemes = keys
             .into_iter()
             .map(|key| Scheme::new(participants.clone(), key))
             .collect();
-        (schemes, participants)
+
+        (schemes, public_keys)
+    }
+
+    fn to_tuples(keys: &[ed25519::PublicKey]) -> Vec<(ed25519::PublicKey, ed25519::PublicKey)> {
+        keys.iter().cloned().map(|p| (p.clone(), p)).collect()
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -649,7 +664,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants.clone());
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -717,7 +732,7 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::verifier(participants.clone());
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(
             verifier
                 .sign_vote(
@@ -812,7 +827,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -853,7 +868,7 @@ mod tests {
         truncated.signers = Signers::from(participants.len(), signers);
         truncated.signatures.pop();
 
-        let verifier = Scheme::verifier(participants);
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -895,7 +910,7 @@ mod tests {
             .signatures
             .push(certificate.signatures[0].clone());
 
-        let verifier = Scheme::verifier(participants);
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -931,7 +946,7 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier(participants.clone());
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -981,7 +996,7 @@ mod tests {
             .expect("assemble certificate");
         certificate.signatures.pop();
 
-        let verifier = Scheme::verifier(participants);
+        let verifier = Scheme::verifier(to_tuples(&participants));
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1035,7 +1050,7 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
 
-        let verifier = Scheme::verifier(participants);
+        let verifier = Scheme::verifier(to_tuples(&participants));
         let mut iter = [
             (
                 VoteContext::Notarize {

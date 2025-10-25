@@ -61,6 +61,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        ed25519,
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256, Signer,
     };
@@ -123,7 +124,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -169,8 +170,6 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                me: scheme.public_key(),
-                participants: validators.clone().into(),
                 scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
@@ -386,7 +385,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -431,8 +430,6 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
             let voter_config = Config {
-                me: private_key.public_key(),
-                participants: validators.clone().into(),
                 scheme: signing.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
@@ -695,7 +692,7 @@ mod tests {
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -738,8 +735,6 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                me: validators[0].clone(),
-                participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker: oracle.control(validators[0].clone()),
                 automaton: application.clone(),

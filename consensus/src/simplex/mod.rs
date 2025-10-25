@@ -272,8 +272,7 @@ mod tests {
             primitives::variant::{MinPk, MinSig, Variant},
             tle::{decrypt, encrypt, Block},
         },
-        ed25519::PrivateKey,
-        PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -383,7 +382,7 @@ mod tests {
 
     fn all_online<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -451,8 +450,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -629,7 +626,7 @@ mod tests {
 
     fn observer<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -657,7 +654,7 @@ mod tests {
                 fixture(&mut context, n_active);
 
             // Add observer (no share)
-            let scheme_observer = PrivateKey::from_seed(n_active as u64);
+            let scheme_observer = ed25519::PrivateKey::from_seed(n_active as u64);
             let pk_observer = scheme_observer.public_key();
             schemes.push(scheme_observer);
 
@@ -714,10 +711,8 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    blocker,
-                    participants: validators.clone().into(),
                     scheme: signing.clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
@@ -789,7 +784,7 @@ mod tests {
 
     fn unclean_shutdown<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
     {
         // Create context
@@ -872,8 +867,6 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -977,7 +970,7 @@ mod tests {
 
     fn backfill<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1055,8 +1048,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1177,8 +1168,6 @@ mod tests {
             actor.start();
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
-                me: validator.clone(),
-                participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
@@ -1232,7 +1221,7 @@ mod tests {
 
     fn one_offline<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1312,8 +1301,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1489,7 +1476,7 @@ mod tests {
 
     fn slow_validator<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1566,8 +1553,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1666,7 +1651,7 @@ mod tests {
 
     fn all_recovery<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1733,8 +1718,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone().clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -1869,7 +1852,7 @@ mod tests {
 
     fn partition<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1936,8 +1919,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone().clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -2065,7 +2046,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2135,8 +2116,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -2259,7 +2238,7 @@ mod tests {
 
     fn conflicter<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2344,10 +2323,8 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        blocker,
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
@@ -2441,7 +2418,7 @@ mod tests {
 
     fn invalid<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2519,8 +2496,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -2608,7 +2583,7 @@ mod tests {
 
     fn impersonator<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2693,8 +2668,6 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -2774,7 +2747,7 @@ mod tests {
 
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2858,8 +2831,6 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -2939,7 +2910,7 @@ mod tests {
 
     fn nuller<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3020,8 +2991,6 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -3114,7 +3083,7 @@ mod tests {
 
     fn outdated<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3196,8 +3165,6 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        me: validator.clone(),
-                        participants: validators.clone().into(),
                         scheme: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
@@ -3272,7 +3239,7 @@ mod tests {
 
     fn run_1k<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3340,8 +3307,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -3438,7 +3403,7 @@ mod tests {
 
     fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3493,8 +3458,6 @@ mod tests {
             actor.start();
             let blocker = oracle.control(validators[0].clone());
             let cfg = config::Config {
-                me: validators[0].clone(),
-                participants: validators.clone().into(),
                 scheme: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
@@ -3582,7 +3545,7 @@ mod tests {
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
@@ -3655,8 +3618,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -3846,8 +3807,6 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: validators.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),

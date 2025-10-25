@@ -8,7 +8,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, set::Ordered};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -19,7 +19,10 @@ pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, bls_threshold_schemes, bls_threshold_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn bls_threshold_fixture<V, R>(rng: &mut R, n: u32) -> Fixture<bls12381_threshold::Scheme<V>>
+pub fn bls_threshold_fixture<V, R>(
+    rng: &mut R,
+    n: u32,
+) -> Fixture<bls12381_threshold::Scheme<ed25519::PublicKey, V>>
 where
     V: Variant,
     R: RngCore + CryptoRng,
@@ -39,11 +42,12 @@ where
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
+    let participants = Ordered::from(ed25519_public.clone());
     let schemes = shares
         .into_iter()
-        .map(|share| bls12381_threshold::Scheme::new(&ed25519_public, &polynomial, share))
+        .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
         .collect();
-    let verifier = bls12381_threshold::Scheme::verifier(&ed25519_public, &polynomial.clone());
+    let verifier = bls12381_threshold::Scheme::verifier(participants, &polynomial.clone());
 
     (ed25519_keys, ed25519_public, schemes, verifier)
 }
@@ -52,7 +56,10 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, bls_multisig_schemes, bls_multisig_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn bls_multisig_fixture<V, R>(rng: &mut R, n: u32) -> Fixture<bls12381_multisig::Scheme<V>>
+pub fn bls_multisig_fixture<V, R>(
+    rng: &mut R,
+    n: u32,
+) -> Fixture<bls12381_multisig::Scheme<ed25519::PublicKey, V>>
 where
     V: Variant,
     R: RngCore + CryptoRng,
@@ -72,11 +79,17 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
+    let participants = ed25519_public
+        .iter()
+        .cloned()
+        .zip(bls_public)
+        .collect::<Vec<_>>();
+
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(bls_public.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::new(participants.clone(), sk))
         .collect();
-    let verifier = bls12381_multisig::Scheme::verifier(bls_public.clone());
+    let verifier = bls12381_multisig::Scheme::verifier(participants);
 
     (ed25519_keys, ed25519_public, schemes, verifier)
 }
@@ -85,7 +98,7 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes, ed25519_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn ed25519_fixture<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
+pub fn ed25519_fixture<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme<ed25519::PublicKey>>
 where
     R: RngCore + CryptoRng,
 {
@@ -101,12 +114,18 @@ where
         .map(|k| k.public_key())
         .collect::<Vec<_>>();
 
+    let participants = ed25519_public
+        .iter()
+        .cloned()
+        .map(|p| (p.clone(), p))
+        .collect::<Vec<_>>();
+
     let schemes = ed25519_keys
         .iter()
         .cloned()
-        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
+        .map(|sk| ed_scheme::Scheme::new(participants.clone(), sk))
         .collect();
-    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
+    let verifier = ed_scheme::Scheme::verifier(participants);
 
     (ed25519_keys, ed25519_public, schemes, verifier)
 }

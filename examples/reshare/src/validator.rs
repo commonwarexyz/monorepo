@@ -280,7 +280,7 @@ mod test {
         }
     }
 
-    fn all_online<S: Scheme>(n: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S>(n: u32, seed: u64, link: Link, required: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:

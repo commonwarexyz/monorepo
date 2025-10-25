@@ -2304,46 +2304,73 @@ mod tests {
     fn generate_bls12381_threshold_schemes(
         n: u32,
         seed: u64,
-    ) -> Vec<bls12381_threshold::Scheme<MinSig>> {
+    ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, MinSig>> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|i| EdPrivateKey::from_seed(i as u64).public_key())
+            .collect();
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
 
         shares
             .into_iter()
-            .map(|share| bls12381_threshold::Scheme::new(&vec![0; n as usize], &polynomial, share))
+            .map(|share| {
+                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
+            })
             .collect()
     }
 
     fn generate_bls12381_threshold_verifier(
         n: u32,
         seed: u64,
-    ) -> bls12381_threshold::Scheme<MinSig> {
+    ) -> bls12381_threshold::Scheme<EdPublicKey, MinSig> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|i| EdPrivateKey::from_seed(i as u64).public_key())
+            .collect();
+
         let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-        bls12381_threshold::Scheme::verifier(&vec![0; n as usize], &polynomial)
+        bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 
-    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme> {
-        let mut private_keys: Vec<_> = (0..n)
+    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme<EdPublicKey>> {
+        let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64))
             .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<EdPublicKey> =
-            private_keys.iter().map(|key| key.public_key()).collect();
+
+        // Create participants as tuples (P, ed25519::PublicKey)
+        let participants: Vec<_> = private_keys
+            .iter()
+            .cloned()
+            .map(|p| (p.public_key(), p.public_key()))
+            .collect();
+
         private_keys
             .into_iter()
             .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
             .collect()
     }
 
-    fn generate_ed25519_verifier_with_offset(n: usize, offset: u64) -> ed25519::Scheme {
-        let mut private_keys: Vec<_> = (0..n)
+    fn generate_ed25519_verifier_with_offset(
+        n: usize,
+        offset: u64,
+    ) -> ed25519::Scheme<EdPublicKey> {
+        let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64 + offset))
             .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<_> = private_keys.iter().map(|key| key.public_key()).collect();
+
+        // Create participants as tuples (P, ed25519::PublicKey)
+        let participants: Vec<_> = private_keys
+            .iter()
+            .cloned()
+            .map(|p| (p.public_key(), p.public_key()))
+            .collect();
+
         ed25519::Scheme::verifier(participants)
     }
 
