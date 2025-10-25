@@ -79,6 +79,7 @@ impl crate::Storage for Storage {
         };
 
         // Check if partition exists before creating
+        #[cfg(unix)]
         let parent_existed = parent.exists();
 
         // Create the partition directory, if it does not exist
