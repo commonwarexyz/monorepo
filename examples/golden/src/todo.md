@@ -12,7 +12,11 @@
   - [X] accumulates the decrypted share, summing it to the previously accumulated shares
 - [X] implement logic for dealer to create shares and broadcast message
 - [X] Implement TLE test with golden-dkg
-- [ ] Implement live-round
+- [ ] Implement live-round: leader rotation mechanism in which
+  - [ ] leader broadcasts a message (maybe a counter)
+  - [ ] each replica signs the message using its share
+  - [ ] upon receiving 2f+1 signatures, the leader recover the threshold signature, verifies it against the group public key and broadcasts it 
+  - [ ] replicas verify the threshold signature and accept the message
+  - [ ] a new leader broadcasts the next message (with counter incremented) ...
 - [ ] Implement re-sharing
 - [ ] Implement bulletproof zk-proof system for correct random scalar
-  - [ ] Ask if they want implementation with bulletproofs crate or with a zkSNARK from SP1

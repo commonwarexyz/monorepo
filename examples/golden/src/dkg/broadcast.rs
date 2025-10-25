@@ -1,5 +1,5 @@
-use crate::ciphered_share::CipheredShare;
-use crate::error::Error;
+use crate::dkg::ciphered_share::CipheredShare;
+use crate::dkg::error::Error;
 use commonware_cryptography::bls12381::primitives::group::{Element, Scalar, G1};
 use commonware_cryptography::bls12381::primitives::poly;
 use commonware_cryptography::bls12381::primitives::variant::MinPk;

@@ -1,12 +1,14 @@
-pub mod broadcast;
-pub mod ciphered_share;
-pub mod error;
-pub mod participant;
+pub mod dkg {
+    pub mod broadcast;
+    pub mod ciphered_share;
+    pub mod error;
+    pub mod participant;
+}
 
 #[cfg(test)]
 mod test {
-    use crate::error::Error;
-    use crate::participant::{evrf::EVRF, registry::Registry, Participant};
+    use crate::dkg::error::Error;
+    use crate::dkg::participant::{evrf::EVRF, registry::Registry, Participant};
     use commonware_cryptography::bls12381::primitives::group::{Element, Scalar};
     use commonware_cryptography::bls12381::primitives::ops::{
         sign_message, threshold_signature_recover,

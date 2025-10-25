@@ -7,9 +7,9 @@ use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::collections::HashMap;
 
-use crate::broadcast::BroadcastMsg;
-use crate::ciphered_share::CipheredShare;
-use crate::error::Error;
+use crate::dkg::broadcast::BroadcastMsg;
+use crate::dkg::ciphered_share::CipheredShare;
+use crate::dkg::error::Error;
 
 pub mod evrf;
 pub mod registry;

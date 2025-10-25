@@ -1,6 +1,6 @@
-use crate::broadcast::BroadcastMsg;
-use crate::error::Error;
-use crate::participant::evrf::EVRF;
+use crate::dkg::broadcast::BroadcastMsg;
+use crate::dkg::error::Error;
+use crate::dkg::participant::evrf::EVRF;
 use commonware_cryptography::bls12381::primitives::group::Element;
 use commonware_cryptography::bls12381::primitives::group::Scalar;
 use commonware_cryptography::bls12381::primitives::group::G1;

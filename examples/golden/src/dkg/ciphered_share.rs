@@ -1,4 +1,4 @@
-use crate::participant::evrf::Output;
+use crate::dkg::participant::evrf::Output;
 use commonware_cryptography::bls12381::primitives::group::{
     Element, Scalar, Share as DKGShare, G1,
 };

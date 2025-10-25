@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{
+use crate::dkg::{
     broadcast::BroadcastMsgError, ciphered_share::ShareError, participant::registry::RegistryError,
 };
 
