@@ -712,14 +712,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [Error::UnexpectedData] if the location does not reference a commit operation.
+    /// Returns Error if there is some underlying storage failure.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
 
         let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            return Err(Error::UnexpectedData(last_commit));
+            unreachable!("last commit should be a commit floor operation");
         };
 
         Ok(Some((last_commit, metadata)))
