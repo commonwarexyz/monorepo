@@ -19,10 +19,10 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<V>;
+pub type ThresholdScheme<P, V> = signing_scheme::bls12381_threshold::Scheme<P, V>;
 
 /// The ED25519 signing scheme used in simplex.
-pub type EdScheme = signing_scheme::ed25519::Scheme;
+pub type EdScheme<P> = signing_scheme::ed25519::Scheme<P>;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
@@ -79,18 +79,20 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, C> {
+impl<V: Variant, C: Signer> EpochSchemeProvider
+    for SchemeProvider<ThresholdScheme<C::PublicKey, V>, C>
+{
     type Variant = V;
     type PublicKey = C::PublicKey;
-    type Scheme = ThresholdScheme<V>;
+    type Scheme = ThresholdScheme<C::PublicKey, V>;
 
     fn scheme_for_epoch(
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
         if let Some(share) = transition.share.as_ref() {
-            ThresholdScheme::<V>::new(
-                transition.participants.as_ref(),
+            ThresholdScheme::new(
+                transition.participants.clone(),
                 transition
                     .poly
                     .as_ref()
@@ -98,8 +100,8 @@ impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdSche
                 share.clone(),
             )
         } else {
-            ThresholdScheme::<V>::verifier(
-                transition.participants.as_ref(),
+            ThresholdScheme::verifier(
+                transition.participants.clone(),
                 transition
                     .poly
                     .as_ref()
@@ -109,16 +111,22 @@ impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdSche
     }
 }
 
-impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
+impl EpochSchemeProvider for SchemeProvider<EdScheme<ed25519::PublicKey>, ed25519::PrivateKey> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
-    type Scheme = EdScheme;
+    type Scheme = EdScheme<ed25519::PublicKey>;
 
     fn scheme_for_epoch(
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        EdScheme::new(transition.participants.clone(), self.signer.clone())
+        let participants = transition
+            .participants
+            .iter()
+            .map(|p| (p.clone(), p.clone()))
+            .collect();
+
+        EdScheme::new(participants, self.signer.clone())
     }
 }
 

@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -208,7 +208,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
     P: PublicKey,
-    S: Scheme,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
 > {
@@ -242,21 +242,28 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
         P: PublicKey,
-        S: Scheme,
+        S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
     > Actor<E, P, S, B, D>
 {
-    pub fn new(context: E, cfg: Config<P, S, B>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
+        let participants = cfg.scheme.participants();
+        let me = cfg
+            .scheme
+            .me()
+            .and_then(|index| participants.key(index))
+            .cloned();
+
         let config = requester::Config {
-            public_key: cfg.me,
+            me,
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
         let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        requester.reconcile(cfg.participants.as_ref());
+        requester.reconcile(participants.as_ref());
 
         // Initialize metrics
         let outstanding = Gauge::default();

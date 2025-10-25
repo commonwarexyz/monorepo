@@ -128,7 +128,7 @@ mod tests {
     type K = PublicKey;
     type V = MinPk;
     type E = PrivateKey;
-    type S = bls12381_threshold::Scheme<V>;
+    type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantSchemeProvider;
 
     #[derive(Clone)]
@@ -203,7 +203,7 @@ mod tests {
             coordinator,
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
-                public_key: secret.public_key(),
+                me: Some(secret.public_key()),
                 rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
                 initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),

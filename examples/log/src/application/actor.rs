@@ -28,6 +28,11 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let participants = config
+            .participants
+            .into_iter()
+            .map(|p| (p.clone(), p))
+            .collect();
 
         (
             Self {
@@ -35,7 +40,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::new(config.participants, config.private_key),
+            Scheme::new(participants, config.private_key),
             Reporter::new(),
             Mailbox::new(sender),
         )

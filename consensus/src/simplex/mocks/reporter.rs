@@ -6,8 +6,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
-            Participants, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, VoteContext,
         },
     },
     types::{Round, View},
@@ -39,7 +38,7 @@ pub struct Config<P: PublicKey, S: Scheme> {
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
-    participants: Participants<P>,
+    participants: Ordered<P>,
     scheme: S,
 
     namespace: Vec<u8>,
@@ -70,7 +69,7 @@ where
         Self {
             context,
             namespace: cfg.namespace,
-            participants: cfg.participants.into(),
+            participants: cfg.participants,
             scheme: cfg.scheme,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             seeds: Arc::new(Mutex::new(HashMap::new())),
@@ -92,7 +91,7 @@ where
         let next_round = Round::new(round.epoch(), round.view() + 1);
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let leader_index = select_leader::<S, _>(&self.participants, next_round, seed);
+            let leader_index = select_leader::<S, _>(self.participants.as_ref(), next_round, seed);
             self.participants[leader_index as usize].clone()
         });
     }

@@ -38,8 +38,8 @@ use crate::{
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
-use commonware_cryptography::Digest;
-use commonware_utils::union;
+use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::{set::Ordered, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -50,12 +50,21 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// seed for leader rotation. Implementations may override the provided defaults to take advantage
 /// of scheme-specific batching strategies.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
+    /// Public key type for individual participants.
+    type PublicKey: PublicKey;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
+
+    /// Returns the index of "self" in the participant set, if available.
+    /// Returns `None` if the scheme is a verifier-only instance.
+    fn me(&self) -> Option<u32>;
+
+    /// Returns the ordered set of participant public keys managed by the scheme.
+    fn participants(&self) -> &Ordered<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

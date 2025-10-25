@@ -8,9 +8,9 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum_from_slice, set::Ordered};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -142,71 +142,36 @@ impl<S: Scheme> VoteVerification<S> {
     }
 }
 
-/// The set of consensus participants.
-///
-/// Keys are stored in sorted order to provide stable, deterministic indices for
-/// signing schemes.
-#[derive(Clone, Debug)]
-pub struct Participants<P: PublicKey> {
-    /// Set of participants' public keys.
-    keys: Ordered<P>,
-    /// Quorum (2f+1) computed from the participant set.
-    quorum: u32,
-    /// Maximum number of faults (f) tolerated by the participant set.
-    max_faults: u32,
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedExt<P> {
+    /// Returns the quorum value (2f+1) for this participant set.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&P>;
+
+    /// Returns the index for the given participant key, if present.
+    fn index(&self, key: &P) -> Option<u32>;
 }
 
-impl<P: PublicKey> Participants<P> {
-    /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Ordered<P>) -> Self {
-        let quorum = quorum_from_slice(keys.as_ref());
-        let max_faults = max_faults(keys.len() as u32);
-
-        Self {
-            keys,
-            quorum,
-            max_faults,
-        }
+impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
+    fn quorum(&self) -> u32 {
+        quorum(self.len() as u32)
     }
 
-    /// Returns the participant key at the given signer index.
-    pub fn get(&self, signer: u32) -> Option<&P> {
-        self.keys.get(signer as usize)
+    fn max_faults(&self) -> u32 {
+        max_faults(self.len() as u32)
     }
 
-    /// Returns the signer index for the given key, if present.
-    pub fn index(&self, key: &P) -> Option<u32> {
-        self.keys.position(key).map(|index| index as u32)
+    fn index(&self, key: &P) -> Option<u32> {
+        self.position(key).map(|index| index as u32)
     }
 
-    /// Returns the cached quorum value for this participant set.
-    pub fn quorum(&self) -> u32 {
-        self.quorum
-    }
-
-    /// Returns the cached maximum number of faults tolerated by this participant set.
-    pub fn max_faults(&self) -> u32 {
-        self.max_faults
-    }
-}
-
-impl<P: PublicKey> Deref for Participants<P> {
-    type Target = [P];
-
-    fn deref(&self) -> &Self::Target {
-        self.keys.as_ref()
-    }
-}
-
-impl<P: PublicKey> From<Ordered<P>> for Participants<P> {
-    fn from(keys: Ordered<P>) -> Self {
-        Self::new(keys)
-    }
-}
-
-impl<P: PublicKey> From<Vec<P>> for Participants<P> {
-    fn from(keys: Vec<P>) -> Self {
-        Self::new(keys.into())
+    fn key(&self, index: u32) -> Option<&P> {
+        self.get(index as usize)
     }
 }
 
@@ -2339,46 +2304,73 @@ mod tests {
     fn generate_bls12381_threshold_schemes(
         n: u32,
         seed: u64,
-    ) -> Vec<bls12381_threshold::Scheme<MinSig>> {
+    ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, MinSig>> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|i| EdPrivateKey::from_seed(i as u64).public_key())
+            .collect();
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
 
         shares
             .into_iter()
-            .map(|share| bls12381_threshold::Scheme::new(&vec![0; n as usize], &polynomial, share))
+            .map(|share| {
+                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
+            })
             .collect()
     }
 
     fn generate_bls12381_threshold_verifier(
         n: u32,
         seed: u64,
-    ) -> bls12381_threshold::Scheme<MinSig> {
+    ) -> bls12381_threshold::Scheme<EdPublicKey, MinSig> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|i| EdPrivateKey::from_seed(i as u64).public_key())
+            .collect();
+
         let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-        bls12381_threshold::Scheme::verifier(&vec![0; n as usize], &polynomial)
+        bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 
-    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme> {
-        let mut private_keys: Vec<_> = (0..n)
+    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme<EdPublicKey>> {
+        let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64))
             .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<EdPublicKey> =
-            private_keys.iter().map(|key| key.public_key()).collect();
+
+        // Create participants as tuples (P, ed25519::PublicKey)
+        let participants: Vec<_> = private_keys
+            .iter()
+            .cloned()
+            .map(|p| (p.public_key(), p.public_key()))
+            .collect();
+
         private_keys
             .into_iter()
             .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
             .collect()
     }
 
-    fn generate_ed25519_verifier_with_offset(n: usize, offset: u64) -> ed25519::Scheme {
-        let mut private_keys: Vec<_> = (0..n)
+    fn generate_ed25519_verifier_with_offset(
+        n: usize,
+        offset: u64,
+    ) -> ed25519::Scheme<EdPublicKey> {
+        let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64 + offset))
             .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<_> = private_keys.iter().map(|key| key.public_key()).collect();
+
+        // Create participants as tuples (P, ed25519::PublicKey)
+        let participants: Vec<_> = private_keys
+            .iter()
+            .cloned()
+            .map(|p| (p.public_key(), p.public_key()))
+            .collect();
+
         ed25519::Scheme::verifier(participants)
     }
 
