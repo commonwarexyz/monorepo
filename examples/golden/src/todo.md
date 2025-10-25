@@ -1,0 +1,22 @@
+- [X] implement generic broadcast message validation: to be triggered when a generic player receives a message from a generic dealer
+  - [X] The commitment to the shares of all the players should be accumulated in some way (maybe returned). In this way, once we had correctly validated all n-1 the broadcast messages, we have for free also the public keys of all the players 
+  - [X] The same should be said for the constant term of the dealer committed polynomial: once we have validated all the broadcast messages, we get for free also the group public key
+  - [X] Maybe we should have a Registry or something like that, where we hold
+    - [X] A counter counting the number of correctly validated (and accumulated) broadcast messages -> it can be the numer of processed dealers' ids
+    - [X] Commitments to the shares of all the players: X_{j,k} -> after processing n-1 messages, this will contain the public keys of all the players
+    - [X] Commitments to the constant term of each dealer polynomial: A_{j,0} -> after processing n-1 messages, this will contain the group public key
+    - [X] My decrypted shares received by all the dealers: x_{j,i} -> after processing n-1 messages, this will contain my share of the group secret key
+- [X] implement specific broadcast message processing: from an incoming broadcast message the player,
+  - [X] re-computes the random scalar (it is sure that it corresponds to the authentic random scalar thanks to the zk proof, previously validated) 
+  - [X] decrypts the ciphered share using the recovered random scalar
+  - [X] accumulates the decrypted share, summing it to the previously accumulated shares
+- [X] implement logic for dealer to create shares and broadcast message
+- [X] Implement TLE test with golden-dkg
+- [ ] Implement live-round: leader rotation mechanism in which (hotstuff)
+  - [ ] leader broadcasts a message (maybe a counter)
+  - [ ] each replica signs the message using its share
+  - [ ] upon receiving 2f+1 signatures, the leader recover the threshold signature, verifies it against the group public key and broadcasts it 
+  - [ ] replicas verify the threshold signature and accept the message
+  - [ ] a new leader broadcasts the next message (with counter incremented) ...
+- [ ] Implement re-sharing
+- [ ] Implement bulletproof zk-proof system for correct random scalar
