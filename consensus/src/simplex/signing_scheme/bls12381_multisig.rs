@@ -386,9 +386,7 @@ mod tests {
         (schemes, bls_public)
     }
 
-    fn to_tuples<V: Variant>(
-        bls_keys: &[V::Public],
-    ) -> Vec<(ed25519::PublicKey, V::Public)> {
+    fn to_tuples<V: Variant>(bls_keys: &[V::Public]) -> Vec<(ed25519::PublicKey, V::Public)> {
         let n = bls_keys.len();
         let mut ed25519_keys: Vec<_> = (0..n)
             .map(|i| ed25519::PrivateKey::from_seed(i as u64))
