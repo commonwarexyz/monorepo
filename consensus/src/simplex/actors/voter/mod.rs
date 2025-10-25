@@ -10,15 +10,13 @@ use crate::{
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Ordered;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
-    P: PublicKey,
     S: Scheme,
     B: Blocker,
     D: Digest,
@@ -26,8 +24,6 @@ pub struct Config<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    pub me: P,
-    pub participants: Ordered<P>,
     pub scheme: S,
     pub blocker: B,
     pub automaton: A,

@@ -8,9 +8,9 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum_from_slice, set::Ordered};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -142,71 +142,36 @@ impl<S: Scheme> VoteVerification<S> {
     }
 }
 
-/// The set of consensus participants.
-///
-/// Keys are stored in sorted order to provide stable, deterministic indices for
-/// signing schemes.
-#[derive(Clone, Debug)]
-pub struct Participants<P: PublicKey> {
-    /// Set of participants' public keys.
-    keys: Ordered<P>,
-    /// Quorum (2f+1) computed from the participant set.
-    quorum: u32,
-    /// Maximum number of faults (f) tolerated by the participant set.
-    max_faults: u32,
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedExt<P> {
+    /// Returns the quorum value (2f+1) for this participant set.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&P>;
+
+    /// Returns the index for the given participant key, if present.
+    fn index(&self, key: &P) -> Option<u32>;
 }
 
-impl<P: PublicKey> Participants<P> {
-    /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Ordered<P>) -> Self {
-        let quorum = quorum_from_slice(keys.as_ref());
-        let max_faults = max_faults(keys.len() as u32);
-
-        Self {
-            keys,
-            quorum,
-            max_faults,
-        }
+impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
+    fn quorum(&self) -> u32 {
+        quorum(self.len() as u32)
     }
 
-    /// Returns the participant key at the given signer index.
-    pub fn get(&self, signer: u32) -> Option<&P> {
-        self.keys.get(signer as usize)
+    fn max_faults(&self) -> u32 {
+        max_faults(self.len() as u32)
     }
 
-    /// Returns the signer index for the given key, if present.
-    pub fn index(&self, key: &P) -> Option<u32> {
-        self.keys.position(key).map(|index| index as u32)
+    fn index(&self, key: &P) -> Option<u32> {
+        self.position(key).map(|index| index as u32)
     }
 
-    /// Returns the cached quorum value for this participant set.
-    pub fn quorum(&self) -> u32 {
-        self.quorum
-    }
-
-    /// Returns the cached maximum number of faults tolerated by this participant set.
-    pub fn max_faults(&self) -> u32 {
-        self.max_faults
-    }
-}
-
-impl<P: PublicKey> Deref for Participants<P> {
-    type Target = [P];
-
-    fn deref(&self) -> &Self::Target {
-        self.keys.as_ref()
-    }
-}
-
-impl<P: PublicKey> From<Ordered<P>> for Participants<P> {
-    fn from(keys: Ordered<P>) -> Self {
-        Self::new(keys)
-    }
-}
-
-impl<P: PublicKey> From<Vec<P>> for Participants<P> {
-    fn from(keys: Vec<P>) -> Self {
-        Self::new(keys.into())
+    fn key(&self, index: u32) -> Option<&P> {
+        self.get(index as usize)
     }
 }
 

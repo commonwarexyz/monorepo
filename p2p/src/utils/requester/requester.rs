@@ -33,7 +33,7 @@ pub type ID = u64;
 /// performant peers and/or periodically set `shuffle` in `request`.
 pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     context: E,
-    public_key: P,
+    me: Option<P>,
     metrics: super::Metrics,
     initial: Duration,
     timeout: Duration,
@@ -81,7 +81,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         let metrics = super::Metrics::init(context.clone());
         Self {
             context,
-            public_key: config.public_key,
+            me: config.me,
             metrics,
             initial: config.initial,
             timeout: config.timeout,
@@ -130,7 +130,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         // Look for a participant that can handle request
         for (participant, _) in participant_iter {
             // Check if me
-            if *participant == self.public_key {
+            if Some(participant) == self.me.as_ref() {
                 continue;
             }
 

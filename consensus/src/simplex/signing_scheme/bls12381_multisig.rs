@@ -8,7 +8,7 @@
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{Vote, VoteContext, VoteVerification},
+        types::{OrderedExt, Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
@@ -23,56 +23,61 @@ use commonware_cryptography::{
         },
         variant::Variant,
     },
-    Digest,
+    Digest, PublicKey,
 };
-use commonware_utils::quorum_from_slice;
+use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
-pub struct Scheme<V: Variant> {
+pub struct Scheme<P: PublicKey, V: Variant> {
+    participants: Ordered<P>,
     /// Participant set used for signer indexing and batch verification.
-    participants: Vec<V::Public>,
+    consensus: Vec<V::Public>,
     /// Optional local signing key paired with its participant index.
     signer: Option<(u32, Private)>,
-    /// Quorum (2f+1) computed from the participant set.
-    quorum: u32,
 }
 
-impl<V: Variant> Scheme<V> {
+impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Creates a new scheme instance with the provided key material.
     ///
     /// * `participants` - ordered validator set used for verification.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(participants: Vec<V::Public>, private_key: Private) -> Self {
-        let signer = participants
+    pub fn new(mut participants: Vec<(P, V::Public)>, private_key: Private) -> Self {
+        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
+
+        let len = participants.len();
+        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
+        let participants = Ordered::from(participants);
+        assert_eq!(participants.len(), len, "duplicate participant keys");
+
+        let signer = consensus
             .iter()
             .position(|p| *p == compute_public::<V>(&private_key))
             .map(|index| (index as u32, private_key));
 
-        let quorum = quorum_from_slice(&participants);
-
         Self {
             participants,
+            consensus,
             signer,
-            quorum,
         }
     }
 
     /// Builds a pure verifier that can authenticate votes and certificates.
-    pub fn verifier(participants: Vec<V::Public>) -> Self {
-        let quorum = quorum_from_slice(&participants);
+    pub fn verifier(mut participants: Vec<(P, V::Public)>) -> Self {
+        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
+
+        let len = participants.len();
+        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
+        let participants = Ordered::from(participants);
+        assert_eq!(participants.len(), len, "duplicate participant keys");
 
         Self {
             participants,
+            consensus,
             signer: None,
-            quorum,
         }
-    }
-
-    fn participant(&self, index: u32) -> Option<&V::Public> {
-        self.participants.get(index as usize)
     }
 }
 
@@ -117,10 +122,19 @@ impl<V: Variant> Read for Certificate<V> {
     }
 }
 
-impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
+impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
+    type PublicKey = P;
     type Signature = V::Signature;
     type Certificate = Certificate<V>;
     type Seed = ();
+
+    fn me(&self) -> Option<u32> {
+        self.signer.as_ref().map(|(index, _)| *index)
+    }
+
+    fn participants(&self) -> &Ordered<Self::PublicKey> {
+        &self.participants
+    }
 
     fn sign_vote<D: Digest>(
         &self,
@@ -144,7 +158,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.participant(vote.signer) else {
+        let Some(public_key) = self.consensus.get(vote.signer as usize) else {
             return false;
         };
 
@@ -175,7 +189,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         let mut publics = Vec::new();
         let mut signatures = Vec::new();
         for vote in votes.into_iter() {
-            let Some(public_key) = self.participant(vote.signer) else {
+            let Some(public_key) = self.consensus.get(vote.signer as usize) else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -237,7 +251,7 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
 
             entries.push((signer, signature));
         }
-        if entries.len() < self.quorum as usize {
+        if entries.len() < self.participants.quorum() as usize {
             return None;
         }
 
@@ -262,14 +276,14 @@ impl<V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<V> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.quorum as usize {
+        if certificate.signers.count() < self.participants.quorum() as usize {
             return false;
         }
 
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.participant(signer) else {
+            let Some(public_key) = self.consensus.get(signer as usize) else {
                 return false;
             };
 

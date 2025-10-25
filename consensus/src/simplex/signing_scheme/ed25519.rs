@@ -8,50 +8,71 @@
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{Participants, Vote, VoteContext, VoteVerification},
+        types::{OrderedExt, Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
-    ed25519::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature},
-    BatchVerifier, Digest, Signer as _, Verifier as _,
+    ed25519::{self, Batch},
+    BatchVerifier, Digest, PublicKey, Signer as _, Verifier as _,
 };
+use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
-pub struct Scheme {
-    /// Participant set (sorted) used for signer indexing and batch verification.
-    participants: Participants<PublicKey>,
+pub struct Scheme<P: PublicKey> {
+    /// Participant set ordered by the first key, used for signer indexing and batch verification.
+    participants: Ordered<P>,
+    /// Consensus
+    consensus: Vec<ed25519::PublicKey>,
     /// Optional local signing key paired with its participant index.
-    signer: Option<(u32, PrivateKey)>,
+    signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
-impl Scheme {
+impl<P: PublicKey> Scheme<P> {
     /// Creates a new scheme instance with the provided key material.
     ///
     /// * `participants` - ordered validator set used for verification.
     /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(participants: impl Into<Participants<PublicKey>>, private_key: PrivateKey) -> Self {
-        let participants = participants.into();
+    pub fn new(
+        mut participants: Vec<(P, ed25519::PublicKey)>,
+        private_key: ed25519::PrivateKey,
+    ) -> Self {
+        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
 
-        let signer = participants
-            .index(&private_key.public_key())
-            .map(|index| (index, private_key));
+        let len = participants.len();
+        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
+        let participants = Ordered::from(participants);
+        assert_eq!(participants.len(), len, "duplicate participant keys");
+
+        let signer = consensus
+            .iter()
+            .position(|p| p == &private_key.public_key())
+            .map(|index| (index as u32, private_key));
 
         Self {
             participants,
+            consensus,
             signer,
         }
     }
 
     /// Builds a pure verifier that can authenticate votes without signing.
-    pub fn verifier(participants: impl Into<Participants<PublicKey>>) -> Self {
+    pub fn verifier(mut participants: Vec<(P, ed25519::PublicKey)>) -> Self {
+        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
+
+        let len = participants.len();
+        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
+        let participants = Ordered::from(participants);
+        assert_eq!(participants.len(), len, "duplicate participant keys");
+
         Self {
-            participants: participants.into(),
+            participants,
+            consensus,
             signer: None,
         }
     }
@@ -82,7 +103,7 @@ impl Scheme {
         // Add the certificate to the batch.
         let (namespace, message) = vote_namespace_and_message(namespace, context);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(signer) else {
+            let Some(public_key) = self.consensus.get(signer as usize) else {
                 return false;
             };
 
@@ -104,7 +125,7 @@ pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.
     pub signers: Signers,
     /// Ed25519 signatures emitted by the respective validators ordered by signer index.
-    pub signatures: Vec<Ed25519Signature>,
+    pub signatures: Vec<ed25519::Signature>,
 }
 
 impl Write for Certificate {
@@ -132,7 +153,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::ed25519::Certificate",
@@ -147,10 +168,19 @@ impl Read for Certificate {
     }
 }
 
-impl signing_scheme::Scheme for Scheme {
-    type Signature = Ed25519Signature;
+impl<P: PublicKey> signing_scheme::Scheme for Scheme<P> {
+    type PublicKey = P;
+    type Signature = ed25519::Signature;
     type Certificate = Certificate;
     type Seed = ();
+
+    fn me(&self) -> Option<u32> {
+        self.signer.as_ref().map(|(index, _)| *index)
+    }
+
+    fn participants(&self) -> &Ordered<Self::PublicKey> {
+        &self.participants
+    }
 
     fn sign_vote<D: Digest>(
         &self,
@@ -174,7 +204,7 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.participants.get(vote.signer) else {
+        let Some(public_key) = self.consensus.get(vote.signer as usize) else {
             return false;
         };
 
@@ -201,7 +231,7 @@ impl signing_scheme::Scheme for Scheme {
         let mut batch = Batch::new();
 
         for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.get(vote.signer) else {
+            let Some(public_key) = self.consensus.get(vote.signer as usize) else {
                 invalid.insert(vote.signer);
                 continue;
             };

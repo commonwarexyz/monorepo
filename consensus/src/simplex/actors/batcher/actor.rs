@@ -7,7 +7,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, Participants, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, OrderedExt, Voter,
         },
     },
     types::{Epoch, View},
@@ -21,6 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
+use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
@@ -29,12 +30,12 @@ use tracing::{trace, warn};
 
 struct Round<
     P: PublicKey,
-    S: Scheme,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Participants<P>,
+    participants: Ordered<P>,
 
     blocker: B,
     reporter: R,
@@ -48,14 +49,14 @@ struct Round<
 
 impl<
         P: PublicKey,
-        S: Scheme,
+        S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
     > Round<P, S, B, D, R>
 {
     fn new(
-        participants: Participants<P>,
+        participants: Ordered<P>,
         scheme: S,
         blocker: B,
         reporter: R,
@@ -303,23 +304,22 @@ impl<
         self.verifier.verify_finalizes(rng, namespace)
     }
 
-    fn is_active(&self, leader: &P) -> Option<bool> {
-        let leader_index = self.participants.index(leader)? as usize;
-        Some(self.notarizes[leader_index].is_some() || self.nullifies[leader_index].is_some())
+    fn is_active(&self, leader: u32) -> Option<bool> {
+        Some(self.notarizes[leader as usize].is_some() || self.nullifies[leader as usize].is_some())
     }
 }
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + Rng + CryptoRng,
     P: PublicKey,
-    S: Scheme,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    participants: Participants<P>,
+    participants: Ordered<P>,
     scheme: S,
 
     blocker: B,
@@ -330,7 +330,7 @@ pub struct Actor<
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    mailbox_receiver: mpsc::Receiver<Message<P, S, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     added: Counter,
     verified: Counter,
@@ -342,13 +342,13 @@ pub struct Actor<
 impl<
         E: Spawner + Metrics + Clock + Rng + CryptoRng,
         P: PublicKey,
-        S: Scheme,
+        S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
     > Actor<E, P, S, B, D, R>
 {
-    pub fn new(context: E, cfg: Config<P, S, B, R>) -> (Self, Mailbox<P, S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -379,11 +379,12 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let participants = cfg.scheme.participants().clone();
         (
             Self {
                 context: ContextCell::new(context),
 
-                participants: cfg.participants.into(),
+                participants,
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
@@ -454,10 +455,9 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            let leader_index = self.participants.index(&leader).unwrap();
                             work.entry(current)
                                 .or_insert_with(|| self.new_round(initialized))
-                                .set_leader(leader_index);
+                                .set_leader(leader);
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
@@ -476,7 +476,7 @@ impl<
                                 }
 
                                 // Don't penalize leader for not being a participant
-                                let Some(active) = round.is_active(&leader) else {
+                                let Some(active) = round.is_active(leader) else {
                                     is_active = true;
                                     break;
                                 };
@@ -607,9 +607,10 @@ impl<
             // Block invalid signers
             if !failed.is_empty() {
                 for invalid in failed {
-                    let signer = self.participants[invalid as usize].clone();
-                    warn!(?signer, "blocking peer");
-                    self.blocker.block(signer).await;
+                    if let Some(signer) = self.participants.key(invalid) {
+                        warn!(?signer, "blocking peer");
+                        self.blocker.block(signer.clone()).await;
+                    }
                 }
             }
 
