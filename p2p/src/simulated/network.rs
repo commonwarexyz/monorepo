@@ -28,7 +28,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -389,12 +389,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     async fn run(mut self) {
+        let mut shutdown = self.context.stopped();
         loop {
             let tick = match self.transmitter.next() {
                 Some(when) => Either::Left(self.context.sleep_until(when)),
                 None => Either::Right(future::pending()),
             };
             select! {
+                _ = &mut shutdown => {
+                    debug!("shutdown");
+                    break;
+                },
                 _ = tick => {
                     let now = self.context.current();
                     let completions = self.transmitter.advance(now);
