@@ -247,7 +247,7 @@ where
     let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
-        (round.epoch() + round.view()) as usize % participants.len()
+        (round.epoch().wrapping_add(round.view())) as usize % participants.len()
     };
 
     idx as u32
