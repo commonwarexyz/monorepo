@@ -194,15 +194,11 @@ impl Cli {
         sender: impl Sender<PublicKey = PublicKey>,
         receiver: impl Receiver<PublicKey = PublicKey>,
     ) -> Actor {
-        let inner = self.setup_participant();
-        Actor::new(ctx.with_label("actor"), inner, (sender, receiver))
-    }
-
-    fn setup_participant(&self) -> Participant {
         let beta = Scalar::one();
         let sk_i = Scalar::from_index(self.peer_index);
         let evrf = EVRF::new(sk_i.clone(), beta);
-        Participant::new(evrf, Registry::default())
+        let inner = Participant::new(evrf, Registry::default());
+        Actor::new(ctx.with_label("actor"), inner, (sender, receiver))
     }
 }
 
