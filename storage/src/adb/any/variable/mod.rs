@@ -678,14 +678,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let steps_to_take = self.steps + 1;
-        for _ in 0..steps_to_take {
-            if self.is_empty() {
-                self.inactivity_floor_loc = self.op_count();
-                info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                self.raise_floor().await?;
             }
-            self.raise_floor().await?;
         }
         self.steps = 0;
 
@@ -712,14 +712,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [Error::UnexpectedData] if the location does not reference a commit operation.
+    /// Returns Error if there is some underlying storage failure.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
 
         let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            return Err(Error::UnexpectedData(last_commit));
+            unreachable!("last commit should be a commit floor operation");
         };
 
         Ok(Some((last_commit, metadata)))
@@ -990,6 +990,7 @@ pub(super) mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let empty_root = db.root(&mut hasher);
             assert_eq!(empty_root, MemMmr::default().root(&mut hasher));
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Sha256::fill(1u8);
