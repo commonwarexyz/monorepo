@@ -940,6 +940,7 @@ mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc, 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
