@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use crate::cyphered_share::CypheredShare;
 use crate::error::Error;
 use commonware_cryptography::bls12381::primitives::group::{Element, Scalar, G1};
 use commonware_cryptography::bls12381::primitives::poly;
 use commonware_cryptography::bls12381::primitives::variant::MinPk;
 use commonware_cryptography::bls12381::PublicKey;
+use commonware_utils::set::Ordered;
 use thiserror::Error as ThisError;
 #[derive(Debug, ThisError)]
 pub enum BroadcastMsgError {
@@ -16,7 +15,7 @@ pub enum BroadcastMsgError {
     #[error("Invalid cyphertext")]
     InvalidCypherText,
 }
-
+#[derive(Clone)]
 pub struct BroadcastMsg {
     msg: Vec<u8>,
     shares: Vec<CypheredShare>,
@@ -34,12 +33,12 @@ impl BroadcastMsg {
     pub fn validate(
         &self,
         dealer: u32,
-        participants: &HashMap<u32, PublicKey>,
+        players: &Ordered<PublicKey>,
     ) -> Result<Vec<(u32, G1)>, Error> {
-        let Some(dealer_pk) = participants.get(&dealer) else {
+        let Some(dealer_pk) = players.get(dealer as usize) else {
             return Err(BroadcastMsgError::PlayerNotFound(dealer).into());
         };
-        let num_players = participants.len() as u32;
+        let num_players = players.len() as u32;
         let shares_len = self.shares.len() as u32;
         if shares_len != num_players {
             return Err(BroadcastMsgError::UnexpectedShares(shares_len).into());
@@ -49,7 +48,7 @@ impl BroadcastMsg {
 
         for cs in &self.shares {
             let k = cs.index();
-            let Some(receiver_pk) = participants.get(&k) else {
+            let Some(receiver_pk) = players.get(k as usize) else {
                 return Err(BroadcastMsgError::PlayerNotFound(k).into());
             };
             cs.verify_zk_proof(*dealer_pk.as_ref(), &self.msg, *receiver_pk.as_ref())?;
@@ -57,10 +56,6 @@ impl BroadcastMsg {
             let x_jk = self.verify_validity_of_cyphertext(cs, k)?;
             out.push((k, x_jk));
         }
-
-        // we push also the share commitment of the dealer
-        let x_jj = self.compute_share_committment(dealer);
-        out.push((dealer, x_jj));
 
         Ok(out)
     }
@@ -83,6 +78,7 @@ impl BroadcastMsg {
     fn verify_validity_of_cyphertext(&self, cs: &CypheredShare, k: u32) -> Result<G1, Error> {
         let g_z = cs.commitment_cyphered_share();
         let mut r = cs.commitment_random_scalar();
+
         let x = self.compute_share_committment(k);
         r.add(&x);
 
@@ -97,9 +93,11 @@ impl BroadcastMsg {
     fn compute_share_committment(&self, k: u32) -> G1 {
         let mut out = G1::zero();
 
+        // Recall that polynomial always evaluates argument +1 in order to avoid revealing of the secret (intercept of polynomial)
+        let k_plus_one = k + 1;
         for l in 0..self.poly.degree() + 1 {
             let mut coeff = self.poly.get(l);
-            let sc = Scalar::from(k.pow(l));
+            let sc = Scalar::from(k_plus_one.pow(l));
             coeff.mul(&sc);
             out.add(&coeff);
         }

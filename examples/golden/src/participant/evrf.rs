@@ -9,7 +9,7 @@ use commonware_cryptography::bls12381::{
 };
 use rand_core::CryptoRngCore;
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Debug)]
 pub struct Output {
     pub scalar: Scalar,
     pub commitment: G1,

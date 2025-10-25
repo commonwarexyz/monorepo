@@ -1,10 +1,11 @@
 use crate::broadcast::BroadcastMsg;
 use crate::error::Error;
-use crate::evrf::EVRF;
+use crate::participant::evrf::EVRF;
 use commonware_cryptography::bls12381::primitives::group::Element;
 use commonware_cryptography::bls12381::primitives::group::Scalar;
 use commonware_cryptography::bls12381::primitives::group::G1;
 use commonware_cryptography::bls12381::PublicKey;
+use commonware_utils::set::Ordered;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error as ThisError;
 
@@ -21,45 +22,46 @@ pub enum RegistryError {
 /// Short-lived registry: re-initied at every round
 #[derive(Clone)]
 pub struct Registry {
-    player_id: u32,
     dealer_broadcasted: HashSet<u32>,
-    player_pubkeys: HashMap<u32, G1>,
+    players_pubkeys: HashMap<u32, G1>,
     share: Scalar,
     group_pubkey: G1,
     ready: bool,
 }
 
-impl Registry {
-    pub fn new(player_id: u32) -> Self {
+impl Default for Registry {
+    fn default() -> Self {
         Self {
-            player_id,
             dealer_broadcasted: Default::default(),
-            player_pubkeys: Default::default(),
+            players_pubkeys: Default::default(),
             share: Scalar::zero(),
             group_pubkey: G1::zero(),
             ready: false,
         }
     }
+}
 
+impl Registry {
     // Steps (11), ..., (16)
     pub fn on_incoming_bmsg(
         &mut self,
         dealer: u32,
+        player_id: u32,
         mut bmsg: BroadcastMsg,
-        participants_pk_i: &HashMap<u32, PublicKey>,
+        players: &Ordered<PublicKey>,
         evrf: &EVRF,
     ) -> Result<(), Error> {
         if !self.dealer_broadcasted.insert(dealer) {
             return Err(RegistryError::DealerAlreadySeen(dealer).into());
         }
-        let share_commitments = bmsg.validate(dealer, participants_pk_i)?;
-        let Some(my_share) = bmsg.take_cyphered_share(self.player_id) else {
-            return Err(RegistryError::ShareNotFound(self.player_id).into());
+        let share_commitments = bmsg.validate(dealer, players)?;
+        let Some(my_share) = bmsg.take_cyphered_share(player_id) else {
+            return Err(RegistryError::ShareNotFound(player_id).into());
         };
         self.update_share_commitments(share_commitments);
 
         // Decrypt f_{j}(i) and store it
-        let Some(dealer_pk) = participants_pk_i.get(&dealer) else {
+        let Some(dealer_pk) = players.get(dealer as usize) else {
             return Err(RegistryError::PubkeyNotFound(dealer).into());
         };
         let evrf_output = evrf.evaluate(bmsg.msg(), dealer_pk);
@@ -72,7 +74,7 @@ impl Registry {
         let a0 = bmsg.commitment_omega();
         self.group_pubkey.add(&a0);
 
-        let n = participants_pk_i.len();
+        let n = players.len();
 
         if self.dealer_broadcasted.len() == n - 1 {
             self.ready = true
@@ -81,30 +83,34 @@ impl Registry {
         Ok(())
     }
 
-    pub fn share(&self) -> Option<&Scalar> {
+    pub fn get_share(&self) -> Option<&Scalar> {
         if !self.ready {
             return None;
         }
         Some(&self.share)
     }
 
-    pub fn group_pubkey(&self) -> Option<PublicKey> {
+    pub fn get_group_pubkey(&self) -> Option<PublicKey> {
         if !self.ready {
             return None;
         }
         Some(PublicKey::from(self.group_pubkey))
     }
 
-    pub fn player_pubkey(&self, k: u32) -> Option<PublicKey> {
+    pub fn get_player_pubkey(&self, k: u32) -> Option<PublicKey> {
         if !self.ready {
             return None;
         }
-        self.player_pubkeys.get(&k).map(|x| PublicKey::from(*x))
+        self.players_pubkeys.get(&k).map(|x| PublicKey::from(*x))
+    }
+
+    pub fn players_pubkeys(&self) -> &HashMap<u32, G1> {
+        &self.players_pubkeys
     }
 
     fn update_share_commitments(&mut self, share_commitments: Vec<(u32, G1)>) {
         for (player, share_commitment) in share_commitments {
-            let entry = self.player_pubkeys.entry(player).or_insert(G1::zero());
+            let entry = self.players_pubkeys.entry(player).or_insert(G1::zero());
 
             entry.add(&share_commitment);
         }
