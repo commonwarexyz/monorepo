@@ -275,7 +275,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                public_key: scheme.public_key(),
+                me: Some(scheme.public_key()),
                 rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
@@ -383,7 +383,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                public_key: scheme.public_key(),
+                me: Some(scheme.public_key()),
                 rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
