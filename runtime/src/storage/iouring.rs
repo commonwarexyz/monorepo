@@ -106,6 +106,9 @@ impl crate::Storage for Storage {
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
+        // Check if partition exists before creating
+        let parent_existed = parent.exists();
+
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
@@ -140,8 +143,13 @@ impl crate::Storage for Storage {
             // Sync the blob to ensure it is durably created
             blob.sync().await?;
 
-            // Sync the parent directory to ensure the directory entry is durable.
+            // Sync the parent directory to ensure the directory entry is durable
             sync_dir(parent)?;
+
+            // Sync storage directory if parent directory did not exist
+            if !parent_existed {
+                sync_dir(&self.storage_directory)?;
+            }
         }
 
         Ok((blob, len))
