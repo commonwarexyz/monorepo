@@ -20,13 +20,13 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, union};
+use commonware_utils::{from_hex, set::Ordered, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -98,7 +98,6 @@ fn main() {
     let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
 
     // Configure allowed peers
-    let mut validators = HashSet::new();
     let participants = matches
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
@@ -106,11 +105,14 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    for peer in participants {
-        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
-        tracing::info!(key = ?verifier, "registered authorized key");
-        validators.insert(verifier);
-    }
+    let validators = participants
+        .into_iter()
+        .map(|peer| {
+            let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
+            tracing::info!(key = ?verifier, "registered authorized key");
+            verifier
+        })
+        .collect::<Ordered<_>>();
 
     // Configure networks
     let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
@@ -128,7 +130,13 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
+        namespaces.insert(
+            public,
+            (
+                Scheme::certificate_verifier(validators.clone(), public),
+                namespace,
+            ),
+        );
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }
@@ -238,7 +246,7 @@ fn main() {
             let (peer, mut sender, mut receiver) = match listen(
                 context.with_label("listener"),
                 |peer| {
-                    let out = validators.contains(&peer);
+                    let out = validators.position(&peer).is_some();
                     async move { out }
                 },
                 config.clone(),

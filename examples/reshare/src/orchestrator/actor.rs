@@ -26,7 +26,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{set::Ordered, NZUsize, NZU32};
+use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
@@ -44,7 +44,6 @@ where
     S: Scheme,
 {
     pub oracle: B,
-    pub signer: C,
     pub application: A,
     pub scheme_provider: SchemeProvider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
@@ -70,7 +69,6 @@ where
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
-    signer: C,
     application: A,
 
     oracle: B,
@@ -91,7 +89,7 @@ where
     C: Signer,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
-    S: Scheme,
+    S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
@@ -102,7 +100,6 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                signer: config.signer,
                 application: config.application,
                 oracle: config.oracle,
                 marshal: config.marshal,
@@ -247,7 +244,6 @@ where
                             let engine = self
                                 .enter_epoch(
                                     transition.epoch,
-                                    transition.participants,
                                     scheme,
                                     &mut pending_mux,
                                     &mut recovered_mux,
@@ -280,7 +276,6 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
-        participants: Ordered<C::PublicKey>,
         scheme: S,
         pending_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
@@ -299,8 +294,6 @@ where
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
-                me: self.signer.public_key(),
-                participants,
                 scheme,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
