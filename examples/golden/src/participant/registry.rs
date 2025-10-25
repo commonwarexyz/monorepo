@@ -55,7 +55,7 @@ impl Registry {
             return Err(RegistryError::DealerAlreadySeen(dealer).into());
         }
         let share_commitments = bmsg.validate(dealer, players)?;
-        let Some(my_share) = bmsg.take_cyphered_share(player_id) else {
+        let Some(my_share) = bmsg.take_ciphered_share(player_id) else {
             return Err(RegistryError::ShareNotFound(player_id).into());
         };
         self.update_share_commitments(share_commitments);

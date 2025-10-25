@@ -1,4 +1,4 @@
-use crate::cyphered_share::CypheredShare;
+use crate::ciphered_share::CipheredShare;
 use crate::error::Error;
 use commonware_cryptography::bls12381::primitives::group::{Element, Scalar, G1};
 use commonware_cryptography::bls12381::primitives::poly;
@@ -12,18 +12,18 @@ pub enum BroadcastMsgError {
     PlayerNotFound(u32),
     #[error("Insufficient amount of shares {0}")]
     UnexpectedShares(u32),
-    #[error("Invalid cyphertext")]
-    InvalidCypherText,
+    #[error("Invalid ciphertext")]
+    InvalidCipherText,
 }
 #[derive(Clone)]
 pub struct BroadcastMsg {
     msg: Vec<u8>,
-    shares: Vec<CypheredShare>,
+    shares: Vec<CipheredShare>,
     poly: poly::Public<MinPk>,
 }
 
 impl BroadcastMsg {
-    pub fn new(msg: Vec<u8>, shares: Vec<CypheredShare>, poly: poly::Public<MinPk>) -> Self {
+    pub fn new(msg: Vec<u8>, shares: Vec<CipheredShare>, poly: poly::Public<MinPk>) -> Self {
         Self { msg, shares, poly }
     }
 
@@ -53,14 +53,14 @@ impl BroadcastMsg {
             };
             cs.verify_zk_proof(*dealer_pk.as_ref(), &self.msg, *receiver_pk.as_ref())?;
 
-            let x_jk = self.verify_validity_of_cyphertext(cs, k)?;
+            let x_jk = self.verify_validity_of_ciphertext(cs, k)?;
             out.push((k, x_jk));
         }
 
         Ok(out)
     }
 
-    pub fn take_cyphered_share(&mut self, player: u32) -> Option<CypheredShare> {
+    pub fn take_ciphered_share(&mut self, player: u32) -> Option<CipheredShare> {
         let position = self.shares.iter().position(|x| x.index() == player)?;
         let out = self.shares.remove(position);
         Some(out)
@@ -75,15 +75,15 @@ impl BroadcastMsg {
     }
 
     /// Step (9)
-    fn verify_validity_of_cyphertext(&self, cs: &CypheredShare, k: u32) -> Result<G1, Error> {
-        let g_z = cs.commitment_cyphered_share();
+    fn verify_validity_of_ciphertext(&self, cs: &CipheredShare, k: u32) -> Result<G1, Error> {
+        let g_z = cs.commitment_ciphered_share();
         let mut r = cs.commitment_random_scalar();
 
         let x = self.compute_share_committment(k);
         r.add(&x);
 
         if g_z != r {
-            return Err(BroadcastMsgError::InvalidCypherText.into());
+            return Err(BroadcastMsgError::InvalidCipherText.into());
         }
 
         Ok(x)

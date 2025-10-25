@@ -8,10 +8,11 @@
     - [X] My decrypted shares received by all the dealers: x_{j,i} -> after processing n-1 messages, this will contain my share of the group secret key
 - [X] implement specific broadcast message processing: from an incoming broadcast message the player,
   - [X] re-computes the random scalar (it is sure that it corresponds to the authentic random scalar thanks to the zk proof, previously validated) 
-  - [X] decrypts the cyphered share using the recovered random scalar
+  - [X] decrypts the ciphered share using the recovered random scalar
   - [X] accumulates the decrypted share, summing it to the previously accumulated shares
 - [X] implement logic for dealer to create shares and broadcast message
-- [ ] Recover the group secret key via collusion of t players: validate the public key against the group public key stored in the Registry
+- [X] Implement TLE test with golden-dkg
+- [ ] Implement live-round
+- [ ] Implement re-sharing
 - [ ] Implement bulletproof zk-proof system for correct random scalar
   - [ ] Ask if they want implementation with bulletproofs crate or with a zkSNARK from SP1
-- [ ] Implement re-sharing

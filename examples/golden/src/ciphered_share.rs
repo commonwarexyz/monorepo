@@ -14,39 +14,40 @@ pub enum ShareError {
 }
 
 #[derive(Eq, PartialEq, Clone)]
-pub struct CypheredShare {
-    cyphered: DKGShare,
+pub struct CipheredShare {
+    ciphered: DKGShare,
     commitment_r: G1,
     zk_proof: (),
 }
 
-impl PartialOrd for CypheredShare {
+impl PartialOrd for CipheredShare {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for CypheredShare {
+impl Ord for CipheredShare {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.index().cmp(&other.index())
     }
 }
 
-impl CypheredShare {
+impl CipheredShare {
     pub fn new(mut dkg_share: DKGShare, evrf: Output) -> Self {
         let alpha = evrf.scalar;
         let commitment = evrf.commitment;
-        let zk_proof = evrf.zk_proof;
-        dkg_share.private.add(&alpha); // now the share is cyphered
+        // let zk_proof = evrf.zk_proof;
+        let zk_proof = ();
+        dkg_share.private.add(&alpha); // now the share is ciphered
         Self {
-            cyphered: dkg_share,
+            ciphered: dkg_share,
             commitment_r: commitment,
             zk_proof,
         }
     }
 
     pub fn index(&self) -> u32 {
-        self.cyphered.index
+        self.ciphered.index
     }
 
     pub fn decrypt(mut self, evrf_scalar: Scalar) -> Result<Scalar, ShareError> {
@@ -55,11 +56,16 @@ impl CypheredShare {
         if g != self.commitment_r {
             return Err(ShareError::InvalidEVRFScalar);
         }
-        self.cyphered.private.sub(&evrf_scalar);
-        Ok(self.cyphered.private)
+        self.ciphered.private.sub(&evrf_scalar);
+        Ok(self.ciphered.private)
     }
 
-    pub fn verify_zk_proof(&self, dealer: G1, msg: &[u8], receiver: G1) -> Result<(), ShareError> {
+    pub fn verify_zk_proof(
+        &self,
+        _dealer: G1,
+        _msg: &[u8],
+        _receiver: G1,
+    ) -> Result<(), ShareError> {
         // TODO: implement ZK-proof validation (figure 3, execpt last step)
         // Err(ShareError::InvalidZkProof)
         Ok(())
@@ -71,9 +77,9 @@ impl CypheredShare {
     }
 
     /// g^{z_{j,k}}
-    pub fn commitment_cyphered_share(&self) -> G1 {
+    pub fn commitment_ciphered_share(&self) -> G1 {
         let mut out = G1::one();
-        out.mul(&self.cyphered.private);
+        out.mul(&self.ciphered.private);
         out
     }
 }
@@ -89,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_commiemtnet_cyphered() {
+    fn test_commiemtnet_ciphered() {
         let rng = &mut thread_rng();
 
         let n = 3;
@@ -101,10 +107,10 @@ mod tests {
         // Random scalalr
         let alpha = Scalar::from_rand(rng);
 
-        // Uncyphered share
+        // Unciphered share
         let f_jk = shares[k].private.clone();
 
-        // Cyphered share
+        // Ciphered share
         let mut z_jk = f_jk.clone();
         z_jk.add(&alpha);
 
@@ -116,7 +122,7 @@ mod tests {
         let mut big_f_jk = G1::one();
         big_f_jk.mul(&f_jk);
 
-        // Commitment cyphered share
+        // Commitment ciphered share
         big_f_jk.add(&r_jk);
 
         // Comitment secret
@@ -127,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commiemtnet_cyphered_from_poly() {
+    fn test_commiemtnet_ciphered_from_poly() {
         let rng = &mut thread_rng();
 
         let n = 3;
@@ -139,14 +145,14 @@ mod tests {
         // Random scalalr
         let alpha = Scalar::from_rand(rng);
 
-        // Uncyphered share
+        // Unciphered share
         let f_jk = shares[k].private.clone();
 
         // Commitment secret
         let mut big_f_jk = G1::one();
         big_f_jk.mul(&f_jk);
 
-        // Cyphered share
+        // Ciphered share
         let mut z_jk = f_jk;
         z_jk.add(&alpha);
 
@@ -165,7 +171,7 @@ mod tests {
             recov_x_jk.add(&coeff);
         }
 
-        // Commitment cyphered share
+        // Commitment ciphered share
         recov_x_jk.add(&r_jk);
 
         // Comitment secret

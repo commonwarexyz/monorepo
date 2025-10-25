@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::{
-    broadcast::BroadcastMsgError, cyphered_share::ShareError, participant::registry::RegistryError,
+    broadcast::BroadcastMsgError, ciphered_share::ShareError, participant::registry::RegistryError,
 };
 
 #[derive(Debug, Error)]

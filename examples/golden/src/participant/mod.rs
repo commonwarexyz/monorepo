@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::dkg::Dealer as DKGDealer;
-use commonware_cryptography::bls12381::primitives::group::G1;
+use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
 use commonware_cryptography::bls12381::primitives::variant::MinPk;
 use commonware_cryptography::bls12381::PublicKey;
 use commonware_utils::set::Ordered;
@@ -8,7 +8,7 @@ use rand_core::CryptoRngCore;
 use std::collections::HashMap;
 
 use crate::broadcast::BroadcastMsg;
-use crate::cyphered_share::CypheredShare;
+use crate::ciphered_share::CipheredShare;
 use crate::error::Error;
 
 pub mod evrf;
@@ -36,7 +36,7 @@ impl Participant {
 
         let msg: [u8; 32] = rng.gen();
 
-        // Cypher Share
+        // Cipher Share
         let shares = shares
             .into_iter()
             .map(|x| {
@@ -44,7 +44,7 @@ impl Participant {
                 let party_pki = players.get(id as usize).expect("Player not found");
                 let ervf_out = self.evrf.evaluate(msg.as_slice(), party_pki);
 
-                CypheredShare::new(x, ervf_out)
+                CipheredShare::new(x, ervf_out)
             })
             .collect::<Vec<_>>();
 
@@ -72,5 +72,9 @@ impl Participant {
 
     pub fn players_pubkeys(&self) -> &HashMap<u32, G1> {
         self.registry.players_pubkeys()
+    }
+
+    pub fn get_share(&self) -> Option<&Scalar> {
+        self.registry.get_share()
     }
 }
