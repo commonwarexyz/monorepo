@@ -12,10 +12,25 @@ use commonware_utils::set::Ordered;
 use futures::channel::oneshot;
 
 /// Messages that can be sent to the tracker actor.
+#[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     Register { index: u64, peers: Ordered<C> },
+
+    // ---------- Used by peer set provider ----------
+    /// Fetch the peer set at a given index.
+    PeerSet {
+        /// The index of the peer set to fetch.
+        index: u64,
+        /// One-shot channel to send the peer set.
+        responder: oneshot::Sender<Option<Ordered<C>>>,
+    },
+    /// Fetch the latest peer set index.
+    LatestPeerSet {
+        /// One-shot channel to send the latest peer set index.
+        responder: oneshot::Sender<Option<u64>>,
+    },
 
     // ---------- Used by blocker ----------
     /// Block a peer, disconnecting them if currently connected and preventing future connections
@@ -206,7 +221,7 @@ impl<C: PublicKey> Releaser<C> {
 ///
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -229,6 +244,29 @@ impl<C: PublicKey> Oracle<C> {
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&mut self, index: u64, peers: Ordered<C>) {
         let _ = self.sender.send(Message::Register { index, peers });
+    }
+}
+
+impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
+    type PublicKey = C;
+
+    async fn latest_peer_set(&mut self) -> Option<u64> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::LatestPeerSet { responder: sender })
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::PeerSet {
+                index: id,
+                responder: sender,
+            })
+            .unwrap();
+        receiver.await.unwrap()
     }
 }
 

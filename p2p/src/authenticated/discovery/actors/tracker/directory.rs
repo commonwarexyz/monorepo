@@ -15,6 +15,7 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
+    ops::Deref,
 };
 use tracing::debug;
 
@@ -213,6 +214,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+    }
+
+    /// Gets a peer set by index.
+    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+        self.sets.get(index).map(Deref::deref)
+    }
+
+    /// Returns the latest peer set index.
+    pub fn latest_set_index(&self) -> Option<u64> {
+        self.sets.keys().last().copied()
     }
 
     /// Attempt to reserve a peer for the dialer.

@@ -2,7 +2,7 @@ use super::{
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
-    metrics, wire, Coordinator, Producer,
+    metrics, wire, Producer,
 };
 use crate::Consumer;
 use bytes::Bytes;
@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    PeerSetProvider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -43,7 +43,7 @@ struct Serve<E: Clock, P: PublicKey> {
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Coordinator<PublicKey = P>,
+    D: PeerSetProvider<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    coordinator: D,
+    peer_provider: D,
 
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
@@ -94,7 +94,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: Coordinator<PublicKey = P>,
+        D: PeerSetProvider<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
@@ -121,7 +121,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                coordinator: cfg.coordinator,
+                peer_provider: cfg.peer_provider,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -153,8 +153,18 @@ impl<
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         // Set initial peer set.
-        self.last_peer_set_id = Some(self.coordinator.peer_set_id());
-        self.fetcher.reconcile(self.coordinator.peers());
+        self.last_peer_set_id = self.peer_provider.latest_peer_set().await;
+        if let Some(peer_set_id) = self.last_peer_set_id {
+            self.fetcher.reconcile(
+                self.peer_provider
+                    .peer_set(peer_set_id)
+                    .await
+                    .expect("peer set must exist")
+                    .as_ref(),
+            );
+        } else {
+            debug!("no initial peer set");
+        }
 
         loop {
             // Update metrics
@@ -170,10 +180,18 @@ impl<
             self.metrics.serve_processing.set(self.serves.len() as i64);
 
             // Update peer list if-and-only-if it might have changed.
-            let peer_set_id = self.coordinator.peer_set_id();
-            if self.last_peer_set_id != Some(peer_set_id) {
-                self.last_peer_set_id = Some(peer_set_id);
-                self.fetcher.reconcile(self.coordinator.peers());
+            let peer_set_id = self.peer_provider.latest_peer_set().await;
+            if self.last_peer_set_id != peer_set_id {
+                self.last_peer_set_id = peer_set_id;
+                if let Some(peer_set_id) = peer_set_id {
+                    self.fetcher.reconcile(
+                        self.peer_provider
+                            .peer_set(peer_set_id)
+                            .await
+                            .expect("peer set must exist")
+                            .as_ref(),
+                    );
+                }
             }
 
             // Get retry timeout (if any)
