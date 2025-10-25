@@ -1,12 +1,35 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex};
-use std::{path::PathBuf, sync::Arc};
+#[cfg(unix)]
+use std::path::Path;
+use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::{fs, sync::Mutex};
 
 #[cfg(not(unix))]
 mod fallback;
 #[cfg(unix)]
 mod unix;
+
+/// Syncs a directory to ensure directory entry changes are durable.
+/// On Unix, directory metadata (file creation/deletion) must be explicitly
+/// fsynced.
+#[cfg(unix)]
+async fn sync_dir(path: &Path) -> Result<(), Error> {
+    let dir = fs::File::open(path).await.map_err(|e| {
+        Error::BlobOpenFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })?;
+    dir.sync_all().await.map_err(|e| {
+        Error::BlobSyncFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -55,26 +78,61 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
+        // Check if partition exists before creating
+        #[cfg(unix)]
+        let parent_existed = parent.exists();
+
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Open the file in read-write mode, create if it does not exist
-        let mut file = fs::OpenOptions::new()
+        // Try to create a new file first
+        let (mut file, len, newly_created) = match fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create_new(true)
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+        {
+            Ok(file) => (file, 0, true),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // File already exists, just open it
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&path)
+                    .await
+                    .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+                let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+                (file, len, false)
+            }
+            Err(e) => return Err(Error::BlobOpenFailed(partition.into(), hex(name), e)),
+        };
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
-        // Get the file length
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        // Only sync if we created a new file
+        if newly_created {
+            // Sync the file to ensure it is durable
+            file.sync_all()
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+
+            #[cfg(unix)]
+            {
+                // Sync the parent directory to ensure the directory entry is durable.
+                sync_dir(parent).await?;
+
+                // Sync storage directory if parent directory did not exist
+                if !parent_existed {
+                    sync_dir(&self.cfg.storage_directory).await?;
+                }
+            }
+        }
 
         #[cfg(unix)]
         {
@@ -102,10 +160,18 @@ impl crate::Storage for Storage {
             fs::remove_file(blob_path)
                 .await
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+
+            // Sync the partition directory to ensure the removal is durable.
+            #[cfg(unix)]
+            sync_dir(&path).await?;
         } else {
-            fs::remove_dir_all(path)
+            fs::remove_dir_all(&path)
                 .await
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
+
+            // Sync the storage directory to ensure the removal is durable.
+            #[cfg(unix)]
+            sync_dir(&self.cfg.storage_directory).await?;
         }
         Ok(())
     }
