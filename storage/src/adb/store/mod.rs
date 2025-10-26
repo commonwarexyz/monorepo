@@ -707,6 +707,13 @@ where
             .await?
             .checked_sub(1)
             .map(Location::new_unchecked);
+        assert!(
+            self.last_commit.is_none()
+                || matches!(
+                    self.get_op(self.last_commit.unwrap()).await?,
+                    Operation::CommitFloor(_, _)
+                )
+        );
 
         debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
