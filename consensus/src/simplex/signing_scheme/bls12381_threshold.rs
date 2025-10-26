@@ -77,6 +77,16 @@ pub enum Scheme<P: PublicKey, V: Variant> {
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
+    ///
+    /// The participant identity keys are used for committee ordering and indexing.
+    /// The polynomial contains the public verification keys for the threshold scheme.
+    ///
+    /// If the provided share does not match the polynomial evaluation at its index,
+    /// the instance will act as a verifier (unable to sign votes).
+    ///
+    /// * `participants` - ordered set of participant identity keys
+    /// * `polynomial` - public polynomial for threshold verification
+    /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
@@ -101,6 +111,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Produces a verifier that can authenticate votes but does not hold signing state.
+    ///
+    /// The participant identity keys are used for committee ordering and indexing.
+    /// The polynomial contains the public verification keys for the threshold scheme.
+    ///
+    /// * `participants` - ordered set of participant identity keys
+    /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
@@ -113,6 +129,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Creates a verifier that only checks recovered certificates.
+    ///
+    /// This lightweight verifier can authenticate recovered threshold certificates but cannot
+    /// verify individual votes or partial signatures. The participant identity keys are used
+    /// for committee ordering and indexing.
+    ///
+    /// * `participants` - ordered set of participant identity keys
+    /// * `identity` - aggregate public key for certificate verification
     pub fn certificate_verifier(participants: Ordered<P>, identity: V::Public) -> Self {
         Self::CertificateVerifier {
             participants,

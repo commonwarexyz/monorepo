@@ -36,8 +36,12 @@ pub struct Scheme<P: PublicKey> {
 impl<P: PublicKey> Scheme<P> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// * `participants` - ordered validator set used for verification.
-    /// * `private_key` - optional secret key enabling signing capabilities.
+    /// Participants are provided as tuples pairing identity keys with consensus keys.
+    /// The identity key (first element) is used for committee ordering and indexing,
+    /// while the consensus key (second element) is used for signing and verification.
+    ///
+    /// If the provided private key does not match any consensus key in the participant set,
+    /// the instance will act as a verifier (unable to sign votes).
     pub fn new(
         mut participants: Vec<(P, ed25519::PublicKey)>,
         private_key: ed25519::PrivateKey,
@@ -62,6 +66,10 @@ impl<P: PublicKey> Scheme<P> {
     }
 
     /// Builds a pure verifier that can authenticate votes without signing.
+    ///
+    /// Participants are provided as tuples pairing identity keys with consensus keys.
+    /// The identity key (first element) is used for committee ordering and indexing,
+    /// while the consensus key (second element) is used for verification.
     pub fn verifier(mut participants: Vec<(P, ed25519::PublicKey)>) -> Self {
         participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
 
@@ -125,8 +133,8 @@ impl Scheme<ed25519::PublicKey> {
     /// This is a convenience constructor for the common Ed25519 case where the same
     /// key is used for both participant identity and consensus signing.
     ///
-    /// * `participants` - validator public keys used for both identity and consensus.
-    /// * `private_key` - secret key enabling signing capabilities.
+    /// If the provided private key does not match any consensus key in the participant set,
+    /// the instance will act as a verifier (unable to sign votes).
     pub fn new_identical(
         participants: Ordered<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
@@ -142,8 +150,6 @@ impl Scheme<ed25519::PublicKey> {
     ///
     /// This is a convenience constructor for the common Ed25519 case where the same
     /// key is used for both participant identity and consensus verification.
-    ///
-    /// * `participants` - validator public keys used for both identity and consensus.
     pub fn verifier_identical(participants: Ordered<ed25519::PublicKey>) -> Self {
         let participants: Vec<_> = participants
             .into_iter()

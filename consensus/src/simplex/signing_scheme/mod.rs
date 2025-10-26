@@ -49,8 +49,15 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// quorum certificates, checks recovered certificates and, when available, derives a randomness
 /// seed for leader rotation. Implementations may override the provided defaults to take advantage
 /// of scheme-specific batching strategies.
+///
+/// # Identity vs Consensus Keys
+///
+/// Implementations separate participant identity keys from consensus signing keys:
+/// - `PublicKey` represents participant identity, used for ordering and indexing the committee
+/// - Consensus keys (scheme-specific) are used for signing and verification of votes/certificates
+/// - Implementations may use the same key for both identity and consensus (e.g., [`ed25519`])
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Public key type for individual participants' identity.
+    /// Public key type for participant identity used to order and index the committee.
     type PublicKey: PublicKey;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;

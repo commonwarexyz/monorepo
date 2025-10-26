@@ -43,8 +43,13 @@ pub struct Scheme<P: PublicKey, V: Variant> {
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// * `participants` - ordered validator set used for verification.
-    /// * `private_key` - optional secret key enabling signing capabilities.
+    /// Participants are provided as tuples pairing identity keys with consensus keys.
+    /// The identity key (first element) is used for committee ordering and indexing,
+    /// while the consensus key (second element) is the BLS public key used for signing
+    /// and verification.
+    ///
+    /// If the provided private key does not match any consensus key in the participant set,
+    /// the instance will act as a verifier (unable to sign votes).
     pub fn new(mut participants: Vec<(P, V::Public)>, private_key: Private) -> Self {
         participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
 
@@ -66,6 +71,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Builds a pure verifier that can authenticate votes and certificates.
+    ///
+    /// Participants are provided as tuples pairing identity keys with consensus keys.
+    /// The identity key (first element) is used for committee ordering and indexing,
+    /// while the consensus key (second element) is the BLS public key used for verification.
     pub fn verifier(mut participants: Vec<(P, V::Public)>) -> Self {
         participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
 
