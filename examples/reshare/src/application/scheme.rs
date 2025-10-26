@@ -120,13 +120,7 @@ impl EpochSchemeProvider for SchemeProvider<EdScheme<ed25519::PublicKey>, ed2551
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        let participants = transition
-            .participants
-            .iter()
-            .map(|p| (p.clone(), p.clone()))
-            .collect();
-
-        EdScheme::new(participants, self.signer.clone())
+        EdScheme::new_identical(transition.participants.clone(), self.signer.clone())
     }
 }
 

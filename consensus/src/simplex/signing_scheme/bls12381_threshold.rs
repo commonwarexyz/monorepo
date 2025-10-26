@@ -50,6 +50,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
+        /// Participant set's public identities.
         participants: Ordered<P>,
         /// Aggregate public identity shared by the committee.
         identity: V::Public,
@@ -59,6 +60,7 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         share: Share,
     },
     Verifier {
+        /// Participant set's public identities.
         participants: Ordered<P>,
         /// Aggregate public identity shared by the committee.
         identity: V::Public,
@@ -66,6 +68,7 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         polynomial: Vec<V::Public>,
     },
     CertificateVerifier {
+        /// Participant set's public identities.
         participants: Ordered<P>,
         /// Aggregate public identity shared by the committee.
         identity: V::Public,

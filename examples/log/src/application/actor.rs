@@ -34,7 +34,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::new_identical(config.participants.into(), config.private_key),
+            Scheme::new_identical(config.participants, config.private_key),
             Reporter::new(),
             Mailbox::new(sender),
         )

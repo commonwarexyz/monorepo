@@ -112,20 +112,14 @@ where
     let ed25519_public = ed25519_keys
         .iter()
         .map(|k| k.public_key())
-        .collect::<Vec<_>>();
-
-    let participants = ed25519_public
-        .iter()
-        .cloned()
-        .map(|p| (p.clone(), p))
-        .collect::<Vec<_>>();
+        .collect::<Ordered<_>>();
 
     let schemes = ed25519_keys
         .iter()
         .cloned()
-        .map(|sk| ed_scheme::Scheme::new(participants.clone(), sk))
+        .map(|sk| ed_scheme::Scheme::new_identical(ed25519_public.clone(), sk))
         .collect();
-    let verifier = ed_scheme::Scheme::verifier(participants);
+    let verifier = ed_scheme::Scheme::verifier_identical(ed25519_public.clone());
 
-    (ed25519_keys, ed25519_public, schemes, verifier)
+    (ed25519_keys, ed25519_public.into(), schemes, verifier)
 }

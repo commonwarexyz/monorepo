@@ -50,7 +50,7 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// seed for leader rotation. Implementations may override the provided defaults to take advantage
 /// of scheme-specific batching strategies.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Public key type for individual participants.
+    /// Public key type for individual participants' identity.
     type PublicKey: PublicKey;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
@@ -63,7 +63,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns `None` if the scheme is a verifier-only instance.
     fn me(&self) -> Option<u32>;
 
-    /// Returns the ordered set of participant public keys managed by the scheme.
+    /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Ordered<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.

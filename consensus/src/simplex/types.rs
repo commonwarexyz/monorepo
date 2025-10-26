@@ -2343,16 +2343,11 @@ mod tests {
             .map(|idx| EdPrivateKey::from_seed(idx as u64))
             .collect();
 
-        // Create participants as tuples (P, ed25519::PublicKey)
-        let participants: Vec<_> = private_keys
-            .iter()
-            .cloned()
-            .map(|p| (p.public_key(), p.public_key()))
-            .collect();
+        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
 
         private_keys
             .into_iter()
-            .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
+            .map(|sk| ed25519::Scheme::new_identical(participants.clone(), sk))
             .collect()
     }
 
@@ -2364,14 +2359,9 @@ mod tests {
             .map(|idx| EdPrivateKey::from_seed(idx as u64 + offset))
             .collect();
 
-        // Create participants as tuples (P, ed25519::PublicKey)
-        let participants: Vec<_> = private_keys
-            .iter()
-            .cloned()
-            .map(|p| (p.public_key(), p.public_key()))
-            .collect();
+        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
 
-        ed25519::Scheme::verifier(participants)
+        ed25519::Scheme::verifier_identical(participants)
     }
 
     #[test]

@@ -25,11 +25,11 @@ use std::collections::BTreeSet;
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey> {
-    /// Participant set ordered by the first key, used for signer indexing and batch verification.
+    /// Participant set's public identities.
     participants: Ordered<P>,
-    /// Consensus
+    /// Participant set used for consensus signer indexing and verification.
     consensus: Vec<ed25519::PublicKey>,
-    /// Optional local signing key paired with its participant index.
+    /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
@@ -128,14 +128,14 @@ impl Scheme<ed25519::PublicKey> {
     /// * `participants` - validator public keys used for both identity and consensus.
     /// * `private_key` - secret key enabling signing capabilities.
     pub fn new_identical(
-        participants: Vec<ed25519::PublicKey>,
+        participants: Ordered<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
     ) -> Self {
-        let participants_tuples: Vec<_> = participants
+        let participants: Vec<_> = participants
             .into_iter()
             .map(|key| (key.clone(), key))
             .collect();
-        Self::new(participants_tuples, private_key)
+        Self::new(participants, private_key)
     }
 
     /// Builds a pure verifier where identity and consensus keys are identical.
@@ -144,12 +144,12 @@ impl Scheme<ed25519::PublicKey> {
     /// key is used for both participant identity and consensus verification.
     ///
     /// * `participants` - validator public keys used for both identity and consensus.
-    pub fn verifier_identical(participants: Vec<ed25519::PublicKey>) -> Self {
-        let participants_tuples: Vec<_> = participants
+    pub fn verifier_identical(participants: Ordered<ed25519::PublicKey>) -> Self {
+        let participants: Vec<_> = participants
             .into_iter()
             .map(|key| (key.clone(), key))
             .collect();
-        Self::verifier(participants_tuples)
+        Self::verifier(participants)
     }
 }
 
@@ -413,27 +413,16 @@ mod tests {
         keys.iter().map(|key| key.public_key()).collect()
     }
 
-    fn schemes(n: usize) -> (Vec<Scheme<ed25519::PublicKey>>, Vec<ed25519::PublicKey>) {
+    fn schemes(n: usize) -> (Vec<Scheme<ed25519::PublicKey>>, Ordered<ed25519::PublicKey>) {
         let keys = generate_private_keys(n);
-        let public_keys = participants(&keys);
-
-        // Create participants as tuples (P, ed25519::PublicKey)
-        let participants: Vec<_> = public_keys
-            .iter()
-            .cloned()
-            .map(|p| (p.clone(), p))
-            .collect();
+        let public_keys = Ordered::from(participants(&keys));
 
         let schemes = keys
             .into_iter()
-            .map(|key| Scheme::new(participants.clone(), key))
+            .map(|key| Scheme::new_identical(public_keys.clone(), key))
             .collect();
 
         (schemes, public_keys)
-    }
-
-    fn to_tuples(keys: &[ed25519::PublicKey]) -> Vec<(ed25519::PublicKey, ed25519::PublicKey)> {
-        keys.iter().cloned().map(|p| (p.clone(), p)).collect()
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -698,7 +687,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants.into());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -766,7 +755,7 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -861,7 +850,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -902,7 +891,7 @@ mod tests {
         truncated.signers = Signers::from(participants.len(), signers);
         truncated.signatures.pop();
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -944,7 +933,7 @@ mod tests {
             .signatures
             .push(certificate.signatures[0].clone());
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -980,7 +969,7 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants.clone());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1030,7 +1019,7 @@ mod tests {
             .expect("assemble certificate");
         certificate.signatures.pop();
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1084,7 +1073,7 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
 
-        let verifier = Scheme::verifier(to_tuples(&participants));
+        let verifier = Scheme::verifier_identical(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {

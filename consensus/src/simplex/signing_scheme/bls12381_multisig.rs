@@ -32,10 +32,11 @@ use std::{collections::BTreeSet, fmt::Debug};
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
+    /// Participant set's public identities.
     participants: Ordered<P>,
-    /// Participant set used for signer indexing and batch verification.
+    /// Participant set used for consensus signer indexing and verification.
     consensus: Vec<V::Public>,
-    /// Optional local signing key paired with its participant index.
+    /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, Private)>,
 }
 
@@ -360,7 +361,10 @@ mod tests {
 
     fn signing_schemes<V: Variant>(
         n: usize,
-    ) -> (Vec<Scheme<ed25519::PublicKey, V>>, Vec<V::Public>) {
+    ) -> (
+        Vec<Scheme<ed25519::PublicKey, V>>,
+        Vec<(ed25519::PublicKey, V::Public)>,
+    ) {
         let bls_keys = generate_private_keys(n);
         let bls_public = bls_public_keys::<V>(&bls_keys);
 
@@ -383,22 +387,7 @@ mod tests {
             .map(|key| Scheme::new(participants.clone(), key))
             .collect();
 
-        (schemes, bls_public)
-    }
-
-    fn to_tuples<V: Variant>(bls_keys: &[V::Public]) -> Vec<(ed25519::PublicKey, V::Public)> {
-        let n = bls_keys.len();
-        let mut ed25519_keys: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        ed25519_keys.sort_by_key(|k| k.public_key());
-        let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
-
-        ed25519_public
-            .iter()
-            .zip(bls_keys.iter())
-            .map(|(p, bls)| (p.clone(), *bls))
-            .collect()
+        (schemes, participants)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -471,7 +460,7 @@ mod tests {
 
     fn verifier_cannot_sign<V: Variant>() {
         let (_, participants) = signing_schemes::<V>(4);
-        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
 
         let proposal = sample_proposal(0, 3, 2);
         assert!(
@@ -685,7 +674,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -763,7 +752,7 @@ mod tests {
             "cloned signer should retain signing capability"
         );
 
-        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -806,7 +795,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -864,7 +853,7 @@ mod tests {
             .assemble_certificate(votes_b)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {
@@ -933,7 +922,7 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signature = certificate_a.signature;
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {
@@ -987,7 +976,7 @@ mod tests {
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1031,7 +1020,7 @@ mod tests {
         signers.push(participants.len() as u32);
         certificate.signers = Signers::from(participants.len() + 1, signers);
 
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1072,7 +1061,7 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier(to_tuples::<V>(&participants));
+        let verifier = Scheme::verifier(participants.clone());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
