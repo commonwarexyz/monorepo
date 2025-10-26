@@ -26,7 +26,7 @@ use std::{
     collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 pub mod sync;
 
@@ -680,7 +680,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // previous commit becoming inactive.
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
-            info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
