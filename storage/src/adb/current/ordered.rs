@@ -398,15 +398,8 @@ impl<
         // The digest contains all information from the base mmr, and all information from the peak
         // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
         // all the information we need.
-
-        // Handle empty/fully pruned bitmap
-        if self.status.len() == self.status.pruned_bits() {
-            return Ok(mmr_root);
-        }
-
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit == BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is complete, no partial chunk to add
+        if next_bit == 0 {
             return Ok(mmr_root);
         }
 
@@ -481,8 +474,7 @@ impl<
         }
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit == BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is complete, no partial chunk to add
+        if next_bit == 0 {
             return Ok((proof, ops, chunks));
         }
 
@@ -540,8 +532,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+        if next_bit != 0 {
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
@@ -611,8 +602,7 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+        if next_bit != 0 {
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
@@ -733,8 +723,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+        if next_bit != 0 {
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
         }
