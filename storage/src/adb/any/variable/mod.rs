@@ -544,12 +544,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Updates the value associated with the given key in the store, inserting a default value
-    /// if the key does not already exist.
+    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
-    /// if the store is closed without committing.
+    /// uncommitted until `commit` is called. Uncommitted operations will be rolled back if the db
+    /// is closed without committing.
     pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
     where
         V: Default,
