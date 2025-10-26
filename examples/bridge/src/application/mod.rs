@@ -15,7 +15,7 @@ mod actor;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 mod ingress;
 
 /// Configuration for the application.
@@ -30,7 +30,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: PublicKey> {
     pub other_public: <MinSig as Variant>::Public,
 
     /// Participants active in consensus.
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
 
     pub share: group::Share,
 

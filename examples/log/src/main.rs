@@ -52,7 +52,7 @@ use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{union, NZUsize, NZU32};
+use commonware_utils::{set::Ordered, union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -103,7 +103,6 @@ fn main() {
     tracing::info!(port, "loaded port");
 
     // Configure allowed peers
-    let mut validators = Vec::new();
     let participants = matches
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
@@ -112,11 +111,14 @@ fn main() {
     if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
-    for peer in &participants {
-        let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
-        tracing::info!(key = ?verifier, "registered authorized key",);
-        validators.push(verifier);
-    }
+    let validators = participants
+        .iter()
+        .map(|peer| {
+            let verifier = ed25519::PrivateKey::from_seed(*peer).public_key();
+            tracing::info!(key = ?verifier, "registered authorized key",);
+            verifier
+        })
+        .collect::<Ordered<_>>();
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -192,7 +194,7 @@ fn main() {
             application::Config {
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone().into(),
+                participants: validators.clone(),
                 private_key: signer.clone(),
             },
         );
@@ -200,7 +202,7 @@ fn main() {
         // Initialize consensus
         let cfg = simplex::Config {
             me: signer.public_key(),
-            participants: validators.clone().into(),
+            participants: validators.clone(),
             scheme,
             blocker: oracle,
             automaton: mailbox.clone(),

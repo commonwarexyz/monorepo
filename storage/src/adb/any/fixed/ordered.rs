@@ -9,17 +9,16 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
+        operation::fixed::{
+            ordered::{KeyData, Operation},
+            FixedOperation,
+        },
+        store::{self, Db},
         Error,
     },
     index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
-    store::{
-        operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
-        },
-        Db,
-    },
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -35,7 +34,7 @@ enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
     Exists(K),
 
-    /// The key did not already exist in the snapshot. The wrapped key data is for the the first
+    /// The key did not already exist in the snapshot. The wrapped key data is for the first
     /// preceding key that does exist in the snapshot.
     NotExists(KeyData<K, V>),
 }
@@ -57,7 +56,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -67,7 +66,7 @@ pub struct Any<
     /// - An operation's location is always equal to the number of the MMR leaf storing the digest
     ///   of the operation.
     /// - The log is never pruned beyond the inactivity floor.
-    log: Journal<E, Operation<K, V>>,
+    pub(crate) log: Journal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -75,18 +74,18 @@ pub struct Any<
     /// # Invariants
     ///
     /// Only references operations of type [Operation::Update].
-    snapshot: Index<T, Location>,
+    pub(crate) snapshot: Index<T, Location>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    inactivity_floor_loc: Location,
+    pub(crate) inactivity_floor_loc: Location,
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
-    steps: u64,
+    pub(crate) steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    hasher: Standard<H>,
+    pub(crate) hasher: Standard<H>,
 }
 
 impl<
@@ -124,7 +123,7 @@ impl<
     /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
     /// status updates. The first argument of the callback is the activity status of the operation,
     /// and the second argument is the location of the operation it inactivates (if any).
-    async fn build_snapshot_from_log<F>(
+    pub(crate) async fn build_snapshot_from_log<F>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, Location>,
@@ -397,6 +396,23 @@ impl<
             .map(|(v, next_key, _)| (v, next_key)))
     }
 
+    /// Whether the span defined by `span_start` and `span_end` contains `key`.
+    pub fn span_contains(span_start: &K, span_end: &K, key: &K) -> bool {
+        if span_start >= span_end {
+            // cyclic span case
+            if key >= span_start || key < span_end {
+                return true;
+            }
+        } else {
+            // normal span case
+            if key >= span_start && key < span_end {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Find the span produced by the provided `iter` that contains `key`, if any.
     async fn find_span(
         log: &Journal<E, Operation<K, V>>,
@@ -406,16 +422,8 @@ impl<
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(log, loc).await?;
-            if data.key >= data.next_key {
-                // cyclic span case
-                if *key >= data.key || *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
-            } else {
-                // normal span case
-                if *key >= data.key && *key < data.next_key {
-                    return Ok(Some((loc, data)));
-                }
+            if Self::span_contains(&data.key, &data.next_key, key) {
+                return Ok(Some((loc, data)));
             }
         }
 
@@ -454,7 +462,7 @@ impl<
 
     /// Get the value, next-key, and location of the active operation for `key` in the db, or None
     /// if it has no value.
-    async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, K, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
             let data = Self::get_update_op(&self.log, loc).await?;
             if data.key == *key {
@@ -495,7 +503,7 @@ impl<
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
     /// invoked with the old location of the affected key (if any).
-    async fn update_with_callback(
+    pub(crate) async fn update_with_callback(
         &mut self,
         key: K,
         value: V,
@@ -559,7 +567,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
     /// invoked with the old location of the affected key (if any).
-    async fn delete_with_callback(
+    pub(crate) async fn delete_with_callback(
         &mut self,
         key: K,
         mut callback: impl FnMut(bool, Option<Location>),
@@ -677,7 +685,7 @@ impl<
 
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
     /// until the next successful `commit`.
-    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
@@ -775,7 +783,7 @@ impl<
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
-    async fn move_op_if_active(
+    pub(crate) async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
         old_loc: Location,
@@ -809,9 +817,10 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there is not at least one active operation above the inactivity floor.
+    /// Expects there is at least one active operation above the inactivity floor, and returns Error
+    /// otherwise.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
@@ -859,7 +868,10 @@ impl<
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
+        try_join!(
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+        )?;
 
         Ok(())
     }
@@ -916,35 +928,35 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
         self.get(key).await.map_err(Into::into)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
         self.update(key, value).await.map_err(Into::into)
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
         self.delete(key).await.map_err(Into::into)
     }
 
-    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+    async fn commit(&mut self) -> Result<(), store::Error> {
         self.commit().await.map_err(Into::into)
     }
 
-    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+    async fn sync(&mut self) -> Result<(), store::Error> {
         self.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
         self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    async fn close(self) -> Result<(), crate::store::Error> {
+    async fn close(self) -> Result<(), store::Error> {
         self.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), crate::store::Error> {
+    async fn destroy(self) -> Result<(), store::Error> {
         self.destroy().await.map_err(Into::into)
     }
 }

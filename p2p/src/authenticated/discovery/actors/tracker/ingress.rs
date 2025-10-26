@@ -8,15 +8,14 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
 use futures::channel::oneshot;
 
 /// Messages that can be sent to the tracker actor.
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    ///
-    /// The vector of peers must be sorted in ascending order by public key.
-    Register { index: u64, peers: Vec<C> },
+    Register { index: u64, peers: Ordered<C> },
 
     // ---------- Used by blocker ----------
     /// Block a peer, disconnecting them if currently connected and preventing future connections
@@ -226,9 +225,9 @@ impl<C: PublicKey> Oracle<C> {
     /// # Parameters
     ///
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Should be monotonically increasing.
+    ///   Must be monotonically increasing, per the rules of [Ordered].
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    pub async fn register(&mut self, index: u64, peers: Vec<C>) {
+    pub async fn register(&mut self, index: u64, peers: Ordered<C>) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
 }

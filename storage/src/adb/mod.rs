@@ -22,6 +22,8 @@ pub mod any;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
+pub mod operation;
+pub mod store;
 pub mod sync;
 pub mod verify;
 use tracing::warn;
@@ -52,6 +54,10 @@ pub enum Error {
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
+
+    /// The key exists in the db, so we cannot prove its exclusion.
+    #[error("key exists")]
+    KeyExists,
 
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),

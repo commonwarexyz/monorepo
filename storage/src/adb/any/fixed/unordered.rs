@@ -5,15 +5,13 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
+        operation::fixed::{unordered::Operation, FixedOperation},
+        store::{self, Db},
         Error,
     },
     index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
-    store::{
-        operation::{Fixed as Operation, FixedOperation as OperationTrait},
-        Db,
-    },
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -215,29 +213,6 @@ impl<
         Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` >= self.op_count().
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-
-        assert!(loc < self.op_count());
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        Ok(self.log.read(*loc).await?.into_value())
-    }
-
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
@@ -255,6 +230,11 @@ impl<
     /// yet committed.
     pub fn op_count(&self) -> Location {
         self.mmr.leaves()
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -402,7 +382,7 @@ impl<
         // previous commit becoming inactive.
         let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
-            if self.snapshot.keys() == 0 {
+            if self.is_empty() {
                 self.inactivity_floor_loc = self.op_count();
                 info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
@@ -474,9 +454,10 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there is not at least one active operation above the inactivity floor.
+    /// Expects there is at least one active operation above the inactivity floor, and returns Error
+    /// otherwise.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
@@ -524,7 +505,10 @@ impl<
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
+        try_join!(
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+        )?;
 
         Ok(())
     }
@@ -581,35 +565,35 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
         self.get(key).await.map_err(Into::into)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
         self.update(key, value).await.map_err(Into::into)
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
         self.delete(key).await.map(|_| ()).map_err(Into::into)
     }
 
-    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+    async fn commit(&mut self) -> Result<(), store::Error> {
         self.commit().await.map_err(Into::into)
     }
 
-    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+    async fn sync(&mut self) -> Result<(), store::Error> {
         self.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
         self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    async fn close(self) -> Result<(), crate::store::Error> {
+    async fn close(self) -> Result<(), store::Error> {
         self.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), crate::store::Error> {
+    async fn destroy(self) -> Result<(), store::Error> {
         self.destroy().await.map_err(Into::into)
     }
 }
@@ -619,10 +603,9 @@ impl<
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::verify_proof,
+        adb::{operation::fixed::unordered::Operation, verify_proof},
         index::{Index as IndexTrait, Unordered as Index},
         mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
-        store::operation::Fixed as Operation,
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -792,7 +775,7 @@ pub(super) mod test {
             // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
-            assert_eq!(db.snapshot.keys(), 0);
+            assert!(db.is_empty());
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();

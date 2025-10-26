@@ -6,7 +6,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::{
-    store::{Config as SConfig, Store},
+    adb::store::{Config as SConfig, Store},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
