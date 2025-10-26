@@ -361,16 +361,7 @@ where
         let mut value = self.get(&key).await?.unwrap_or_default();
         update(&mut value);
 
-        let new_loc = self.log_size;
-        if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
-        } else {
-            self.snapshot.insert(&key, new_loc);
-        };
-
-        self.apply_op(Operation::Update(key, value))
-            .await
-            .map(|_| ())
+        self.update(key, value).await
     }
 
     /// Deletes the value associated with the given key in the store. If the key has no value,
