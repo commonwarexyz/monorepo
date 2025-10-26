@@ -1,9 +1,12 @@
 use crate::dkg::ciphered_share::CipheredShare;
 use crate::dkg::error::Error;
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadRangeExt, Write};
 use commonware_cryptography::bls12381::primitives::group::{Element, Scalar, G1};
 use commonware_cryptography::bls12381::primitives::poly;
 use commonware_cryptography::bls12381::primitives::variant::MinPk;
 use commonware_cryptography::bls12381::PublicKey;
+use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Committable, Digestible, Hasher, Sha256};
 use commonware_utils::set::Ordered;
 use thiserror::Error as ThisError;
 #[derive(Debug, ThisError)]
@@ -23,6 +26,7 @@ pub struct BroadcastMsg {
 }
 
 impl BroadcastMsg {
+    const COMMITMENT_MSG: &[u8] = b"GOLDEN_DKG_SHARES";
     pub fn new(msg: Vec<u8>, shares: Vec<CipheredShare>, poly: poly::Public<MinPk>) -> Self {
         Self { msg, shares, poly }
     }
@@ -103,5 +107,51 @@ impl BroadcastMsg {
         }
 
         out
+    }
+}
+
+impl EncodeSize for BroadcastMsg {
+    fn encode_size(&self) -> usize {
+        self.msg.encode_size() + self.shares.encode_size() + self.poly.encode_size()
+    }
+}
+
+impl Read for BroadcastMsg {
+    type Cfg = (RangeCfg<usize>, RangeCfg<usize>, usize);
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let (msg_range, shares_range, poly_degree) = cfg;
+
+        let msg = Vec::<u8>::read_range(buf, *msg_range)?;
+
+        let shares = Vec::<CipheredShare>::read_cfg(buf, &(*shares_range, ()))?;
+
+        let poly = poly::Public::<MinPk>::read_cfg(buf, poly_degree)?;
+
+        Ok(Self { msg, shares, poly })
+    }
+}
+
+impl Write for BroadcastMsg {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.msg.write(buf);
+        self.shares.write(buf);
+        self.poly.write(buf);
+    }
+}
+
+impl Committable for BroadcastMsg {
+    type Commitment = Digest;
+    fn commitment(&self) -> Self::Commitment {
+        Sha256::hash(Self::COMMITMENT_MSG)
+    }
+}
+
+impl Digestible for BroadcastMsg {
+    type Digest = Digest;
+    fn digest(&self) -> Self::Digest {
+        Sha256::hash(&self.msg)
     }
 }

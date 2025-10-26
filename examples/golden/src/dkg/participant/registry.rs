@@ -8,15 +8,14 @@ use commonware_cryptography::bls12381::PublicKey;
 use commonware_utils::set::Ordered;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error as ThisError;
+use tracing::debug;
 
 #[derive(Debug, ThisError)]
 pub enum RegistryError {
-    #[error("Dealer already seen: {0}")]
-    DealerAlreadySeen(u32),
     #[error("Share not found for player {0}")]
     ShareNotFound(u32),
-    #[error("Public key not found for player {0}")]
-    PubkeyNotFound(u32),
+    #[error("Index not found for player {0}")]
+    IndexNotFound(Box<PublicKey>),
 }
 
 /// Short-lived registry: re-initied at every round
@@ -45,14 +44,20 @@ impl Registry {
     // Steps (11), ..., (16)
     pub fn on_incoming_bmsg(
         &mut self,
-        dealer: u32,
+        dealer_pk: &PublicKey,
         player_id: u32,
         mut bmsg: BroadcastMsg,
         players: &Ordered<PublicKey>,
         evrf: &EVRF,
     ) -> Result<(), Error> {
+        // Decrypt f_{j}(i) and store it
+        let Some(dealer) = players.position(dealer_pk) else {
+            return Err(RegistryError::IndexNotFound(Box::new(dealer_pk.clone())).into());
+        };
+        let dealer = dealer as u32;
+
         if !self.dealer_broadcasted.insert(dealer) {
-            return Err(RegistryError::DealerAlreadySeen(dealer).into());
+            return Ok(());
         }
         let share_commitments = bmsg.validate(dealer, players)?;
         let Some(my_share) = bmsg.take_ciphered_share(player_id) else {
@@ -60,11 +65,9 @@ impl Registry {
         };
         self.update_share_commitments(share_commitments);
 
-        // Decrypt f_{j}(i) and store it
-        let Some(dealer_pk) = players.get(dealer as usize) else {
-            return Err(RegistryError::PubkeyNotFound(dealer).into());
-        };
         let evrf_output = evrf.evaluate(bmsg.msg(), dealer_pk);
+
+        debug!(target:"player", dealer_pk=dealer_pk.to_string(),dealer_id=dealer, "Recovered secret scalar: {}",evrf_output.scalar);
 
         let decrypted = my_share.decrypt(evrf_output.scalar)?;
 
@@ -76,7 +79,7 @@ impl Registry {
 
         let n = players.len();
 
-        if self.dealer_broadcasted.len() == n - 1 {
+        if self.dealer_broadcasted.len() == n {
             self.ready = true
         }
 

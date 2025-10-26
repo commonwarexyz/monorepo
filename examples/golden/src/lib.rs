@@ -4,6 +4,8 @@ pub mod dkg {
     pub mod error;
     pub mod participant;
 }
+pub mod actor;
+pub mod cli;
 
 #[cfg(test)]
 mod test {
@@ -111,7 +113,7 @@ mod test {
         //Evaluation
         for (j, bmsg) in bmsgs.into_iter().enumerate() {
             for (k, player) in participants.iter_mut().enumerate() {
-                player.on_incoming_bmsg(j as u32, k as u32, bmsg.clone(), &players)?;
+                player.on_incoming_bmsg(&players[j], k as u32, bmsg.clone(), &players)?;
             }
         }
 

@@ -1,4 +1,5 @@
 use crate::dkg::participant::evrf::Output;
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::group::{
     Element, Scalar, Share as DKGShare, G1,
 };
@@ -18,18 +19,6 @@ pub struct CipheredShare {
     ciphered: DKGShare,
     commitment_r: G1,
     zk_proof: (),
-}
-
-impl PartialOrd for CipheredShare {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for CipheredShare {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.index().cmp(&other.index())
-    }
 }
 
 impl CipheredShare {
@@ -81,6 +70,52 @@ impl CipheredShare {
         let mut out = G1::one();
         out.mul(&self.ciphered.private);
         out
+    }
+}
+
+impl PartialOrd for CipheredShare {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CipheredShare {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.index().cmp(&other.index())
+    }
+}
+
+impl EncodeSize for CipheredShare {
+    fn encode_size(&self) -> usize {
+        // TODO: add zkproof
+        self.ciphered.encode_size() + self.commitment_r.encode_size()
+    }
+}
+
+impl Read for CipheredShare {
+    type Cfg = ();
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let ciphered = DKGShare::read_cfg(buf, cfg)?;
+        let commitment_r = G1::read(buf)?;
+        // TODO: add zkproof
+
+        let out = Self {
+            ciphered,
+            commitment_r,
+            zk_proof: (),
+        };
+        Ok(out)
+    }
+}
+
+impl Write for CipheredShare {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.ciphered.write(buf);
+        self.commitment_r.write(buf);
+        // TODO: add zkproof
     }
 }
 

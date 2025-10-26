@@ -6,6 +6,7 @@ use commonware_utils::set::Ordered;
 use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::collections::HashMap;
+use tracing::debug;
 
 use crate::dkg::broadcast::BroadcastMsg;
 use crate::dkg::ciphered_share::CipheredShare;
@@ -44,6 +45,8 @@ impl Participant {
                 let party_pki = players.get(id as usize).expect("Player not found");
                 let ervf_out = self.evrf.evaluate(msg.as_slice(), party_pki);
 
+                debug!(target:"dealer", party_id=id, party_pk=party_pki.to_string(), "evrf secret scalar: {}", ervf_out.scalar);
+
                 CipheredShare::new(x, ervf_out)
             })
             .collect::<Vec<_>>();
@@ -57,7 +60,7 @@ impl Participant {
 
     pub fn on_incoming_bmsg(
         &mut self,
-        dealer: u32,
+        dealer: &PublicKey,
         player_id: u32,
         bmsg: BroadcastMsg,
         players: &Ordered<PublicKey>,
