@@ -693,7 +693,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier_identical(participants.into());
+        let verifier = Scheme::verifier_identical(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,

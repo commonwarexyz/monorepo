@@ -368,6 +368,7 @@ mod tests {
         keys.iter().map(|key| compute_public::<V>(key)).collect()
     }
 
+    #[allow(clippy::type_complexity)]
     fn signing_schemes<V: Variant>(
         n: usize,
     ) -> (
