@@ -64,12 +64,13 @@ fn fuzz_with_chunk_size<const N: usize>(operations: &[Operation]) {
                     .len()
                     .is_multiple_of(Prunable::<N>::CHUNK_SIZE_BITS)
                 {
-                    // Create chunk from seed
+                    // Create chunk from seed by repeating the seed bytes
                     let seed_bytes = seed.to_le_bytes();
                     let mut chunk = [0u8; N];
-                    for (i, byte) in chunk.iter_mut().enumerate() {
-                        *byte = seed_bytes[i % 8];
-                    }
+                    chunk
+                        .iter_mut()
+                        .zip(seed_bytes.iter().cycle())
+                        .for_each(|(dst, &src)| *dst = src);
                     prunable.push_chunk(&chunk);
                 }
             }
