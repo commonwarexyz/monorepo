@@ -181,10 +181,10 @@ where
         loop {
             select! {
                 message = pending_backup.next() => {
-                    // If a message is received in an unregistered sub-channel in the recovered or pending network,
+                    // If a message is received in an unregistered sub-channel in the pending network,
                     // attempt to forward the boundary finalization for the epoch.
                     let Some((epoch, (from, _))) = message else {
-                        warn!("recovered/pending mux backup channel closed, shutting down orchestrator");
+                        warn!("pending mux backup channel closed, shutting down orchestrator");
                         break;
                     };
                     let Some(latest_epoch) = engines.keys().last().copied() else {
@@ -210,7 +210,7 @@ where
                         epoch,
                         boundary_height,
                         ?from,
-                        "received message on recovery/pending network from old epoch. forwarding boundary finalization"
+                        "received message on pending network from old epoch. forwarding boundary finalization"
                     );
 
                     // Forward the finalization to the sender. This operation is best-effort.
