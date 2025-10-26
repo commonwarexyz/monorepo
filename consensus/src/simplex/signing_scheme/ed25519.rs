@@ -119,6 +119,40 @@ impl<P: PublicKey> Scheme<P> {
     }
 }
 
+impl Scheme<ed25519::PublicKey> {
+    /// Creates a new scheme instance where identity and consensus keys are identical.
+    ///
+    /// This is a convenience constructor for the common Ed25519 case where the same
+    /// key is used for both participant identity and consensus signing.
+    ///
+    /// * `participants` - validator public keys used for both identity and consensus.
+    /// * `private_key` - secret key enabling signing capabilities.
+    pub fn new_identical(
+        participants: Vec<ed25519::PublicKey>,
+        private_key: ed25519::PrivateKey,
+    ) -> Self {
+        let participants_tuples: Vec<_> = participants
+            .into_iter()
+            .map(|key| (key.clone(), key))
+            .collect();
+        Self::new(participants_tuples, private_key)
+    }
+
+    /// Builds a pure verifier where identity and consensus keys are identical.
+    ///
+    /// This is a convenience constructor for the common Ed25519 case where the same
+    /// key is used for both participant identity and consensus verification.
+    ///
+    /// * `participants` - validator public keys used for both identity and consensus.
+    pub fn verifier_identical(participants: Vec<ed25519::PublicKey>) -> Self {
+        let participants_tuples: Vec<_> = participants
+            .into_iter()
+            .map(|key| (key.clone(), key))
+            .collect();
+        Self::verifier(participants_tuples)
+    }
+}
+
 /// Certificate formed by collecting Ed25519 signatures plus their signer indices.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
