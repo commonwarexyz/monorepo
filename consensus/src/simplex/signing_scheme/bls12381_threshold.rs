@@ -12,7 +12,7 @@ use crate::{
             self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             seed_namespace_and_message, vote_namespace_and_message,
         },
-        types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
+        types::{Finalization, Notarization, OrderedExt, Vote, VoteContext, VoteVerification},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -35,7 +35,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::{quorum, set::Ordered};
+use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -57,8 +57,6 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         polynomial: Vec<V::Public>,
         /// Local share used to author partial signatures.
         share: Share,
-        /// Quorum threshold derived from the participant set.
-        threshold: u32,
     },
     Verifier {
         participants: Ordered<P>,
@@ -66,8 +64,6 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         identity: V::Public,
         /// Evaluated public polynomial for each participant index.
         polynomial: Vec<V::Public>,
-        /// Quorum threshold derived from the participant set.
-        threshold: u32,
     },
     CertificateVerifier {
         participants: Ordered<P>,
@@ -81,17 +77,23 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let threshold = quorum(polynomial.len() as u32);
 
-        // FIXME: there should be validation on the Share provided
-        // is it part of the polynomial and is the index valid?
-
-        Self::Signer {
-            participants,
-            polynomial,
-            identity,
-            share,
-            threshold,
+        if polynomial
+            .get(share.index as usize)
+            .is_some_and(|p| share.public::<V>() == *p)
+        {
+            Self::Signer {
+                participants,
+                polynomial,
+                identity,
+                share,
+            }
+        } else {
+            Self::Verifier {
+                participants,
+                identity,
+                polynomial,
+            }
         }
     }
 
@@ -99,13 +101,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
-        let threshold = quorum(polynomial.len() as u32);
 
         Self::Verifier {
             participants,
             identity,
             polynomial,
-            threshold,
         }
     }
 
@@ -147,15 +147,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         match self {
             Scheme::Signer { polynomial, .. } => polynomial,
             Scheme::Verifier { polynomial, .. } => polynomial,
-            _ => panic!("can only be called for signer and verifier"),
-        }
-    }
-
-    /// Quorum threshold implied by the participant set.
-    pub fn threshold(&self) -> u32 {
-        match self {
-            Scheme::Signer { threshold, .. } => *threshold,
-            Scheme::Verifier { threshold, .. } => *threshold,
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -337,8 +328,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let threshold = self.threshold();
-
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
@@ -355,12 +344,13 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             })
             .unzip();
 
-        if vote_partials.len() < threshold as usize {
+        let quorum = self.participants().quorum();
+        if vote_partials.len() < quorum as usize {
             return None;
         }
 
         let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
-            threshold,
+            quorum,
             vote_partials.iter(),
             seed_partials.iter(),
         )
