@@ -25,15 +25,6 @@
 //! The database maintains a location before which all operations are inactive, called the
 //! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
 //!
-//! |                               Log State                                            | Inactivity Floor | Uncommitted Ops |
-//! |------------------------------------------------------------------------------------|------------------|-----------------|
-//! | [pre-commit] Update(a, v), Update(a, v')                                           |                0 |               2 |
-//! | [raise-floor] Update(a, v), Update(a, v'), Update(a, v'), Update(a, v')            |                3 |               2 |
-//! | [prune+commit] Update(a, v'), Commit(3)                                            |                3 |               0 |
-//! | [pre-commit] Update(a, v'), Commit(3), Update(b, v), Update(a, v'')                |                3 |               2 |
-//! | [raise-floor] Update(a, v'), Commit(3), Update(b, v), Update(a, v''), Update(b, v) |                6 |               2 |
-//! | [prune+commit] Update(a, v''), Update(b, v), Commit(6)                             |                6 |               0 |
-//!
 //! # Example
 //!
 //! ```rust
