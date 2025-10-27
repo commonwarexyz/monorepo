@@ -27,10 +27,11 @@ impl<T: Read<Cfg = ()>> ReadExt for T {}
 /// This is typically used to implement the `DefaultExt` trait for types that are unit-like.
 pub trait IsUnit: Default {}
 
+// Generate `IsUnit` implementations for types with only one possible value.
 impl IsUnit for () {}
 impl<T: IsUnit, const N: usize> IsUnit for [T; N] where [T; N]: Default {}
 
-// Generate `IsUnit` implementations for tuples up to 12 elements.
+// Generate `IsUnit` implementations for `IsUnit` tuples up to 12 elements.
 macro_rules! impl_is_unit_for_tuple {
     ( $($T:ident),+ ) => {
         impl<$($T),+> IsUnit for ( $($T),+ ) where $($T: IsUnit),+ {}
