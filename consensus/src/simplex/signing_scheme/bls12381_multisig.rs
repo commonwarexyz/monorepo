@@ -32,22 +32,21 @@ use std::{collections::BTreeSet, fmt::Debug};
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
-    /// Participant set's public identities.
+    /// Participants in the committee.
     participants: OrderedAssociated<P, V::Public>,
-    /// Optional local consensus signing key paired with its participant index.
+    /// Key used for generating signatures.
     signer: Option<(u32, Private)>,
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants are provided as tuples pairing identity keys with consensus keys.
-    /// The identity key (first element) is used for committee ordering and indexing,
-    /// while the consensus key (second element) is the BLS public key used for signing
-    /// and verification.
+    /// Participants have both an identity key and a consensus key. The identity key
+    /// is used for committee ordering and indexing, while the consensus key is used for
+    /// signing and verification.
     ///
-    /// If the provided private key does not match any consensus key in the participant set,
-    /// the instance will act as a verifier (unable to sign votes).
+    /// If the provided private key does not match any consensus key in the committee,
+    /// the instance will act as a verifier (unable to generate signatures).
     pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
@@ -62,11 +61,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Builds a pure verifier that can authenticate votes and certificates.
+    /// Builds a verifier that can authenticate votes and certificates.
     ///
-    /// Participants are provided as tuples pairing identity keys with consensus keys.
-    /// The identity key (first element) is used for committee ordering and indexing,
-    /// while the consensus key (second element) is the BLS public key used for verification.
+    /// Participants have both an identity key and a consensus key. The identity key
+    /// is used for committee ordering and indexing, while the consensus key is used for
+    /// verification.
     pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
         Self {
             participants,
