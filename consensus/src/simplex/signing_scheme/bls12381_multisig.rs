@@ -50,7 +50,17 @@ impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
     pub fn new(participants: Ordered<(P, V::Public)>, private_key: Private) -> Self {
-        Self::from(participants, Some(private_key))
+        let public = compute_public::<V>(&private_key);
+        let signer = participants
+            .iter()
+            .enumerate()
+            .find(|(_, (_, bls))| *bls == public)
+            .map(|(index, _)| (index as u32, private_key));
+
+        Self {
+            participants,
+            signer,
+        }
     }
 
     /// Builds a pure verifier that can authenticate votes and certificates.
@@ -59,22 +69,9 @@ impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
     /// The identity key (first element) is used for committee ordering and indexing,
     /// while the consensus key (second element) is the BLS public key used for verification.
     pub fn verifier(participants: Ordered<(P, V::Public)>) -> Self {
-        Self::from(participants, None)
-    }
-
-    fn from(participants: Ordered<(P, V::Public)>, private_key: Option<Private>) -> Self {
-        let signer = private_key.and_then(|sk| {
-            let public = compute_public::<V>(&sk);
-            participants
-                .iter()
-                .enumerate()
-                .find(|(_, (_, bls))| *bls == public)
-                .map(|(index, _)| (index as u32, sk))
-        });
-
         Self {
             participants,
-            signer,
+            signer: None,
         }
     }
 
