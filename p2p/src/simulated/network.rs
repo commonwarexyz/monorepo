@@ -75,6 +75,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
+    // The current peer set ID
+    peer_set_id: u64,
+
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
@@ -116,6 +119,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
+                peer_set_id: 0,
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 received_messages,
@@ -205,8 +209,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::PeerSet { response, .. } => {
                 let _ = response.send(Some(self.peers.keys().cloned().collect()));
             }
+            ingress::Message::IncrementPeerSet => {
+                self.peer_set_id += 1;
+            }
             ingress::Message::LatestPeerSet { response } => {
-                let _ = response.send(Some(0));
+                // The peer set is constant in the simulated network.
+                let _ = response.send(Some(self.peer_set_id));
             }
             ingress::Message::LimitBandwidth {
                 public_key,

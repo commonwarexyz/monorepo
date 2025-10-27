@@ -9,7 +9,7 @@ use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
-use commonware_p2p::{authenticated::discovery, utils::requester, PeerSetManager};
+use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
@@ -74,10 +74,7 @@ where
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
-    let (mut network, mut oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
-
-    // Register all possible peers
-    oracle.register(0, peer_config.all_peers()).await;
+    let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
     let pending_limit = Quota::per_second(NZU32!(128));
     let pending = network.register(PENDING_CHANNEL, pending_limit, MESSAGE_BACKLOG);
@@ -117,11 +114,12 @@ where
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
-            blocker: oracle,
+            peer_set_manager: oracle.clone(),
+            blocker: oracle.clone(),
             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
             participant_config: Some((args.config_path, config.clone())),
             polynomial,
@@ -204,12 +202,6 @@ mod test {
         ),
     > {
         let mut registrations = HashMap::new();
-
-        // Register an unused channel for all validators _before_ starting resolver engines.
-        for validator in validators.iter() {
-            oracle.register(validator.clone(), 0xFF).await.unwrap();
-        }
-
         for validator in validators.iter() {
             let pending = oracle
                 .register(validator.clone(), PENDING_CHANNEL)
@@ -241,9 +233,10 @@ mod test {
                 .unwrap();
 
             // Create a static resolver for marshal
+            let peer_manager = oracle.control(validator.clone());
             let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),
-                peer_provider: oracle.control(validator.clone()),
+                peer_provider: peer_manager,
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     me: Some(validator.clone()),
@@ -363,11 +356,13 @@ mod test {
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
-                let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
+                let peer_manager = oracle.control(public_key.clone());
+                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer,
-                        blocker: oracle.control(public_key),
+                        peer_set_manager: peer_manager.clone(),
+                        blocker: peer_manager,
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
@@ -567,12 +562,14 @@ mod test {
                 } else {
                     None
                 };
+                let peer_manager = oracle.control(public_key.clone());
                 let engine =
-                    engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label("engine"),
                         engine::Config {
                             signer: signer.clone(),
-                            blocker: oracle.control(public_key.clone()),
+                            peer_set_manager: peer_manager.clone(),
+                            blocker: peer_manager,
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
                             polynomial: Some(polynomial.clone()),
@@ -686,12 +683,14 @@ mod test {
                 } else {
                     None
                 };
+                let peer_manager = oracle.control(public_key.clone());
                 let engine =
-                    engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label("engine"),
                         engine::Config {
                             signer: signer.clone(),
-                            blocker: oracle.control(public_key.clone()),
+                            peer_set_manager: peer_manager.clone(),
+                            blocker: peer_manager,
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
                             polynomial: Some(polynomial.clone()),
@@ -845,11 +844,13 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
-                let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
+                let peer_manager = oracle.control(public_key.clone());
+                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
-                        blocker: oracle.control(public_key.clone()),
+                        peer_set_manager: peer_manager.clone(),
+                        blocker: peer_manager,
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
@@ -928,25 +929,28 @@ mod test {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine"),
-                engine::Config {
-                    signer: signer.clone(),
-                    blocker: oracle.control(public_key.clone()),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: Some(share),
-                    active_participants: validators.clone(),
-                    inactive_participants: Vec::default(),
-                    num_participants_per_epoch: validators.len(),
-                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: "validator_0".to_string(),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-            )
-            .await;
+            let peer_manager = oracle.control(public_key.clone());
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        peer_set_manager: peer_manager.clone(),
+                        blocker: peer_manager,
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: Some(share),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: "validator_0".to_string(),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1082,12 +1086,14 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
+                let peer_manager = oracle.control(public_key.clone());
                 let engine =
-                    engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label(&format!("engine_{idx}")),
                         engine::Config {
                             signer: signer.clone(),
-                            blocker: oracle.control(public_key.clone()),
+                            peer_set_manager: peer_manager.clone(),
+                            blocker: peer_manager,
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
                             polynomial: Some(polynomial.clone()),
@@ -1163,28 +1169,35 @@ mod test {
             )
             .await;
 
+            // Increment the peer set ID, since it has changed.
+            oracle.increment_peer_set_id().await.unwrap();
+
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine_0"),
-                engine::Config {
-                    signer: signer.clone(),
-                    blocker: oracle.control(public_key.clone()),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: Some(share),
-                    active_participants: validators.clone(),
-                    inactive_participants: Vec::default(),
-                    num_participants_per_epoch: validators.len(),
-                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: "validator_0".to_string(),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-            )
-            .await;
+            let peer_manager = oracle.control(public_key.clone());
+
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine_0"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        peer_set_manager: peer_manager.clone(),
+                        blocker: peer_manager,
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: Some(share),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: "validator_0".to_string(),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1332,12 +1345,14 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
+                let peer_manager = oracle.control(public_key.clone());
                 let engine =
-                    engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label(&format!("engine_{idx}")),
                         engine::Config {
                             signer: signer.clone(),
-                            blocker: oracle.control(public_key.clone()),
+                            peer_set_manager: peer_manager.clone(),
+                            blocker: peer_manager,
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
                             polynomial: Some(polynomial.clone()),
@@ -1413,29 +1428,35 @@ mod test {
             )
             .await;
 
+            // Increment the peer set ID, since it has changed.
+            oracle.increment_peer_set_id().await.unwrap();
+
             // Set up the peer to marshal. Note that this peer is _not_ a part of the committee
             // in the first epoch.
             let signer = signers[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine_0"),
-                engine::Config {
-                    signer: signer.clone(),
-                    blocker: oracle.control(public_key.clone()),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: None,
-                    active_participants: validators[1..].to_vec(),
-                    inactive_participants: validators[..1].to_vec(),
-                    num_participants_per_epoch: validators.len() - 1,
-                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: "validator_0".to_string(),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-            )
-            .await;
+            let peer_manager = oracle.control(public_key.clone());
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine_0"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        peer_set_manager: peer_manager.clone(),
+                        blocker: peer_manager,
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: None,
+                        active_participants: validators[1..].to_vec(),
+                        inactive_participants: validators[..1].to_vec(),
+                        num_participants_per_epoch: validators.len() - 1,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: "validator_0".to_string(),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1580,12 +1601,14 @@ mod test {
                     let public_key = signer.public_key();
                     public_keys.insert(public_key.clone());
 
+                    let peer_manager = oracle.control(public_key.clone());
                     let engine =
-                        engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                        engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                             context.with_label("engine"),
                             engine::Config {
                                 signer: signer.clone(),
-                                blocker: oracle.control(public_key.clone()),
+                                peer_set_manager: peer_manager.clone(),
+                                blocker: peer_manager,
                                 namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                                 participant_config: None,
                                 polynomial: Some(polynomial.clone()),

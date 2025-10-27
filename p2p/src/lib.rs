@@ -68,7 +68,7 @@ pub trait Receiver: Debug + Send + 'static {
 }
 
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
-pub trait PeerSetManager: Debug + Send + 'static {
+pub trait PeerSetManager: Debug + Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;
 

@@ -17,7 +17,7 @@ use commonware_cryptography::{
     },
     Hasher, Signer,
 };
-use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
+use commonware_p2p::{utils::mux::Muxer, PeerSetManager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
@@ -39,7 +39,8 @@ use tracing::info;
 
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
-pub struct Config<C> {
+pub struct Config<C, P> {
+    pub peer_set_manager: P,
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
@@ -50,14 +51,16 @@ pub struct Config<C> {
     pub partition_prefix: String,
 }
 
-pub struct Actor<E, H, C, V>
+pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
+    peer_set_manager: P,
     participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
@@ -69,15 +72,16 @@ where
     failed_rounds: Counter,
 }
 
-impl<E, H, C, V> Actor<E, H, C, V>
+impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub async fn init(context: E, config: Config<C>) -> (Self, Mailbox<H, C, V>) {
+    pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         let context = ContextCell::new(context);
 
         // Initialize a metadata store for epoch and round information.
@@ -115,6 +119,7 @@ where
         (
             Self {
                 context,
+                peer_set_manager: config.peer_set_manager,
                 participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
@@ -214,6 +219,25 @@ where
         };
         orchestrator
             .report(orchestrator::Message::Enter(transition))
+            .await;
+
+        // Register the initial set of peers.
+        let players_after_next = Ordered::from_iter(
+            Self::choose_from_all(
+                &all_participants,
+                self.num_participants_per_epoch,
+                current_epoch + 1,
+            )
+            .into_iter(),
+        );
+        let next_epoch_peers = dealers
+            .clone()
+            .into_iter()
+            .chain(players.clone())
+            .chain(players_after_next)
+            .collect::<Ordered<_>>();
+        self.peer_set_manager
+            .register(current_epoch, next_epoch_peers)
             .await;
 
         // Initialize the DKG manager for the first round.
@@ -394,6 +418,28 @@ where
                             .into_iter()
                             .collect::<Ordered<_>>()
                         };
+
+                        // Select the players for the epoch after next to allow them to sync two epochs prior
+                        // to their participation.
+                        let next_epoch_players = Ordered::from_iter(
+                            Self::choose_from_all(
+                                &all_participants,
+                                self.num_participants_per_epoch,
+                                next_epoch + 1,
+                            )
+                            .into_iter(),
+                        );
+
+                        // Register the set of peers for the next epoch.
+                        let next_epoch_peers = next_participants
+                            .clone()
+                            .into_iter()
+                            .chain(next_players.clone())
+                            .chain(next_epoch_players)
+                            .collect::<Ordered<_>>();
+                        self.peer_set_manager
+                            .register(next_epoch, next_epoch_peers)
+                            .await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {

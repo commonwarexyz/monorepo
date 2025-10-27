@@ -19,6 +19,7 @@ pub enum Message<P: PublicKey> {
     PeerSet {
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
+    IncrementPeerSet,
     LatestPeerSet {
         response: oneshot::Sender<Option<u64>>,
     },
@@ -121,6 +122,14 @@ impl<P: PublicKey> Oracle<P> {
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 
+    /// Increment the peer set version, causing all peers to refresh their peer sets.
+    pub async fn increment_peer_set_id(&mut self) -> Result<(), Error> {
+        self.sender
+            .send(Message::IncrementPeerSet)
+            .await
+            .map_err(|_| Error::NetworkClosed)
+    }
+
     /// Set bandwidth limits for a peer.
     ///
     /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
@@ -214,13 +223,11 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> crate::PeerSetManager for Control<P> {
     type PublicKey = P;
-    type Peers = ();
+    type Peers = Ordered<Self::PublicKey>;
 
-    async fn register(&mut self, _id: u64, _peers: Self::Peers) {
-        unimplemented!(
-            "p2p::simulated has a non-traditional registry path, unsupported by PeerSetManager"
-        )
-    }
+    /// No-op; [crate::PeerSetManager::register] is not supported in the simulated network, use
+    /// [Oracle::register] instead.
+    async fn register(&mut self, _id: u64, _peers: Self::Peers) {}
 
     async fn peer_set(&mut self, _id: u64) -> Option<Ordered<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
