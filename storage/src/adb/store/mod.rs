@@ -25,15 +25,6 @@
 //! The database maintains a location before which all operations are inactive, called the
 //! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
 //!
-//! |                               Log State                                            | Inactivity Floor | Uncommitted Ops |
-//! |------------------------------------------------------------------------------------|------------------|-----------------|
-//! | [pre-commit] Update(a, v), Update(a, v')                                           |                0 |               2 |
-//! | [raise-floor] Update(a, v), Update(a, v'), Update(a, v'), Update(a, v')            |                3 |               2 |
-//! | [prune+commit] Update(a, v'), Commit(3)                                            |                3 |               0 |
-//! | [pre-commit] Update(a, v'), Commit(3), Update(b, v), Update(a, v'')                |                3 |               2 |
-//! | [raise-floor] Update(a, v'), Commit(3), Update(b, v), Update(a, v''), Update(b, v) |                6 |               2 |
-//! | [prune+commit] Update(a, v''), Update(b, v), Commit(6)                             |                6 |               0 |
-//!
 //! # Example
 //!
 //! ```rust
@@ -122,12 +113,12 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 /// Errors that can occur when interacting with a [Store] database.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(transparent)]
-    Journal(#[from] crate::journal::Error),
-
     /// The requested operation has been pruned.
     #[error("operation pruned")]
     OperationPruned(Location),
+
+    #[error(transparent)]
+    Journal(#[from] crate::journal::Error),
 
     #[error(transparent)]
     Adb(#[from] crate::adb::Error),
@@ -246,8 +237,12 @@ where
     /// The total number of operations that have been applied to the store.
     log_size: Location,
 
-    /// The number of operations that are pending commit.
-    uncommitted_ops: u64,
+    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
+    /// active operation to tip.
+    pub(crate) steps: u64,
+
+    /// The location of the last commit operation (if any exists).
+    pub(crate) last_commit: Option<Location>,
 }
 
 impl<E, K, V, T> Store<E, K, V, T>
@@ -300,7 +295,8 @@ where
             inactivity_floor_loc: Location::new_unchecked(0),
             oldest_retained_loc: Location::new_unchecked(0),
             log_size: Location::new_unchecked(0),
-            uncommitted_ops: 0,
+            steps: 0,
+            last_commit: None,
         };
 
         db.build_snapshot_from_log().await
@@ -342,6 +338,7 @@ where
         let new_loc = self.log_size;
         if let Some(old_loc) = self.get_key_loc(&key).await? {
             Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
+            self.steps += 1;
         } else {
             self.snapshot.insert(&key, new_loc);
         };
@@ -364,16 +361,7 @@ where
         let mut value = self.get(&key).await?.unwrap_or_default();
         update(&mut value);
 
-        let new_loc = self.log_size;
-        if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
-        } else {
-            self.snapshot.insert(&key, new_loc);
-        };
-
-        self.apply_op(Operation::Update(key, value))
-            .await
-            .map(|_| ())
+        self.update(key, value).await
     }
 
     /// Deletes the value associated with the given key in the store. If the key has no value,
@@ -385,6 +373,7 @@ where
         };
 
         Self::delete_loc(&mut self.snapshot, &key, old_loc);
+        self.steps += 1;
 
         self.apply_op(Operation::Delete(key)).await.map(|_| ())
     }
@@ -396,15 +385,57 @@ where
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1805): implement improved floor
-        // raising logic.
-        self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                self.raise_floor().await?;
+            }
+        }
+        self.steps = 0;
+
+        // Apply the commit operation with the new inactivity floor.
+        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
-        self.uncommitted_ops = 0;
+        self.last_commit = Some(self.op_count() - 1);
 
         let section = self.current_section();
         self.log.sync(section).await?;
+
         debug!(log_size = ?self.log_size, "commit complete");
+
+        Ok(())
+    }
+
+    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
+    /// active operation above the inactivity floor, moving it to tip, and then setting the
+    /// inactivity floor to the location following the moved operation. This method is therefore
+    /// guaranteed to raise the floor by at least one.
+    ///
+    /// # Errors
+    ///
+    /// Expects there is at least one active operation above the inactivity floor, and returns Error
+    /// otherwise.
+    async fn raise_floor(&mut self) -> Result<(), Error> {
+        // Search for the first active operation above the inactivity floor and move it to tip.
+        //
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
+        let mut op = self.get_op(self.inactivity_floor_loc).await?;
+        while self
+            .move_op_if_active(op, self.inactivity_floor_loc)
+            .await?
+            .is_none()
+        {
+            self.inactivity_floor_loc += 1;
+            op = self.get_op(self.inactivity_floor_loc).await?;
+        }
+
+        // Increment the floor to the next operation since we know the current one is inactive.
+        self.inactivity_floor_loc += 1;
 
         Ok(())
     }
@@ -469,33 +500,27 @@ where
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns Error if there is some underlying storage failure.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let mut last_commit = *self.op_count() - self.uncommitted_ops;
-        if last_commit == 0 {
+        let Some(last_commit) = self.last_commit else {
             return Ok(None);
-        }
-        last_commit -= 1;
-        let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?;
-        let Operation::CommitFloor(metadata, _) = self.log.get(section, offset).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((Location::new_unchecked(last_commit), metadata)))
+        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
     /// via [Store::commit].
     pub async fn close(self) -> Result<(), Error> {
-        if self.uncommitted_ops > 0 {
-            warn!(
-                log_size = ?self.log_size,
-                uncommitted_ops = self.uncommitted_ops,
-                "closing store with uncommitted operations"
-            );
-        }
-
         try_join!(self.log.close(), self.locations.close())?;
+
         Ok(())
     }
 
@@ -532,6 +557,11 @@ where
     /// are not yet committed.
     pub fn op_count(&self) -> Location {
         self.log_size
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -671,6 +701,19 @@ where
 
         // Confirm post-conditions hold.
         assert_eq!(self.log_size, self.locations.size().await?);
+        self.last_commit = self
+            .locations
+            .size()
+            .await?
+            .checked_sub(1)
+            .map(Location::new_unchecked);
+        assert!(
+            self.last_commit.is_none()
+                || matches!(
+                    self.get_op(self.last_commit.unwrap()).await?,
+                    Operation::CommitFloor(_, _)
+                )
+        );
 
         debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
@@ -688,7 +731,6 @@ where
         self.locations.append(offset).await?;
 
         // Update the uncommitted operations count and increment the log size
-        self.uncommitted_ops += 1;
         self.log_size += 1;
 
         // Maintain the invariant that all completely full sections are synced & immutable.
@@ -796,31 +838,6 @@ where
             Ok(None)
         }
     }
-
-    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
-    /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it.
-    ///
-    /// This method does not change the state of the db's snapshot.
-    async fn raise_inactivity_floor(
-        &mut self,
-        metadata: Option<V>,
-        max_steps: u64,
-    ) -> Result<(), Error> {
-        for _ in 0..max_steps {
-            if self.inactivity_floor_loc == self.log_size {
-                break;
-            }
-            let op = self.get_op(self.inactivity_floor_loc).await?;
-            self.move_op_if_active(op, self.inactivity_floor_loc)
-                .await?;
-            self.inactivity_floor_loc += 1;
-        }
-
-        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
-            .await
-            .map(|_| ())
-    }
 }
 
 impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
@@ -912,6 +929,7 @@ mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc, 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
@@ -927,10 +945,16 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let mut db = create_test_store(context.clone()).await;
 
-            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
+            // non-empty db.
+            db.update(Digest::random(&mut context), vec![1, 2, 3])
+                .await
+                .unwrap();
             for _ in 1..100 {
                 db.commit(None).await.unwrap();
-                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
+                // Distance should equal 3 after the second commit, with inactivity_floor
+                // referencing the previous commit operation.
+                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
             }
 
             db.destroy().await.unwrap();
@@ -946,7 +970,6 @@ mod test {
 
             // Ensure the store is empty
             assert_eq!(store.op_count(), 0);
-            assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 0);
 
             let key = Digest::random(&mut ctx);
@@ -960,7 +983,6 @@ mod test {
             store.update(key, value.clone()).await.unwrap();
 
             assert_eq!(store.log_size, 1);
-            assert_eq!(store.uncommitted_ops, 1);
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Fetch the value
@@ -975,15 +997,13 @@ mod test {
 
             // Ensure the re-opened store removed the uncommitted operations
             assert_eq!(store.log_size, 0);
-            assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 0);
-            assert_eq!(store.get_metadata().await.unwrap(), None);
+            assert!(store.get_metadata().await.unwrap().is_none());
 
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
 
             assert_eq!(store.log_size, 1);
-            assert_eq!(store.uncommitted_ops, 1);
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
@@ -991,23 +1011,21 @@ mod test {
             store.commit(metadata.clone()).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), metadata.clone()))
+                Some((Location::new_unchecked(2), metadata.clone()))
             );
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
             // retained.
-            assert_eq!(store.log_size, 4);
-            assert_eq!(store.uncommitted_ops, 0);
-            assert_eq!(store.inactivity_floor_loc, 2);
+            assert_eq!(store.log_size, 3);
+            assert_eq!(store.inactivity_floor_loc, 1);
 
             // Re-open the store
             let mut store = create_test_store(ctx.with_label("store")).await;
 
             // Ensure the re-opened store retained the committed operations
-            assert_eq!(store.log_size, 4);
-            assert_eq!(store.uncommitted_ops, 0);
-            assert_eq!(store.inactivity_floor_loc, 2);
+            assert_eq!(store.log_size, 3);
+            assert_eq!(store.inactivity_floor_loc, 1);
 
             // Fetch the value, ensuring it is still present
             let fetched_value = store.get(&key).await.unwrap();
@@ -1019,25 +1037,23 @@ mod test {
             store.update(k1, v1.clone()).await.unwrap();
             store.update(k2, v2.clone()).await.unwrap();
 
-            assert_eq!(store.log_size, 6);
-            assert_eq!(store.uncommitted_ops, 2);
-            assert_eq!(store.inactivity_floor_loc, 2);
+            assert_eq!(store.log_size, 5);
+            assert_eq!(store.inactivity_floor_loc, 1);
 
             // Make sure we can still get metadata.
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), metadata))
+                Some((Location::new_unchecked(2), metadata))
             );
 
             store.commit(None).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(8), None))
+                Some((Location::new_unchecked(6), None))
             );
 
-            assert_eq!(store.log_size, 9);
-            assert_eq!(store.uncommitted_ops, 0);
-            assert_eq!(store.inactivity_floor_loc, 5);
+            assert_eq!(store.log_size, 7);
+            assert_eq!(store.inactivity_floor_loc, 2);
 
             // Ensure all keys can be accessed, despite the first section being pruned.
             assert_eq!(store.get(&key).await.unwrap().unwrap(), value);
@@ -1077,16 +1093,18 @@ mod test {
             let iter = store.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // 100 operations were applied, and two were moved due to their activity, plus
-            // the commit operation.
-            assert_eq!(store.log_size, UPDATES + 3);
+            // 100 operations were applied, each triggering one step, plus the commit op.
+            assert_eq!(store.log_size, UPDATES * 2 + 1);
             // Only the highest `Update` operation is active, plus the commit operation above it.
-            assert_eq!(store.inactivity_floor_loc, UPDATES + 1);
+            let expected_floor = UPDATES * 2 - 1;
+            assert_eq!(store.inactivity_floor_loc, expected_floor);
 
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
-            assert_eq!(store.oldest_retained_loc, UPDATES - UPDATES % 7);
-            assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(
+                store.oldest_retained_loc,
+                expected_floor - expected_floor % 7
+            );
 
             store.destroy().await.unwrap();
         });
@@ -1203,18 +1221,16 @@ mod test {
             store.update(k_b, v_b.clone()).await.unwrap();
 
             store.commit(None).await.unwrap();
-            assert_eq!(store.op_count(), 6);
-            assert_eq!(store.uncommitted_ops, 0);
-            assert_eq!(store.inactivity_floor_loc, 3);
+            assert_eq!(store.op_count(), 4);
+            assert_eq!(store.inactivity_floor_loc, 1);
             assert_eq!(store.get(&k_a).await.unwrap().unwrap(), v_a);
 
             store.update(k_b, v_a.clone()).await.unwrap();
             store.update(k_a, v_c.clone()).await.unwrap();
 
             store.commit(None).await.unwrap();
-            assert_eq!(store.op_count(), 9);
-            assert_eq!(store.uncommitted_ops, 0);
-            assert_eq!(store.inactivity_floor_loc, 6);
+            assert_eq!(store.op_count(), 10);
+            assert_eq!(store.inactivity_floor_loc, 7);
             assert_eq!(store.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(store.get(&k_b).await.unwrap().unwrap(), v_a);
 
@@ -1276,7 +1292,7 @@ mod test {
             }
             db.commit(None).await.unwrap();
             let op_count = db.op_count();
-            assert_eq!(op_count, 2561);
+            assert_eq!(op_count, 1672);
             assert_eq!(db.snapshot.items(), 1000);
 
             // Delete every 7th key
@@ -1308,11 +1324,11 @@ mod test {
             }
             db.commit(None).await.unwrap();
 
-            assert_eq!(db.op_count(), 2787);
-            assert_eq!(db.inactivity_floor_loc, 1480);
+            assert_eq!(db.op_count(), 1960);
+            assert_eq!(db.inactivity_floor_loc, 755);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc, 1480 - 1480 % 7);
+            assert_eq!(db.oldest_retained_loc, 755 - 755 % 7);
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
