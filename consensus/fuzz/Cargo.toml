@@ -1,0 +1,24 @@
+[package]
+name = "commonware-consensus-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-consensus = { workspace = true}
+commonware-cryptography = { workspace = true}
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+rand = { workspace = true }
+commonware-codec = { workspace = true }
+
+[[bin]]
+name = "select_leaders"
+path = "fuzz_targets/select_leaders.rs"
+test = false
+doc = false
+bench = false
