@@ -339,7 +339,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::ed25519,
+            mocks::fixtures::{ed25519, Fixture},
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },
@@ -357,7 +357,9 @@ mod tests {
 
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let (_, _, schemes, verifier) = ed25519(&mut rng, n);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, n);
         let participants = verifier.participants().clone();
 
         (schemes, participants)

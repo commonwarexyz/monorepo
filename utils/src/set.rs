@@ -203,6 +203,11 @@ impl<K, V> OrderedAssociated<K, V> {
         &self.keys
     }
 
+    /// Consumes the map and returns the ordered keys.
+    pub fn into_keys(self) -> Ordered<K> {
+        self.keys
+    }
+
     /// Returns the associated value at `index`, if it exists.
     pub fn value(&self, index: usize) -> Option<&V> {
         self.values.get(index)
@@ -503,5 +508,14 @@ mod test {
             ordered.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             wrapped.keys().iter().copied().collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn test_ordered_map_into_keys() {
+        let map: OrderedAssociated<_, _> = vec![(3u8, "c"), (1u8, "a"), (2u8, "b")]
+            .into_iter()
+            .collect();
+        let keys = map.into_keys();
+        assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 }

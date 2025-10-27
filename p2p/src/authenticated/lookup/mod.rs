@@ -67,7 +67,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
-//! use commonware_utils::{NZU32, set::Ordered};
+//! use commonware_utils::{NZU32, set::OrderedAssociated};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -120,7 +120,7 @@
 //!     // the composition of a validator set changes).
 //!     oracle.register(
 //!         0,
-//!         Ordered::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
+//!         OrderedAssociated::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
 //!     ).await;
 //!
 //!     // Register some channel

@@ -317,7 +317,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::bls12381_multisig,
+            mocks::fixtures::{bls12381_multisig, Fixture},
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },
@@ -350,7 +350,7 @@ mod tests {
         OrderedAssociated<ed25519::PublicKey, V::Public>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let (_, _, schemes, _) = bls12381_multisig::<V, _>(&mut rng, n);
+        let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, n);
         let participants = schemes.first().unwrap().participants.clone();
 
         (schemes, participants)
