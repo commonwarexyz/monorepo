@@ -1,6 +1,6 @@
 use crate::{
     adb::{immutable, operation::variable::Operation, sync, Error},
-    journal::{contiguous, variable},
+    journal::contiguous,
     mmr::{Location, StandardHasher as Standard},
     translator::Translator,
 };
@@ -9,9 +9,6 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
-
-mod journal;
-use journal::init_journal;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
@@ -34,9 +31,10 @@ where
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
         // Initialize contiguous journal for the sync range
-        init_journal(
+        contiguous::Variable::init_sync(
             context.with_label("log"),
-            variable::Config {
+            contiguous::Config {
+                items_per_section: config.log_items_per_section,
                 partition: config.log_partition.clone(),
                 compression: config.log_compression,
                 codec_config: config.log_codec_config.clone(),
@@ -44,7 +42,6 @@ where
                 buffer_pool: config.buffer_pool.clone(),
             },
             *range.start..*range.end,
-            config.log_items_per_section,
         )
         .await
     }

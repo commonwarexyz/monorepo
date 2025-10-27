@@ -4,16 +4,20 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Contiguous;
-use crate::journal::{fixed, variable, Error};
+use crate::{
+    journal::{fixed, variable, Error},
+    mmr::Location,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
+use core::ops::Range;
 use futures::{stream, Stream, StreamExt as _};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
 };
-use tracing::info;
+use tracing::{debug, info};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -251,6 +255,97 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             size: start_size,
             oldest_retained_pos: start_size,
         })
+    }
+
+    /// Initialize a contiguous Variable journal for use in state sync.
+    ///
+    /// The bounds are item locations (not section numbers). This function prepares the
+    /// on-disk journal so that subsequent appends go to the correct physical location for the
+    /// requested range.
+    ///
+    /// Behavior by existing on-disk state:
+    /// - Fresh (no data): returns an empty journal.
+    /// - Stale (all data strictly before `range.start`): destroys existing data and returns an
+    ///   empty journal.
+    /// - Overlap within [`range.start`, `range.end`]:
+    ///   - Prunes to `range.start`
+    /// - Unexpected data beyond `range.end`: returns [crate::adb::Error::UnexpectedData].
+    ///
+    /// # Arguments
+    /// - `context`: storage context
+    /// - `cfg`: journal configuration
+    /// - `range`: range of item locations to retain
+    ///
+    /// # Returns
+    /// A contiguous journal ready for sync operations. The journal's size will be within the range.
+    ///
+    /// # Errors
+    /// Returns [crate::adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    pub(crate) async fn init_sync(
+        context: E,
+        cfg: Config<V::Cfg>,
+        range: Range<u64>,
+    ) -> Result<Variable<E, V>, crate::adb::Error> {
+        assert!(!range.is_empty(), "range must not be empty");
+
+        debug!(
+            range.start,
+            range.end,
+            items_per_section = cfg.items_per_section.get(),
+            "initializing contiguous variable journal for sync"
+        );
+
+        // Initialize contiguous journal
+        let mut journal = Variable::init(context.with_label("journal"), cfg.clone()).await?;
+
+        let size = journal.size().await?;
+
+        // No existing data - initialize at the start of the sync range if needed
+        if size == 0 {
+            if range.start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                return Ok(journal);
+            } else {
+                debug!(
+                    range.start,
+                    "no existing journal data, initializing at sync range start"
+                );
+                journal.destroy().await?;
+                return Ok(Variable::init_at_size(context, cfg, range.start).await?);
+            }
+        }
+
+        // Check if data exceeds the sync range
+        if size > range.end {
+            return Err(crate::adb::Error::UnexpectedData(Location::new_unchecked(
+                size,
+            )));
+        }
+
+        // If all existing data is before our sync range, destroy and recreate fresh
+        if size <= range.start {
+            // All data is stale (ends at or before range.start)
+            debug!(
+                size,
+                range.start, "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            return Ok(Variable::init_at_size(context, cfg, range.start).await?);
+        }
+
+        // Prune to lower bound if needed
+        let oldest = journal.oldest_retained_pos().await?;
+        if let Some(oldest_pos) = oldest {
+            if oldest_pos < range.start {
+                debug!(
+                    oldest_pos,
+                    range.start, "pruning journal to sync range start"
+                );
+                journal.prune(range.start).await?;
+            }
+        }
+
+        Ok(journal)
     }
 
     /// Rewind the journal to the given size, discarding items from the end.
@@ -768,6 +863,10 @@ mod tests {
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
+
+    // Use some jank sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 2;
 
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
@@ -1693,6 +1792,438 @@ mod tests {
             // Continue appending
             let pos = journal.append(3000).await.unwrap();
             assert_eq!(pos, 30);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when there is no existing data on disk.
+    #[test_traced]
+    fn test_init_sync_no_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_fresh_start".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Initialize journal with sync boundaries when no existing data exists
+            let lower_bound = 10;
+            let upper_bound = 26;
+            let mut journal =
+                Variable::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
+                    .await
+                    .expect("Failed to initialize journal with sync boundaries");
+
+            assert_eq!(journal.size().await.unwrap(), lower_bound);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Append items using the contiguous API
+            let pos1 = journal.append(42u64).await.unwrap();
+            assert_eq!(pos1, lower_bound);
+            assert_eq!(journal.read(pos1).await.unwrap(), 42u64);
+
+            let pos2 = journal.append(43u64).await.unwrap();
+            assert_eq!(pos2, lower_bound + 1);
+            assert_eq!(journal.read(pos2).await.unwrap(), 43u64);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when there is existing data that overlaps with the sync target range.
+    #[test_traced]
+    fn test_init_sync_existing_data_overlap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_overlap".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create initial journal with data in multiple sections
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
+            for i in 0..20u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that overlap with existing data
+            // lower_bound: 8 (section 1), upper_bound: 31 (last location 30, section 6)
+            let lower_bound = 8;
+            let upper_bound = 31;
+            let mut journal = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with overlap");
+
+            assert_eq!(journal.size().await.unwrap(), 20);
+
+            // Verify oldest retained is pruned to lower_bound's section boundary (5)
+            let oldest = journal.oldest_retained_pos().await.unwrap();
+            assert_eq!(oldest, Some(5)); // Section 1 starts at position 5
+
+            // Verify data integrity: positions before 5 are pruned
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+
+            // Positions 5-19 should be accessible
+            assert_eq!(journal.read(5).await.unwrap(), 500);
+            assert_eq!(journal.read(8).await.unwrap(), 800);
+            assert_eq!(journal.read(19).await.unwrap(), 1900);
+
+            // Position 20+ should not exist yet
+            assert!(matches!(
+                journal.read(20).await,
+                Err(Error::ItemOutOfRange(_))
+            ));
+
+            // Assert journal can accept new items
+            let pos = journal.append(999).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` with invalid parameters.
+    #[should_panic]
+    #[test_traced]
+    fn test_init_sync_invalid_parameters() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_invalid".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            #[allow(clippy::reversed_empty_ranges)]
+            let _result = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg,
+                10..5, // invalid range: lower > upper
+            )
+            .await;
+        });
+    }
+
+    /// Test `init_sync` when existing data exactly matches the sync range.
+    #[test_traced]
+    fn test_init_sync_existing_data_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items_per_section = NZU64!(5);
+            let cfg = Config {
+                partition: "test_exact_match".into(),
+                items_per_section,
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create initial journal with data exactly matching sync range
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-19 (sections 0-3 with items_per_section=5)
+            for i in 0..20u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that exactly match existing data
+            let lower_bound = 5; // section 1
+            let upper_bound = 20; // section 3
+            let mut journal = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with exact match");
+
+            assert_eq!(journal.size().await.unwrap(), 20);
+
+            // Verify pruning to lower bound (section 1 boundary = position 5)
+            let oldest = journal.oldest_retained_pos().await.unwrap();
+            assert_eq!(oldest, Some(5)); // Section 1 starts at position 5
+
+            // Verify positions before 5 are pruned
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+
+            // Positions 5-19 should be accessible
+            assert_eq!(journal.read(5).await.unwrap(), 500);
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            assert_eq!(journal.read(19).await.unwrap(), 1900);
+
+            // Position 20+ should not exist yet
+            assert!(matches!(
+                journal.read(20).await,
+                Err(Error::ItemOutOfRange(_))
+            ));
+
+            // Assert journal can accept new operations
+            let pos = journal.append(999).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when existing data exceeds the sync target range.
+    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+    #[test_traced]
+    fn test_init_sync_existing_data_exceeds_upper_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items_per_section = NZU64!(5);
+            let cfg = Config {
+                partition: "test_unexpected_data".into(),
+                items_per_section,
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create initial journal with data beyond sync range
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
+            for i in 0..30u64 {
+                journal.append(i * 1000).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that are exceeded by existing data
+            let lower_bound = 8; // section 1
+            for upper_bound in 9..29 {
+                let result = Variable::<deterministic::Context, u64>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    lower_bound..upper_bound,
+                )
+                .await;
+
+                // Should return UnexpectedData error since data exists beyond upper_bound
+                assert!(matches!(result, Err(crate::adb::Error::UnexpectedData(_))));
+            }
+        });
+    }
+
+    /// Test `init_sync` when all existing data is stale (before lower bound).
+    #[test_traced]
+    fn test_init_sync_existing_data_stale() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items_per_section = NZU64!(5);
+            let cfg = Config {
+                partition: "test_stale".into(),
+                items_per_section,
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create initial journal with stale data
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
+            for i in 0..10u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries beyond all existing data
+            let lower_bound = 15; // section 3
+            let upper_bound = 26; // last element in section 5
+            let journal = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with stale data");
+
+            assert_eq!(journal.size().await.unwrap(), 15);
+
+            // Verify fresh journal (all old data destroyed, starts at position 15)
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            // Verify old positions don't exist
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(_))));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` with section boundary edge cases.
+    #[test_traced]
+    fn test_init_sync_section_boundaries() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items_per_section = NZU64!(5);
+            let cfg = Config {
+                partition: "test_boundaries".into(),
+                items_per_section,
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create journal with data at section boundaries
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-24 (sections 0-4 with items_per_section=5)
+            for i in 0..25u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Test sync boundaries exactly at section boundaries
+            let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
+            let upper_bound = 25; // Last element exactly at section boundary (24/5 = 4)
+            let mut journal = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal at boundaries");
+
+            assert_eq!(journal.size().await.unwrap(), 25);
+
+            // Verify oldest retained is at section 3 boundary (position 15)
+            let oldest = journal.oldest_retained_pos().await.unwrap();
+            assert_eq!(oldest, Some(15));
+
+            // Verify positions before 15 are pruned
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(_))));
+
+            // Verify positions 15-24 are accessible
+            assert_eq!(journal.read(15).await.unwrap(), 1500);
+            assert_eq!(journal.read(20).await.unwrap(), 2000);
+            assert_eq!(journal.read(24).await.unwrap(), 2400);
+
+            // Position 25+ should not exist yet
+            assert!(matches!(
+                journal.read(25).await,
+                Err(Error::ItemOutOfRange(_))
+            ));
+
+            // Assert journal can accept new operations
+            let pos = journal.append(999).await.unwrap();
+            assert_eq!(pos, 25);
+            assert_eq!(journal.read(25).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when range.start and range.end-1 are in the same section.
+    #[test_traced]
+    fn test_init_sync_same_section_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items_per_section = NZU64!(5);
+            let cfg = Config {
+                partition: "test_same_section".into(),
+                items_per_section,
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Create journal with data in multiple sections
+            let mut journal =
+                Variable::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data at positions 0-14 (sections 0-2 with items_per_section=5)
+            for i in 0..15u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Test sync boundaries within the same section
+            let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
+            let upper_bound = 15; // Last operation 14 (section 2: 14/5 = 2)
+            let mut journal = Variable::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with same-section bounds");
+
+            assert_eq!(journal.size().await.unwrap(), 15);
+
+            // Both operations are in section 2, so sections 0, 1 should be pruned, section 2 retained
+            // Oldest retained position should be at section 2 boundary (position 10)
+            let oldest = journal.oldest_retained_pos().await.unwrap();
+            assert_eq!(oldest, Some(10));
+
+            // Verify positions before 10 are pruned
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
+
+            // Verify positions 10-14 are accessible
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            assert_eq!(journal.read(11).await.unwrap(), 1100);
+            assert_eq!(journal.read(14).await.unwrap(), 1400);
+
+            // Position 15+ should not exist yet
+            assert!(matches!(
+                journal.read(15).await,
+                Err(Error::ItemOutOfRange(_))
+            ));
+
+            // Assert journal can accept new operations
+            let pos = journal.append(999).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
         });
