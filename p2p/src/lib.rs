@@ -67,10 +67,16 @@ pub trait Receiver: Debug + Send + 'static {
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 }
 
-/// Interface for fetching an ordered list of connected peers, given a set id.
-pub trait PeerSetProvider: Debug + Send + 'static {
+/// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
+pub trait PeerSetManager: Debug + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;
+
+    /// The type for the peer set in registration.
+    type Peers;
+
+    /// Register a new ordered set of peers for a given ID.
+    fn register(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
 
     /// Fetch the ordered set of peers for a given ID.
     fn peer_set(

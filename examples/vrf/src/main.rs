@@ -83,7 +83,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::{authenticated::discovery, PeerSetManager};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, set::Ordered, NZU32};
 use governor::Quota;

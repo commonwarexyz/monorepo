@@ -230,6 +230,11 @@ impl<C: PublicKey> Oracle<C> {
     pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
+}
+
+impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
+    type PublicKey = C;
+    type Peers = Ordered<C>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -242,13 +247,9 @@ impl<C: PublicKey> Oracle<C> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Must be monotonically increasing, per the rules of [Ordered].
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    pub async fn register(&mut self, index: u64, peers: Ordered<C>) {
+    async fn register(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
-}
-
-impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
-    type PublicKey = C;
 
     async fn latest_peer_set(&mut self) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();

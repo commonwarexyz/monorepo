@@ -177,6 +177,11 @@ impl<C: PublicKey> Oracle<C> {
     pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
+}
+
+impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
+    type PublicKey = C;
+    type Peers = OrderedAssociated<C, SocketAddr>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -187,13 +192,9 @@ impl<C: PublicKey> Oracle<C> {
     /// * `peers` - Vector of authorized peers at an `index`.
     ///   Each element is a tuple containing the public key and the socket address of the peer.
     ///   The peer must be dialable at and dial from the given socket address.
-    pub async fn register(&mut self, index: u64, peers: OrderedAssociated<C, SocketAddr>) {
+    async fn register(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
-}
-
-impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
-    type PublicKey = C;
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();

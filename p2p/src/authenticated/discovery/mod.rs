@@ -225,7 +225,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Receiver, Recipients, Sender};
+    use crate::{PeerSetManager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{

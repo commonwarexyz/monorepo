@@ -9,7 +9,7 @@ use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
-use commonware_p2p::{authenticated::discovery, utils::requester};
+use commonware_p2p::{authenticated::discovery, utils::requester, PeerSetManager};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;

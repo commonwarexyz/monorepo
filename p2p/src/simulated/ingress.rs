@@ -212,8 +212,15 @@ pub struct Control<P: PublicKey> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: PublicKey> crate::PeerSetProvider for Control<P> {
+impl<P: PublicKey> crate::PeerSetManager for Control<P> {
     type PublicKey = P;
+    type Peers = ();
+
+    async fn register(&mut self, _id: u64, _peers: Self::Peers) {
+        unimplemented!(
+            "p2p::simulated has a non-traditional registry path, unsupported by PeerSetManager"
+        )
+    }
 
     async fn peer_set(&mut self, _id: u64) -> Option<Ordered<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();

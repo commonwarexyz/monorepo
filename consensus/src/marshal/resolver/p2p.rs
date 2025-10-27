@@ -5,7 +5,7 @@ use crate::{
     Block,
 };
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, PeerSetProvider, Receiver, Sender};
+use commonware_p2p::{utils::requester, PeerSetManager, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
@@ -14,7 +14,7 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P: PublicKey, C: PeerSetProvider<PublicKey = P>> {
+pub struct Config<P: PublicKey, C: PeerSetManager<PublicKey = P>> {
     /// The public key to identify this node.
     pub public_key: P,
 
@@ -48,7 +48,7 @@ pub fn init<E, C, B, S, R, P>(
 )
 where
     E: Rng + Spawner + Clock + GClock + Metrics,
-    C: PeerSetProvider<PublicKey = P>,
+    C: PeerSetManager<PublicKey = P>,
     B: Block,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,

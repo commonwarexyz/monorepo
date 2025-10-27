@@ -57,7 +57,7 @@ mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::{authenticated::discovery, PeerSetManager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::{set::Ordered, NZU32};
 use governor::Quota;

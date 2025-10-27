@@ -6,7 +6,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated::discovery, Receiver, Recipients, Sender};
+use commonware_p2p::{authenticated::discovery, PeerSetManager, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, set::Ordered, union, NZU32};
 use futures::future::try_join_all;

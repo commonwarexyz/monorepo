@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    PeerSetProvider, Receiver, Recipients, Sender,
+    PeerSetManager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -43,7 +43,7 @@ struct Serve<E: Clock, P: PublicKey> {
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: PeerSetProvider<PublicKey = P>,
+    D: PeerSetManager<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -94,7 +94,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: PeerSetProvider<PublicKey = P>,
+        D: PeerSetManager<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,

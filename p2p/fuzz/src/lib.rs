@@ -7,7 +7,7 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Blocker, Channel, Receiver, Recipients, Sender,
+    Blocker, Channel, PeerSetManager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::{
