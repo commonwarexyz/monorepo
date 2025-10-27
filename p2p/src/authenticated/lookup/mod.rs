@@ -597,12 +597,10 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((peer_sk, peer_pk, peer_addr));
             }
-            let peers = {
-                let iter = peers_and_sks
-                    .iter()
-                    .map(|(_, pk, addr)| (pk.clone(), *addr));
-                OrderedWrapped::from_iter(iter)
-            };
+            let peers: OrderedWrapped<_, _> = peers_and_sks
+                .iter()
+                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .collect();
 
             // Create network
             let (sk, _, addr) = peers_and_sks[0].clone();
@@ -652,12 +650,10 @@ mod tests {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((sk, pk, addr));
             }
-            let peers = {
-                let iter = peers_and_sks
-                    .iter()
-                    .map(|(_, pk, addr)| (pk.clone(), *addr));
-                OrderedWrapped::from_iter(iter)
-            };
+            let peers: OrderedWrapped<_, _> = peers_and_sks
+                .iter()
+                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .collect();
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 
