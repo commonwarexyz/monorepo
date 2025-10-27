@@ -80,12 +80,13 @@ where
         .cloned()
         .zip(bls_public)
         .collect::<Vec<_>>();
+    let ordered_participants = Ordered::new_by_first(participants.clone());
 
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(participants.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::new(ordered_participants.clone(), sk))
         .collect();
-    let verifier = bls12381_multisig::Scheme::verifier(participants);
+    let verifier = bls12381_multisig::Scheme::verifier(ordered_participants);
 
     (ed25519_keys, ed25519_public, schemes, verifier)
 }
