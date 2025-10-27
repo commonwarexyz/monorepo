@@ -538,8 +538,7 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.quorum() as usize;
-        round.nullification.is_some() || round.nullifies.len() >= quorum
+        round.nullification.is_some() || round.nullifies.len() >= self.scheme.quorum() as usize
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
