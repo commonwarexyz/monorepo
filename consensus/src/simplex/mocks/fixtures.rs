@@ -50,12 +50,10 @@ where
 
     let ed25519_associated = ed25519_participants(rng, n);
     let participants = ed25519_associated.keys().clone();
-    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
-    let schemes = ed25519_keys
-        .iter()
-        .cloned()
-        .map(|sk| ed_scheme::Scheme::new(participants.clone(), sk))
+    let schemes = ed25519_associated
+        .into_iter()
+        .map(|(_, sk)| ed_scheme::Scheme::new(participants.clone(), sk))
         .collect();
     let verifier = ed_scheme::Scheme::verifier(participants.clone());
 
@@ -79,9 +77,7 @@ where
 {
     assert!(n > 0);
 
-    let ed25519_associated = ed25519_participants(rng, n);
-    let participants = ed25519_associated.keys().clone();
-
+    let participants = ed25519_participants(rng, n).into_keys();
     let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
     let bls_public: Vec<_> = bls_privates
         .iter()
@@ -93,7 +89,6 @@ where
         .into_iter()
         .zip(bls_public)
         .collect::<OrderedAssociated<_, _>>();
-
     let schemes: Vec<_> = bls_privates
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
@@ -119,11 +114,9 @@ where
     R: RngCore + CryptoRng,
 {
     assert!(n > 0);
+
+    let participants = ed25519_participants(rng, n).into_keys();
     let t = quorum(n);
-
-    let ed25519_associated = ed25519_participants(rng, n);
-    let participants = ed25519_associated.keys().clone();
-
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
     let schemes = shares
