@@ -41,7 +41,7 @@ pub struct Config<T: Translator, C> {
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// Base partition name for the log. Sub-partitions will be created by appending suffixes.
+    /// The name of the [RStorage] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
@@ -73,7 +73,8 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     ///
     /// # Invariant
     ///
-    /// The number of leaves in this MMR always equals the number of operations in the `log`.
+    /// The number of leaves in this MMR always equals the number of operations in the unpruned
+    /// `log`.
     mmr: Mmr<E, H>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
@@ -103,16 +104,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         Ok(Location::new_unchecked(
             self.log.size().await.map_err(Error::Journal)?,
         ))
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub async fn oldest_retained_loc(&self) -> Result<Option<Location>, Error> {
-        Ok(self
-            .log
-            .oldest_retained_pos()
-            .await
-            .map_err(Error::Journal)?
-            .map(Location::new_unchecked))
     }
 
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -314,6 +305,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         Ok(log_size)
     }
 
+    /// Return the oldest location that remains retrievable.
+    pub async fn oldest_retained_loc(&self) -> Result<Option<Location>, Error> {
+        Ok(self
+            .log
+            .oldest_retained_pos()
+            .await
+            .map_err(Error::Journal)?
+            .map(Location::new_unchecked))
+    }
+
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to section boundaries.
     ///
@@ -334,13 +335,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log.prune(*loc).await?;
 
         // Get the oldest retained location based on what the log actually pruned
-        let log_size = Location::new_unchecked(self.log.size().await?);
         let oldest_retained_loc = self
             .log
             .oldest_retained_pos()
             .await?
             .map(Location::new_unchecked)
-            .unwrap_or(log_size);
+            .unwrap_or(Location::new_unchecked(0));
 
         // Prune the MMR up to the oldest retained item in the log after pruning.
         self.mmr
@@ -531,8 +531,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        let loc = self.op_count().await?;
-        self.last_commit = Some(loc);
+        let log_size = self.op_count().await?;
+        self.last_commit = Some(log_size);
         let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
 
