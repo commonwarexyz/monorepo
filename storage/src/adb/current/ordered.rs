@@ -25,7 +25,7 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
-use tracing::info;
+use tracing::debug;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -284,7 +284,7 @@ impl<
         for _ in 0..steps_to_take {
             if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                info!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
+                debug!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
             self.raise_floor().await?;

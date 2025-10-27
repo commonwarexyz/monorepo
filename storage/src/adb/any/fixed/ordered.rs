@@ -27,7 +27,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
-use tracing::info;
+use tracing::debug;
 
 /// The return type of the `Any::update_loc` method.
 enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
@@ -743,14 +743,14 @@ impl<
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let steps_to_take = self.steps + 1;
-        for _ in 0..steps_to_take {
-            if self.is_empty() {
-                self.inactivity_floor_loc = self.op_count();
-                info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                self.raise_floor().await?;
             }
-            self.raise_floor().await?;
         }
         self.steps = 0;
 
