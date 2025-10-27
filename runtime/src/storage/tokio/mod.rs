@@ -2,7 +2,7 @@ use crate::Error;
 use commonware_utils::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
-use std::{io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::{fs, sync::Mutex};
 
 #[cfg(not(unix))]
@@ -87,33 +87,19 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Try to create a new file first
-        let (mut file, len, newly_created) = match fs::OpenOptions::new()
+        // Open the file, creating it if it doesn't exist
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
             .truncate(false)
             .open(&path)
             .await
-        {
-            Ok(file) => (file, 0, true),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                // File already exists, just open it
-                let file = fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .truncate(false)
-                    .open(&path)
-                    .await
-                    .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
-                let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-                (file, len, false)
-            }
-            Err(e) => return Err(Error::BlobOpenFailed(partition.into(), hex(name), e)),
-        };
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
-        // Set the maximum buffer size
-        file.set_max_buf_size(self.cfg.maximum_buffer_size);
+        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
+        let newly_created = len == 0;
 
         // Only sync if we created a new file
         if newly_created {
@@ -133,6 +119,9 @@ impl crate::Storage for Storage {
                 }
             }
         }
+
+        // Set the maximum buffer size
+        file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
         #[cfg(unix)]
         {
