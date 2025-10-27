@@ -17,6 +17,12 @@ use tracing::info;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
+/// Suffix appended to the base partition name for the data journal.
+const DATA_SUFFIX: &str = "_data";
+
+/// Suffix appended to the base partition name for the offsets journal.
+const OFFSETS_SUFFIX: &str = "_offsets";
+
 /// Calculate the section number for a given position.
 ///
 /// # Arguments
@@ -45,11 +51,8 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 /// Configuration for a contiguous variable-length journal.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The storage partition to use for the data journal.
-    pub data_partition: String,
-
-    /// The storage partition to use for the offsets journal.
-    pub offsets_partition: String,
+    /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
+    pub partition: String,
 
     /// The number of items to store in each section.
     ///
@@ -68,6 +71,18 @@ pub struct Config<C> {
 
     /// Write buffer size for each section.
     pub write_buffer: NonZeroUsize,
+}
+
+impl<C> Config<C> {
+    /// Returns the partition name for the data journal.
+    fn data_partition(&self) -> String {
+        format!("{}{}", self.partition, DATA_SUFFIX)
+    }
+
+    /// Returns the partition name for the offsets journal.
+    fn offsets_partition(&self) -> String {
+        format!("{}{}", self.partition, OFFSETS_SUFFIX)
+    }
 }
 
 /// A contiguous wrapper around [variable::Journal] that implements an append-only log.
@@ -137,21 +152,15 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// The data journal is the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Validate that partitions are different to prevent blob name collisions
-        if cfg.data_partition == cfg.offsets_partition {
-            return Err(Error::InvalidConfiguration(format!(
-                "partition and offsets_partition must be different: both are '{}'",
-                cfg.data_partition
-            )));
-        }
-
         let items_per_section = cfg.items_per_section.get();
+        let data_partition = cfg.data_partition();
+        let offsets_partition = cfg.offsets_partition();
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
             context.clone(),
             variable::Config {
-                partition: cfg.data_partition,
+                partition: data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
@@ -164,7 +173,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let mut offsets = fixed::Journal::init(
             context,
             fixed::Config {
-                partition: cfg.offsets_partition,
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
@@ -711,8 +720,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "offsets_loss_after_prune".to_string(),
-                offsets_partition: "offsets_loss_after_prune_offsets".to_string(),
+                partition: "offsets_loss_after_prune".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -739,7 +747,7 @@ mod tests {
 
             // === Phase 2: Simulate complete offsets partition loss ===
             context
-                .remove(&cfg.offsets_partition, None)
+                .remove(&cfg.offsets_partition(), None)
                 .await
                 .expect("Failed to remove offsets partition");
 
@@ -761,8 +769,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "data_loss_test".to_string(),
-                offsets_partition: "data_loss_test_offsets".to_string(),
+                partition: "data_loss_test".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -784,7 +791,7 @@ mod tests {
 
             // === Simulate data loss: Delete data partition but keep offsets ===
             context
-                .remove(&cfg.data_partition, None)
+                .remove(&cfg.data_partition(), None)
                 .await
                 .expect("Failed to remove data partition");
 
@@ -816,34 +823,6 @@ mod tests {
         });
     }
 
-    /// Test that init rejects when partition and offsets_partition are the same.
-    ///
-    /// This prevents blob name collisions between data and offsets journals.
-    #[test_traced]
-    fn test_variable_reject_same_partitions() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                data_partition: "same_partition".to_string(),
-                offsets_partition: "same_partition".to_string(), // Same as partition!
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let result = Variable::<_, u64>::init(context, cfg).await;
-            match result {
-                Err(e) => {
-                    let err_msg = format!("{e}");
-                    assert!(err_msg.contains("partition and offsets_partition must be different"));
-                }
-                Ok(_) => panic!("Should reject identical partitions"),
-            }
-        });
-    }
-
     #[test_traced]
     fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
@@ -854,8 +833,7 @@ mod tests {
                     Variable::<_, u64>::init(
                         context,
                         Config {
-                            data_partition: format!("generic_test_{}", test_name),
-                            offsets_partition: format!("generic_test_{}_offsets", test_name),
+                            partition: format!("generic_test_{}", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
@@ -877,8 +855,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "sequential_prunes".to_string(),
-                offsets_partition: "sequential_prunes_offsets".to_string(),
+                partition: "sequential_prunes".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -966,8 +943,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "prune_all_reinit".to_string(),
-                offsets_partition: "prune_all_reinit_offsets".to_string(),
+                partition: "prune_all_reinit".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1049,8 +1025,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                data_partition: "recovery_prune_crash".to_string(),
-                offsets_partition: "recovery_prune_crash_offsets".to_string(),
+                partition: "recovery_prune_crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1111,8 +1086,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                data_partition: "recovery_offsets_ahead".to_string(),
-                offsets_partition: "recovery_offsets_ahead_offsets".to_string(),
+                partition: "recovery_offsets_ahead".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1148,8 +1122,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
-                data_partition: "recovery_append_crash".to_string(),
-                offsets_partition: "recovery_append_crash_offsets".to_string(),
+                partition: "recovery_append_crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1204,8 +1177,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                data_partition: "recovery_multiple_prunes".to_string(),
-                offsets_partition: "recovery_multiple_prunes_offsets".to_string(),
+                partition: "recovery_multiple_prunes".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1272,8 +1244,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data across multiple sections ===
             let cfg = Config {
-                data_partition: "recovery_rewind_crash".to_string(),
-                offsets_partition: "recovery_rewind_crash_offsets".to_string(),
+                partition: "recovery_rewind_crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1332,8 +1303,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "recovery_empty_after_prune".to_string(),
-                offsets_partition: "recovery_empty_after_prune_offsets".to_string(),
+                partition: "recovery_empty_after_prune".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1400,8 +1370,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "concurrent_sync_recovery".to_string(),
-                offsets_partition: "concurrent_sync_recovery_offsets".to_string(),
+                partition: "concurrent_sync_recovery".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
