@@ -240,16 +240,12 @@ pub(crate) fn interesting(
 /// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
-pub fn select_leader<S: Scheme>(
-    participant_len: usize,
-    round: Round,
-    seed: Option<S::Seed>,
-) -> u32 {
-    assert!(participant_len > 0, "participant set must be non-empty");
+pub fn select_leader<S: Scheme>(scheme: &S, round: Round, seed: Option<S::Seed>) -> u32 {
+    let participants = scheme.participant_len();
     let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participant_len as u64) as usize
+        commonware_utils::modulo(seed.encode().as_ref(), participants as u64) as usize
     } else {
-        (round.epoch() + round.view()) as usize % participant_len
+        (round.epoch() + round.view()) as usize % participants
     };
 
     idx as u32

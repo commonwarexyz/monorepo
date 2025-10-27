@@ -155,7 +155,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader = select_leader::<S>(self.scheme.participant_len(), self.round, seed);
+        let leader = select_leader::<S>(&self.scheme, self.round, seed);
         self.leader = Some(leader);
     }
 

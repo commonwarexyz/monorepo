@@ -50,13 +50,7 @@ impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
     pub fn new(participants: Ordered<(P, V::Public)>, private_key: Private) -> Self {
-        Self::from_participants(participants, Some(private_key))
-    }
-
-    /// Convenience constructor that accepts unsorted participant tuples,
-    /// sorting and deduplicating entries by the identity key.
-    pub fn new_from_vec(participants: Vec<(P, V::Public)>, private_key: Private) -> Self {
-        Self::new(Self::ordered_participants(participants), private_key)
+        Self::from(participants, Some(private_key))
     }
 
     /// Builds a pure verifier that can authenticate votes and certificates.
@@ -65,26 +59,10 @@ impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
     /// The identity key (first element) is used for committee ordering and indexing,
     /// while the consensus key (second element) is the BLS public key used for verification.
     pub fn verifier(participants: Ordered<(P, V::Public)>) -> Self {
-        Self::from_participants(participants, None)
+        Self::from(participants, None)
     }
 
-    /// Convenience constructor for verifier-only instances from raw tuples,
-    /// sorting and deduplicating by the identity key.
-    pub fn verifier_from_vec(participants: Vec<(P, V::Public)>) -> Self {
-        Self::verifier(Self::ordered_participants(participants))
-    }
-
-    fn ordered_participants(participants: Vec<(P, V::Public)>) -> Ordered<(P, V::Public)> {
-        let len = participants.len();
-        let ordered = Ordered::new_by_first(participants);
-        assert_eq!(ordered.len(), len, "duplicate participant keys");
-        ordered
-    }
-
-    fn from_participants(
-        participants: Ordered<(P, V::Public)>,
-        private_key: Option<Private>,
-    ) -> Self {
+    fn from(participants: Ordered<(P, V::Public)>, private_key: Option<Private>) -> Self {
         let signer = private_key.and_then(|sk| {
             let public = compute_public::<V>(&sk);
             participants

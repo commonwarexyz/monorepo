@@ -91,7 +91,7 @@ where
         let next_round = Round::new(round.epoch(), round.view() + 1);
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let leader_index = select_leader::<S>(self.participants.len(), next_round, seed);
+            let leader_index = select_leader::<S>(&self.scheme, next_round, seed);
             self.participants[leader_index as usize].clone()
         });
     }
