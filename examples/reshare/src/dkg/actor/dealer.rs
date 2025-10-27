@@ -4,10 +4,11 @@ use commonware_cryptography::{
         dkg2::{Dealer, DealerPrivMsg, DealerPubMsg, PlayerAck, RoundInfo, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
+    transcript::Transcript,
     PrivateKey,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use futures::{
     channel::{
         mpsc,
@@ -17,6 +18,9 @@ use futures::{
 };
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
+
+mod state;
+use state::State;
 
 enum Message<V: Variant, C: PrivateKey> {
     Transmit,
@@ -47,10 +51,12 @@ impl<V: Variant, C: PrivateKey> Mailbox<V, C> {
 /// put on chain.
 pub struct Actor<E, V, C, S, R>
 where
+    E: Clock + Storage + Metrics,
     V: Variant,
     C: PrivateKey,
 {
     ctx: ContextCell<E>,
+    state: State<E, C::PublicKey>,
     to_players: S,
     from_players: R,
     inbox: mpsc::Receiver<Message<V, C>>,
@@ -61,7 +67,7 @@ where
 
 impl<E, V, C, S, R> Actor<E, V, C, S, R>
 where
-    E: Spawner + CryptoRngCore,
+    E: Clock + Storage + Metrics + Spawner + CryptoRngCore,
     V: Variant,
     C: PrivateKey,
     S: Sender<PublicKey = C::PublicKey>,
@@ -75,22 +81,37 @@ where
     /// `round_info` is the configuration for the round.
     /// `me` is the private key identifying the dealer.
     /// `share` is the previous share for the dealer.
-    pub fn new(
+    pub async fn init(
         ctx: E,
+        storage_partition: String,
         to_players: S,
         from_players: R,
         round_info: RoundInfo<V, C::PublicKey>,
         me: C,
         share: Share,
     ) -> (Self, Mailbox<V, C>) {
+        let mut state = State::load::<V>(
+            ctx.with_label("storage"),
+            storage_partition,
+            round_info.round(),
+            round_info.max_read_size(),
+        )
+        .await;
         let mut ctx = ContextCell::new(ctx);
         let (outbox, inbox) = mpsc::channel(1);
         let mailbox = Mailbox(outbox);
 
-        let (dealer, pub_msg, priv_msgs) = Dealer::start(ctx.as_mut(), round_info, me, Some(share))
-            .expect("should be able to create dealer");
-        let this = Self {
+        let (dealer, pub_msg, priv_msgs) = Dealer::start(
+            Transcript::resume(state.seed(ctx.as_mut()).await).noise(b"dealer rng"),
+            round_info,
+            me,
+            Some(share),
+        )
+        .expect("should be able to create dealer");
+
+        let mut this = Self {
             ctx,
+            state,
             to_players,
             from_players,
             inbox,
@@ -98,6 +119,11 @@ where
             pub_msg,
             unsent_priv_msgs: priv_msgs.into_iter().collect(),
         };
+
+        for (player, ack) in this.state.acks().iter().cloned().collect::<Vec<_>>() {
+            this.ack(true, player.clone(), ack.clone()).await;
+        }
+
         (this, mailbox)
     }
 
@@ -119,7 +145,7 @@ where
                     let Ok(ack) = PlayerAck::<C::PublicKey>::read(&mut msg_bytes) else {
                         continue;
                     };
-                    self.ack(player, ack);
+                    self.ack(false, player, ack).await;
                 }
                 res = self.inbox.next() => {
                     let Some(msg) = res else {
@@ -144,15 +170,18 @@ where
         tracing::debug!("dealer shutting down");
     }
 
-    fn ack(&mut self, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) {
+    async fn ack(&mut self, replay: bool, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) {
         if !self.unsent_priv_msgs.contains_key(&player) {
             return;
         }
-        if let Err(e) = self.dealer.receive_player_ack(player.clone(), ack) {
+        if let Err(e) = self.dealer.receive_player_ack(player.clone(), ack.clone()) {
             tracing::info!("bad player ack: {}", e);
             return;
         }
         self.unsent_priv_msgs.remove(&player);
+        if !replay {
+            self.state.put_ack(player, ack).await;
+        }
     }
 
     async fn transmit(&mut self) -> Result<(), S::Error> {
