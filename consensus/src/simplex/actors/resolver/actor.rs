@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -21,7 +21,6 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::set::OrderedKeySet;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::{
@@ -250,16 +249,11 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
-        let (me, participant_keys) = {
-            let participants = cfg.scheme.participants();
-            let me = cfg
-                .scheme
-                .me()
-                .and_then(|index| participants.key(index))
-                .cloned();
-            let keys = participants.iter().cloned().collect::<Vec<_>>();
-            (me, keys)
-        };
+        let participant_keys = cfg.scheme.participant_keys();
+        let me = cfg
+            .scheme
+            .me()
+            .and_then(|index| cfg.scheme.participant_key(index).cloned());
 
         let config = requester::Config {
             me,

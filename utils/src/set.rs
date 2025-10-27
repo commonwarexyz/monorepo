@@ -6,7 +6,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
-    iter::FusedIterator,
     ops::{Index, Range},
 };
 
@@ -63,158 +62,12 @@ impl<K: Ord, V> Ordered<(K, V)> {
     pub fn new_by_first(items: impl IntoIterator<Item = (K, V)>) -> Self {
         Self::new_by_key(items, |(key, _)| key)
     }
-}
 
-/// Abstraction over ordered key sets, allowing multiple backing stores (e.g. tuples) to expose the
-/// same interface without copying keys.
-pub trait OrderedKeySet<K: Ord> {
-    /// Iterator type that yields references to ordered keys.
-    type Iter<'a>: Iterator<Item = &'a K> + DoubleEndedIterator + ExactSizeIterator + FusedIterator
-    where
-        Self: 'a,
-        K: 'a;
-
-    /// Returns the size of the set.
-    fn len(&self) -> usize;
-
-    /// Returns true if the set is empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the key at the provided index, if it exists.
-    fn get(&self, index: usize) -> Option<&K>;
-
-    /// Returns the position of `key`, if present.
-    fn position(&self, key: &K) -> Option<usize>;
-
-    /// Returns an iterator over the ordered keys.
-    fn iter(&self) -> Self::Iter<'_>;
-
-    /// Returns the first key, if present.
-    fn first(&self) -> Option<&K> {
-        self.get(0)
-    }
-
-    /// Returns the last key, if present.
-    fn last(&self) -> Option<&K> {
-        if self.is_empty() {
-            None
-        } else {
-            self.get(self.len() - 1)
-        }
-    }
-}
-
-impl<K: Ord> OrderedKeySet<K> for Ordered<K> {
-    type Iter<'a>
-        = core::slice::Iter<'a, K>
-    where
-        K: 'a;
-
-    fn len(&self) -> usize {
-        Ordered::<K>::len(self)
-    }
-
-    fn get(&self, index: usize) -> Option<&K> {
-        Ordered::<K>::get(self, index)
-    }
-
-    fn position(&self, key: &K) -> Option<usize> {
-        Ordered::<K>::position(self, key)
-    }
-
-    fn iter(&self) -> Self::Iter<'_> {
-        Ordered::<K>::iter(self)
-    }
-}
-
-impl<K: Ord, V> OrderedKeySet<K> for Ordered<(K, V)> {
-    type Iter<'a>
-        = TupleKeyIter<'a, K, V>
-    where
-        K: 'a,
-        V: 'a;
-
-    fn len(&self) -> usize {
-        Ordered::<(K, V)>::len(self)
-    }
-
-    fn get(&self, index: usize) -> Option<&K> {
-        Ordered::<(K, V)>::get(self, index).map(|(key, _)| key)
-    }
-
-    fn position(&self, key: &K) -> Option<usize> {
+    /// Returns the position of a key within the ordered tuples, if it exists.
+    pub fn position_by_first(&self, key: &K) -> Option<usize> {
         self.0
             .binary_search_by(|(candidate, _)| candidate.cmp(key))
             .ok()
-    }
-
-    fn iter(&self) -> Self::Iter<'_> {
-        TupleKeyIter {
-            inner: self.0.iter(),
-        }
-    }
-}
-
-/// Iterator over the first element of `(key, value)` tuples.
-#[derive(Clone)]
-pub struct TupleKeyIter<'a, K, V> {
-    inner: core::slice::Iter<'a, (K, V)>,
-}
-
-impl<'a, K, V> Iterator for TupleKeyIter<'a, K, V> {
-    type Item = &'a K;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|(key, _)| key)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl<'a, K, V> DoubleEndedIterator for TupleKeyIter<'a, K, V> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.inner.next_back().map(|(key, _)| key)
-    }
-}
-
-impl<'a, K, V> ExactSizeIterator for TupleKeyIter<'a, K, V> {
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-}
-
-impl<'a, K, V> FusedIterator for TupleKeyIter<'a, K, V> {}
-
-impl<'a, T, K> OrderedKeySet<K> for &'a T
-where
-    K: Ord,
-    T: OrderedKeySet<K> + ?Sized,
-{
-    type Iter<'b>
-        = T::Iter<'b>
-    where
-        Self: 'b,
-        T: 'b,
-        K: 'b;
-
-    fn len(&self) -> usize {
-        (**self).len()
-    }
-
-    fn get(&self, index: usize) -> Option<&K> {
-        (**self).get(index)
-    }
-
-    fn position(&self, key: &K) -> Option<usize> {
-        (**self).position(key)
-    }
-
-    fn iter(&self) -> Self::Iter<'_> {
-        (**self).iter()
     }
 }
 
@@ -373,17 +226,14 @@ mod test {
     }
 
     #[test]
-    fn test_tuple_key_set() {
+    fn test_ordered_new_by_first() {
         let ordered =
-            Ordered::new_by_first([(2u8, "two"), (1, "one"), (3, "three"), (2, "duplicate two")]);
+            Ordered::new_by_first([(2u8, "two"), (1, "one"), (3, "three"), (2, "duplicate")]);
 
         assert_eq!(ordered.len(), 3);
-        assert_eq!(OrderedKeySet::<u8>::position(&ordered, &1), Some(0));
-        assert_eq!(OrderedKeySet::<u8>::position(&ordered, &3), Some(2));
-        assert_eq!(OrderedKeySet::<u8>::get(&ordered, 0), Some(&1));
-        assert_eq!(OrderedKeySet::<u8>::last(&ordered), Some(&3));
-
-        let keys: Vec<u8> = OrderedKeySet::<u8>::iter(&ordered).copied().collect();
-        assert_eq!(keys, vec![1, 2, 3]);
+        assert_eq!(ordered.get(0).map(|(k, _)| *k), Some(1));
+        assert_eq!(ordered.get(1).map(|(k, _)| *k), Some(2));
+        assert_eq!(ordered.position_by_first(&3), Some(2));
+        assert_eq!(ordered.position_by_first(&4), None);
     }
 }

@@ -31,14 +31,14 @@ use std::{collections::BTreeSet, fmt::Debug};
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey + Ord, V: Variant> {
+pub struct Scheme<P: PublicKey + Ord + Clone, V: Variant> {
     /// Participant identities paired with their consensus keys.
     participants: Ordered<(P, V::Public)>,
     /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, Private)>,
 }
 
-impl<P: PublicKey + Ord, V: Variant> Scheme<P, V> {
+impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
     /// Creates a new scheme instance with the provided ordered key material.
     ///
     /// Participants are provided as tuples pairing identity keys with consensus keys and must
@@ -146,22 +146,35 @@ impl<V: Variant> Read for Certificate<V> {
     }
 }
 
-impl<P: PublicKey + Ord, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
+impl<P: PublicKey + Ord + Clone, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
     type PublicKey = P;
     type Signature = V::Signature;
     type Certificate = Certificate<V>;
     type Seed = ();
-    type ParticipantSet<'a>
-        = &'a Ordered<(P, V::Public)>
-    where
-        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> Self::ParticipantSet<'_> {
-        &self.participants
+    fn participant_len(&self) -> usize {
+        self.participants.len()
+    }
+
+    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey> {
+        self.participants.get(index as usize).map(|(key, _)| key)
+    }
+
+    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32> {
+        self.participants
+            .position_by_first(key)
+            .map(|index| index as u32)
+    }
+
+    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+        self.participants
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     fn sign_vote<D: Digest>(

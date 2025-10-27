@@ -39,7 +39,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{set::OrderedKeySet, union};
+use commonware_utils::{max_faults, quorum, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -58,24 +58,42 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// - Implementations may use the same key for both identity and consensus (e.g., [`ed25519`])
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Public key type for participant identity used to order and index the committee.
-    type PublicKey: PublicKey;
+    type PublicKey: PublicKey + Clone;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
-    /// View over the ordered participant set.
-    type ParticipantSet<'a>: OrderedKeySet<Self::PublicKey> + Sized
-    where
-        Self: 'a;
-
     /// Returns the index of "self" in the participant set, if available.
     /// Returns `None` if the scheme is a verifier-only instance.
     fn me(&self) -> Option<u32>;
 
-    /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> Self::ParticipantSet<'_>;
+    /// Returns the number of participants managed by the scheme.
+    fn participant_len(&self) -> usize;
+
+    /// Returns the public key for the given participant index.
+    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey>;
+
+    /// Returns the index for a given participant key, if present.
+    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32>;
+
+    /// Returns all participant public keys ordered by their committee index.
+    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+        (0..self.participant_len() as u32)
+            .filter_map(|idx| self.participant_key(idx).cloned())
+            .collect()
+    }
+
+    /// Returns the quorum size (2f + 1) for the participant set.
+    fn participant_quorum(&self) -> u32 {
+        quorum(self.participant_len() as u32)
+    }
+
+    /// Returns the maximum number of tolerated faults.
+    fn participant_max_faults(&self) -> u32 {
+        max_faults(self.participant_len() as u32)
+    }
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

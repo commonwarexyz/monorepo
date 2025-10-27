@@ -8,7 +8,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -27,7 +27,6 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::set::OrderedKeySet;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -113,7 +112,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let participant_len = scheme.participants().len();
+        let participant_len = scheme.participant_len();
         let notarizes = Vec::with_capacity(participant_len);
         let nullifies = Vec::with_capacity(participant_len);
         let finalizes = Vec::with_capacity(participant_len);
@@ -156,7 +155,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader = select_leader::<S, _>(self.scheme.participants(), self.round, seed);
+        let leader = select_leader::<S>(self.scheme.participant_len(), self.round, seed);
         self.leader = Some(leader);
     }
 
@@ -253,7 +252,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Attempt to construct notarization
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         if self.notarizes.len() < quorum {
             return None;
         }
@@ -287,7 +286,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Attempt to construct nullification
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         if self.nullifies.len() < quorum {
             return None;
         }
@@ -317,7 +316,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Attempt to construct finalization
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         if self.finalizes.len() < quorum {
             return None;
         }
@@ -349,7 +348,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        if self.notarizes.len() <= self.scheme.participants().max_faults() as usize {
+        if self.notarizes.len() <= self.scheme.participant_max_faults() as usize {
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
@@ -532,7 +531,7 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         if round.notarizes.len() >= quorum {
             return Some(&proposal.payload);
         }
@@ -544,7 +543,7 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         round.nullification.is_some() || round.nullifies.len() >= quorum
     }
 
@@ -554,7 +553,7 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let quorum = self.scheme.participants().quorum() as usize;
+        let quorum = self.scheme.participant_quorum() as usize;
         if round.finalizes.len() >= quorum {
             return Some(&proposal.payload);
         }

@@ -12,7 +12,7 @@ use crate::{
             self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             seed_namespace_and_message, vote_namespace_and_message,
         },
-        types::{Finalization, Notarization, OrderedExt, Vote, VoteContext, VoteVerification},
+        types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -48,7 +48,7 @@ use std::{
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
-pub enum Scheme<P: PublicKey, V: Variant> {
+pub enum Scheme<P: PublicKey + Clone, V: Variant> {
     Signer {
         /// Participant set's public identities.
         participants: Ordered<P>,
@@ -75,7 +75,7 @@ pub enum Scheme<P: PublicKey, V: Variant> {
     },
 }
 
-impl<P: PublicKey, V: Variant> Scheme<P, V> {
+impl<P: PublicKey + Clone, V: Variant> Scheme<P, V> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -299,21 +299,17 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P,
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
+impl<P: PublicKey + Clone, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
     fn seed(&self) -> Seed<V> {
         Seed::new(self.proposal.round, self.certificate.seed_signature)
     }
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
+impl<P: PublicKey + Clone, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P, V> {
     type PublicKey = P;
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
     type Seed = Seed<V>;
-    type ParticipantSet<'a>
-        = &'a Ordered<P>
-    where
-        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         match self {
@@ -322,8 +318,20 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
     }
 
-    fn participants(&self) -> Self::ParticipantSet<'_> {
-        self.participants()
+    fn participant_len(&self) -> usize {
+        self.participants().len()
+    }
+
+    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey> {
+        self.participants().get(index as usize)
+    }
+
+    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32> {
+        self.participants().position(key).map(|index| index as u32)
+    }
+
+    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+        self.participants().iter().cloned().collect()
     }
 
     fn sign_vote<D: Digest>(
@@ -374,7 +382,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             })
             .unzip();
 
-        let quorum = self.participants().quorum();
+        let quorum = self.participant_quorum();
         if vote_partials.len() < quorum as usize {
             return None;
         }

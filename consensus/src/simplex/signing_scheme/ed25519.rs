@@ -157,17 +157,25 @@ impl signing_scheme::Scheme for Scheme {
     type Signature = ed25519::Signature;
     type Certificate = Certificate;
     type Seed = ();
-    type ParticipantSet<'a>
-        = &'a Ordered<ed25519::PublicKey>
-    where
-        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> Self::ParticipantSet<'_> {
-        &self.participants
+    fn participant_len(&self) -> usize {
+        self.participants.len()
+    }
+
+    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey> {
+        self.participants.get(index as usize)
+    }
+
+    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32> {
+        self.participants.position(key).map(|index| index as u32)
+    }
+
+    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+        self.participants.iter().cloned().collect()
     }
 
     fn sign_vote<D: Digest>(
