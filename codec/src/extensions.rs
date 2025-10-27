@@ -33,13 +33,7 @@ impl<T: IsUnit, const N: usize> IsUnit for [T; N] where [T; N]: Default {}
 // Generate `IsUnit` implementations for tuples up to 12 elements.
 macro_rules! impl_is_unit_for_tuple {
     ( $($T:ident),+ ) => {
-        impl<$($T),+> IsUnit for ( $($T),+ )
-        where
-            $(
-                $T: IsUnit,
-            )+
-        {
-        }
+        impl<$($T),+> IsUnit for ( $($T),+ ) where $($T: IsUnit),+ {}
     }
 }
 impl_is_unit_for_tuple!(A, B);
