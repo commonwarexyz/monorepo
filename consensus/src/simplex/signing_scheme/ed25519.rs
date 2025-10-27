@@ -358,11 +358,12 @@ mod tests {
     fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
-            schemes, verifier, ..
+            participants,
+            schemes,
+            ..
         } = ed25519(&mut rng, n);
-        let participants = verifier.participants().clone();
 
-        (schemes, participants)
+        (schemes, participants.into())
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
