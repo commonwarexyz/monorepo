@@ -34,7 +34,7 @@ use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, ErrorKind},
+    io::Error as IoError,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
