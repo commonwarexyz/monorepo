@@ -275,8 +275,7 @@ mod tests {
     };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::set::OrderedWrapped;
-    use commonware_utils::NZU32;
+    use commonware_utils::{set::OrderedWrapped, NZU32};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
