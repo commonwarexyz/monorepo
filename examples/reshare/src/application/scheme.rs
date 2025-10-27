@@ -19,10 +19,10 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<P, V> = signing_scheme::bls12381_threshold::Scheme<P, V>;
+pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
-pub type EdScheme<P> = signing_scheme::ed25519::Scheme<P>;
+pub type EdScheme = signing_scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
@@ -79,12 +79,10 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant, C: Signer> EpochSchemeProvider
-    for SchemeProvider<ThresholdScheme<C::PublicKey, V>, C>
-{
+impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
-    type PublicKey = C::PublicKey;
-    type Scheme = ThresholdScheme<C::PublicKey, V>;
+    type PublicKey = ed25519::PublicKey;
+    type Scheme = ThresholdScheme<V>;
 
     fn scheme_for_epoch(
         &self,
@@ -111,16 +109,16 @@ impl<V: Variant, C: Signer> EpochSchemeProvider
     }
 }
 
-impl EpochSchemeProvider for SchemeProvider<EdScheme<ed25519::PublicKey>, ed25519::PrivateKey> {
+impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
-    type Scheme = EdScheme<ed25519::PublicKey>;
+    type Scheme = EdScheme;
 
     fn scheme_for_epoch(
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        EdScheme::new_identical(transition.participants.clone(), self.signer.clone())
+        EdScheme::new(transition.participants.clone(), self.signer.clone())
     }
 }
 

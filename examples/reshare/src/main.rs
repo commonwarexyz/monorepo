@@ -114,9 +114,9 @@ fn main() {
 
         match app.subcommand {
             Subcommands::Setup(args) => setup::run(args),
-            Subcommands::Dkg(args) => validator::run::<EdScheme<_>>(context, args).await,
+            Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<_, _>>(context, args).await
+                validator::run::<ThresholdScheme<_>>(context, args).await
             }
         }
     });

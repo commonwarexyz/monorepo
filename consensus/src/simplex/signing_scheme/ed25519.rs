@@ -16,7 +16,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     ed25519::{self, Batch},
-    BatchVerifier, Digest, PublicKey, Signer as _, Verifier as _,
+    BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
@@ -24,43 +24,28 @@ use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey> {
+pub struct Scheme {
     /// Participant set's public identities.
-    participants: Ordered<P>,
-    /// Participant set used for consensus signer indexing and verification.
-    consensus: Vec<ed25519::PublicKey>,
+    participants: Ordered<ed25519::PublicKey>,
     /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
-impl<P: PublicKey> Scheme<P> {
+impl Scheme {
     /// Creates a new scheme instance with the provided key material.
-    ///
-    /// Participants are provided as tuples pairing identity keys with consensus keys.
-    /// The identity key (first element) is used for committee ordering and indexing,
-    /// while the consensus key (second element) is used for signing and verification.
     ///
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
     pub fn new(
-        mut participants: Vec<(P, ed25519::PublicKey)>,
+        participants: Ordered<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
     ) -> Self {
-        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
-
-        let len = participants.len();
-        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
-        let participants = Ordered::from(participants);
-        assert_eq!(participants.len(), len, "duplicate participant keys");
-
-        let signer = consensus
-            .iter()
-            .position(|p| p == &private_key.public_key())
+        let signer = participants
+            .position(&private_key.public_key())
             .map(|index| (index as u32, private_key));
 
         Self {
             participants,
-            consensus,
             signer,
         }
     }
@@ -70,17 +55,9 @@ impl<P: PublicKey> Scheme<P> {
     /// Participants are provided as tuples pairing identity keys with consensus keys.
     /// The identity key (first element) is used for committee ordering and indexing,
     /// while the consensus key (second element) is used for verification.
-    pub fn verifier(mut participants: Vec<(P, ed25519::PublicKey)>) -> Self {
-        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
-
-        let len = participants.len();
-        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
-        let participants = Ordered::from(participants);
-        assert_eq!(participants.len(), len, "duplicate participant keys");
-
+    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
             participants,
-            consensus,
             signer: None,
         }
     }
@@ -111,7 +88,7 @@ impl<P: PublicKey> Scheme<P> {
         // Add the certificate to the batch.
         let (namespace, message) = vote_namespace_and_message(namespace, context);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.consensus.get(signer as usize) else {
+            let Some(public_key) = self.participants.get(signer as usize) else {
                 return false;
             };
 
@@ -127,39 +104,6 @@ impl<P: PublicKey> Scheme<P> {
     }
 }
 
-impl Scheme<ed25519::PublicKey> {
-    /// Creates a new scheme instance where identity and consensus keys are identical.
-    ///
-    /// This is a convenience constructor for the common Ed25519 case where the same
-    /// key is used for both participant identity and consensus signing.
-    ///
-    /// If the provided private key does not match any consensus key in the participant set,
-    /// the instance will act as a verifier (unable to sign votes).
-    pub fn new_identical(
-        participants: Ordered<ed25519::PublicKey>,
-        private_key: ed25519::PrivateKey,
-    ) -> Self {
-        let participants: Vec<_> = participants
-            .into_iter()
-            .map(|key| (key.clone(), key))
-            .collect();
-        Self::new(participants, private_key)
-    }
-
-    /// Builds a pure verifier where identity and consensus keys are identical.
-    ///
-    /// This is a convenience constructor for the common Ed25519 case where the same
-    /// key is used for both participant identity and consensus verification.
-    pub fn verifier_identical(participants: Ordered<ed25519::PublicKey>) -> Self {
-        let participants: Vec<_> = participants
-            .into_iter()
-            .map(|key| (key.clone(), key))
-            .collect();
-        Self::verifier(participants)
-    }
-}
-
-/// Certificate formed by collecting Ed25519 signatures plus their signer indices.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.
@@ -208,8 +152,8 @@ impl Read for Certificate {
     }
 }
 
-impl<P: PublicKey> signing_scheme::Scheme for Scheme<P> {
-    type PublicKey = P;
+impl signing_scheme::Scheme for Scheme {
+    type PublicKey = ed25519::PublicKey;
     type Signature = ed25519::Signature;
     type Certificate = Certificate;
     type Seed = ();
@@ -244,7 +188,7 @@ impl<P: PublicKey> signing_scheme::Scheme for Scheme<P> {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.consensus.get(vote.signer as usize) else {
+        let Some(public_key) = self.participants.get(vote.signer as usize) else {
             return false;
         };
 
@@ -271,7 +215,7 @@ impl<P: PublicKey> signing_scheme::Scheme for Scheme<P> {
         let mut batch = Batch::new();
 
         for vote in votes.into_iter() {
-            let Some(public_key) = self.consensus.get(vote.signer as usize) else {
+            let Some(public_key) = self.participants.get(vote.signer as usize) else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -419,13 +363,13 @@ mod tests {
         keys.iter().map(|key| key.public_key()).collect()
     }
 
-    fn schemes(n: usize) -> (Vec<Scheme<ed25519::PublicKey>>, Ordered<ed25519::PublicKey>) {
+    fn schemes(n: usize) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
         let keys = generate_private_keys(n);
         let public_keys = Ordered::from(participants(&keys));
 
         let schemes = keys
             .into_iter()
-            .map(|key| Scheme::new_identical(public_keys.clone(), key))
+            .map(|key| Scheme::new(public_keys.clone(), key))
             .collect();
 
         (schemes, public_keys)
@@ -693,7 +637,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -761,7 +705,7 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -856,7 +800,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -897,7 +841,7 @@ mod tests {
         truncated.signers = Signers::from(participants.len(), signers);
         truncated.signatures.pop();
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -939,7 +883,7 @@ mod tests {
             .signatures
             .push(certificate.signatures[0].clone());
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -975,7 +919,7 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier_identical(participants.clone());
+        let verifier = Scheme::verifier(participants.clone());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1025,7 +969,7 @@ mod tests {
             .expect("assemble certificate");
         certificate.signatures.pop();
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -1079,7 +1023,7 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signatures[0] = bad_certificate.signatures[1].clone();
 
-        let verifier = Scheme::verifier_identical(participants);
+        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {
