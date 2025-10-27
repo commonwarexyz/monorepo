@@ -217,8 +217,13 @@ impl<H: CHasher> Mmr<H> {
         self.pruned_to_pos + (index as u64)
     }
 
-    /// Returns the requested node, assuming it is either retained or known to exist in the
-    /// pinned_nodes map.
+    /// Return the requested node if it is either retained or present in the pinned_nodes map, and
+    /// panic otherwise. Use `get_node` instead if you require a non-panicking getter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the requested node does not exist for any reason such as the node is pruned or
+    /// `pos` is out of bounds.
     pub fn get_node_unchecked(&self, pos: Position) -> &H::Digest {
         if pos < self.pruned_to_pos {
             return self
@@ -230,7 +235,7 @@ impl<H: CHasher> Mmr<H> {
         &self.nodes[self.pos_to_index(pos)]
     }
 
-    /// Returns the requested node or None if it is not stored in the MMR.
+    /// Return the requested node or None if it is not stored in the MMR.
     pub fn get_node(&self, pos: Position) -> Option<H::Digest> {
         if pos < self.pruned_to_pos {
             return self.pinned_nodes.get(&pos).copied();
@@ -249,6 +254,7 @@ impl<H: CHasher> Mmr<H> {
             pos >= self.pruned_to_pos,
             "pos precedes oldest retained position"
         );
+
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 

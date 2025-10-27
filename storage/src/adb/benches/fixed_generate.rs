@@ -8,8 +8,11 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     adb::{
-        any::fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-        store::Db,
+        any::{
+            fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
+            variable::{Any as VariableAny, Config as VariableAnyConfig},
+        },
+        store::{Config as SConfig, Db, Store},
     },
     translator::EightCap,
 };
@@ -39,6 +42,23 @@ type UAnyDb =
     UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type OAnyDb =
     OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type UnauthDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
+type VariableAnyDb =
+    VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+
+fn unauth_cfg() -> SConfig<EightCap, ()> {
+    SConfig::<EightCap, ()> {
+        log_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
+        log_write_buffer: NZUsize!(1024),
+        log_compression: None,
+        log_codec_config: (),
+        log_items_per_section: NZU64!(ITEMS_PER_BLOB),
+        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
+        locations_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        translator: EightCap,
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+    }
+}
 
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
@@ -55,6 +75,30 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     }
 }
 
+fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
+    VariableAnyConfig::<EightCap, ()> {
+        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        mmr_write_buffer: NZUsize!(1024),
+        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_codec_config: (),
+        log_items_per_section: NZU64!(ITEMS_PER_BLOB),
+        log_write_buffer: NZUsize!(1024),
+        log_compression: None,
+        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
+        locations_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        translator: EightCap,
+        thread_pool: Some(pool),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+    }
+}
+
+async fn get_unauthenticated(ctx: Context) -> UnauthDb {
+    let store_cfg = unauth_cfg();
+    Store::init(ctx, store_cfg).await.unwrap()
+}
+
 async fn get_unordered_any(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
@@ -69,6 +113,12 @@ async fn get_ordered_any(ctx: Context) -> OAnyDb {
     OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
         .await
         .unwrap()
+}
+
+async fn get_variable_any(ctx: Context) -> VariableAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let variable_any_cfg = variable_any_cfg(pool);
+    VariableAny::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
@@ -112,19 +162,45 @@ async fn gen_random_kv<
     db
 }
 
-/// Benchmark the generation of a large randomly generated any db.
+#[derive(Debug, Clone, Copy)]
+enum Variant {
+    Unauthenticated,
+    AnyUnordered,
+    AnyOrdered,
+    VariableAny, // unordered
+}
+
+impl Variant {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Variant::Unauthenticated => "adb::store",
+            Variant::AnyUnordered => "any::fixed::unordered",
+            Variant::AnyOrdered => "any::fixed::ordered",
+            Variant::VariableAny => "any::variable",
+        }
+    }
+}
+
+const VARIANTS: [Variant; 4] = [
+    Variant::AnyUnordered,
+    Variant::AnyOrdered,
+    Variant::Unauthenticated,
+    Variant::VariableAny,
+];
+
+/// Benchmark the generation of a large randomly generated [Db].
 fn bench_fixed_generate(c: &mut Criterion) {
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            for db_type in ["unordered", "ordered"] {
+            for variant in VARIANTS {
                 let runner = tokio::Runner::new(Config::default().clone());
                 c.bench_function(
                     &format!(
-                        "{}/elements={} operations={}, keyspace={}",
+                        "{}/variant={} elements={} operations={}",
                         module_path!(),
+                        variant.name(),
                         elements,
                         operations,
-                        db_type,
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
@@ -132,17 +208,32 @@ fn bench_fixed_generate(c: &mut Criterion) {
                             let mut total_elapsed = Duration::ZERO;
                             for _ in 0..iters {
                                 let start = Instant::now();
-                                if db_type == "unordered" {
-                                    let db = get_unordered_any(ctx.clone()).await;
-                                    let db = gen_random_kv(db, elements, operations).await;
-                                    total_elapsed += start.elapsed();
-                                    db.destroy().await.unwrap(); // don't time destroy
-                                } else {
-                                    let db = get_ordered_any(ctx.clone()).await;
-                                    let db = gen_random_kv(db, elements, operations).await;
-                                    total_elapsed += start.elapsed();
-                                    db.destroy().await.unwrap(); // don't time destroy
-                                };
+                                match variant {
+                                    Variant::AnyUnordered => {
+                                        let db = get_unordered_any(ctx.clone()).await;
+                                        let db = gen_random_kv(db, elements, operations).await;
+                                        total_elapsed += start.elapsed();
+                                        db.destroy().await.unwrap(); // don't time destroy
+                                    }
+                                    Variant::AnyOrdered => {
+                                        let db = get_ordered_any(ctx.clone()).await;
+                                        let db = gen_random_kv(db, elements, operations).await;
+                                        total_elapsed += start.elapsed();
+                                        db.destroy().await.unwrap(); // don't time destroy
+                                    }
+                                    Variant::Unauthenticated => {
+                                        let db = get_unauthenticated(ctx.clone()).await;
+                                        let db = gen_random_kv(db, elements, operations).await;
+                                        total_elapsed += start.elapsed();
+                                        db.destroy().await.unwrap(); // don't time destroy
+                                    }
+                                    Variant::VariableAny => {
+                                        let db = get_variable_any(ctx.clone()).await;
+                                        let db = gen_random_kv(db, elements, operations).await;
+                                        total_elapsed += start.elapsed();
+                                        db.destroy().await.unwrap(); // don't time destroy
+                                    }
+                                }
                             }
                             total_elapsed
                         });
