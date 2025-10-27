@@ -406,12 +406,11 @@ mod tests {
 
             // Register participants
             let Fixture {
-                private_keys: schemes,
-                public_keys: validators,
-                schemes: signing_schemes,
+                public_keys,
+                schemes,
                 ..
             } = fixture(&mut context, n);
-            let mut registrations = register_validators(&mut oracle, &validators).await;
+            let mut registrations = register_validators(&mut oracle, &public_keys).await;
 
             // Link all validators
             let link = Link {
@@ -419,22 +418,21 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+            link_validators(&mut oracle, &public_keys, Action::Link(link), None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for (idx, scheme) in schemes.into_iter().enumerate() {
+            for (idx, validator) in public_keys.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+                let context = context.with_label(&format!("validator-{}", validator));
 
                 // Configure engine
-                let validator = scheme.public_key();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone().into(),
-                    scheme: signing_schemes[idx].clone(),
+                    participants: public_keys.clone().into(),
+                    scheme: schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -451,9 +449,9 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let blocker = oracle.control(scheme.public_key());
+                let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    scheme: signing_schemes[idx].clone(),
+                    scheme: schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -3841,8 +3839,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) =
-                bls12381_threshold::<V, _>(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators

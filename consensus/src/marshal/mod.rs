@@ -91,7 +91,7 @@ mod tests {
     use crate::{
         marshal::ingress::mailbox::Identifier,
         simplex::{
-            self,
+            mocks::fixtures::{bls12381_threshold, Fixture},
             signing_scheme::bls12381_threshold,
             types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
@@ -271,12 +271,6 @@ mod tests {
         oracle
     }
 
-    fn setup_validators_and_shares(
-        context: &mut deterministic::Context,
-    ) -> (Vec<E>, Vec<K>, Vec<S>, S) {
-        simplex::mocks::fixtures::bls12381_threshold::<V, _>(context, NUM_VALIDATORS)
-    }
-
     async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
@@ -321,7 +315,12 @@ mod tests {
         );
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -428,7 +427,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -476,7 +480,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -544,7 +553,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -604,7 +618,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -702,7 +721,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let secret = schemes[0].clone();
@@ -759,7 +782,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
             let secret = schemes[0].clone();
@@ -832,7 +859,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -886,7 +917,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: peers,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
@@ -941,7 +977,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, signing_schemes, _) = setup_validators_and_shares(&mut context);
+            let Fixture {
+                private_keys: schemes,
+                schemes: signing_schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let secret = schemes[0].clone();
             let (_application, mut actor) = setup_validator(
