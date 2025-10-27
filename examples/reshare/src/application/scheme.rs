@@ -19,7 +19,7 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<P, V> = signing_scheme::bls12381_threshold::Scheme<P, V>;
+pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
 pub type EdScheme = signing_scheme::ed25519::Scheme;
@@ -79,12 +79,10 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant, C: Signer> EpochSchemeProvider
-    for SchemeProvider<ThresholdScheme<C::PublicKey, V>, C>
-{
+impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
-    type PublicKey = C::PublicKey;
-    type Scheme = ThresholdScheme<C::PublicKey, V>;
+    type PublicKey = ed25519::PublicKey;
+    type Scheme = ThresholdScheme<V>;
 
     fn scheme_for_epoch(
         &self,
