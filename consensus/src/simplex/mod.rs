@@ -1126,8 +1126,8 @@ mod tests {
             .await;
 
             // Configure engine for first peer
-            let validator = participants[0].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let me = participants[0].clone();
+            let context = context.with_label(&format!("validator-{me}"));
 
             // Link first peer to all (except second)
             link_validators(
@@ -1164,7 +1164,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                participant: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -1173,14 +1173,14 @@ mod tests {
                 application_cfg,
             );
             actor.start();
-            let blocker = oracle.control(validator.clone());
+            let blocker = oracle.control(me.clone());
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: validator.to_string(),
+                partition: me.to_string(),
                 mailbox_size: 1024,
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -1201,7 +1201,7 @@ mod tests {
 
             // Start engine
             let (pending, recovered, resolver) = registrations
-                .remove(&validator)
+                .remove(&me)
                 .expect("validator should be registered");
             engine_handlers.push(engine.start(pending, recovered, resolver));
 

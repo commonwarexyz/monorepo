@@ -148,7 +148,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Initialize voter actor
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().into(),
@@ -160,7 +160,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                participant: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -171,7 +171,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                blocker: oracle.control(validator.clone()),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -199,17 +199,16 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = participants[1].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -222,7 +221,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -413,7 +412,7 @@ mod tests {
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().into(),
@@ -425,7 +424,7 @@ mod tests {
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                participant: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -434,11 +433,11 @@ mod tests {
             actor.start();
             let voter_config = Config {
                 scheme: signing.clone(),
-                blocker: oracle.control(validator.clone()),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: format!("voter_actor_test_{validator}"),
+                partition: format!("voter_actor_test_{me}"),
                 epoch: 333,
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -462,17 +461,16 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = participants[1].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -485,7 +483,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -768,11 +766,10 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
-            let validator = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
 
             // Start the actor
             voter.start(

@@ -723,12 +723,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
-                validator,
+                me,
                 schemes[0].clone().into(),
             )
             .await;
@@ -784,12 +784,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
-                validator,
+                me,
                 schemes[0].clone().into(),
             )
             .await;
@@ -860,12 +860,12 @@ mod tests {
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
-                validator,
+                me,
                 schemes[0].clone().into(),
             )
             .await;
@@ -918,12 +918,12 @@ mod tests {
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(participants),
-                validator,
+                me,
                 schemes[0].clone().into(),
             )
             .await;
@@ -977,12 +977,12 @@ mod tests {
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = participants[0].clone();
+            let me = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
-                validator,
+                me,
                 schemes[0].clone().into(),
             )
             .await;
