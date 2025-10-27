@@ -440,7 +440,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -703,7 +703,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -861,7 +861,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -1045,7 +1045,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -1164,7 +1164,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: me.clone(),
+                me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -1300,7 +1300,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -1546,7 +1546,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
                     }
@@ -1554,7 +1554,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     }
@@ -1723,7 +1723,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -1927,7 +1927,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -2133,7 +2133,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -2343,7 +2343,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -2517,7 +2517,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -2692,7 +2692,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -2858,7 +2858,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -3021,7 +3021,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -3198,7 +3198,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
-                        participant: validator.clone(),
+                        me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                     };
@@ -3343,7 +3343,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
                 };
@@ -3498,7 +3498,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: participants[0].clone(),
+                me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -3661,7 +3661,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
@@ -3850,7 +3850,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
-                    participant: validator.clone(),
+                    me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
