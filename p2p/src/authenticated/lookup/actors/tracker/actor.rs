@@ -270,7 +270,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, Ordered::new_by_key([(pk.clone(), addr)], |(pk, _)| pk))
+                .register(0, Ordered::new_by_first([(pk.clone(), addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -299,7 +299,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, Ordered::new_by_key([(pk1.clone(), addr)], |(pk, _)| pk))
+                .register(0, Ordered::new_by_first([(pk1.clone(), addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -355,10 +355,10 @@ mod tests {
             oracle
                 .register(
                     0,
-                    Ordered::new_by_key(
-                        [(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)],
-                        |(pk, _)| pk,
-                    ),
+                    Ordered::new_by_first([
+                        (peer_pk.clone(), peer_addr),
+                        (peer_pk2.clone(), peer_addr2),
+                    ]),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
@@ -390,10 +390,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .register(
-                    0,
-                    Ordered::new_by_key([(peer_pk.clone(), peer_addr)], |(pk, _)| pk),
-                )
+                .register(0, Ordered::new_by_first([(peer_pk.clone(), peer_addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -428,10 +425,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .register(
-                    0,
-                    Ordered::new_by_key([(boot_pk.clone(), boot_addr)], |(pk, _)| pk),
-                )
+                .register(0, Ordered::new_by_first([(boot_pk.clone(), boot_addr)]))
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -455,10 +449,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .register(
-                    0,
-                    Ordered::new_by_key([(boot_pk.clone(), boot_addr)], |(pk, _)| pk),
-                )
+                .register(0, Ordered::new_by_first([(boot_pk.clone(), boot_addr)]))
                 .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
@@ -495,10 +486,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .register(
-                    0,
-                    Ordered::new_by_key([(peer_pk.clone(), peer_addr)], |(pk, _)| pk),
-                )
+                .register(0, Ordered::new_by_first([(peer_pk.clone(), peer_addr)]))
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -552,10 +540,7 @@ mod tests {
             oracle
                 .register(
                     0,
-                    Ordered::new_by_key(
-                        vec![(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)],
-                        |(pk, _)| pk,
-                    ),
+                    Ordered::new_by_first([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]),
                 )
                 .await;
             // let the register take effect
@@ -576,10 +561,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .register(
-                    1,
-                    Ordered::new_by_key([(pk_2.clone(), addr_2)], |(pk, _)| pk),
-                )
+                .register(1, Ordered::new_by_first([(pk_2.clone(), addr_2)]))
                 .await;
 
             // Wait for a listener update

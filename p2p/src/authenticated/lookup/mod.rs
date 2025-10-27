@@ -120,7 +120,7 @@
 //!     // the composition of a validator set changes).
 //!     oracle.register(
 //!         0,
-//!         Ordered::new_by_key([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)], |(pk, _)| pk)
+//!         Ordered::new_by_first([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)]),
 //!     ).await;
 //!
 //!     // Register some channel
@@ -247,7 +247,7 @@ mod tests {
 
             // Register peers
             oracle
-                .register(0, Ordered::new_by_key(peers.clone(), |(pk, _)| pk))
+                .register(0, Ordered::new_by_first(peers.clone()))
                 .await;
 
             // Register basic application
@@ -519,12 +519,12 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, Ordered::new_by_key([peers[0].clone()], |(pk, _)| pk))
+                    .register(0, Ordered::new_by_first([peers[0].clone()]))
                     .await;
                 oracle
                     .register(
                         1,
-                        Ordered::new_by_key([peers[1].clone(), peers[2].clone()], |(pk, _)| pk),
+                        Ordered::new_by_first([peers[1].clone(), peers[2].clone()]),
                     )
                     .await;
                 oracle
@@ -602,7 +602,7 @@ mod tests {
                 let iter = peers_and_sks
                     .iter()
                     .map(|(_, pk, addr)| (pk.clone(), *addr));
-                Ordered::new_by_key(iter, |(pk, _)| pk)
+                Ordered::new_by_first(iter)
             };
 
             // Create network
@@ -657,7 +657,7 @@ mod tests {
                 let iter = peers_and_sks
                     .iter()
                     .map(|(_, pk, addr)| (pk.clone(), *addr));
-                Ordered::new_by_key(iter, |(pk, _)| pk)
+                Ordered::new_by_first(iter)
             };
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
