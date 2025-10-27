@@ -36,7 +36,7 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes, ed25519_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn ed25519_fixture<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
+pub fn ed25519<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
 {
@@ -60,7 +60,7 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, bls_multisig_schemes, bls_multisig_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn bls_multisig_fixture<V, R>(
+pub fn bls12381_multisig<V, R>(
     rng: &mut R,
     n: u32,
 ) -> Fixture<bls12381_multisig::Scheme<ed25519::PublicKey, V>>
@@ -99,7 +99,7 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, bls_threshold_schemes, bls_threshold_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn bls_threshold_fixture<V, R>(
+pub fn bls12381_threshold<V, R>(
     rng: &mut R,
     n: u32,
 ) -> Fixture<bls12381_threshold::Scheme<ed25519::PublicKey, V>>

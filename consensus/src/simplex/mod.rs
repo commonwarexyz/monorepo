@@ -258,9 +258,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{
-                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
-            },
+            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::seed_namespace,
         },
         types::Round,
@@ -617,11 +615,11 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online(bls_threshold_fixture::<MinPk, _>);
-        all_online(bls_threshold_fixture::<MinSig, _>);
-        all_online(bls_multisig_fixture::<MinPk, _>);
-        all_online(bls_multisig_fixture::<MinSig, _>);
-        all_online(ed25519_fixture);
+        all_online(bls12381_threshold::<MinPk, _>);
+        all_online(bls12381_threshold::<MinSig, _>);
+        all_online(bls12381_multisig::<MinPk, _>);
+        all_online(bls12381_multisig::<MinSig, _>);
+        all_online(ed25519);
     }
 
     fn observer<S, F>(mut fixture: F)
@@ -775,11 +773,11 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer(bls_threshold_fixture::<MinPk, _>);
-        observer(bls_threshold_fixture::<MinSig, _>);
-        observer(bls_multisig_fixture::<MinPk, _>);
-        observer(bls_multisig_fixture::<MinSig, _>);
-        observer(ed25519_fixture);
+        observer(bls12381_threshold::<MinPk, _>);
+        observer(bls12381_threshold::<MinSig, _>);
+        observer(bls12381_multisig::<MinPk, _>);
+        observer(bls12381_multisig::<MinSig, _>);
+        observer(ed25519);
     }
 
     fn unclean_shutdown<S, F>(mut fixture: F)
@@ -961,11 +959,11 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown(bls_threshold_fixture::<MinPk, _>);
-        unclean_shutdown(bls_threshold_fixture::<MinSig, _>);
-        unclean_shutdown(bls_multisig_fixture::<MinPk, _>);
-        unclean_shutdown(bls_multisig_fixture::<MinSig, _>);
-        unclean_shutdown(ed25519_fixture);
+        unclean_shutdown(bls12381_threshold::<MinPk, _>);
+        unclean_shutdown(bls12381_threshold::<MinSig, _>);
+        unclean_shutdown(bls12381_multisig::<MinPk, _>);
+        unclean_shutdown(bls12381_multisig::<MinSig, _>);
+        unclean_shutdown(ed25519);
     }
 
     fn backfill<S, F>(mut fixture: F)
@@ -1212,11 +1210,11 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill(bls_threshold_fixture::<MinPk, _>);
-        backfill(bls_threshold_fixture::<MinSig, _>);
-        backfill(bls_multisig_fixture::<MinPk, _>);
-        backfill(bls_multisig_fixture::<MinSig, _>);
-        backfill(ed25519_fixture);
+        backfill(bls12381_threshold::<MinPk, _>);
+        backfill(bls12381_threshold::<MinSig, _>);
+        backfill(bls12381_multisig::<MinPk, _>);
+        backfill(bls12381_multisig::<MinSig, _>);
+        backfill(ed25519);
     }
 
     fn one_offline<S, F>(mut fixture: F)
@@ -1467,11 +1465,11 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline(bls_threshold_fixture::<MinPk, _>);
-        one_offline(bls_threshold_fixture::<MinSig, _>);
-        one_offline(bls_multisig_fixture::<MinPk, _>);
-        one_offline(bls_multisig_fixture::<MinSig, _>);
-        one_offline(ed25519_fixture);
+        one_offline(bls12381_threshold::<MinPk, _>);
+        one_offline(bls12381_threshold::<MinSig, _>);
+        one_offline(bls12381_multisig::<MinPk, _>);
+        one_offline(bls12381_multisig::<MinSig, _>);
+        one_offline(ed25519);
     }
 
     fn slow_validator<S, F>(mut fixture: F)
@@ -1642,11 +1640,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator(bls_threshold_fixture::<MinPk, _>);
-        slow_validator(bls_threshold_fixture::<MinSig, _>);
-        slow_validator(bls_multisig_fixture::<MinPk, _>);
-        slow_validator(bls_multisig_fixture::<MinSig, _>);
-        slow_validator(ed25519_fixture);
+        slow_validator(bls12381_threshold::<MinPk, _>);
+        slow_validator(bls12381_threshold::<MinSig, _>);
+        slow_validator(bls12381_multisig::<MinPk, _>);
+        slow_validator(bls12381_multisig::<MinSig, _>);
+        slow_validator(ed25519);
     }
 
     fn all_recovery<S, F>(mut fixture: F)
@@ -1843,11 +1841,11 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery(bls_threshold_fixture::<MinPk, _>);
-        all_recovery(bls_threshold_fixture::<MinSig, _>);
-        all_recovery(bls_multisig_fixture::<MinPk, _>);
-        all_recovery(bls_multisig_fixture::<MinSig, _>);
-        all_recovery(ed25519_fixture);
+        all_recovery(bls12381_threshold::<MinPk, _>);
+        all_recovery(bls12381_threshold::<MinSig, _>);
+        all_recovery(bls12381_multisig::<MinPk, _>);
+        all_recovery(bls12381_multisig::<MinSig, _>);
+        all_recovery(ed25519);
     }
 
     fn partition<S, F>(mut fixture: F)
@@ -2037,11 +2035,11 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_partition() {
-        partition(bls_threshold_fixture::<MinPk, _>);
-        partition(bls_threshold_fixture::<MinSig, _>);
-        partition(bls_multisig_fixture::<MinPk, _>);
-        partition(bls_multisig_fixture::<MinSig, _>);
-        partition(ed25519_fixture);
+        partition(bls12381_threshold::<MinPk, _>);
+        partition(bls12381_threshold::<MinSig, _>);
+        partition(bls12381_multisig::<MinPk, _>);
+        partition(bls12381_multisig::<MinSig, _>);
+        partition(ed25519);
     }
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
@@ -2184,11 +2182,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0, bls_threshold_fixture::<MinPk, _>);
-        slow_and_lossy_links(0, bls_threshold_fixture::<MinSig, _>);
-        slow_and_lossy_links(0, bls_multisig_fixture::<MinPk, _>);
-        slow_and_lossy_links(0, bls_multisig_fixture::<MinSig, _>);
-        slow_and_lossy_links(0, ed25519_fixture);
+        slow_and_lossy_links(0, bls12381_threshold::<MinPk, _>);
+        slow_and_lossy_links(0, bls12381_threshold::<MinSig, _>);
+        slow_and_lossy_links(0, bls12381_multisig::<MinPk, _>);
+        slow_and_lossy_links(0, bls12381_multisig::<MinSig, _>);
+        slow_and_lossy_links(0, ed25519);
     }
 
     #[test_traced]
@@ -2197,24 +2195,24 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ts_pk_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
-            let ts_pk_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
+            let ts_pk_state_1 = slow_and_lossy_links(seed, bls12381_threshold::<MinPk, _>);
+            let ts_pk_state_2 = slow_and_lossy_links(seed, bls12381_threshold::<MinPk, _>);
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
-            let ts_sig_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
-            let ts_sig_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
+            let ts_sig_state_1 = slow_and_lossy_links(seed, bls12381_threshold::<MinSig, _>);
+            let ts_sig_state_2 = slow_and_lossy_links(seed, bls12381_threshold::<MinSig, _>);
             assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
-            let ms_pk_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
-            let ms_pk_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
+            let ms_pk_state_1 = slow_and_lossy_links(seed, bls12381_multisig::<MinPk, _>);
+            let ms_pk_state_2 = slow_and_lossy_links(seed, bls12381_multisig::<MinPk, _>);
             assert_eq!(ms_pk_state_1, ms_pk_state_2);
 
-            let ms_sig_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
-            let ms_sig_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
+            let ms_sig_state_1 = slow_and_lossy_links(seed, bls12381_multisig::<MinSig, _>);
+            let ms_sig_state_2 = slow_and_lossy_links(seed, bls12381_multisig::<MinSig, _>);
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            let ed_state_1 = slow_and_lossy_links(seed, ed25519_fixture);
-            let ed_state_2 = slow_and_lossy_links(seed, ed25519_fixture);
+            let ed_state_1 = slow_and_lossy_links(seed, ed25519);
+            let ed_state_2 = slow_and_lossy_links(seed, ed25519);
             assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
@@ -2408,11 +2406,11 @@ mod tests {
     #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter(seed, bls_threshold_fixture::<MinPk, _>);
-            conflicter(seed, bls_threshold_fixture::<MinSig, _>);
-            conflicter(seed, bls_multisig_fixture::<MinPk, _>);
-            conflicter(seed, bls_multisig_fixture::<MinSig, _>);
-            conflicter(seed, ed25519_fixture);
+            conflicter(seed, bls12381_threshold::<MinPk, _>);
+            conflicter(seed, bls12381_threshold::<MinSig, _>);
+            conflicter(seed, bls12381_multisig::<MinPk, _>);
+            conflicter(seed, bls12381_multisig::<MinSig, _>);
+            conflicter(seed, ed25519);
         }
     }
 
@@ -2573,11 +2571,11 @@ mod tests {
     #[ignore]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid(seed, bls_threshold_fixture::<MinPk, _>);
-            invalid(seed, bls_threshold_fixture::<MinSig, _>);
-            invalid(seed, bls_multisig_fixture::<MinPk, _>);
-            invalid(seed, bls_multisig_fixture::<MinSig, _>);
-            invalid(seed, ed25519_fixture);
+            invalid(seed, bls12381_threshold::<MinPk, _>);
+            invalid(seed, bls12381_threshold::<MinSig, _>);
+            invalid(seed, bls12381_multisig::<MinPk, _>);
+            invalid(seed, bls12381_multisig::<MinSig, _>);
+            invalid(seed, ed25519);
         }
     }
 
@@ -2737,11 +2735,11 @@ mod tests {
     #[ignore]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator(seed, bls_threshold_fixture::<MinPk, _>);
-            impersonator(seed, bls_threshold_fixture::<MinSig, _>);
-            impersonator(seed, bls_multisig_fixture::<MinPk, _>);
-            impersonator(seed, bls_multisig_fixture::<MinSig, _>);
-            impersonator(seed, ed25519_fixture);
+            impersonator(seed, bls12381_threshold::<MinPk, _>);
+            impersonator(seed, bls12381_threshold::<MinSig, _>);
+            impersonator(seed, bls12381_multisig::<MinPk, _>);
+            impersonator(seed, bls12381_multisig::<MinSig, _>);
+            impersonator(seed, ed25519);
         }
     }
 
@@ -2900,11 +2898,11 @@ mod tests {
     #[ignore]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer(seed, bls_threshold_fixture::<MinPk, _>);
-            reconfigurer(seed, bls_threshold_fixture::<MinSig, _>);
-            reconfigurer(seed, bls_multisig_fixture::<MinPk, _>);
-            reconfigurer(seed, bls_multisig_fixture::<MinSig, _>);
-            reconfigurer(seed, ed25519_fixture);
+            reconfigurer(seed, bls12381_threshold::<MinPk, _>);
+            reconfigurer(seed, bls12381_threshold::<MinSig, _>);
+            reconfigurer(seed, bls12381_multisig::<MinPk, _>);
+            reconfigurer(seed, bls12381_multisig::<MinSig, _>);
+            reconfigurer(seed, ed25519);
         }
     }
 
@@ -3073,11 +3071,11 @@ mod tests {
     #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller(seed, bls_threshold_fixture::<MinPk, _>);
-            nuller(seed, bls_threshold_fixture::<MinSig, _>);
-            nuller(seed, bls_multisig_fixture::<MinPk, _>);
-            nuller(seed, bls_multisig_fixture::<MinSig, _>);
-            nuller(seed, ed25519_fixture);
+            nuller(seed, bls12381_threshold::<MinPk, _>);
+            nuller(seed, bls12381_threshold::<MinSig, _>);
+            nuller(seed, bls12381_multisig::<MinPk, _>);
+            nuller(seed, bls12381_multisig::<MinSig, _>);
+            nuller(seed, ed25519);
         }
     }
 
@@ -3229,11 +3227,11 @@ mod tests {
     #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated(seed, bls_threshold_fixture::<MinPk, _>);
-            outdated(seed, bls_threshold_fixture::<MinSig, _>);
-            outdated(seed, bls_multisig_fixture::<MinPk, _>);
-            outdated(seed, bls_multisig_fixture::<MinSig, _>);
-            outdated(seed, ed25519_fixture);
+            outdated(seed, bls12381_threshold::<MinPk, _>);
+            outdated(seed, bls12381_threshold::<MinSig, _>);
+            outdated(seed, bls12381_multisig::<MinPk, _>);
+            outdated(seed, bls12381_multisig::<MinSig, _>);
+            outdated(seed, ed25519);
         }
     }
 
@@ -3373,32 +3371,32 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_1k_bls_threshold_min_pk() {
-        run_1k(bls_threshold_fixture::<MinPk, _>);
+    fn test_1k_bls12381_threshold_min_pk() {
+        run_1k(bls12381_threshold::<MinPk, _>);
     }
 
     #[test_traced]
     #[ignore]
-    fn test_1k_bls_threshold_min_sig() {
-        run_1k(bls_threshold_fixture::<MinSig, _>);
+    fn test_1k_bls12381_threshold_min_sig() {
+        run_1k(bls12381_threshold::<MinSig, _>);
     }
 
     #[test_traced]
     #[ignore]
-    fn test_1k_bls_multisig_min_pk() {
-        run_1k(bls_multisig_fixture::<MinPk, _>);
+    fn test_1k_bls12381_multisig_min_pk() {
+        run_1k(bls12381_multisig::<MinPk, _>);
     }
 
     #[test_traced]
     #[ignore]
-    fn test_1k_bls_multisig_min_sig() {
-        run_1k(bls_multisig_fixture::<MinSig, _>);
+    fn test_1k_bls12381_multisig_min_sig() {
+        run_1k(bls12381_multisig::<MinSig, _>);
     }
 
     #[test_traced]
     #[ignore]
     fn test_1k_ed25519() {
-        run_1k(ed25519_fixture);
+        run_1k(ed25519);
     }
 
     fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
@@ -3536,11 +3534,11 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        children_shutdown_on_engine_abort(bls_threshold_fixture::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls_threshold_fixture::<MinSig, _>);
-        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinPk, _>);
-        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinSig, _>);
-        children_shutdown_on_engine_abort(ed25519_fixture);
+        children_shutdown_on_engine_abort(bls12381_threshold::<MinPk, _>);
+        children_shutdown_on_engine_abort(bls12381_threshold::<MinSig, _>);
+        children_shutdown_on_engine_abort(bls12381_multisig::<MinPk, _>);
+        children_shutdown_on_engine_abort(bls12381_multisig::<MinSig, _>);
+        children_shutdown_on_engine_abort(ed25519);
     }
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
@@ -3727,11 +3725,11 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering(bls_threshold_fixture::<MinPk, _>);
-        attributable_reporter_filtering(bls_threshold_fixture::<MinSig, _>);
-        attributable_reporter_filtering(bls_multisig_fixture::<MinPk, _>);
-        attributable_reporter_filtering(bls_multisig_fixture::<MinSig, _>);
-        attributable_reporter_filtering(ed25519_fixture);
+        attributable_reporter_filtering(bls12381_threshold::<MinPk, _>);
+        attributable_reporter_filtering(bls12381_threshold::<MinSig, _>);
+        attributable_reporter_filtering(bls12381_multisig::<MinPk, _>);
+        attributable_reporter_filtering(bls12381_multisig::<MinSig, _>);
+        attributable_reporter_filtering(ed25519);
     }
 
     fn tle<V: Variant>() {
@@ -3756,7 +3754,7 @@ mod tests {
 
             // Register participants
             let (schemes, validators, signing_schemes, _) =
-                bls_threshold_fixture::<V, _>(&mut context, n);
+                bls12381_threshold::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators

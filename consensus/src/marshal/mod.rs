@@ -274,7 +274,7 @@ mod tests {
     fn setup_validators_and_shares(
         context: &mut deterministic::Context,
     ) -> (Vec<E>, Vec<K>, Vec<S>, S) {
-        simplex::mocks::fixtures::bls_threshold_fixture::<V, _>(context, NUM_VALIDATORS)
+        simplex::mocks::fixtures::bls12381_threshold::<V, _>(context, NUM_VALIDATORS)
     }
 
     async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {

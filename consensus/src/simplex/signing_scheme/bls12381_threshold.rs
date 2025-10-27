@@ -615,7 +615,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::bls_threshold_fixture,
+            mocks::fixtures::bls12381_threshold,
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
@@ -641,7 +641,7 @@ mod tests {
 
     fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Scheme<V>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let (_, _, schemes, verifier) = bls_threshold_fixture::<V, _>(&mut rng, n);
+        let (_, _, schemes, verifier) = bls12381_threshold::<V, _>(&mut rng, n);
 
         (schemes, verifier)
     }

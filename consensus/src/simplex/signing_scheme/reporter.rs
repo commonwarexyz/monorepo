@@ -116,7 +116,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{bls_threshold_fixture, ed25519_fixture},
+            mocks::fixtures::{bls12381_threshold, ed25519},
             signing_scheme::Scheme,
             types::{Notarization, Notarize, Proposal, VoteContext},
         },
@@ -170,7 +170,7 @@ mod tests {
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
         let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -201,7 +201,7 @@ mod tests {
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
         let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 
@@ -239,7 +239,7 @@ mod tests {
     fn test_certificates_always_reported() {
         // Certificates should always be reported, even for non-attributable schemes
         let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
+        let (_, _, schemes, verifier) = bls12381_threshold::<MinPk, _>(&mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -288,7 +288,7 @@ mod tests {
     fn test_non_attributable_filters_peer_activities() {
         // Non-attributable schemes (like BLS threshold) must filter peer per-validator activities
         let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = bls_threshold_fixture::<MinPk, _>(&mut rng, 4);
+        let (_, _, schemes, verifier) = bls12381_threshold::<MinPk, _>(&mut rng, 4);
 
         assert!(
             !verifier.is_attributable(),
@@ -323,7 +323,7 @@ mod tests {
     fn test_attributable_scheme_reports_peer_activities() {
         // Ed25519 (attributable) should report peer per-validator activities
         let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, 4);
+        let (_, _, schemes, verifier) = ed25519(&mut rng, 4);
 
         assert!(verifier.is_attributable(), "Ed25519 must be attributable");
 

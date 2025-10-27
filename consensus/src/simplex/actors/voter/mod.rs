@@ -50,9 +50,7 @@ mod tests {
         simplex::{
             actors::{batcher, resolver},
             mocks,
-            mocks::fixtures::{
-                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
-            },
+            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -367,11 +365,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls_threshold_fixture::<MinPk, _>);
-        stale_backfill(bls_threshold_fixture::<MinSig, _>);
-        stale_backfill(bls_multisig_fixture::<MinPk, _>);
-        stale_backfill(bls_multisig_fixture::<MinSig, _>);
-        stale_backfill(ed25519_fixture);
+        stale_backfill(bls12381_threshold::<MinPk, _>);
+        stale_backfill(bls12381_threshold::<MinSig, _>);
+        stale_backfill(bls12381_multisig::<MinPk, _>);
+        stale_backfill(bls12381_multisig::<MinSig, _>);
+        stale_backfill(ed25519);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -683,11 +681,11 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinSig, _>);
-        append_old_interesting_view(ed25519_fixture);
+        append_old_interesting_view(bls12381_threshold::<MinPk, _>);
+        append_old_interesting_view(bls12381_threshold::<MinSig, _>);
+        append_old_interesting_view(bls12381_multisig::<MinPk, _>);
+        append_old_interesting_view(bls12381_multisig::<MinSig, _>);
+        append_old_interesting_view(ed25519);
     }
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
@@ -834,10 +832,10 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519_fixture);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinSig, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519);
     }
 }
