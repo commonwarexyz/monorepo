@@ -35,7 +35,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -51,21 +51,17 @@ use std::{
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
         /// Participant set's public identities.
-        participants: Ordered<P>,
+        participants: OrderedAssociated<P, V::Public>,
         /// Aggregate public identity shared by the committee.
         identity: V::Public,
-        /// Evaluated public polynomial for each participant index.
-        polynomial: Vec<V::Public>,
         /// Local share used to author partial signatures.
         share: Share,
     },
     Verifier {
         /// Participant set's public identities.
-        participants: Ordered<P>,
+        participants: OrderedAssociated<P, V::Public>,
         /// Aggregate public identity shared by the committee.
         identity: V::Public,
-        /// Evaluated public polynomial for each participant index.
-        polynomial: Vec<V::Public>,
     },
     CertificateVerifier {
         /// Participant set's public identities.
@@ -90,14 +86,15 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let participants = participants
+            .into_iter()
+            .zip(polynomial)
+            .collect::<OrderedAssociated<_, _>>();
 
-        if polynomial
-            .get(share.index as usize)
-            .is_some_and(|p| share.public::<V>() == *p)
-        {
+        let public_key = share.public::<V>();
+        if participants.values().iter().any(|p| p == &public_key) {
             Self::Signer {
                 participants,
-                polynomial,
                 identity,
                 share,
             }
@@ -105,7 +102,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             Self::Verifier {
                 participants,
                 identity,
-                polynomial,
             }
         }
     }
@@ -120,11 +116,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let participants = participants
+            .into_iter()
+            .zip(polynomial)
+            .collect::<OrderedAssociated<_, _>>();
 
         Self::Verifier {
             participants,
             identity,
-            polynomial,
         }
     }
 
@@ -171,8 +170,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Evaluated public polynomial used to validate partial signatures.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
-            Scheme::Signer { polynomial, .. } => polynomial,
-            Scheme::Verifier { polynomial, .. } => polynomial,
+            Scheme::Signer { participants, .. } => participants.values(),
+            Scheme::Verifier { participants, .. } => participants.values(),
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -394,9 +393,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let polynomial = self.polynomial();
-
-        let Some(evaluated) = polynomial.get(vote.signer as usize) else {
+        let Some(evaluated) = self.polynomial().get(vote.signer as usize) else {
             return false;
         };
 
@@ -432,8 +429,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let polynomial = self.polynomial();
-
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
@@ -451,6 +446,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             })
             .unzip();
 
+        let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
         if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
