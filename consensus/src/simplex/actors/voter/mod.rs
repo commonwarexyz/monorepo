@@ -141,7 +141,12 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
@@ -403,7 +408,12 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
             let private_key = schemes[0].clone();
@@ -709,7 +719,11 @@ mod tests {
             network.start();
 
             // Get participants
-            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {

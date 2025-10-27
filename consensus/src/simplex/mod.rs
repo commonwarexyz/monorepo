@@ -405,7 +405,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -648,8 +653,12 @@ mod tests {
             network.start();
 
             // Register participants (active)
-            let (mut schemes, validators, signing_schemes, observer) =
-                fixture(&mut context, n_active);
+            let Fixture {
+                private_keys: mut schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                verifier: observer,
+            } = fixture(&mut context, n_active);
 
             // Add observer (no share)
             let scheme_observer = ed25519::PrivateKey::from_seed(n_active as u64);
@@ -799,7 +808,12 @@ mod tests {
 
         // Create validator keys
         let mut rng = StdRng::seed_from_u64(0);
-        let (schemes, validators, signing_schemes, _) = fixture(&mut rng, n);
+        let Fixture {
+            private_keys: schemes,
+            public_keys: validators,
+            schemes: signing_schemes,
+            ..
+        } = fixture(&mut rng, n);
 
         loop {
             let rng = rng.clone();
@@ -992,7 +1006,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1245,7 +1264,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1498,7 +1522,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1673,7 +1702,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1874,7 +1908,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2071,7 +2110,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2263,7 +2307,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2443,7 +2492,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2608,7 +2662,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2772,7 +2831,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2935,7 +2999,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3108,7 +3177,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3262,7 +3336,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3422,7 +3501,11 @@ mod tests {
             network.start();
 
             // Register a single participant
-            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -3564,7 +3647,12 @@ mod tests {
             network.start();
 
             // Register participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                private_keys: schemes,
+                public_keys: validators,
+                schemes: signing_schemes,
+                ..
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators

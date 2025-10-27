@@ -13,7 +13,12 @@ use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
-pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>, S);
+pub struct Fixture<S> {
+    pub private_keys: Vec<ed25519::PrivateKey>,
+    pub public_keys: Vec<ed25519::PublicKey>,
+    pub schemes: Vec<S>,
+    pub verifier: S,
+}
 
 /// Generates ed25519 participants.
 fn ed25519_participants<R>(
@@ -34,8 +39,7 @@ where
 
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
 ///
-/// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes, ed25519_scheme_verifier)`
-/// where all vectors share the same ordering.
+/// Returns a [`Fixture`] whose keys and scheme instances share a consistent ordering.
 pub fn ed25519<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
@@ -53,13 +57,17 @@ where
         .collect();
     let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 
-    (ed25519_keys, ed25519_public.into(), schemes, verifier)
+    Fixture {
+        private_keys: ed25519_keys,
+        public_keys: ed25519_public.into(),
+        schemes,
+        verifier,
+    }
 }
 
 /// Builds ed25519 identities and matching BLS multisig schemes for tests.
 ///
-/// Returns `(ed25519_private_keys, ed25519_public_keys, bls_multisig_schemes, bls_multisig_scheme_verifier)`
-/// where all vectors share the same ordering.
+/// Returns a [`Fixture`] whose keys and scheme instances share a consistent ordering.
 pub fn bls12381_multisig<V, R>(
     rng: &mut R,
     n: u32,
@@ -92,13 +100,17 @@ where
         .collect();
     let verifier = bls12381_multisig::Scheme::verifier(participants);
 
-    (ed25519_keys, ed25519_public, schemes, verifier)
+    Fixture {
+        private_keys: ed25519_keys,
+        public_keys: ed25519_public,
+        schemes,
+        verifier,
+    }
 }
 
 /// Builds ed25519 identities and matching BLS threshold schemes for tests.
 ///
-/// Returns `(ed25519_private_keys, ed25519_public_keys, bls_threshold_schemes, bls_threshold_scheme_verifier)`
-/// where all vectors share the same ordering.
+/// Returns a [`Fixture`] whose keys and scheme instances share a consistent ordering.
 pub fn bls12381_threshold<V, R>(
     rng: &mut R,
     n: u32,
@@ -123,5 +135,10 @@ where
         .collect();
     let verifier = bls12381_threshold::Scheme::verifier(participants, &polynomial.clone());
 
-    (ed25519_keys, ed25519_public, schemes, verifier)
+    Fixture {
+        private_keys: ed25519_keys,
+        public_keys: ed25519_public,
+        schemes,
+        verifier,
+    }
 }
