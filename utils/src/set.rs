@@ -329,13 +329,7 @@ impl<K: Read, V: Read> Read for OrderedWrapped<K, V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let (range_cfg, key_cfg, value_cfg) = cfg;
         let keys = Ordered::<K>::read_cfg(buf, &(*range_cfg, key_cfg.clone()))?;
-        let values = Vec::<V>::read_cfg(buf, &(*range_cfg, value_cfg.clone()))?;
-        if keys.len() != values.len() {
-            return Err(commonware_codec::Error::Invalid(
-                "utils::set::OrderedWrapped",
-                "decoded keys and values length mismatch",
-            ));
-        }
+        let values = Vec::<V>::read_cfg(buf, &(RangeCfg::exact(keys.len()), value_cfg.clone()))?;
         Ok(Self { keys, values })
     }
 }
