@@ -26,7 +26,7 @@ use std::{
 
 const NUM_ELEMENTS: u64 = 1_000;
 const NUM_OPERATIONS: u64 = 10_000;
-const COMMITS_PER_ITERATION: u64 = 25;
+const COMMITS_PER_ITERATION: u64 = 100;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
