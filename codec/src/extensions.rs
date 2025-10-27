@@ -28,7 +28,7 @@ impl<T: Read<Cfg = ()>> ReadExt for T {}
 pub trait IsUnit: Default {}
 
 impl IsUnit for () {}
-impl<T> IsUnit for [T; 0] {}
+impl<T: IsUnit, const N: usize> IsUnit for [T; N] where [T; N]: Default {}
 
 // Generate `IsUnit` implementations for tuples up to 12 elements.
 macro_rules! impl_is_unit_for_tuple {
