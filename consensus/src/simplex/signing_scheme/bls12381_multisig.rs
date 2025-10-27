@@ -25,7 +25,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedWrapped};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
@@ -33,9 +33,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     /// Participant set's public identities.
-    participants: Ordered<P>,
-    /// Participant set used for consensus signer indexing and verification.
-    consensus: Vec<V::Public>,
+    participants: OrderedWrapped<P, V::Public>,
     /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, Private)>,
 }
@@ -50,22 +48,15 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
-    pub fn new(mut participants: Vec<(P, V::Public)>, private_key: Private) -> Self {
-        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
-
-        let len = participants.len();
-        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
-        let participants = Ordered::from(participants);
-        assert_eq!(participants.len(), len, "duplicate participant keys");
-
-        let signer = consensus
+    pub fn new(participants: OrderedWrapped<P, V::Public>, private_key: Private) -> Self {
+        let signer = participants
+            .values()
             .iter()
-            .position(|p| *p == compute_public::<V>(&private_key))
+            .position(|p| p == &compute_public::<V>(&private_key))
             .map(|index| (index as u32, private_key));
 
         Self {
             participants,
-            consensus,
             signer,
         }
     }
@@ -75,17 +66,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Participants are provided as tuples pairing identity keys with consensus keys.
     /// The identity key (first element) is used for committee ordering and indexing,
     /// while the consensus key (second element) is the BLS public key used for verification.
-    pub fn verifier(mut participants: Vec<(P, V::Public)>) -> Self {
-        participants.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
-
-        let len = participants.len();
-        let (participants, consensus): (Vec<_>, Vec<_>) = participants.into_iter().unzip();
-        let participants = Ordered::from(participants);
-        assert_eq!(participants.len(), len, "duplicate participant keys");
-
+    pub fn verifier(participants: OrderedWrapped<P, V::Public>) -> Self {
         Self {
             participants,
-            consensus,
             signer: None,
         }
     }
@@ -168,7 +151,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.consensus.get(vote.signer as usize) else {
+        let Some(public_key) = self.participants.value(vote.signer as usize) else {
             return false;
         };
 
@@ -199,7 +182,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         let mut publics = Vec::new();
         let mut signatures = Vec::new();
         for vote in votes.into_iter() {
-            let Some(public_key) = self.consensus.get(vote.signer as usize) else {
+            let Some(public_key) = self.participants.value(vote.signer as usize) else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -293,7 +276,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.consensus.get(signer as usize) else {
+            let Some(public_key) = self.participants.value(signer as usize) else {
                 return false;
             };
 
@@ -373,7 +356,7 @@ mod tests {
         n: usize,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
-        Vec<(ed25519::PublicKey, V::Public)>,
+        OrderedWrapped<ed25519::PublicKey, V::Public>,
     ) {
         let bls_keys = generate_private_keys(n);
         let bls_public = bls_public_keys::<V>(&bls_keys);
@@ -386,7 +369,7 @@ mod tests {
         let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
 
         // Create participants as tuples (ed25519::PublicKey, V::Public)
-        let participants: Vec<_> = ed25519_public
+        let participants: OrderedWrapped<_, _> = ed25519_public
             .iter()
             .zip(bls_public.iter())
             .map(|(p, bls)| (p.clone(), *bls))
