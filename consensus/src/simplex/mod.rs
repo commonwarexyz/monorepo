@@ -652,16 +652,15 @@ mod tests {
 
             // Register participants (active)
             let Fixture {
-                mut private_keys,
                 public_keys,
                 schemes,
                 verifier,
+                ..
             } = fixture(&mut context, n_active);
 
             // Add observer (no share)
             let private_key_observer = ed25519::PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
-            private_keys.push(private_key_observer);
 
             // Register all (including observer) with the network
             let mut all_validators = public_keys.clone();

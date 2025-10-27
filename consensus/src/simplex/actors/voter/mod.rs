@@ -715,16 +715,16 @@ mod tests {
 
             // Get participants
             let Fixture {
-                public_keys: validators,
-                schemes: signing_schemes,
+                public_keys,
+                schemes,
                 ..
             } = fixture(&mut context, n);
 
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing_schemes[0].clone(),
+                participants: public_keys.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -732,7 +732,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validators[0].clone(),
+                participant: public_keys[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -742,8 +742,8 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                scheme: signing_schemes[0].clone(),
-                blocker: oracle.control(validators[0].clone()),
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(public_keys[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -768,7 +768,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
-            let validator = validators[0].clone();
+            let validator = public_keys[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -807,7 +807,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;
