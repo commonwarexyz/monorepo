@@ -62,10 +62,10 @@ pub trait Syncable {
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
 
     /// Get the operation count of the database.
-    fn op_count(&self) -> Location;
+    fn op_count(&self) -> impl Future<Output = Result<Location, adb::Error>> + Send;
 
     /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound(&self) -> Location;
+    fn lower_bound(&self) -> impl Future<Output = Result<Location, adb::Error>> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(

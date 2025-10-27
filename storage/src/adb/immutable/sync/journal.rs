@@ -1,97 +1,142 @@
-//! Sync-facing journal wrapper for the Immutable database.
-//!
-//! - Sync engine uses `size` and `append` to update the journal.
-//! - This wrapper tracks a synthetic global `size` (next append location) and maps it to
-//!   sections via `items_per_section` when appending.
-//! - Callers must prepare the variable journal (e.g., `init_sync`) and compute the initial
-//!   `size` from a replay that considers only `[range.start, range.end)`.
-//! - No pruning/bound checks are done here; the sync engine handles range validation.
-
 use crate::{
-    adb::{operation::variable::Operation, sync},
-    journal::variable,
+    adb,
+    journal::{
+        contiguous::{self, Variable as ContiguousVariable},
+        variable,
+    },
+    mmr::Location,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
-use commonware_utils::Array;
+use core::ops::Range;
 use std::num::NonZeroU64;
+use tracing::debug;
 
-/// Wraps a [variable::Journal] to provide a sync-compatible interface.
-/// Namely, it provides a `size` method that returns the number of operations in the journal,
-/// and an `append` method that appends an operation to the journal. These are used by the
-/// sync engine to populate the journal with data from the target database.
-pub struct Journal<E, K, V>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    /// Underlying variable journal storing the operations.
-    inner: variable::Journal<E, Operation<K, V>>,
-
-    /// Logical operations per storage section.
+/// Initialize a contiguous Variable journal for use in state sync.
+///
+/// The bounds are item locations (not section numbers). This function prepares the
+/// on-disk journal so that subsequent appends go to the correct physical location for the
+/// requested range.
+///
+/// Behavior by existing on-disk state:
+/// - Fresh (no data): returns an empty journal.
+/// - Stale (all data strictly before `range.start`): destroys existing data and returns an
+///   empty journal.
+/// - Overlap within [`range.start`, `range.end`]:
+///   - Prunes to `range.start`
+/// - Unexpected data beyond `range.end`: returns [adb::Error::UnexpectedData].
+///
+/// # Arguments
+/// - `context`: storage context
+/// - `cfg`: journal configuration (partition will have `_data` and `_locations` suffixes added)
+/// - `items_per_section`: number of items per section
+/// - `range`: range of item locations to retain
+///
+/// # Returns
+/// A contiguous journal ready for sync operations. The journal's size will be within the range.
+///
+/// # Errors
+/// Returns [adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+pub(super) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
+    context: E,
+    cfg: variable::Config<V::Cfg>,
+    range: Range<u64>,
     items_per_section: NonZeroU64,
+) -> Result<ContiguousVariable<E, V>, adb::Error> {
+    assert!(!range.is_empty(), "range must not be empty");
 
-    /// Logical next append location (number of ops present).
-    /// Invariant: computed by caller so `range.start <= size <= range.end`
-    /// for the sync range.
-    size: u64,
-}
+    debug!(
+        range.start,
+        range.end,
+        items_per_section = items_per_section.get(),
+        "initializing contiguous variable journal for sync"
+    );
 
-impl<E, K, V> Journal<E, K, V>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    /// Create a new sync-compatible [Journal].
-    ///
-    /// # Arguments
-    /// * `inner` - The wrapped [variable::Journal], whose logical last operation location is
-    ///   `size - 1`.
-    /// * `items_per_section` - Operations per section.
-    /// * `size` - Logical next append location to report.
-    pub fn new(
-        inner: variable::Journal<E, Operation<K, V>>,
-        items_per_section: NonZeroU64,
-        size: u64,
-    ) -> Self {
-        Self {
-            inner,
+    // Initialize contiguous journal
+    let mut journal = ContiguousVariable::init(
+        context.with_label("journal"),
+        contiguous::Config {
+            data_partition: format!("{}_data", cfg.partition),
+            offsets_partition: format!("{}_offsets", cfg.partition),
             items_per_section,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config.clone(),
+            buffer_pool: cfg.buffer_pool.clone(),
+            write_buffer: cfg.write_buffer,
+        },
+    )
+    .await?;
+
+    let size = journal.size().await?;
+
+    // No existing data - initialize at the start of the sync range if needed
+    if size == 0 {
+        if range.start == 0 {
+            debug!("no existing journal data, returning empty journal");
+            return Ok(journal);
+        } else {
+            debug!(
+                range.start,
+                "no existing journal data, initializing at sync range start"
+            );
+            journal.destroy().await?;
+            return Ok(ContiguousVariable::init_at_size(
+                context,
+                contiguous::Config {
+                    data_partition: format!("{}_data", cfg.partition),
+                    offsets_partition: format!("{}_offsets", cfg.partition),
+                    items_per_section,
+                    compression: cfg.compression,
+                    codec_config: cfg.codec_config,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.write_buffer,
+                },
+                range.start,
+            )
+            .await?);
+        }
+    }
+
+    // Check if data exceeds the sync range
+    if size > range.end {
+        return Err(adb::Error::UnexpectedData(Location::new_unchecked(size)));
+    }
+
+    // If all existing data is before our sync range, destroy and recreate fresh
+    if size <= range.start {
+        // All data is stale (ends at or before range.start)
+        debug!(
             size,
+            range.start, "existing journal data is stale, re-initializing at start position"
+        );
+        journal.destroy().await?;
+        return Ok(ContiguousVariable::init_at_size(
+            context,
+            contiguous::Config {
+                data_partition: format!("{}_data", cfg.partition),
+                offsets_partition: format!("{}_offsets", cfg.partition),
+                items_per_section,
+                compression: cfg.compression,
+                codec_config: cfg.codec_config,
+                buffer_pool: cfg.buffer_pool,
+                write_buffer: cfg.write_buffer,
+            },
+            range.start,
+        )
+        .await?);
+    }
+
+    // Prune to lower bound if needed
+    let oldest = journal.oldest_retained_pos().await?;
+    if let Some(oldest_pos) = oldest {
+        if oldest_pos < range.start {
+            debug!(
+                oldest_pos,
+                range.start, "pruning journal to sync range start"
+            );
+            journal.prune(range.start).await?;
         }
     }
 
-    /// Return the inner [variable::Journal].
-    pub fn into_inner(self) -> variable::Journal<E, Operation<K, V>> {
-        self.inner
-    }
-}
-
-impl<E, K, V> sync::Journal for Journal<E, K, V>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    type Op = Operation<K, V>;
-    type Error = crate::journal::Error;
-
-    async fn size(&self) -> Result<u64, Self::Error> {
-        Ok(self.size)
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        let section = self.size / self.items_per_section;
-        self.inner.append(section, op).await?;
-        self.size += 1;
-        if self.size > 0 && self.size % self.items_per_section == 0 {
-            // Sync this full section before appending to the next section.
-            // TODO(#1718): Migrate to the new contiguous variable journal type, which will handle section
-            // calculation and syncing internally.
-            self.inner.sync(section).await?;
-        }
-        Ok(())
-    }
+    Ok(journal)
 }
