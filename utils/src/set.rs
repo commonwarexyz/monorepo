@@ -167,6 +167,9 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
 ///
 /// Like [`Ordered`], the contained [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the
 /// inner [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
+///
+/// Consumers that only need the ordered keys can treat an [`OrderedAssociated`] as an
+/// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct OrderedAssociated<K, V> {
     keys: Ordered<K>,
