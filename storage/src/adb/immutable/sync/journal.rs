@@ -56,8 +56,7 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
     let mut journal = ContiguousVariable::init(
         context.with_label("journal"),
         contiguous::Config {
-            data_partition: format!("{}_data", cfg.partition),
-            offsets_partition: format!("{}_offsets", cfg.partition),
+            partition: cfg.partition.clone(),
             items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config.clone(),
@@ -83,8 +82,7 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
             return Ok(ContiguousVariable::init_at_size(
                 context,
                 contiguous::Config {
-                    data_partition: format!("{}_data", cfg.partition),
-                    offsets_partition: format!("{}_offsets", cfg.partition),
+                    partition: cfg.partition.clone(),
                     items_per_section,
                     compression: cfg.compression,
                     codec_config: cfg.codec_config,
@@ -113,8 +111,7 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
         return Ok(ContiguousVariable::init_at_size(
             context,
             contiguous::Config {
-                data_partition: format!("{}_data", cfg.partition),
-                offsets_partition: format!("{}_offsets", cfg.partition),
+                partition: cfg.partition,
                 items_per_section,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,

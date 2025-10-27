@@ -67,6 +67,4 @@ pub enum Error {
     DecompressionFailed,
     #[error("corruption detected: {0}")]
     Corruption(String),
-    #[error("invalid configuration: {0}")]
-    InvalidConfiguration(String),
 }

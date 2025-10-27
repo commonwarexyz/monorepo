@@ -215,19 +215,14 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         cfg: Config<V::Cfg>,
         start_size: u64,
     ) -> Result<Self, Error> {
-        // Validate that partitions are different to prevent blob name collisions
-        if cfg.data_partition == cfg.offsets_partition {
-            return Err(Error::InvalidConfiguration(format!(
-                "partition and offsets_partition must be different: both are '{}'",
-                cfg.data_partition
-            )));
-        }
+        let data_partition = cfg.data_partition();
+        let offsets_partition = cfg.offsets_partition();
 
         // Initialize empty data journal
         let data = variable::Journal::init(
             context.clone(),
             variable::Config {
-                partition: cfg.data_partition,
+                partition: data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
@@ -240,7 +235,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         let offsets = crate::adb::any::fixed::sync::init_journal_at_size(
             context,
             fixed::Config {
-                partition: cfg.offsets_partition,
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
@@ -1476,8 +1471,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_zero".to_string(),
-                offsets_partition: "init_at_size_zero_offsets".to_string(),
+                partition: "init_at_size_zero".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1510,8 +1504,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_boundary".to_string(),
-                offsets_partition: "init_at_size_boundary_offsets".to_string(),
+                partition: "init_at_size_boundary".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1550,8 +1543,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_mid".to_string(),
-                offsets_partition: "init_at_size_mid_offsets".to_string(),
+                partition: "init_at_size_mid".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1585,8 +1577,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_persist".to_string(),
-                offsets_partition: "init_at_size_persist_offsets".to_string(),
+                partition: "init_at_size_persist".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1637,8 +1628,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_large".to_string(),
-                offsets_partition: "init_at_size_large_offsets".to_string(),
+                partition: "init_at_size_large".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1669,8 +1659,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                data_partition: "init_at_size_prune".to_string(),
-                offsets_partition: "init_at_size_prune_offsets".to_string(),
+                partition: "init_at_size_prune".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),

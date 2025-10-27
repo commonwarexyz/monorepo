@@ -41,11 +41,8 @@ pub struct Config<T: Translator, C> {
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the data of the (pruned) log of operations.
-    pub log_data_partition: String,
-
-    /// The name of the [RStorage] partition used to persist the offsets index of the log.
-    pub log_offsets_partition: String,
+    /// Base partition name for the log. Sub-partitions will be created by appending suffixes.
+    pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
@@ -143,8 +140,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         let mut log = contiguous::Variable::init(
             context.with_label("log"),
             contiguous::Config {
-                data_partition: cfg.log_data_partition,
-                offsets_partition: cfg.log_offsets_partition,
+                partition: cfg.log_partition,
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
@@ -666,8 +662,7 @@ pub(super) mod test {
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_data_partition: format!("log_data_{suffix}"),
-            log_offsets_partition: format!("log_offsets_{suffix}"),
+            log_partition: format!("log_{suffix}"),
             log_items_per_section: NZU64!(ITEMS_PER_SECTION),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),

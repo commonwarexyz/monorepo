@@ -37,7 +37,7 @@ where
         init_journal(
             context.with_label("log"),
             variable::Config {
-                partition: config.log_data_partition.clone(),
+                partition: config.log_partition.clone(),
                 compression: config.log_compression,
                 codec_config: config.log_codec_config.clone(),
                 write_buffer: config.log_write_buffer,
@@ -222,8 +222,7 @@ mod tests {
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_data_partition: format!("log_data_{suffix}"),
-            log_offsets_partition: format!("log_offsets_{suffix}"),
+            log_partition: format!("log_{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: (),
