@@ -426,7 +426,7 @@ mod tests {
             let mut engine_handlers = Vec::new();
             for (idx, validator) in public_keys.iter().enumerate() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator-{}", validator));
+                let context = context.with_label(&format!("validator-{}", *validator));
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -477,7 +477,7 @@ mod tests {
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
-                    .remove(&validator)
+                    .remove(validator)
                     .expect("validator should be registered");
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
