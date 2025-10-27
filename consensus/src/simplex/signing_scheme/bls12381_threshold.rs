@@ -617,6 +617,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simplex::mocks::fixtures::bls_threshold_fixture;
     use crate::{
         simplex::{
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
@@ -624,35 +625,25 @@ mod tests {
         },
         types::Round,
     };
-    use crate::simplex::mocks::fixtures::bls_threshold_fixture;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::{
-            primitives::{
-                ops::partial_sign_message,
-                variant::{MinPk, MinSig, Variant},
-            },
+        bls12381::primitives::{
+            ops::partial_sign_message,
+            variant::{MinPk, MinSig, Variant},
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256, Signer,
+        Hasher, Sha256,
     };
     use commonware_utils::quorum;
-    use rand::{
-        rngs::StdRng,
-        thread_rng, SeedableRng,
-    };
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
     type Scheme<V> = super::Scheme<ed25519::PublicKey, V>;
     type Signature<V> = super::Signature<V>;
 
-    fn setup_signers<V: Variant>(
-        n: u32,
-        seed: u64,
-    ) -> (Vec<Scheme<V>>, Scheme<V>) {
-        assert!(n >= 2);
+    fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Scheme<V>) {
         let mut rng = StdRng::seed_from_u64(seed);
         let (_, _, schemes, verifier) = bls_threshold_fixture::<V, _>(&mut rng, n);
 
@@ -930,16 +921,14 @@ mod tests {
 
         let mut corrupted = certificate.clone();
         corrupted.vote_signature = corrupted.seed_signature;
-        assert!(
-            !verifier.verify_certificate(
-                &mut thread_rng(),
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-                &corrupted,
-            )
-        );
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &corrupted,
+        ));
     }
 
     #[test]
@@ -1373,13 +1362,13 @@ mod tests {
         let mut corrupted = certificate.clone();
         corrupted.seed_signature = corrupted.vote_signature;
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-                &mut thread_rng(),
-                NAMESPACE,
-                VoteContext::Nullify {
-                    round: proposal.round,
-                },
-                &corrupted,
-            ));
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+            &corrupted,
+        ));
     }
 
     #[test]

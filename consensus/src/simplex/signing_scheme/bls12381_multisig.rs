@@ -314,6 +314,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simplex::mocks::fixtures::bls_multisig_fixture;
     use crate::{
         simplex::{
             signing_scheme::Scheme as _,
@@ -321,15 +322,15 @@ mod tests {
         },
         types::Round,
     };
-    use crate::simplex::mocks::fixtures::bls_multisig_fixture;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
+            group::Element,
             variant::{MinPk, MinSig, Variant},
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256, Signer,
+        Hasher, Sha256,
     };
     use commonware_utils::quorum;
     use rand::{
@@ -339,15 +340,15 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"bls-multisig-signing-scheme";
 
-    #[allow(clippy::type_complexity)]
-    fn signing_schemes<V: Variant>(
-        n: usize,
+    fn setup_signers<V: Variant>(
+        n: u32,
+        seed: u64,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
         OrderedAssociated<ed25519::PublicKey, V::Public>,
     ) {
-        let mut rng = StdRng::seed_from_u64(42);
-        let (_, _, schemes, verifier) = bls_multisig_fixture::<V, _>(&mut rng, n as u32);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let (_, _, schemes, verifier) = bls_multisig_fixture::<V, _>(&mut rng, n);
 
         let participants = schemes
             .first()
@@ -370,7 +371,7 @@ mod tests {
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
+        let (schemes, _) = setup_signers::<V>(4, 42);
         let scheme = &schemes[0];
 
         let proposal = sample_proposal(0, 2, 1);
@@ -430,7 +431,7 @@ mod tests {
     }
 
     fn verifier_cannot_sign<V: Variant>() {
-        let (_, participants) = signing_schemes::<V>(4);
+        let (_, participants) = setup_signers::<V>(4, 42);
         let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
 
         let proposal = sample_proposal(0, 3, 2);
@@ -454,7 +455,7 @@ mod tests {
     }
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(5);
+        let (schemes, _) = setup_signers::<V>(5, 42);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
@@ -519,7 +520,7 @@ mod tests {
     }
 
     fn assemble_certificate_sorts_signers<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
+        let (schemes, _) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 7, 4);
 
         let votes = [
@@ -566,7 +567,7 @@ mod tests {
     }
 
     fn assemble_certificate_requires_quorum<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
+        let (schemes, _) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 9, 5);
 
         let votes: Vec<_> = schemes
@@ -594,7 +595,7 @@ mod tests {
     }
 
     fn assemble_certificate_rejects_out_of_range_signer<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
+        let (schemes, _) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 13, 7);
 
         let mut votes: Vec<_> = schemes
@@ -623,7 +624,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_corruption<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 15, 8);
 
         let votes: Vec<_> = schemes
@@ -674,7 +675,7 @@ mod tests {
     }
 
     fn certificate_codec_roundtrip<V: Variant>() {
-        let (schemes, _) = signing_schemes::<V>(4);
+        let (schemes, _) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 21, 11);
 
         let votes: Vec<_> = schemes
@@ -707,7 +708,7 @@ mod tests {
     }
 
     fn scheme_clone_and_into_verifier<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
         let clone = schemes[0].clone();
@@ -744,7 +745,7 @@ mod tests {
     }
 
     fn verify_certificate<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
@@ -784,7 +785,7 @@ mod tests {
     }
 
     fn verify_certificates_batch<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal_a = sample_proposal(0, 23, 12);
         let proposal_b = sample_proposal(1, 24, 13);
 
@@ -851,7 +852,7 @@ mod tests {
     }
 
     fn verify_certificates_batch_detects_failure<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal_a = sample_proposal(0, 25, 14);
         let proposal_b = sample_proposal(1, 26, 15);
 
@@ -920,7 +921,7 @@ mod tests {
     }
 
     fn verify_certificate_rejects_sub_quorum<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 17, 9);
 
         let votes: Vec<_> = schemes
@@ -965,7 +966,7 @@ mod tests {
     }
 
     fn verify_certificate_rejects_unknown_signer<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes
@@ -1009,7 +1010,7 @@ mod tests {
     }
 
     fn verify_certificate_rejects_invalid_certificate_signers_size<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 20, 11);
 
         let votes: Vec<_> = schemes
@@ -1064,7 +1065,7 @@ mod tests {
     }
 
     fn certificate_decode_checks_sorted_unique_signers<V: Variant>() {
-        let (schemes, participants) = signing_schemes::<V>(4);
+        let (schemes, participants) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes
