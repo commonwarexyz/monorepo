@@ -42,7 +42,7 @@ use std::{
     fmt::Debug,
 };
 
-/// Signing scheme state for the BLS threshold flow.
+/// State for the BLS12-381 threshold scheme.
 ///
 /// The enum mirrors the roles a node may play: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
@@ -142,6 +142,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
+    /// Returns the ordered set of participant public identity keys managed by the scheme.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
             Scheme::Signer { participants, .. } => participants,
@@ -167,7 +168,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Evaluated public polynomial used to validate partial signatures.
+    /// Returns the evaluated public polynomial for validating partial signatures.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
             Scheme::Signer { participants, .. } => participants.values(),
