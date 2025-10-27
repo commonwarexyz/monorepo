@@ -325,16 +325,16 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, participant) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("participant-{i}")),
                     &mut oracle,
                     p2p::mocks::Coordinator::new(participants.clone()),
-                    validator.clone(),
+                    participant.clone(),
                     schemes[i].clone().into(),
                 )
                 .await;
-                applications.insert(validator.clone(), application);
+                applications.insert(participant.clone(), application);
                 actors.push(actor);
             }
 
@@ -433,12 +433,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, participant) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("participant-{i}")),
                     &mut oracle,
                     p2p::mocks::Coordinator::new(vec![]),
-                    validator.clone(),
+                    participant.clone(),
                     schemes[i].clone().into(),
                 )
                 .await;
@@ -485,12 +485,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, participant) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("participant-{i}")),
                     &mut oracle,
                     p2p::mocks::Coordinator::new(participants.clone()),
-                    validator.clone(),
+                    participant.clone(),
                     schemes[i].clone().into(),
                 )
                 .await;
@@ -557,12 +557,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, participant) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("participant-{i}")),
                     &mut oracle,
                     p2p::mocks::Coordinator::new(participants.clone()),
-                    validator.clone(),
+                    participant.clone(),
                     schemes[i].clone().into(),
                 )
                 .await;
@@ -621,12 +621,12 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, participant) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("participant-{i}")),
                     &mut oracle,
                     p2p::mocks::Coordinator::new(participants.clone()),
-                    validator.clone(),
+                    participant.clone(),
                     schemes[i].clone().into(),
                 )
                 .await;
