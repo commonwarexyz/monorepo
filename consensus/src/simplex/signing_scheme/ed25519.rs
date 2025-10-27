@@ -337,9 +337,9 @@ impl signing_scheme::Scheme for Scheme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::mocks::fixtures::ed25519_fixture;
     use crate::{
         simplex::{
+            mocks::fixtures::ed25519_fixture,
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },

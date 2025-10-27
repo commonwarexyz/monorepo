@@ -315,9 +315,9 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::mocks::fixtures::bls_multisig_fixture;
     use crate::{
         simplex::{
+            mocks::fixtures::bls_multisig_fixture,
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },

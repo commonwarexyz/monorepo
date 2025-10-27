@@ -613,9 +613,9 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::mocks::fixtures::bls_threshold_fixture;
     use crate::{
         simplex::{
+            mocks::fixtures::bls_threshold_fixture,
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
