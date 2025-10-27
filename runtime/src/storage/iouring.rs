@@ -121,8 +121,8 @@ impl crate::Storage for Storage {
             .open(&path)
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
-        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
+        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
         let newly_created = len == 0;
 
         // Create the blob

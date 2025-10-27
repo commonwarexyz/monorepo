@@ -97,8 +97,8 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
+        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
         let newly_created = len == 0;
 
         // Only sync if we created a new file
@@ -108,6 +108,8 @@ impl crate::Storage for Storage {
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
+            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
+            // durably persisted.
             #[cfg(unix)]
             {
                 // Sync the parent directory to ensure the directory entry is durable.
@@ -151,6 +153,8 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
             // Sync the partition directory to ensure the removal is durable.
+            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
+            // durably persisted.
             #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
@@ -159,6 +163,8 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable.
+            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
+            // durably persisted.
             #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
         }
