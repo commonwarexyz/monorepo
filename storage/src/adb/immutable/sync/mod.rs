@@ -116,26 +116,6 @@ where
     }
 }
 
-/// Implement sync::Journal for contiguous::Variable to enable use in sync operations.
-impl<E, K, V> sync::Journal for contiguous::Variable<E, Operation<K, V>>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec + Send,
-{
-    type Op = Operation<K, V>;
-    type Error = crate::journal::Error;
-
-    async fn size(&self) -> Result<u64, Self::Error> {
-        contiguous::Variable::size(self).await
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        contiguous::Variable::append(self, op).await?;
-        Ok(())
-    }
-}
-
 /// Configuration for syncing an [immutable::Immutable] to a target state.
 pub struct Config<E, K, V, T, D, C>
 where

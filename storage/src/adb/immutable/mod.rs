@@ -68,7 +68,13 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticatable key-value database based on an MMR that does not allow updates or deletions
 /// of previously set keys.
-pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Immutable<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec + Send,
+    H: CHasher,
+    T: Translator,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -228,12 +234,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // Get current MMR size
         let mut mmr_leaves = mmr.leaves();
 
-        // Get the start position (oldest retained position) from the log
-        let start_pos = log.oldest_retained_pos().await?.unwrap_or(0);
+        // Get the start location from the log
+        let start_loc = log.oldest_retained_pos().await?.unwrap_or(0);
 
         // The number of operations in the log.
-        let mut log_size = Location::new_unchecked(start_pos);
-        // The position of the first operation to follow the last known commit point.
+        let mut log_size = Location::new_unchecked(start_loc);
+        // The location of the first operation to follow the last known commit point.
         let mut after_last_commit: Option<u64> = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
         let mut uncommitted_ops = Vec::new();
@@ -242,7 +248,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // operations that must be rolled back, and any log operations that need to be re-added to the MMR.
         {
             let stream = log
-                .replay(start_pos, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .replay(start_loc, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
@@ -279,16 +285,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         }
 
         // Rewind the operations log if necessary.
-        if let Some(end_pos) = after_last_commit {
+        if let Some(end_loc) = after_last_commit {
             assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
-                log_size = end_pos,
+                log_size = end_loc,
                 "rewinding over uncommitted operations at end of log"
             );
-            log.rewind(end_pos).await.map_err(Error::Journal)?;
+            log.rewind(end_loc).await.map_err(Error::Journal)?;
             log.sync().await.map_err(Error::Journal)?;
-            log_size = Location::new_unchecked(end_pos);
+            log_size = Location::new_unchecked(end_loc);
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
