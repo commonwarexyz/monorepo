@@ -109,7 +109,7 @@ impl crate::Storage for Storage {
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted.
+            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
             #[cfg(unix)]
             {
                 // Sync the parent directory to ensure the directory entry is durable.
@@ -154,7 +154,7 @@ impl crate::Storage for Storage {
 
             // Sync the partition directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted.
+            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
             #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
@@ -164,7 +164,7 @@ impl crate::Storage for Storage {
 
             // Sync the storage directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted.
+            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
             #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
         }
