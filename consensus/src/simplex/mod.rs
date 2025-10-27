@@ -244,6 +244,10 @@ pub fn select_leader<S, P>(participants: &[P], round: Round, seed: Option<S::See
 where
     S: Scheme,
 {
+    assert!(
+        !participants.is_empty(),
+        "no participants to select leader from"
+    );
     let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
