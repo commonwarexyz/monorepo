@@ -2,7 +2,7 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::set::Ordered;
+use commonware_utils::set::OrderedWrapped;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -105,7 +105,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Ordered<(C, SocketAddr)>) -> Vec<C> {
+    pub fn add_set(&mut self, index: u64, peers: OrderedWrapped<C, SocketAddr>) -> Vec<C> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");
@@ -275,7 +275,8 @@ mod tests {
     };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{set::Ordered, NZU32};
+    use commonware_utils::set::OrderedWrapped;
+    use commonware_utils::NZU32;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -303,10 +304,7 @@ mod tests {
 
             let deleted = directory.add_set(
                 0,
-                Ordered::new_by_key(
-                    [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)],
-                    |(pk, _)| pk,
-                ),
+                OrderedWrapped::from(vec![(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
             );
             assert!(
                 deleted.is_empty(),
@@ -315,10 +313,7 @@ mod tests {
 
             let deleted = directory.add_set(
                 1,
-                Ordered::new_by_key(
-                    [(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)],
-                    |(pk, _)| pk,
-                ),
+                OrderedWrapped::from(vec![(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
             );
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");

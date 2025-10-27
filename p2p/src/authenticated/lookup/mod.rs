@@ -174,7 +174,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::{set::Ordered, NZU32};
+    use commonware_utils::{set::OrderedWrapped, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -247,7 +247,7 @@ mod tests {
 
             // Register peers
             oracle
-                .register(0, Ordered::new_by_key(peers.clone(), |(pk, _)| pk))
+                .register(0, OrderedWrapped::from(peers.clone()))
                 .await;
 
             // Register basic application
@@ -519,12 +519,12 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, Ordered::new_by_key([peers[0].clone()], |(pk, _)| pk))
+                    .register(0, OrderedWrapped::from(vec![peers[0].clone()]))
                     .await;
                 oracle
                     .register(
                         1,
-                        Ordered::new_by_key([peers[1].clone(), peers[2].clone()], |(pk, _)| pk),
+                        OrderedWrapped::from(vec![peers[1].clone(), peers[2].clone()]),
                     )
                     .await;
                 oracle
@@ -602,7 +602,7 @@ mod tests {
                 let iter = peers_and_sks
                     .iter()
                     .map(|(_, pk, addr)| (pk.clone(), *addr));
-                Ordered::new_by_key(iter, |(pk, _)| pk)
+                OrderedWrapped::from(iter.collect::<Vec<_>>())
             };
 
             // Create network
@@ -629,7 +629,7 @@ mod tests {
             context.fill(&mut msg[..]);
 
             // Send message
-            let recipient = Recipients::One(peers[1].0.clone());
+            let recipient = Recipients::One(peers[1].clone());
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
@@ -656,8 +656,9 @@ mod tests {
             let peers = {
                 let iter = peers_and_sks
                     .iter()
-                    .map(|(_, pk, addr)| (pk.clone(), *addr));
-                Ordered::new_by_key(iter, |(pk, _)| pk)
+                    .map(|(_, pk, addr)| (pk.clone(), *addr))
+                    .collect::<Vec<_>>();
+                OrderedWrapped::from(iter)
             };
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();

@@ -10,7 +10,10 @@ use commonware_p2p::{
     Blocker, Channel, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
-use commonware_utils::{set::Ordered, NZU32};
+use commonware_utils::{
+    set::{Ordered, OrderedWrapped},
+    NZU32,
+};
 use governor::Quota;
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -357,7 +360,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: Ordered<_> = peer_ids
+        let peer_list: OrderedWrapped<ed25519::PublicKey, SocketAddr> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];

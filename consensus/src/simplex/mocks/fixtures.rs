@@ -8,7 +8,10 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{quorum, set::Ordered};
+use commonware_utils::{
+    quorum,
+    set::{Ordered, OrderedWrapped},
+};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
@@ -79,7 +82,7 @@ where
         .iter()
         .cloned()
         .zip(bls_public)
-        .collect::<Vec<_>>();
+        .collect::<OrderedWrapped<_, _>>();
 
     let schemes: Vec<_> = bls_privates
         .into_iter()
