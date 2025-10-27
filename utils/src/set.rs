@@ -163,10 +163,12 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
     }
 }
 
-/// An ordered view over keys paired with hidden associated values.
+/// An ordered, deduplicated slice of items each paired with some associated value.
 ///
-/// The ordering and deduplication rules match [`Ordered`], but additional values can be retrieved
-/// when required. Consumers that only need the ordered keys can treat an [`OrderedAssociated`] as an
+/// Like [`Ordered`], the contained [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the
+/// inner [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
+///
+/// Consumers that only need the ordered keys can treat an [`OrderedAssociated`] as an
 /// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct OrderedAssociated<K, V> {
@@ -360,7 +362,7 @@ impl<'a, K, V> IntoIterator for &'a OrderedAssociated<K, V> {
     }
 }
 
-/// Owning iterator over an [`OrderedAssociated`].
+/// Owned iterator over [`OrderedAssociated`].
 pub struct OrderedAssociatedIntoIter<K, V> {
     keys: VecIntoIter<K>,
     values: VecIntoIter<V>,

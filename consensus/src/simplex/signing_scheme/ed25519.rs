@@ -25,17 +25,19 @@ use std::collections::BTreeSet;
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme {
-    /// Participant set's public identities.
+    /// Participants in the committee.
     participants: Ordered<ed25519::PublicKey>,
-    /// Optional local consensus signing key paired with its participant index.
+    /// Key used for generating signatures.
     signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
 impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// If the provided private key does not match any consensus key in the participant set,
-    /// the instance will act as a verifier (unable to sign votes).
+    /// Participants use the same key for both identity and consensus.
+    ///
+    /// If the provided private key does not match any consensus key in the committee,
+    /// the instance will act as a verifier (unable to generate signatures).
     pub fn new(
         participants: Ordered<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
@@ -50,11 +52,9 @@ impl Scheme {
         }
     }
 
-    /// Builds a pure verifier that can authenticate votes without signing.
+    /// Builds a verifier that can authenticate votes without generating signatures.
     ///
-    /// Participants are provided as tuples pairing identity keys with consensus keys.
-    /// The identity key (first element) is used for committee ordering and indexing,
-    /// while the consensus key (second element) is used for verification.
+    /// Participants use the same key for both identity and consensus.
     pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
             participants,

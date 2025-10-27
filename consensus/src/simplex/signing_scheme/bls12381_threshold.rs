@@ -42,31 +42,31 @@ use std::{
     fmt::Debug,
 };
 
-/// Signing scheme state for the BLS threshold flow.
+/// BLS12-381 threshold implementation of the [`Scheme`] trait.
 ///
-/// The enum mirrors the roles a node may play: a signer (with its share),
+/// It is possible for a node to play one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
-        /// Participant set's public identities.
+        /// Participants in the committee.
         participants: OrderedAssociated<P, V::Public>,
-        /// Aggregate public identity shared by the committee.
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Local share used to author partial signatures.
+        /// Local share used to generate partial signatures.
         share: Share,
     },
     Verifier {
-        /// Participant set's public identities.
+        /// Participants in the committee.
         participants: OrderedAssociated<P, V::Public>,
-        /// Aggregate public identity shared by the committee.
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
     CertificateVerifier {
-        /// Participant set's public identities.
+        /// Participants in the committee.
         participants: Ordered<P>,
-        /// Aggregate public identity shared by the committee.
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
 }
@@ -75,7 +75,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
-    /// The polynomial contains the public verification keys for the threshold scheme.
+    /// The polynomial can be evaluated to obtain public verification keys for partial
+    /// signatures produced by committee members.
     ///
     /// If the provided share does not match the polynomial evaluation at its index,
     /// the instance will act as a verifier (unable to sign votes).
@@ -109,7 +110,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Produces a verifier that can authenticate votes but does not hold signing state.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
-    /// The polynomial contains the public verification keys for the threshold scheme.
+    /// The polynomial can be evaluated to obtain public verification keys for partial
+    /// signatures produced by committee members.
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
@@ -134,7 +136,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// for committee ordering and indexing.
     ///
     /// * `participants` - ordered set of participant identity keys
-    /// * `identity` - aggregate public key for certificate verification
+    /// * `identity` - public identity of the committee (constant across reshares)
     pub fn certificate_verifier(participants: Ordered<P>, identity: V::Public) -> Self {
         Self::CertificateVerifier {
             participants,
@@ -142,6 +144,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
+    /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
             Scheme::Signer { participants, .. } => participants,
@@ -150,7 +153,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Returns the shared public identity for this scheme.
+    /// Returns the public identity of the committee (constant across reshares).
     pub fn identity(&self) -> &V::Public {
         match self {
             Scheme::Signer { identity, .. } => identity,
@@ -159,7 +162,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Returns the local share if this instance can sign.
+    /// Returns the local share if this instance can generate partial signatures.
     pub fn share(&self) -> Option<&Share> {
         match self {
             Scheme::Signer { share, .. } => Some(share),
@@ -167,7 +170,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Evaluated public polynomial used to validate partial signatures.
+    /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
             Scheme::Signer { participants, .. } => participants.values(),
