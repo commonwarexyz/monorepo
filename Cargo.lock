@@ -1348,6 +1348,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-p2p-fuzz"
+version = "0.0.62"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "0.0.62"
 dependencies = [

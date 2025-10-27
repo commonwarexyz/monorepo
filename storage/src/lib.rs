@@ -27,7 +27,6 @@ cfg_if::cfg_if! {
         pub mod multijournal;
         pub mod ordinal;
         pub mod rmap;
-        pub mod store;
         pub mod translator;
     }
 }

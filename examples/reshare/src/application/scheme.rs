@@ -12,6 +12,7 @@ use commonware_cryptography::{
     ed25519, PublicKey, Signer,
 };
 use commonware_resolver::p2p;
+use commonware_utils::set::Ordered;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -123,11 +124,11 @@ impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
 
 #[derive(Clone)]
 pub struct Coordinator<P> {
-    pub participants: Vec<P>,
+    pub participants: Ordered<P>,
 }
 
 impl<P> Coordinator<P> {
-    pub fn new(participants: Vec<P>) -> Self {
+    pub fn new(participants: Ordered<P>) -> Self {
         Self { participants }
     }
 }

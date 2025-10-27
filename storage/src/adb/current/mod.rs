@@ -5,8 +5,8 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
+    adb::operation::fixed::FixedOperation,
     mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
-    store::operation::FixedOperation as OperationTrait,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode};
@@ -128,7 +128,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 
 /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
 /// the log with the provided root.
-pub fn verify_range_proof<H: CHasher, O: OperationTrait, const N: usize>(
+pub fn verify_range_proof<H: CHasher, O: FixedOperation, const N: usize>(
     hasher: &mut StandardHasher<H>,
     grafting_height: u32,
     proof: &Proof<H::Digest>,

@@ -13,7 +13,7 @@ pub use actor::Actor;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Set;
+use commonware_utils::set::Ordered;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -27,7 +27,7 @@ pub struct Config<
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub me: P,
-    pub participants: Set<P>,
+    pub participants: Ordered<P>,
     pub scheme: S,
     pub blocker: B,
     pub automaton: A,

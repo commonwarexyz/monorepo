@@ -7,7 +7,10 @@
 //!   `size` from a replay that considers only `[range.start, range.end)`.
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
-use crate::{adb::sync, multijournal, store::operation::Variable};
+use crate::{
+    adb::{operation::variable::Operation, sync},
+    multijournal,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
@@ -24,7 +27,7 @@ where
     V: Codec,
 {
     /// Underlying variable journal storing the operations.
-    inner: multijournal::Journal<E, Variable<K, V>>,
+    inner: multijournal::Journal<E, Operation<K, V>>,
 
     /// Logical operations per storage section.
     items_per_section: NonZeroU64,
@@ -49,7 +52,7 @@ where
     /// * `items_per_section` - Operations per section.
     /// * `size` - Logical next append location to report.
     pub fn new(
-        inner: multijournal::Journal<E, Variable<K, V>>,
+        inner: multijournal::Journal<E, Operation<K, V>>,
         items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
@@ -61,7 +64,7 @@ where
     }
 
     /// Return the inner [multijournal::Journal].
-    pub fn into_inner(self) -> multijournal::Journal<E, Variable<K, V>> {
+    pub fn into_inner(self) -> multijournal::Journal<E, Operation<K, V>> {
         self.inner
     }
 }
@@ -72,7 +75,7 @@ where
     K: Array,
     V: Codec,
 {
-    type Op = Variable<K, V>;
+    type Op = Operation<K, V>;
     type Error = crate::journal::Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {

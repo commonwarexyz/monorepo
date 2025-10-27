@@ -9,17 +9,16 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
+        operation::fixed::{
+            ordered::{KeyData, Operation},
+            FixedOperation,
+        },
+        store::{self, Db},
         Error,
     },
     index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
-    store::{
-        operation::{
-            FixedOperation as OperationTrait, FixedOrdered as Operation, OrderedKeyData as KeyData,
-        },
-        Db,
-    },
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -28,7 +27,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::NonZeroU64;
-use tracing::info;
+use tracing::debug;
 
 /// The return type of the `Any::update_loc` method.
 enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
@@ -744,14 +743,14 @@ impl<
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let steps_to_take = self.steps + 1;
-        for _ in 0..steps_to_take {
-            if self.is_empty() {
-                self.inactivity_floor_loc = self.op_count();
-                info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                self.raise_floor().await?;
             }
-            self.raise_floor().await?;
         }
         self.steps = 0;
 
@@ -818,9 +817,10 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there is not at least one active operation above the inactivity floor.
+    /// Expects there is at least one active operation above the inactivity floor, and returns Error
+    /// otherwise.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
@@ -868,7 +868,10 @@ impl<
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
+        try_join!(
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+        )?;
 
         Ok(())
     }
@@ -925,35 +928,35 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
         self.get(key).await.map_err(Into::into)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
         self.update(key, value).await.map_err(Into::into)
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
         self.delete(key).await.map_err(Into::into)
     }
 
-    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+    async fn commit(&mut self) -> Result<(), store::Error> {
         self.commit().await.map_err(Into::into)
     }
 
-    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+    async fn sync(&mut self) -> Result<(), store::Error> {
         self.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
         self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    async fn close(self) -> Result<(), crate::store::Error> {
+    async fn close(self) -> Result<(), store::Error> {
         self.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), crate::store::Error> {
+    async fn destroy(self) -> Result<(), store::Error> {
         self.destroy().await.map_err(Into::into)
     }
 }

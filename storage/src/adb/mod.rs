@@ -22,6 +22,8 @@ pub mod any;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
+pub mod operation;
+pub mod store;
 pub mod sync;
 pub mod verify;
 use tracing::warn;

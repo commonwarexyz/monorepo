@@ -6,7 +6,7 @@ use crate::authenticated::discovery::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{set::Ordered, SystemTimeExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -173,7 +173,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Vec<C>) {
+    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");

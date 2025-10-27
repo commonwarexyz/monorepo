@@ -24,8 +24,7 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 ///
 /// # Arguments
 ///
-/// * `position` - The absolute position in the journal (must be >= `oldest_retained_pos`)
-/// * `oldest_retained_pos` - The position of the first item after pruning (section-aligned)
+/// * `position` - The absolute position in the journal
 /// * `items_per_section` - The number of items stored in each section
 ///
 /// # Returns
@@ -35,28 +34,15 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 /// # Examples
 ///
 /// ```ignore
-/// // With 10 items per section and no pruning:
-/// assert_eq!(position_to_section(0, 0, 10), 0);   // position 0 -> section 0
-/// assert_eq!(position_to_section(9, 0, 10), 0);   // position 9 -> section 0
-/// assert_eq!(position_to_section(10, 0, 10), 1);  // position 10 -> section 1
-/// assert_eq!(position_to_section(25, 0, 10), 2);  // position 25 -> section 2
-///
-/// // After pruning sections 0-1 (oldest_retained_pos = 20):
-/// assert_eq!(position_to_section(20, 20, 10), 2); // position 20 -> section 2
-/// assert_eq!(position_to_section(25, 20, 10), 2); // position 25 -> section 2
-/// assert_eq!(position_to_section(30, 20, 10), 3); // position 30 -> section 3
+/// // With 10 items per section:
+/// assert_eq!(position_to_section(0, 10), 0);   // position 0 -> section 0
+/// assert_eq!(position_to_section(9, 10), 0);   // position 9 -> section 0
+/// assert_eq!(position_to_section(10, 10), 1);  // position 10 -> section 1
+/// assert_eq!(position_to_section(25, 10), 2);  // position 25 -> section 2
+/// assert_eq!(position_to_section(30, 10), 3);  // position 30 -> section 3
 /// ```
-const fn position_to_section(
-    position: u64,
-    oldest_retained_pos: u64,
-    items_per_section: u64,
-) -> u64 {
-    // Calculate position relative to the oldest retained position
-    let relative_position = position - oldest_retained_pos;
-
-    // Determine the section: base section number (from oldest_retained_pos)
-    // plus the section offset (from relative_position)
-    (relative_position / items_per_section) + (oldest_retained_pos / items_per_section)
+const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
+    position / items_per_section
 }
 
 /// Configuration for a variable-length journal.
@@ -229,8 +215,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         // Read the offset of the first item to discard (at position 'size').
         let discard_offset = self.offsets.read(size).await?;
-        let discard_section =
-            position_to_section(size, self.oldest_retained_pos, self.items_per_section);
+        let discard_section = position_to_section(size, self.items_per_section);
 
         self.data
             .rewind_to_offset(discard_section, discard_offset)
@@ -323,7 +308,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let min_position = min_position.min(self.size);
 
         // Calculate section number
-        let min_section = min_position / self.items_per_section;
+        let min_section = position_to_section(min_position, self.items_per_section);
 
         let pruned = self.data.prune(min_section).await?;
         if pruned {
@@ -362,8 +347,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         // Use offsets index to find offset to start from, calculate section from position
         let start_offset = self.offsets.read(start_pos).await?;
-        let start_section =
-            position_to_section(start_pos, self.oldest_retained_pos, self.items_per_section);
+        let start_section = position_to_section(start_pos, self.items_per_section);
         let data_stream = self
             .data
             .replay(start_section, start_offset, buffer_size)
@@ -400,8 +384,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         // Read offset from journal and calculate section from position
         let offset = self.offsets.read(position).await?;
-        let section =
-            position_to_section(position, self.oldest_retained_pos, self.items_per_section);
+        let section = position_to_section(position, self.items_per_section);
 
         // Read item from data journal
         self.data.get(section, offset).await
@@ -454,7 +437,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
     /// Return the section number where the next append will write.
     const fn current_section(&self) -> u64 {
-        position_to_section(self.size, self.oldest_retained_pos, self.items_per_section)
+        position_to_section(self.size, self.items_per_section)
     }
 
     /// Repair the offsets journal and data journal to be consistent in case a crash occured
@@ -509,7 +492,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             }
 
             // data.blobs is empty. This can happen in two cases:
-            // 1. Rewind crash: we completely pruned the data journal but crashed before rewinding
+            // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
             if let Some(oldest) = offsets.oldest_retained_pos().await? {
@@ -618,26 +601,25 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         );
 
         // Find where to start replaying
-        let (start_section, resume_offset, skip_first) = if let Some(oldest) =
-            offsets.oldest_retained_pos().await?
-        {
-            if oldest < offsets_size {
-                // Offsets has items -- resume from last indexed position
-                let last_offset = offsets.read(offsets_size - 1).await?;
-                let last_section = position_to_section(offsets_size - 1, oldest, items_per_section);
-                (last_section, last_offset, true)
+        let (start_section, resume_offset, skip_first) =
+            if let Some(oldest) = offsets.oldest_retained_pos().await? {
+                if oldest < offsets_size {
+                    // Offsets has items -- resume from last indexed position
+                    let last_offset = offsets.read(offsets_size - 1).await?;
+                    let last_section = position_to_section(offsets_size - 1, items_per_section);
+                    (last_section, last_offset, true)
+                } else {
+                    // Offsets fully pruned but data has items -- start from first data section
+                    // SAFETY: data.blobs is non-empty (checked above)
+                    let first_section = *data.blobs.first_key_value().unwrap().0;
+                    (first_section, 0, false)
+                }
             } else {
-                // Offsets fully pruned but data has items -- start from first data section
+                // Offsets empty -- start from first data section
                 // SAFETY: data.blobs is non-empty (checked above)
                 let first_section = *data.blobs.first_key_value().unwrap().0;
                 (first_section, 0, false)
-            }
-        } else {
-            // Offsets empty -- start from first data section
-            // SAFETY: data.blobs is non-empty (checked above)
-            let first_section = *data.blobs.first_key_value().unwrap().0;
-            (first_section, 0, false)
-        };
+            };
 
         // Replay data journal from start position through the end and index all items.
         // The data journal is the source of truth, so we consume the entire stream.
@@ -721,67 +703,6 @@ mod tests {
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use futures::FutureExt as _;
-    use test_case::test_case;
-
-    // No pruning cases
-    #[test_case(0, 0, 10, 0; "first section start")]
-    #[test_case(5, 0, 10, 0; "first section middle")]
-    #[test_case(9, 0, 10, 0; "first section end")]
-    #[test_case(10, 0, 10, 1; "second section start")]
-    #[test_case(15, 0, 10, 1; "second section middle")]
-    #[test_case(19, 0, 10, 1; "second section end")]
-    #[test_case(20, 0, 10, 2; "third section start")]
-    #[test_case(25, 0, 10, 2; "third section middle")]
-    #[test_case(29, 0, 10, 2; "third section end")]
-    // After pruning one section
-    #[test_case(10, 10, 10, 1; "after prune one: section 1 start")]
-    #[test_case(15, 10, 10, 1; "after prune one: section 1 middle")]
-    #[test_case(19, 10, 10, 1; "after prune one: section 1 end")]
-    #[test_case(20, 10, 10, 2; "after prune one: section 2 start")]
-    #[test_case(25, 10, 10, 2; "after prune one: section 2 middle")]
-    #[test_case(29, 10, 10, 2; "after prune one: section 2 end")]
-    // After pruning two sections
-    #[test_case(20, 20, 10, 2; "after prune two: section 2 start")]
-    #[test_case(25, 20, 10, 2; "after prune two: section 2 middle")]
-    #[test_case(29, 20, 10, 2; "after prune two: section 2 end")]
-    #[test_case(30, 20, 10, 3; "after prune two: section 3 start")]
-    #[test_case(35, 20, 10, 3; "after prune two: section 3 middle")]
-    #[test_case(39, 20, 10, 3; "after prune two: section 3 end")]
-    // Section boundaries
-    #[test_case(0, 0, 10, 0; "boundary: position 0")]
-    #[test_case(10, 0, 10, 1; "boundary: position 10")]
-    #[test_case(20, 0, 10, 2; "boundary: position 20")]
-    #[test_case(30, 0, 10, 3; "boundary: position 30")]
-    #[test_case(10, 10, 10, 1; "boundary after prune: base 10")]
-    #[test_case(20, 10, 10, 2; "boundary after prune: position 20")]
-    #[test_case(30, 10, 10, 3; "boundary after prune: position 30")]
-    #[test_case(20, 20, 10, 2; "boundary after prune: base 20")]
-    #[test_case(30, 20, 10, 3; "boundary after prune: position 30 base 20")]
-    #[test_case(40, 20, 10, 4; "boundary after prune: position 40")]
-    // Edge case: 1 item per section
-    #[test_case(0, 0, 1, 0; "1 item: position 0")]
-    #[test_case(1, 0, 1, 1; "1 item: position 1")]
-    #[test_case(2, 0, 1, 2; "1 item: position 2")]
-    #[test_case(10, 0, 1, 10; "1 item: position 10")]
-    #[test_case(5, 5, 1, 5; "1 item after prune: position 5")]
-    #[test_case(6, 5, 1, 6; "1 item after prune: position 6")]
-    #[test_case(10, 5, 1, 10; "1 item after prune: position 10")]
-    // Position equals oldest_retained_pos
-    #[test_case(0, 0, 10, 0; "position equals base: 0")]
-    #[test_case(10, 10, 10, 1; "position equals base: 10")]
-    #[test_case(20, 20, 10, 2; "position equals base: 20")]
-    #[test_case(100, 100, 10, 10; "position equals base: 100")]
-    fn test_position_to_section_mapping(
-        position: u64,
-        oldest_retained_pos: u64,
-        items_per_section: u64,
-        expected_section: u64,
-    ) {
-        assert_eq!(
-            position_to_section(position, oldest_retained_pos, items_per_section),
-            expected_section
-        );
-    }
 
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///

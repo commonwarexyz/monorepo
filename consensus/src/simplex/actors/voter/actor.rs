@@ -705,7 +705,7 @@ impl<
         if retry && past_view > 0 {
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
                 self.outbound_messages
-                    .get_or_create(&metrics::FINALIZATION)
+                    .get_or_create(metrics::Outbound::finalization())
                     .inc();
                 let msg = Voter::Finalization(finalization);
                 recovered_sender
@@ -715,7 +715,7 @@ impl<
                 debug!(view = past_view, "rebroadcast entry finalization");
             } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 self.outbound_messages
-                    .get_or_create(&metrics::NOTARIZATION)
+                    .get_or_create(metrics::Outbound::notarization())
                     .inc();
                 let msg = Voter::Notarization(notarization);
                 recovered_sender
@@ -726,7 +726,7 @@ impl<
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
                 self.outbound_messages
-                    .get_or_create(&metrics::NULLIFICATION)
+                    .get_or_create(metrics::Outbound::nullification())
                     .inc();
                 let msg = Voter::Nullification(nullification);
                 recovered_sender
@@ -767,7 +767,7 @@ impl<
 
         // Broadcast nullify
         self.outbound_messages
-            .get_or_create(&metrics::NULLIFY)
+            .get_or_create(metrics::Outbound::nullify())
             .inc();
         let msg = Voter::Nullify(nullify);
         pending_sender
@@ -1321,7 +1321,7 @@ impl<
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
             self.outbound_messages
-                .get_or_create(&metrics::NOTARIZE)
+                .get_or_create(metrics::Outbound::notarize())
                 .inc();
             batcher.constructed(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
@@ -1356,7 +1356,7 @@ impl<
 
             // Handle the notarization
             self.outbound_messages
-                .get_or_create(&metrics::NOTARIZATION)
+                .get_or_create(metrics::Outbound::notarization())
                 .inc();
             self.handle_notarization(notarization.clone()).await;
 
@@ -1390,7 +1390,7 @@ impl<
 
             // Handle the nullification
             self.outbound_messages
-                .get_or_create(&metrics::NULLIFICATION)
+                .get_or_create(metrics::Outbound::nullification())
                 .inc();
             self.handle_nullification(nullification.clone()).await;
 
@@ -1468,7 +1468,7 @@ impl<
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
             self.outbound_messages
-                .get_or_create(&metrics::FINALIZE)
+                .get_or_create(metrics::Outbound::finalize())
                 .inc();
             batcher.constructed(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
@@ -1503,7 +1503,7 @@ impl<
 
             // Handle the finalization
             self.outbound_messages
-                .get_or_create(&metrics::FINALIZATION)
+                .get_or_create(metrics::Outbound::finalization())
                 .inc();
             self.handle_finalization(finalization.clone()).await;
 

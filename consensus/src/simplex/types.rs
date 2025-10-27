@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum_from_slice, set::Set};
+use commonware_utils::{max_faults, quorum_from_slice, set::Ordered};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
 
@@ -149,7 +149,7 @@ impl<S: Scheme> VoteVerification<S> {
 #[derive(Clone, Debug)]
 pub struct Participants<P: PublicKey> {
     /// Set of participants' public keys.
-    keys: Set<P>,
+    keys: Ordered<P>,
     /// Quorum (2f+1) computed from the participant set.
     quorum: u32,
     /// Maximum number of faults (f) tolerated by the participant set.
@@ -158,7 +158,7 @@ pub struct Participants<P: PublicKey> {
 
 impl<P: PublicKey> Participants<P> {
     /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Set<P>) -> Self {
+    pub fn new(keys: Ordered<P>) -> Self {
         let quorum = quorum_from_slice(keys.as_ref());
         let max_faults = max_faults(keys.len() as u32);
 
@@ -198,8 +198,8 @@ impl<P: PublicKey> Deref for Participants<P> {
     }
 }
 
-impl<P: PublicKey> From<Set<P>> for Participants<P> {
-    fn from(keys: Set<P>) -> Self {
+impl<P: PublicKey> From<Ordered<P>> for Participants<P> {
+    fn from(keys: Ordered<P>) -> Self {
         Self::new(keys)
     }
 }

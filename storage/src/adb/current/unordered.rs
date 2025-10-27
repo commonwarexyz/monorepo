@@ -5,6 +5,8 @@ use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
         current::{verify_key_value_proof, Config},
+        operation::fixed::unordered::Operation,
+        store::{self, Db},
         Error,
     },
     index::{Index as _, Unordered as Index},
@@ -14,7 +16,6 @@ use crate::{
         hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
-    store::{operation::Fixed as Operation, Db},
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, FixedSize};
@@ -23,7 +24,7 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
-use tracing::info;
+use tracing::debug;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -257,7 +258,7 @@ impl<
         for _ in 0..steps_to_take {
             if self.any.snapshot.keys() == 0 {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                info!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
+                debug!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
             self.raise_floor().await?;
@@ -639,42 +640,42 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, crate::store::Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
         self.get(key).await.map_err(Into::into)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), crate::store::Error> {
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
         self.update(key, value).await.map_err(Into::into)
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), crate::store::Error> {
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
         self.delete(key).await.map(|_| ()).map_err(Into::into)
     }
 
-    async fn commit(&mut self) -> Result<(), crate::store::Error> {
+    async fn commit(&mut self) -> Result<(), store::Error> {
         self.commit().await.map_err(Into::into)
     }
 
-    async fn sync(&mut self) -> Result<(), crate::store::Error> {
+    async fn sync(&mut self) -> Result<(), store::Error> {
         self.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), crate::store::Error> {
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
         self.prune(target_prune_loc).await.map_err(Into::into)
     }
 
-    async fn close(self) -> Result<(), crate::store::Error> {
+    async fn close(self) -> Result<(), store::Error> {
         self.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), crate::store::Error> {
+    async fn destroy(self) -> Result<(), store::Error> {
         self.destroy().await.map_err(Into::into)
     }
 }
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{mmr::mem::Mmr, store::operation::FixedOperation as _, translator::TwoCap};
+    use crate::{adb::operation::fixed::FixedOperation as _, mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
