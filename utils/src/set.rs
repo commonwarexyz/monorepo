@@ -274,7 +274,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for OrderedWrapped<K, V> {
         }
 
         Self {
-            keys: keys.into(),
+            keys: Ordered(keys),
             values,
         }
     }
