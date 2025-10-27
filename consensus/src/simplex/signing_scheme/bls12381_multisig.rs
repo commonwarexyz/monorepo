@@ -25,7 +25,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedWrapped};
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
@@ -33,7 +33,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     /// Participant set's public identities.
-    participants: OrderedWrapped<P, V::Public>,
+    participants: OrderedAssociated<P, V::Public>,
     /// Optional local consensus signing key paired with its participant index.
     signer: Option<(u32, Private)>,
 }
@@ -48,7 +48,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
-    pub fn new(participants: OrderedWrapped<P, V::Public>, private_key: Private) -> Self {
+    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
         let signer = participants
             .values()
             .iter()
@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Participants are provided as tuples pairing identity keys with consensus keys.
     /// The identity key (first element) is used for committee ordering and indexing,
     /// while the consensus key (second element) is the BLS public key used for verification.
-    pub fn verifier(participants: OrderedWrapped<P, V::Public>) -> Self {
+    pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
@@ -356,7 +356,7 @@ mod tests {
         n: usize,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
-        OrderedWrapped<ed25519::PublicKey, V::Public>,
+        OrderedAssociated<ed25519::PublicKey, V::Public>,
     ) {
         let bls_keys = generate_private_keys(n);
         let bls_public = bls_public_keys::<V>(&bls_keys);
@@ -369,7 +369,7 @@ mod tests {
         let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
 
         // Create participants as tuples (ed25519::PublicKey, V::Public)
-        let participants: OrderedWrapped<_, _> = ed25519_public
+        let participants: OrderedAssociated<_, _> = ed25519_public
             .iter()
             .zip(bls_public.iter())
             .map(|(p, bls)| (p.clone(), *bls))

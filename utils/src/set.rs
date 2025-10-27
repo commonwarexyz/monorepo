@@ -166,15 +166,15 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
 /// An ordered view over keys paired with hidden associated values.
 ///
 /// The ordering and deduplication rules match [`Ordered`], but additional values can be retrieved
-/// when required. Consumers that only need the ordered keys can treat an [`OrderedWrapped`] as an
+/// when required. Consumers that only need the ordered keys can treat an [`OrderedAssociated`] as an
 /// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OrderedWrapped<K, V> {
+pub struct OrderedAssociated<K, V> {
     keys: Ordered<K>,
     values: Vec<V>,
 }
 
-impl<K, V> OrderedWrapped<K, V> {
+impl<K, V> OrderedAssociated<K, V> {
     /// Returns the number of entries in the map.
     pub fn len(&self) -> usize {
         self.keys.len()
@@ -232,27 +232,27 @@ impl<K, V> OrderedWrapped<K, V> {
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedWrapped<K, V> {
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedAssociated<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("OrderedWrapped")
+        f.debug_tuple("OrderedAssociated")
             .field(&self.iter_pairs().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl<K, V> AsRef<[K]> for OrderedWrapped<K, V> {
+impl<K, V> AsRef<[K]> for OrderedAssociated<K, V> {
     fn as_ref(&self) -> &[K] {
         self.keys.as_ref()
     }
 }
 
-impl<K, V> AsRef<Ordered<K>> for OrderedWrapped<K, V> {
+impl<K, V> AsRef<Ordered<K>> for OrderedAssociated<K, V> {
     fn as_ref(&self) -> &Ordered<K> {
         &self.keys
     }
 }
 
-impl<K, V> Deref for OrderedWrapped<K, V> {
+impl<K, V> Deref for OrderedAssociated<K, V> {
     type Target = Ordered<K>;
 
     fn deref(&self) -> &Self::Target {
@@ -260,7 +260,7 @@ impl<K, V> Deref for OrderedWrapped<K, V> {
     }
 }
 
-impl<K: Ord, V> FromIterator<(K, V)> for OrderedWrapped<K, V> {
+impl<K: Ord, V> FromIterator<(K, V)> for OrderedAssociated<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut items: Vec<(K, V)> = iter.into_iter().collect();
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
@@ -280,50 +280,50 @@ impl<K: Ord, V> FromIterator<(K, V)> for OrderedWrapped<K, V> {
     }
 }
 
-impl<K: Ord + Clone, V: Clone> From<&[(K, V)]> for OrderedWrapped<K, V> {
+impl<K: Ord + Clone, V: Clone> From<&[(K, V)]> for OrderedAssociated<K, V> {
     fn from(items: &[(K, V)]) -> Self {
         items.iter().cloned().collect()
     }
 }
 
-impl<K: Ord, V> From<Vec<(K, V)>> for OrderedWrapped<K, V> {
+impl<K: Ord, V> From<Vec<(K, V)>> for OrderedAssociated<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V, const N: usize> From<[(K, V); N]> for OrderedWrapped<K, V> {
+impl<K: Ord, V, const N: usize> From<[(K, V); N]> for OrderedAssociated<K, V> {
     fn from(items: [(K, V); N]) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for OrderedWrapped<K, V> {
+impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for OrderedAssociated<K, V> {
     fn from(items: &[(K, V); N]) -> Self {
         items.as_slice().into()
     }
 }
 
-impl<K: Ord, V> From<OrderedWrapped<K, V>> for Vec<(K, V)> {
-    fn from(wrapped: OrderedWrapped<K, V>) -> Self {
+impl<K: Ord, V> From<OrderedAssociated<K, V>> for Vec<(K, V)> {
+    fn from(wrapped: OrderedAssociated<K, V>) -> Self {
         wrapped.into_iter().collect()
     }
 }
 
-impl<K: Write, V: Write> Write for OrderedWrapped<K, V> {
+impl<K: Write, V: Write> Write for OrderedAssociated<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.keys.write(buf);
         self.values.write(buf);
     }
 }
 
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedWrapped<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedAssociated<K, V> {
     fn encode_size(&self) -> usize {
         self.keys.encode_size() + self.values.encode_size()
     }
 }
 
-impl<K: Read, V: Read> Read for OrderedWrapped<K, V> {
+impl<K: Read, V: Read> Read for OrderedAssociated<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -334,19 +334,19 @@ impl<K: Read, V: Read> Read for OrderedWrapped<K, V> {
     }
 }
 
-impl<K, V> IntoIterator for OrderedWrapped<K, V> {
+impl<K, V> IntoIterator for OrderedAssociated<K, V> {
     type Item = (K, V);
-    type IntoIter = OrderedWrappedIntoIter<K, V>;
+    type IntoIter = OrderedAssociatedIntoIter<K, V>;
 
     fn into_iter(self) -> Self::IntoIter {
-        OrderedWrappedIntoIter {
+        OrderedAssociatedIntoIter {
             keys: self.keys.into_iter(),
             values: self.values.into_iter(),
         }
     }
 }
 
-impl<'a, K, V> IntoIterator for &'a OrderedWrapped<K, V> {
+impl<'a, K, V> IntoIterator for &'a OrderedAssociated<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
 
@@ -355,13 +355,13 @@ impl<'a, K, V> IntoIterator for &'a OrderedWrapped<K, V> {
     }
 }
 
-/// Owning iterator over an [`OrderedWrapped`].
-pub struct OrderedWrappedIntoIter<K, V> {
+/// Owning iterator over an [`OrderedAssociated`].
+pub struct OrderedAssociatedIntoIter<K, V> {
     keys: VecIntoIter<K>,
     values: VecIntoIter<V>,
 }
 
-impl<K, V> Iterator for OrderedWrappedIntoIter<K, V> {
+impl<K, V> Iterator for OrderedAssociatedIntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -375,9 +375,9 @@ impl<K, V> Iterator for OrderedWrappedIntoIter<K, V> {
     }
 }
 
-impl<K, V> ExactSizeIterator for OrderedWrappedIntoIter<K, V> {}
+impl<K, V> ExactSizeIterator for OrderedAssociatedIntoIter<K, V> {}
 
-impl<K, V> DoubleEndedIterator for OrderedWrappedIntoIter<K, V> {
+impl<K, V> DoubleEndedIterator for OrderedAssociatedIntoIter<K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let key = self.keys.next_back()?;
         let value = self.values.next_back()?;
@@ -452,7 +452,7 @@ mod test {
     fn test_ordered_map_dedup_and_access() {
         let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
 
-        let map: OrderedWrapped<_, _> = items.into_iter().collect();
+        let map: OrderedAssociated<_, _> = items.into_iter().collect();
 
         assert_eq!(map.len(), 3);
         assert_eq!(map.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
@@ -464,7 +464,7 @@ mod test {
     #[test]
     fn test_ordered_wrapped_from_slice() {
         let pairs = [(3u8, "c"), (1u8, "a"), (2u8, "b")];
-        let wrapped = OrderedWrapped::from(&pairs[..]);
+        let wrapped = OrderedAssociated::from(&pairs[..]);
 
         assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(wrapped.get_value(&2), Some(&"b"));
@@ -476,7 +476,7 @@ mod test {
         let wrapped = pairs
             .iter()
             .map(|(k, v)| (*k, *v))
-            .collect::<OrderedWrapped<_, _>>();
+            .collect::<OrderedAssociated<_, _>>();
 
         assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(wrapped.get_value(&1), Some(&"a"));
@@ -488,7 +488,7 @@ mod test {
             set.iter().map(|v| *v as u32).sum()
         }
 
-        let map: OrderedWrapped<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
+        let map: OrderedAssociated<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
         assert_eq!(sum(&map), 3);
     }
 
@@ -497,7 +497,7 @@ mod test {
         let ordered: Ordered<_> = vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')]
             .into_iter()
             .collect();
-        let wrapped: OrderedWrapped<_, _> = ordered.clone().into_iter().collect();
+        let wrapped: OrderedAssociated<_, _> = ordered.clone().into_iter().collect();
 
         assert_eq!(
             ordered.iter().map(|(k, _)| *k).collect::<Vec<_>>(),

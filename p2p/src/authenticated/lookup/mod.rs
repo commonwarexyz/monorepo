@@ -174,7 +174,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::{set::OrderedWrapped, NZU32};
+    use commonware_utils::{set::OrderedAssociated, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -247,7 +247,7 @@ mod tests {
 
             // Register peers
             oracle
-                .register(0, OrderedWrapped::from(peers.clone()))
+                .register(0, OrderedAssociated::from(peers.clone()))
                 .await;
 
             // Register basic application
@@ -518,12 +518,12 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, OrderedWrapped::from([peers[0].clone()]))
+                    .register(0, OrderedAssociated::from([peers[0].clone()]))
                     .await;
                 oracle
                     .register(
                         1,
-                        OrderedWrapped::from([peers[1].clone(), peers[2].clone()]),
+                        OrderedAssociated::from([peers[1].clone(), peers[2].clone()]),
                     )
                     .await;
                 oracle
@@ -597,7 +597,7 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((peer_sk, peer_pk, peer_addr));
             }
-            let peers: OrderedWrapped<_, _> = peers_and_sks
+            let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
                 .collect();
@@ -650,7 +650,7 @@ mod tests {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((sk, pk, addr));
             }
-            let peers: OrderedWrapped<_, _> = peers_and_sks
+            let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
                 .collect();

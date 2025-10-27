@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     quorum,
-    set::{Ordered, OrderedWrapped},
+    set::{Ordered, OrderedAssociated},
 };
 use rand::{CryptoRng, RngCore};
 
@@ -82,7 +82,7 @@ where
         .iter()
         .cloned()
         .zip(bls_public)
-        .collect::<OrderedWrapped<_, _>>();
+        .collect::<OrderedAssociated<_, _>>();
 
     let schemes: Vec<_> = bls_privates
         .into_iter()

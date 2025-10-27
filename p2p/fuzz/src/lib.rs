@@ -11,7 +11,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, deterministic::Context, Clock, Handle, Metrics, Runner};
 use commonware_utils::{
-    set::{Ordered, OrderedWrapped},
+    set::{Ordered, OrderedAssociated},
     NZU32,
 };
 use governor::Quota;
@@ -360,7 +360,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: OrderedWrapped<ed25519::PublicKey, SocketAddr> = peer_ids
+        let peer_list: OrderedAssociated<ed25519::PublicKey, SocketAddr> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
