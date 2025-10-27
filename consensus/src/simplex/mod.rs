@@ -248,6 +248,7 @@ pub fn select_leader<S, P>(
 ) -> u32
 where
     S: Scheme,
+    P: Ord,
 {
     let len = participants.len();
     let idx = if let Some(seed) = seed {

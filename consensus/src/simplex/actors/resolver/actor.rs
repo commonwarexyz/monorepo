@@ -250,13 +250,16 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
-        let participants = cfg.scheme.participants();
-        let me = cfg
-            .scheme
-            .me()
-            .and_then(|index| participants.key(index))
-            .cloned();
-        let participant_keys: Vec<_> = participants.iter().cloned().collect();
+        let (me, participant_keys) = {
+            let participants = cfg.scheme.participants();
+            let me = cfg
+                .scheme
+                .me()
+                .and_then(|index| participants.key(index))
+                .cloned();
+            let keys = participants.iter().cloned().collect::<Vec<_>>();
+            (me, keys)
+        };
 
         let config = requester::Config {
             me,

@@ -113,10 +113,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let participants = scheme.participants();
-        let notarizes = Vec::with_capacity(participants.len());
-        let nullifies = Vec::with_capacity(participants.len());
-        let finalizes = Vec::with_capacity(participants.len());
+        let participant_len = scheme.participants().len();
+        let notarizes = Vec::with_capacity(participant_len);
+        let nullifies = Vec::with_capacity(participant_len);
+        let finalizes = Vec::with_capacity(participant_len);
 
         Self {
             start: context.current(),

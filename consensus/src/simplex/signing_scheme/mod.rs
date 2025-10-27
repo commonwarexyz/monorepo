@@ -39,10 +39,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{
-    set::{Ordered, OrderedKeySet},
-    union,
-};
+use commonware_utils::{set::OrderedKeySet, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -69,7 +66,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
     /// View over the ordered participant set.
-    type ParticipantSet<'a>: OrderedKeySet<Self::PublicKey> + ?Sized
+    type ParticipantSet<'a>: OrderedKeySet<Self::PublicKey> + Sized
     where
         Self: 'a;
 
