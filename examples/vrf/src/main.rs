@@ -271,7 +271,7 @@ fn main() {
                 signer,
                 DKG_PHASE_TIMEOUT,
                 arbiter,
-                Ordered::from_iter(contributors.clone()),
+                contributors.clone().into_iter().collect(),
                 corrupt,
                 lazy,
                 forger,
@@ -302,7 +302,7 @@ fn main() {
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
-                Ordered::from_iter(contributors),
+                contributors.into_iter().collect(),
             );
             arbiter.start(arbiter_sender, arbiter_receiver);
         }

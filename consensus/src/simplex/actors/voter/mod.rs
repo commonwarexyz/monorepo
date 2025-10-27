@@ -50,9 +50,7 @@ mod tests {
         simplex::{
             actors::{batcher, resolver},
             mocks,
-            mocks::fixtures::{
-                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
-            },
+            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -63,7 +61,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256, Signer,
+        Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -143,16 +141,18 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Initialize voter actor
-            let scheme = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = scheme.public_key();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -160,7 +160,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -170,8 +170,8 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                scheme: signing.clone(),
-                blocker: oracle.control(validator.clone()),
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -198,18 +198,17 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let peer = participants[1].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -222,7 +221,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -270,7 +269,7 @@ mod tests {
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(Round::new(333, 100), 50, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -314,7 +313,7 @@ mod tests {
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
-                build_notarization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
                 .await;
@@ -323,7 +322,7 @@ mod tests {
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(Round::new(333, 300), 100, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -367,11 +366,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls_threshold_fixture::<MinPk, _>);
-        stale_backfill(bls_threshold_fixture::<MinSig, _>);
-        stale_backfill(bls_multisig_fixture::<MinPk, _>);
-        stale_backfill(bls_multisig_fixture::<MinSig, _>);
-        stale_backfill(ed25519_fixture);
+        stale_backfill(bls12381_threshold::<MinPk, _>);
+        stale_backfill(bls12381_threshold::<MinSig, _>);
+        stale_backfill(bls12381_multisig::<MinPk, _>);
+        stale_backfill(bls12381_multisig::<MinSig, _>);
+        stale_backfill(ed25519);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -405,15 +404,18 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
-            let private_key = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = private_key.public_key();
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
+                participants: participants.clone().into(),
                 scheme: signing.clone(),
             };
             let reporter =
@@ -422,7 +424,7 @@ mod tests {
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -431,11 +433,11 @@ mod tests {
             actor.start();
             let voter_config = Config {
                 scheme: signing.clone(),
-                blocker: oracle.control(validator.clone()),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: format!("voter_actor_test_{validator}"),
+                partition: format!("voter_actor_test_{me}"),
                 epoch: 333,
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -458,18 +460,17 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let peer = participants[1].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -482,7 +483,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -540,7 +541,7 @@ mod tests {
                 Sha256::hash(b"test"),
             );
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -587,7 +588,7 @@ mod tests {
                 Sha256::hash(b"test2"),
             );
             let (_, notarization_for_floor) =
-                build_notarization(&signing_schemes, &namespace, &proposal_jft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -617,7 +618,7 @@ mod tests {
                 Sha256::hash(b"test3"),
             );
             let (_, notarization_for_bft) =
-                build_notarization(&signing_schemes, &namespace, &proposal_bft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -639,7 +640,7 @@ mod tests {
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -683,11 +684,11 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinSig, _>);
-        append_old_interesting_view(ed25519_fixture);
+        append_old_interesting_view(bls12381_threshold::<MinPk, _>);
+        append_old_interesting_view(bls12381_threshold::<MinSig, _>);
+        append_old_interesting_view(bls12381_multisig::<MinPk, _>);
+        append_old_interesting_view(bls12381_multisig::<MinSig, _>);
+        append_old_interesting_view(ed25519);
     }
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
@@ -711,13 +712,17 @@ mod tests {
             network.start();
 
             // Get participants
-            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing_schemes[0].clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -725,7 +730,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validators[0].clone(),
+                me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -735,8 +740,8 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                scheme: signing_schemes[0].clone(),
-                blocker: oracle.control(validators[0].clone()),
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -761,11 +766,10 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
-            let validator = validators[0].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
 
             // Start the actor
             voter.start(
@@ -800,7 +804,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;
@@ -834,10 +838,10 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519_fixture);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinSig, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519);
     }
 }

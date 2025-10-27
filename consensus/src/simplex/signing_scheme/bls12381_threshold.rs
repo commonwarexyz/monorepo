@@ -35,42 +35,38 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
 };
 
-/// Signing scheme state for the BLS threshold flow.
+/// BLS12-381 threshold implementation of the [`Scheme`] trait.
 ///
-/// The enum mirrors the roles a node may play: a signer (with its share),
+/// It is possible for a node to play one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
 pub enum Scheme<P: PublicKey, V: Variant> {
     Signer {
-        /// Participant set's public identities.
-        participants: Ordered<P>,
-        /// Aggregate public identity shared by the committee.
+        /// Participants in the committee.
+        participants: OrderedAssociated<P, V::Public>,
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Evaluated public polynomial for each participant index.
-        polynomial: Vec<V::Public>,
-        /// Local share used to author partial signatures.
+        /// Local share used to generate partial signatures.
         share: Share,
     },
     Verifier {
-        /// Participant set's public identities.
-        participants: Ordered<P>,
-        /// Aggregate public identity shared by the committee.
+        /// Participants in the committee.
+        participants: OrderedAssociated<P, V::Public>,
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Evaluated public polynomial for each participant index.
-        polynomial: Vec<V::Public>,
     },
     CertificateVerifier {
-        /// Participant set's public identities.
+        /// Participants in the committee.
         participants: Ordered<P>,
-        /// Aggregate public identity shared by the committee.
+        /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
 }
@@ -79,7 +75,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
-    /// The polynomial contains the public verification keys for the threshold scheme.
+    /// The polynomial can be evaluated to obtain public verification keys for partial
+    /// signatures produced by committee members.
     ///
     /// If the provided share does not match the polynomial evaluation at its index,
     /// the instance will act as a verifier (unable to sign votes).
@@ -90,14 +87,15 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let participants = participants
+            .into_iter()
+            .zip(polynomial)
+            .collect::<OrderedAssociated<_, _>>();
 
-        if polynomial
-            .get(share.index as usize)
-            .is_some_and(|p| share.public::<V>() == *p)
-        {
+        let public_key = share.public::<V>();
+        if participants.values().iter().any(|p| p == &public_key) {
             Self::Signer {
                 participants,
-                polynomial,
                 identity,
                 share,
             }
@@ -105,7 +103,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             Self::Verifier {
                 participants,
                 identity,
-                polynomial,
             }
         }
     }
@@ -113,18 +110,22 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Produces a verifier that can authenticate votes but does not hold signing state.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
-    /// The polynomial contains the public verification keys for the threshold scheme.
+    /// The polynomial can be evaluated to obtain public verification keys for partial
+    /// signatures produced by committee members.
     ///
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let participants = participants
+            .into_iter()
+            .zip(polynomial)
+            .collect::<OrderedAssociated<_, _>>();
 
         Self::Verifier {
             participants,
             identity,
-            polynomial,
         }
     }
 
@@ -135,7 +136,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// for committee ordering and indexing.
     ///
     /// * `participants` - ordered set of participant identity keys
-    /// * `identity` - aggregate public key for certificate verification
+    /// * `identity` - public identity of the committee (constant across reshares)
     pub fn certificate_verifier(participants: Ordered<P>, identity: V::Public) -> Self {
         Self::CertificateVerifier {
             participants,
@@ -143,6 +144,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
+    /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
             Scheme::Signer { participants, .. } => participants,
@@ -151,7 +153,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Returns the shared public identity for this scheme.
+    /// Returns the public identity of the committee (constant across reshares).
     pub fn identity(&self) -> &V::Public {
         match self {
             Scheme::Signer { identity, .. } => identity,
@@ -160,7 +162,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Returns the local share if this instance can sign.
+    /// Returns the local share if this instance can generate partial signatures.
     pub fn share(&self) -> Option<&Share> {
         match self {
             Scheme::Signer { share, .. } => Some(share),
@@ -168,11 +170,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Evaluated public polynomial used to validate partial signatures.
+    /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
-            Scheme::Signer { polynomial, .. } => polynomial,
-            Scheme::Verifier { polynomial, .. } => polynomial,
+            Scheme::Signer { participants, .. } => participants.values(),
+            Scheme::Verifier { participants, .. } => participants.values(),
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -394,9 +396,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let polynomial = self.polynomial();
-
-        let Some(evaluated) = polynomial.get(vote.signer as usize) else {
+        let Some(evaluated) = self.polynomial().get(vote.signer as usize) else {
             return false;
         };
 
@@ -432,8 +432,6 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let polynomial = self.polynomial();
-
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
@@ -451,6 +449,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             })
             .unzip();
 
+        let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
         if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
@@ -619,6 +618,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
+            mocks::fixtures::{bls12381_threshold, Fixture},
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
@@ -626,17 +626,13 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops,
-            primitives::{
-                ops::partial_sign_message,
-                poly::Public,
-                variant::{MinPk, MinSig, Variant},
-            },
+        bls12381::primitives::{
+            ops::partial_sign_message,
+            variant::{MinPk, MinSig, Variant},
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher, PrivateKeyExt, Sha256, Signer,
+        Hasher, Sha256,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
@@ -646,29 +642,13 @@ mod tests {
     type Scheme<V> = super::Scheme<ed25519::PublicKey, V>;
     type Signature<V> = super::Signature<V>;
 
-    fn setup_signers<V: Variant>(
-        n: u32,
-        seed: u64,
-    ) -> (Vec<Scheme<V>>, Ordered<ed25519::PublicKey>, Public<V>) {
-        assert!(n >= 2);
+    fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Scheme<V>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let threshold = quorum(n);
-        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
+        let Fixture {
+            schemes, verifier, ..
+        } = bls12381_threshold::<V, _>(&mut rng, n);
 
-        // Generate ed25519 keys for participant identities
-        let mut ed25519_keys: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        ed25519_keys.sort_by_key(|k| k.public_key());
-        let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
-        let participants = Ordered::from(ed25519_public);
-
-        let schemes = shares
-            .into_iter()
-            .map(|share| Scheme::new(participants.clone(), &polynomial, share))
-            .collect();
-
-        (schemes, participants, polynomial)
+        (schemes, verifier)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -680,7 +660,7 @@ mod tests {
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 7);
+        let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
 
         let proposal = sample_proposal(0, 2, 1);
@@ -740,8 +720,7 @@ mod tests {
     }
 
     fn verifier_cannot_sign<V: Variant>() {
-        let (_, participants, polynomial) = setup_signers::<V>(4, 11);
-        let verifier = Scheme::<V>::verifier(participants, &polynomial);
+        let (_, verifier) = setup_signers::<V>(4, 11);
 
         let proposal = sample_proposal(0, 3, 2);
         assert!(
@@ -764,7 +743,7 @@ mod tests {
     }
 
     fn verifier_accepts_votes<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 11);
+        let (schemes, verifier) = setup_signers::<V>(4, 11);
         let proposal = sample_proposal(0, 3, 2);
         let vote = schemes[1]
             .sign_vote(
@@ -774,7 +753,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let verifier = Scheme::<V>::verifier(participants, &polynomial);
         assert!(verifier.verify_vote(
             NAMESPACE,
             VoteContext::Notarize {
@@ -791,7 +769,7 @@ mod tests {
     }
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(5, 13);
+        let (schemes, _) = setup_signers::<V>(5, 13);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
@@ -841,7 +819,7 @@ mod tests {
     }
 
     fn assemble_certificate_requires_quorum<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 17);
+        let (schemes, _) = setup_signers::<V>(4, 17);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 7, 4);
 
@@ -870,7 +848,7 @@ mod tests {
     }
 
     fn verify_certificate<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 19);
+        let (schemes, verifier) = setup_signers::<V>(4, 19);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 9, 5);
 
@@ -893,7 +871,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -911,7 +888,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_corruption<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 23);
+        let (schemes, verifier) = setup_signers::<V>(4, 23);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 11, 6);
 
@@ -934,7 +911,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -946,16 +922,14 @@ mod tests {
 
         let mut corrupted = certificate.clone();
         corrupted.vote_signature = corrupted.seed_signature;
-        assert!(
-            !Scheme::<V>::verifier(participants.clone(), &polynomial).verify_certificate(
-                &mut thread_rng(),
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-                &corrupted,
-            )
-        );
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Notarize {
+                proposal: &proposal,
+            },
+            &corrupted,
+        ));
     }
 
     #[test]
@@ -965,7 +939,7 @@ mod tests {
     }
 
     fn certificate_codec_roundtrip<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(5, 29);
+        let (schemes, _) = setup_signers::<V>(5, 29);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 13, 7);
 
@@ -1001,7 +975,7 @@ mod tests {
     }
 
     fn seed_codec_roundtrip<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -1040,7 +1014,7 @@ mod tests {
     }
 
     fn seed_verify<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -1086,7 +1060,7 @@ mod tests {
     }
 
     fn seedable<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let proposal = sample_proposal(0, 1, 0);
 
         let notarizes: Vec<_> = schemes
@@ -1116,7 +1090,7 @@ mod tests {
     }
 
     fn scheme_clone_and_verifier<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 31);
+        let (schemes, verifier) = setup_signers::<V>(4, 31);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 9);
 
@@ -1132,7 +1106,6 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(
             verifier
                 .sign_vote(
@@ -1153,7 +1126,7 @@ mod tests {
     }
 
     fn certificate_verifier_accepts_certificates<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 37);
+        let (schemes, _) = setup_signers::<V>(4, 37);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 15, 8);
 
@@ -1176,8 +1149,10 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(participants, *polynomial.constant());
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            schemes[0].participants().clone(),
+            *schemes[0].identity(),
+        );
         assert!(
             certificate_verifier
                 .sign_vote(
@@ -1206,9 +1181,11 @@ mod tests {
     }
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 37);
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(participants, *polynomial.constant());
+        let (schemes, _) = setup_signers::<V>(4, 37);
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            schemes[0].participants().clone(),
+            *schemes[0].identity(),
+        );
         let proposal = sample_proposal(0, 15, 8);
         let vote = schemes[1]
             .sign_vote(
@@ -1241,7 +1218,7 @@ mod tests {
     }
 
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 43);
+        let (schemes, _) = setup_signers::<V>(4, 43);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 19, 10);
 
@@ -1275,7 +1252,7 @@ mod tests {
     }
 
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 47);
+        let (schemes, _) = setup_signers::<V>(4, 47);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 21, 11);
 
@@ -1310,7 +1287,7 @@ mod tests {
     }
 
     fn sign_vote_partial_matches_share<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 53);
+        let (schemes, _) = setup_signers::<V>(4, 53);
         let scheme = &schemes[0];
         let share = scheme.share().expect("has share");
 
@@ -1351,7 +1328,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 59);
+        let (schemes, verifier) = setup_signers::<V>(4, 59);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 25, 13);
 
@@ -1374,7 +1351,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
@@ -1386,15 +1362,14 @@ mod tests {
 
         let mut corrupted = certificate.clone();
         corrupted.seed_signature = corrupted.vote_signature;
-        assert!(!Scheme::<V>::verifier(participants, &polynomial)
-            .verify_certificate::<_, Sha256Digest>(
-                &mut thread_rng(),
-                NAMESPACE,
-                VoteContext::Nullify {
-                    round: proposal.round,
-                },
-                &corrupted,
-            ));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            VoteContext::Nullify {
+                round: proposal.round,
+            },
+            &corrupted,
+        ));
     }
 
     #[test]
