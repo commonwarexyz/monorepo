@@ -340,6 +340,7 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"bls-multisig-signing-scheme";
 
+    #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
         n: u32,
         seed: u64,
@@ -348,16 +349,8 @@ mod tests {
         OrderedAssociated<ed25519::PublicKey, V::Public>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let (_, _, schemes, verifier) = bls_multisig_fixture::<V, _>(&mut rng, n);
-
-        let participants = schemes
-            .first()
-            .map(|scheme| match scheme {
-                Scheme { participants, .. } => participants.clone(),
-            })
-            .unwrap_or_else(|| match verifier {
-                Scheme { participants, .. } => participants,
-            });
+        let (_, _, schemes, _) = bls_multisig_fixture::<V, _>(&mut rng, n);
+        let participants = schemes.first().unwrap().participants.clone();
 
         (schemes, participants)
     }
