@@ -22,15 +22,6 @@ type VecIntoIter<T> = std::vec::IntoIter<T>;
 pub struct Ordered<T>(Vec<T>);
 
 impl<T> Ordered<T> {
-    /// Constructs a new [`Ordered`] from an iterator, sorting and deduplicating the items using the
-    /// mapped key.
-    pub fn new_by_key<K: Ord>(items: impl IntoIterator<Item = T>, f: impl Fn(&T) -> &K) -> Self {
-        let mut items: Vec<_> = items.into_iter().collect();
-        items.sort_by(|l, r| f(l).cmp(f(r)));
-        items.dedup_by(|l, r| f(l) == f(r));
-        Self(items)
-    }
-
     /// Returns the size of the ordered collection.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -157,29 +148,15 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
 /// An ordered view over keys paired with hidden associated values.
 ///
 /// The ordering and deduplication rules match [`Ordered`], but additional values can be retrieved
-/// when required. Consumers that only need the ordered keys can treat an [`OrderedMap`] as an
+/// when required. Consumers that only need the ordered keys can treat an [`OrderedWrapped`] as an
 /// [`Ordered`] through deref coercions.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OrderedMap<K, V> {
+pub struct OrderedWrapped<K, V> {
     keys: Ordered<K>,
     values: Vec<V>,
 }
 
-impl<K, V> OrderedMap<K, V> {
-    /// Creates a map from an existing ordered set of keys and a parallel set of values.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `keys.len() != values.len()`.
-    pub fn from_ordered(keys: Ordered<K>, values: Vec<V>) -> Self {
-        assert_eq!(
-            keys.len(),
-            values.len(),
-            "ordered keys and values must match length"
-        );
-        Self { keys, values }
-    }
-
+impl<K, V> OrderedWrapped<K, V> {
     /// Returns the number of entries in the map.
     pub fn len(&self) -> usize {
         self.keys.len()
@@ -206,11 +183,6 @@ impl<K, V> OrderedMap<K, V> {
     /// Returns the ordered keys as an [`Ordered`] reference.
     pub fn keys(&self) -> &Ordered<K> {
         &self.keys
-    }
-
-    /// Consumes the map and returns the ordered keys.
-    pub fn into_keys(self) -> Ordered<K> {
-        self.keys
     }
 
     /// Returns the associated value at `index`, if it exists.
@@ -240,34 +212,29 @@ impl<K, V> OrderedMap<K, V> {
     pub fn iter(&self) -> core::slice::Iter<'_, K> {
         self.keys.iter()
     }
-
-    /// Consumes the map and returns the associated values.
-    pub fn into_values(self) -> Vec<V> {
-        self.values
-    }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedMap<K, V> {
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedWrapped<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("OrderedMap")
+        f.debug_tuple("OrderedWrapped")
             .field(&self.iter_pairs().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl<K, V> AsRef<[K]> for OrderedMap<K, V> {
+impl<K, V> AsRef<[K]> for OrderedWrapped<K, V> {
     fn as_ref(&self) -> &[K] {
         self.keys.as_ref()
     }
 }
 
-impl<K, V> AsRef<Ordered<K>> for OrderedMap<K, V> {
+impl<K, V> AsRef<Ordered<K>> for OrderedWrapped<K, V> {
     fn as_ref(&self) -> &Ordered<K> {
         &self.keys
     }
 }
 
-impl<K, V> Deref for OrderedMap<K, V> {
+impl<K, V> Deref for OrderedWrapped<K, V> {
     type Target = Ordered<K>;
 
     fn deref(&self) -> &Self::Target {
@@ -275,7 +242,7 @@ impl<K, V> Deref for OrderedMap<K, V> {
     }
 }
 
-impl<K: Ord, V> FromIterator<(K, V)> for OrderedMap<K, V> {
+impl<K: Ord, V> FromIterator<(K, V)> for OrderedWrapped<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut items: Vec<(K, V)> = iter.into_iter().collect();
         items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
@@ -288,45 +255,48 @@ impl<K: Ord, V> FromIterator<(K, V)> for OrderedMap<K, V> {
             values.push(value);
         }
 
-        Self::from_ordered(keys.into(), values)
+        Self {
+            keys: keys.into(),
+            values,
+        }
     }
 }
 
-impl<K: Ord, V> From<Vec<(K, V)>> for OrderedMap<K, V> {
+impl<K: Ord, V> From<Vec<(K, V)>> for OrderedWrapped<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
     }
 }
 
-impl<K: Ord, V> From<OrderedMap<K, V>> for Vec<(K, V)> {
-    fn from(map: OrderedMap<K, V>) -> Self {
-        map.into_iter().collect()
+impl<K: Ord, V> From<OrderedWrapped<K, V>> for Vec<(K, V)> {
+    fn from(wrapped: OrderedWrapped<K, V>) -> Self {
+        wrapped.into_iter().collect()
     }
 }
 
-impl<K: Write, V: Write> Write for OrderedMap<K, V> {
+impl<K: Write, V: Write> Write for OrderedWrapped<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.keys.write(buf);
         self.values.write(buf);
     }
 }
 
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedMap<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedWrapped<K, V> {
     fn encode_size(&self) -> usize {
         self.keys.encode_size() + self.values.encode_size()
     }
 }
 
-impl<K: Read, V: Read> Read for OrderedMap<K, V> {
-    type Cfg = ((RangeCfg<usize>, K::Cfg), (RangeCfg<usize>, V::Cfg));
+impl<K: Read, V: Read> Read for OrderedWrapped<K, V> {
+    type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let (key_cfg, value_cfg) = cfg;
-        let keys = Ordered::<K>::read_cfg(buf, key_cfg)?;
-        let values = Vec::<V>::read_cfg(buf, value_cfg)?;
+        let (range_cfg, key_cfg, value_cfg) = cfg;
+        let keys = Ordered::<K>::read_cfg(buf, &(*range_cfg, key_cfg.clone()))?;
+        let values = Vec::<V>::read_cfg(buf, &(*range_cfg, value_cfg.clone()))?;
         if keys.len() != values.len() {
             return Err(commonware_codec::Error::Invalid(
-                "utils::set::OrderedMap",
+                "utils::set::OrderedWrapped",
                 "decoded keys and values length mismatch",
             ));
         }
@@ -334,19 +304,19 @@ impl<K: Read, V: Read> Read for OrderedMap<K, V> {
     }
 }
 
-impl<K, V> IntoIterator for OrderedMap<K, V> {
+impl<K, V> IntoIterator for OrderedWrapped<K, V> {
     type Item = (K, V);
-    type IntoIter = OrderedMapIntoIter<K, V>;
+    type IntoIter = OrderedWrappedIntoIter<K, V>;
 
     fn into_iter(self) -> Self::IntoIter {
-        OrderedMapIntoIter {
+        OrderedWrappedIntoIter {
             keys: self.keys.into_iter(),
             values: self.values.into_iter(),
         }
     }
 }
 
-impl<'a, K, V> IntoIterator for &'a OrderedMap<K, V> {
+impl<'a, K, V> IntoIterator for &'a OrderedWrapped<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
 
@@ -355,13 +325,13 @@ impl<'a, K, V> IntoIterator for &'a OrderedMap<K, V> {
     }
 }
 
-/// Owning iterator over an [`OrderedMap`].
-pub struct OrderedMapIntoIter<K, V> {
+/// Owning iterator over an [`OrderedWrapped`].
+pub struct OrderedWrappedIntoIter<K, V> {
     keys: VecIntoIter<K>,
     values: VecIntoIter<V>,
 }
 
-impl<K, V> Iterator for OrderedMapIntoIter<K, V> {
+impl<K, V> Iterator for OrderedWrappedIntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -375,9 +345,9 @@ impl<K, V> Iterator for OrderedMapIntoIter<K, V> {
     }
 }
 
-impl<K, V> ExactSizeIterator for OrderedMapIntoIter<K, V> {}
+impl<K, V> ExactSizeIterator for OrderedWrappedIntoIter<K, V> {}
 
-impl<K, V> DoubleEndedIterator for OrderedMapIntoIter<K, V> {
+impl<K, V> DoubleEndedIterator for OrderedWrappedIntoIter<K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let key = self.keys.next_back()?;
         let value = self.values.next_back()?;
@@ -399,14 +369,6 @@ mod test {
 
         let unsealed: Vec<_> = sorted.into();
         assert_eq!(unsealed, EXPECTED);
-
-        struct Example(u8);
-        let examples = CASE.into_iter().map(Example).collect::<Vec<_>>();
-        let sorted_examples = Ordered::new_by_key(examples, |e| &e.0);
-        assert_eq!(
-            sorted_examples.iter().map(|e| e.0).collect::<Vec<_>>(),
-            EXPECTED
-        );
     }
 
     #[test]
@@ -446,7 +408,7 @@ mod test {
     fn test_ordered_map_dedup_and_access() {
         let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
 
-        let map: OrderedMap<_, _> = items.into_iter().collect();
+        let map: OrderedWrapped<_, _> = items.into_iter().collect();
 
         assert_eq!(map.len(), 3);
         assert_eq!(map.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
@@ -461,20 +423,20 @@ mod test {
             set.iter().map(|v| *v as u32).sum()
         }
 
-        let map: OrderedMap<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
+        let map: OrderedWrapped<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
         assert_eq!(sum(&map), 3);
     }
 
     #[test]
     fn test_ordered_map_from_ordered() {
-        let ordered: Ordered<_> = vec![3u8, 1u8, 2u8].into_iter().collect();
-        let values = vec!['a', 'b', 'c'];
-        let map = OrderedMap::from_ordered(ordered.clone(), values.clone());
+        let ordered: Ordered<_> = vec![(3u8, 'a'), (1u8, 'b'), (2u8, 'c')]
+            .into_iter()
+            .collect();
+        let wrapped: OrderedWrapped<_, _> = ordered.clone().into_iter().collect();
 
         assert_eq!(
-            map.iter().copied().collect::<Vec<_>>(),
-            ordered.iter().copied().collect::<Vec<_>>()
+            ordered.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            wrapped.keys().iter().copied().collect::<Vec<_>>(),
         );
-        assert_eq!(map.values(), values.as_slice());
     }
 }
