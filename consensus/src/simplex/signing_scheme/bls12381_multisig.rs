@@ -74,10 +74,6 @@ impl<P: PublicKey + Ord + Clone, V: Variant> Scheme<P, V> {
             signer: None,
         }
     }
-
-    fn consensus_key(&self, index: usize) -> Option<&V::Public> {
-        self.participants.get(index).map(|(_, key)| key)
-    }
 }
 
 /// Certificate formed by an aggregated BLS12-381 signature plus the signers that
@@ -174,7 +170,11 @@ impl<P: PublicKey + Ord + Clone, V: Variant + Send + Sync> signing_scheme::Schem
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.consensus_key(vote.signer as usize) else {
+        let Some(public_key) = self
+            .participants
+            .get(vote.signer as usize)
+            .map(|(_, key)| key)
+        else {
             return false;
         };
 
@@ -205,7 +205,11 @@ impl<P: PublicKey + Ord + Clone, V: Variant + Send + Sync> signing_scheme::Schem
         let mut publics = Vec::new();
         let mut signatures = Vec::new();
         for vote in votes.into_iter() {
-            let Some(public_key) = self.consensus_key(vote.signer as usize) else {
+            let Some(public_key) = self
+                .participants
+                .get(vote.signer as usize)
+                .map(|(_, key)| key)
+            else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -301,7 +305,8 @@ impl<P: PublicKey + Ord + Clone, V: Variant + Send + Sync> signing_scheme::Schem
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.consensus_key(signer as usize) else {
+            let Some(public_key) = self.participants.get(signer as usize).map(|(_, key)| key)
+            else {
                 return false;
             };
 
