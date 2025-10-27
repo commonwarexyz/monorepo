@@ -1150,7 +1150,7 @@ mod tests {
 
         let certificate_verifier = Scheme::<V>::certificate_verifier(
             schemes[0].participants().clone(),
-            schemes[0].identity().clone(),
+            *schemes[0].identity(),
         );
         assert!(
             certificate_verifier
@@ -1183,7 +1183,7 @@ mod tests {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier = Scheme::<V>::certificate_verifier(
             schemes[0].participants().clone(),
-            schemes[0].identity().clone(),
+            *schemes[0].identity(),
         );
         let proposal = sample_proposal(0, 15, 8);
         let vote = schemes[1]
