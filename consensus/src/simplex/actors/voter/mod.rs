@@ -61,7 +61,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256, Signer,
+        Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -142,20 +142,17 @@ mod tests {
 
             // Get participants
             let Fixture {
-                private_keys: schemes,
-                public_keys: validators,
-                schemes: signing_schemes,
+                public_keys,
+                schemes,
                 ..
             } = fixture(&mut context, n);
 
             // Initialize voter actor
-            let scheme = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = scheme.public_key();
+            let validator = public_keys[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing.clone(),
+                participants: public_keys.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -173,7 +170,7 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                scheme: signing.clone(),
+                scheme: schemes[0].clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -201,7 +198,7 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
+            let peer = public_keys[1].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -273,7 +270,7 @@ mod tests {
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(Round::new(333, 100), 50, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -317,7 +314,7 @@ mod tests {
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
-                build_notarization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
                 .await;
@@ -326,7 +323,7 @@ mod tests {
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(Round::new(333, 300), 100, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -409,19 +406,17 @@ mod tests {
 
             // Get participants
             let Fixture {
-                private_keys: schemes,
-                public_keys: validators,
-                schemes: signing_schemes,
+                public_keys,
+                schemes,
                 ..
             } = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
-            let private_key = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = private_key.public_key();
+            let signing = schemes[0].clone();
+            let validator = public_keys[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
+                participants: public_keys.clone().into(),
                 scheme: signing.clone(),
             };
             let reporter =
@@ -466,7 +461,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
+            let peer = public_keys[1].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -548,7 +543,7 @@ mod tests {
                 Sha256::hash(b"test"),
             );
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -595,7 +590,7 @@ mod tests {
                 Sha256::hash(b"test2"),
             );
             let (_, notarization_for_floor) =
-                build_notarization(&signing_schemes, &namespace, &proposal_jft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -625,7 +620,7 @@ mod tests {
                 Sha256::hash(b"test3"),
             );
             let (_, notarization_for_bft) =
-                build_notarization(&signing_schemes, &namespace, &proposal_bft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -647,7 +642,7 @@ mod tests {
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
