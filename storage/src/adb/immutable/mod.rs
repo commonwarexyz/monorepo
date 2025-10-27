@@ -104,14 +104,6 @@ pub struct Immutable<
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T>
 {
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub async fn op_count(&self) -> Result<Location, Error> {
-        Ok(Location::new_unchecked(
-            self.log.size().await.map_err(Error::Journal)?,
-        ))
-    }
-
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -416,6 +408,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         }
     }
 
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub async fn op_count(&self) -> Result<Location, Error> {
+        Ok(Location::new_unchecked(
+            self.log.size().await.map_err(Error::Journal)?,
+        ))
+    }
+
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
     /// is reflected in the snapshot, but will be subject to rollback until the next successful
     /// `commit`. Attempting to set an already-set key results in undefined behavior.
@@ -423,9 +423,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Any keys that have been pruned and map to the same translated key will be dropped
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let loc = self.op_count().await?;
+        let op_count = self.op_count().await?;
         let oldest = self.oldest_retained_loc().await?;
-        self.snapshot.insert_and_prune(&key, loc, |v| {
+        self.snapshot.insert_and_prune(&key, op_count, |v| {
             if let Some(oldest_loc) = oldest {
                 *v < oldest_loc
             } else {

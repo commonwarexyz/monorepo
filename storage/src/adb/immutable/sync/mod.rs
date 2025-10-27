@@ -265,7 +265,8 @@ mod tests {
             let metadata = Some(Sha256::fill(1));
             target_db.commit(metadata).await.unwrap();
             let target_op_count = target_db.op_count().await.unwrap();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc().await.unwrap();
+            let target_oldest_retained_loc =
+                target_db.oldest_retained_loc().await.unwrap().unwrap();
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
@@ -285,8 +286,7 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc.unwrap_or(Location::new_unchecked(0))
-                        ..target_op_count,
+                    range: target_oldest_retained_loc..target_op_count,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -300,7 +300,7 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(got_db.op_count().await.unwrap(), target_op_count);
             assert_eq!(
-                got_db.oldest_retained_loc().await.unwrap(),
+                got_db.oldest_retained_loc().await.unwrap().unwrap(),
                 target_oldest_retained_loc
             );
 
@@ -361,7 +361,8 @@ mod tests {
             target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
 
             let target_op_count = target_db.op_count().await.unwrap();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc().await.unwrap();
+            let target_oldest_retained_loc =
+                target_db.oldest_retained_loc().await.unwrap().unwrap();
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
@@ -372,8 +373,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc.unwrap_or(Location::new_unchecked(0))
-                        ..target_op_count,
+                    range: target_oldest_retained_loc..target_op_count,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -387,7 +387,7 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(got_db.op_count().await.unwrap(), target_op_count);
             assert_eq!(
-                got_db.oldest_retained_loc().await.unwrap(),
+                got_db.oldest_retained_loc().await.unwrap().unwrap(),
                 target_oldest_retained_loc
             );
             assert_eq!(got_db.root(&mut hasher), target_root);
@@ -419,7 +419,7 @@ mod tests {
             // Capture target state
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
-            let lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let op_count = target_db.op_count().await.unwrap();
 
             // Perform sync
@@ -431,7 +431,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0))..op_count,
+                    range: lower_bound..op_count,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -448,7 +448,8 @@ mod tests {
             // Save state before closing
             let expected_root = synced_db.root(&mut hasher);
             let expected_op_count = synced_db.op_count().await.unwrap();
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc().await.unwrap();
+            let expected_oldest_retained_loc =
+                synced_db.oldest_retained_loc().await.unwrap().unwrap();
 
             // Close and reopen the database to test persistence
             synced_db.close().await.unwrap();
@@ -461,7 +462,7 @@ mod tests {
             assert_eq!(reopened_db.root(&mut hasher), expected_root);
             assert_eq!(reopened_db.op_count().await.unwrap(), expected_op_count);
             assert_eq!(
-                reopened_db.oldest_retained_loc().await.unwrap(),
+                reopened_db.oldest_retained_loc().await.unwrap().unwrap(),
                 expected_oldest_retained_loc
             );
 
@@ -495,7 +496,7 @@ mod tests {
 
             // Capture the state after first commit
             let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let initial_upper_bound = target_db.op_count().await.unwrap();
             let initial_root = target_db.root(&mut hasher);
 
@@ -517,8 +518,7 @@ mod tests {
                     db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
                     target: Target {
                         root: initial_root,
-                        range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                            ..initial_upper_bound,
+                        range: initial_lower_bound..initial_upper_bound,
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
@@ -534,7 +534,7 @@ mod tests {
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
                     let log_size = client.journal().size().await.unwrap();
-                    if log_size > *initial_lower_bound.unwrap_or(Location::new_unchecked(0)) {
+                    if log_size > initial_lower_bound {
                         break client;
                     }
                 }
@@ -544,8 +544,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..final_upper_bound,
+                    range: initial_lower_bound..final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -636,7 +635,7 @@ mod tests {
 
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
-            let lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let op_count = target_db.op_count().await.unwrap();
 
             // Add final op after capturing the range
@@ -649,7 +648,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0))..op_count,
+                    range: lower_bound..op_count,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -703,7 +702,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
-            let lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let upper_bound = target_db.op_count().await.unwrap(); // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
@@ -713,7 +712,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0))..upper_bound,
+                    range: lower_bound..upper_bound,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -763,7 +762,7 @@ mod tests {
             // Prepare target
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
-            let lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let upper_bound = target_db.op_count().await.unwrap();
 
             // Sync should complete immediately without fetching
@@ -773,7 +772,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0))..upper_bound,
+                    range: lower_bound..upper_bound,
                 },
                 context,
                 resolver: resolver.clone(),
@@ -810,7 +809,7 @@ mod tests {
 
             // Capture initial target state
             let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let initial_upper_bound = target_db.op_count().await.unwrap();
             let initial_root = target_db.root(&mut hasher);
 
@@ -823,8 +822,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..initial_upper_bound,
+                    range: initial_lower_bound..initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -837,10 +835,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound
-                        .unwrap_or(Location::new_unchecked(0))
-                        .checked_sub(1)
-                        .unwrap()..initial_upper_bound,
+                    range: initial_lower_bound.checked_sub(1).unwrap()..initial_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -873,7 +868,7 @@ mod tests {
 
             // Capture initial target state
             let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let initial_upper_bound = target_db.op_count().await.unwrap();
             let initial_root = target_db.root(&mut hasher);
 
@@ -886,8 +881,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..initial_upper_bound,
+                    range: initial_lower_bound..initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -900,8 +894,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..(initial_upper_bound - 1),
+                    range: initial_lower_bound..(initial_upper_bound - 1),
                 })
                 .await
                 .unwrap();
@@ -921,7 +914,7 @@ mod tests {
         });
     }
 
-    /// Test that the client succeeds when upper bound is updated (no pruning)
+    /// Test that the client succeeds when bounds are updated
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
@@ -934,23 +927,26 @@ mod tests {
 
             // Capture initial target state
             let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let initial_upper_bound = target_db.op_count().await.unwrap();
             let initial_root = target_db.root(&mut hasher);
 
-            // Apply more operations to the target database (no pruning)
+            // Apply more operations to the target database
             let more_ops = create_test_ops(5);
             apply_ops(&mut target_db, more_ops.clone()).await;
             target_db.commit(None).await.unwrap();
 
+            target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            target_db.commit(None).await.unwrap();
+
             // Capture final target state
             let mut hasher = test_hasher();
-            let final_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let final_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let final_upper_bound = target_db.op_count().await.unwrap();
             let final_root = target_db.root(&mut hasher);
 
-            // Assert we're actually updating the upper bound (lower bound stays the same)
-            assert_eq!(final_lower_bound, initial_lower_bound);
+            // Assert we're actually updating the bounds
+            assert_ne!(final_lower_bound, initial_lower_bound);
             assert_ne!(final_upper_bound, initial_upper_bound);
 
             // Create client with initial target
@@ -962,8 +958,7 @@ mod tests {
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..initial_upper_bound,
+                    range: initial_lower_bound..initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -975,8 +970,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: final_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..final_upper_bound,
+                    range: final_lower_bound..final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -989,7 +983,7 @@ mod tests {
             assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count().await.unwrap(), final_upper_bound);
             assert_eq!(
-                synced_db.oldest_retained_loc().await.unwrap(),
+                synced_db.oldest_retained_loc().await.unwrap().unwrap(),
                 final_lower_bound
             );
 
@@ -1014,7 +1008,7 @@ mod tests {
 
             // Capture initial target state
             let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let initial_lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let initial_upper_bound = target_db.op_count().await.unwrap();
             let initial_root = target_db.root(&mut hasher);
 
@@ -1027,8 +1021,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound.unwrap_or(Location::new_unchecked(0))
-                        ..initial_upper_bound,
+                    range: initial_lower_bound..initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1041,8 +1034,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_upper_bound
-                        ..initial_lower_bound.unwrap_or(Location::new_unchecked(0)),
+                    range: initial_upper_bound..initial_lower_bound,
                 })
                 .await
                 .unwrap();
@@ -1073,7 +1065,7 @@ mod tests {
 
             // Capture target state
             let mut hasher = test_hasher();
-            let lower_bound = target_db.oldest_retained_loc().await.unwrap();
+            let lower_bound = target_db.oldest_retained_loc().await.unwrap().unwrap();
             let upper_bound = target_db.op_count().await.unwrap();
             let root = target_db.root(&mut hasher);
 
@@ -1086,7 +1078,7 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0))..upper_bound,
+                    range: lower_bound..upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1101,7 +1093,7 @@ mod tests {
             let _ = update_sender
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
-                    range: lower_bound.unwrap_or(Location::new_unchecked(0)) + 1..upper_bound + 1,
+                    range: lower_bound + 1..upper_bound + 1,
                 })
                 .await;
 
@@ -1109,7 +1101,10 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count().await.unwrap(), upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc().await.unwrap(), lower_bound);
+            assert_eq!(
+                synced_db.oldest_retained_loc().await.unwrap().unwrap(),
+                lower_bound
+            );
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
