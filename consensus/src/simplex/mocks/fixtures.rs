@@ -98,7 +98,7 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes, ed25519_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn ed25519_fixture<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme<ed25519::PublicKey>>
+pub fn ed25519_fixture<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
 {
@@ -117,9 +117,9 @@ where
     let schemes = ed25519_keys
         .iter()
         .cloned()
-        .map(|sk| ed_scheme::Scheme::new_identical(ed25519_public.clone(), sk))
+        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
         .collect();
-    let verifier = ed_scheme::Scheme::verifier_identical(ed25519_public.clone());
+    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 
     (ed25519_keys, ed25519_public.into(), schemes, verifier)
 }

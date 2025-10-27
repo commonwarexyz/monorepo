@@ -2338,7 +2338,7 @@ mod tests {
         bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 
-    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme<EdPublicKey>> {
+    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme> {
         let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64))
             .collect();
@@ -2347,21 +2347,18 @@ mod tests {
 
         private_keys
             .into_iter()
-            .map(|sk| ed25519::Scheme::new_identical(participants.clone(), sk))
+            .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
             .collect()
     }
 
-    fn generate_ed25519_verifier_with_offset(
-        n: usize,
-        offset: u64,
-    ) -> ed25519::Scheme<EdPublicKey> {
+    fn generate_ed25519_verifier_with_offset(n: usize, offset: u64) -> ed25519::Scheme {
         let private_keys: Vec<_> = (0..n)
             .map(|idx| EdPrivateKey::from_seed(idx as u64 + offset))
             .collect();
 
         let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
 
-        ed25519::Scheme::verifier_identical(participants)
+        ed25519::Scheme::verifier(participants)
     }
 
     #[test]
