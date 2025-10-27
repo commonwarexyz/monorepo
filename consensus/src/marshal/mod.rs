@@ -127,7 +127,6 @@ mod tests {
     type B = Block<D>;
     type K = PublicKey;
     type V = MinPk;
-    type E = PublicKey;
     type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantSchemeProvider;
 
@@ -168,7 +167,7 @@ mod tests {
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
         coordinator: p2p::mocks::Coordinator<K>,
-        validator: E,
+        validator: K,
         scheme_provider: P,
     ) -> (
         Application<B>,
