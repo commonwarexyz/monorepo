@@ -360,7 +360,7 @@ impl NetworkScheme for Lookup {
         peer_ids: &'a [PeerId],
     ) {
         // Lookup needs both public keys and addresses
-        let peer_list: OrderedAssociated<ed25519::PublicKey, SocketAddr> = peer_ids
+        let peer_list: OrderedAssociated<_, _> = peer_ids
             .iter()
             .map(|&id| {
                 let p = &topo.peers[id as usize];
