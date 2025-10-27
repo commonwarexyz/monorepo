@@ -223,7 +223,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(validator.clone(), 2).await.unwrap();
+        let network = oracle.register(validator, 2).await.unwrap();
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
