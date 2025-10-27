@@ -15,8 +15,8 @@ use rand::{CryptoRng, RngCore};
 /// scheme verifier.
 pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>, S);
 
-/// Generates ed25519 identities.
-fn generate_ed25519_identities<R>(
+/// Generates ed25519 participants.
+fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
 ) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
@@ -42,7 +42,7 @@ where
 {
     assert!(n > 0);
 
-    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let ed25519_associated = ed25519_participants(rng, n);
     let ed25519_public = ed25519_associated.keys().clone();
     let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
@@ -70,7 +70,7 @@ where
 {
     assert!(n > 0);
 
-    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let ed25519_associated = ed25519_participants(rng, n);
     let ordered_public_keys = ed25519_associated.keys().clone();
     let ed25519_public: Vec<_> = ordered_public_keys.clone().into();
     let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
@@ -110,7 +110,7 @@ where
     assert!(n > 0);
     let t = quorum(n);
 
-    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let ed25519_associated = ed25519_participants(rng, n);
     let participants = ed25519_associated.keys().clone();
     let ed25519_public: Vec<_> = participants.clone().into();
     let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
