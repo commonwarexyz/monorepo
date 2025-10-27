@@ -624,22 +624,24 @@ mod tests {
         },
         types::Round,
     };
+    use crate::simplex::mocks::fixtures::bls_threshold_fixture;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
             primitives::{
                 ops::partial_sign_message,
-                poly::Public,
                 variant::{MinPk, MinSig, Variant},
             },
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher, PrivateKeyExt, Sha256, Signer,
+        Hasher, Sha256, Signer,
     };
     use commonware_utils::quorum;
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use rand::{
+        rngs::StdRng,
+        thread_rng, SeedableRng,
+    };
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
@@ -649,26 +651,12 @@ mod tests {
     fn setup_signers<V: Variant>(
         n: u32,
         seed: u64,
-    ) -> (Vec<Scheme<V>>, Ordered<ed25519::PublicKey>, Public<V>) {
+    ) -> (Vec<Scheme<V>>, Scheme<V>) {
         assert!(n >= 2);
         let mut rng = StdRng::seed_from_u64(seed);
-        let threshold = quorum(n);
-        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
+        let (_, _, schemes, verifier) = bls_threshold_fixture::<V, _>(&mut rng, n);
 
-        // Generate ed25519 keys for participant identities
-        let mut ed25519_keys: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        ed25519_keys.sort_by_key(|k| k.public_key());
-        let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
-        let participants = Ordered::from(ed25519_public);
-
-        let schemes = shares
-            .into_iter()
-            .map(|share| Scheme::new(participants.clone(), &polynomial, share))
-            .collect();
-
-        (schemes, participants, polynomial)
+        (schemes, verifier)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -680,7 +668,7 @@ mod tests {
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 7);
+        let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
 
         let proposal = sample_proposal(0, 2, 1);
@@ -740,8 +728,7 @@ mod tests {
     }
 
     fn verifier_cannot_sign<V: Variant>() {
-        let (_, participants, polynomial) = setup_signers::<V>(4, 11);
-        let verifier = Scheme::<V>::verifier(participants, &polynomial);
+        let (_, verifier) = setup_signers::<V>(4, 11);
 
         let proposal = sample_proposal(0, 3, 2);
         assert!(
@@ -764,7 +751,7 @@ mod tests {
     }
 
     fn verifier_accepts_votes<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 11);
+        let (schemes, verifier) = setup_signers::<V>(4, 11);
         let proposal = sample_proposal(0, 3, 2);
         let vote = schemes[1]
             .sign_vote(
@@ -774,7 +761,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let verifier = Scheme::<V>::verifier(participants, &polynomial);
         assert!(verifier.verify_vote(
             NAMESPACE,
             VoteContext::Notarize {
@@ -791,7 +777,7 @@ mod tests {
     }
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(5, 13);
+        let (schemes, _) = setup_signers::<V>(5, 13);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
@@ -841,7 +827,7 @@ mod tests {
     }
 
     fn assemble_certificate_requires_quorum<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 17);
+        let (schemes, _) = setup_signers::<V>(4, 17);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 7, 4);
 
@@ -870,7 +856,7 @@ mod tests {
     }
 
     fn verify_certificate<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 19);
+        let (schemes, verifier) = setup_signers::<V>(4, 19);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 9, 5);
 
@@ -893,7 +879,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -911,7 +896,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_corruption<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 23);
+        let (schemes, verifier) = setup_signers::<V>(4, 23);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 11, 6);
 
@@ -934,7 +919,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -947,7 +931,7 @@ mod tests {
         let mut corrupted = certificate.clone();
         corrupted.vote_signature = corrupted.seed_signature;
         assert!(
-            !Scheme::<V>::verifier(participants.clone(), &polynomial).verify_certificate(
+            !verifier.verify_certificate(
                 &mut thread_rng(),
                 NAMESPACE,
                 VoteContext::Notarize {
@@ -965,7 +949,7 @@ mod tests {
     }
 
     fn certificate_codec_roundtrip<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(5, 29);
+        let (schemes, _) = setup_signers::<V>(5, 29);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 13, 7);
 
@@ -1001,7 +985,7 @@ mod tests {
     }
 
     fn seed_codec_roundtrip<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -1040,7 +1024,7 @@ mod tests {
     }
 
     fn seed_verify<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 1, 0);
 
@@ -1086,7 +1070,7 @@ mod tests {
     }
 
     fn seedable<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 5);
+        let (schemes, _) = setup_signers::<V>(4, 5);
         let proposal = sample_proposal(0, 1, 0);
 
         let notarizes: Vec<_> = schemes
@@ -1116,7 +1100,7 @@ mod tests {
     }
 
     fn scheme_clone_and_verifier<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 31);
+        let (schemes, verifier) = setup_signers::<V>(4, 31);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 9);
 
@@ -1132,7 +1116,6 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(
             verifier
                 .sign_vote(
@@ -1153,7 +1136,7 @@ mod tests {
     }
 
     fn certificate_verifier_accepts_certificates<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 37);
+        let (schemes, _) = setup_signers::<V>(4, 37);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 15, 8);
 
@@ -1176,8 +1159,10 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(participants, *polynomial.constant());
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            schemes[0].participants().clone(),
+            schemes[0].identity().clone(),
+        );
         assert!(
             certificate_verifier
                 .sign_vote(
@@ -1206,9 +1191,11 @@ mod tests {
     }
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 37);
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(participants, *polynomial.constant());
+        let (schemes, _) = setup_signers::<V>(4, 37);
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            schemes[0].participants().clone(),
+            schemes[0].identity().clone(),
+        );
         let proposal = sample_proposal(0, 15, 8);
         let vote = schemes[1]
             .sign_vote(
@@ -1241,7 +1228,7 @@ mod tests {
     }
 
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 43);
+        let (schemes, _) = setup_signers::<V>(4, 43);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 19, 10);
 
@@ -1275,7 +1262,7 @@ mod tests {
     }
 
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 47);
+        let (schemes, _) = setup_signers::<V>(4, 47);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 21, 11);
 
@@ -1310,7 +1297,7 @@ mod tests {
     }
 
     fn sign_vote_partial_matches_share<V: Variant>() {
-        let (schemes, _, _) = setup_signers::<V>(4, 53);
+        let (schemes, _) = setup_signers::<V>(4, 53);
         let scheme = &schemes[0];
         let share = scheme.share().expect("has share");
 
@@ -1351,7 +1338,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
-        let (schemes, participants, polynomial) = setup_signers::<V>(4, 59);
+        let (schemes, verifier) = setup_signers::<V>(4, 59);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 25, 13);
 
@@ -1374,7 +1361,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::<V>::verifier(participants.clone(), &polynomial);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
@@ -1386,8 +1372,7 @@ mod tests {
 
         let mut corrupted = certificate.clone();
         corrupted.seed_signature = corrupted.vote_signature;
-        assert!(!Scheme::<V>::verifier(participants, &polynomial)
-            .verify_certificate::<_, Sha256Digest>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
                 &mut thread_rng(),
                 NAMESPACE,
                 VoteContext::Nullify {

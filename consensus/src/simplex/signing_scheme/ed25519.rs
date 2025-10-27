@@ -344,35 +344,23 @@ mod tests {
         },
         types::Round,
     };
+    use crate::simplex::mocks::fixtures::ed25519_fixture;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, PrivateKeyExt, Sha256};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
     use commonware_utils::quorum;
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::{
+        rngs::{OsRng, StdRng},
+        thread_rng, SeedableRng,
+    };
 
     const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
 
-    fn generate_private_keys(n: usize) -> Vec<ed25519::PrivateKey> {
-        let mut keys: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        keys.sort_by_key(|key| key.public_key());
-        keys
-    }
-
-    fn participants(keys: &[ed25519::PrivateKey]) -> Vec<ed25519::PublicKey> {
-        keys.iter().map(|key| key.public_key()).collect()
-    }
-
     fn schemes(n: usize) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
-        let keys = generate_private_keys(n);
-        let public_keys = Ordered::from(participants(&keys));
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_, _, schemes, verifier) = ed25519_fixture(&mut rng, n as u32);
+        let participants = verifier.participants().clone();
 
-        let schemes = keys
-            .into_iter()
-            .map(|key| Scheme::new(public_keys.clone(), key))
-            .collect();
-
-        (schemes, public_keys)
+        (schemes, participants)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {

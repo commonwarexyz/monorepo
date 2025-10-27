@@ -321,16 +321,15 @@ mod tests {
         },
         types::Round,
     };
+    use crate::simplex::mocks::fixtures::bls_multisig_fixture;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self, Element},
-            ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
         ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher, PrivateKeyExt, Sha256, Signer,
+        Hasher, Sha256, Signer,
     };
     use commonware_utils::quorum;
     use rand::{
@@ -340,29 +339,6 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"bls-multisig-signing-scheme";
 
-    fn generate_private_keys(n: usize) -> Vec<group::Private> {
-        let mut rng = StdRng::seed_from_u64(42);
-        (0..n)
-            .map(|_| group::Private::from_rand(&mut rng))
-            .collect()
-    }
-
-    fn bls_public_keys<V: Variant>(keys: &[group::Private]) -> Vec<V::Public> {
-        keys.iter().map(|key| compute_public::<V>(key)).collect()
-    }
-
-    fn ordered_ed25519_identities(
-        n: usize,
-    ) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey> {
-        (0..n)
-            .map(|i| {
-                let private_key = ed25519::PrivateKey::from_seed(i as u64);
-                let public_key = private_key.public_key();
-                (public_key, private_key)
-            })
-            .collect()
-    }
-
     #[allow(clippy::type_complexity)]
     fn signing_schemes<V: Variant>(
         n: usize,
@@ -370,21 +346,17 @@ mod tests {
         Vec<Scheme<ed25519::PublicKey, V>>,
         OrderedAssociated<ed25519::PublicKey, V::Public>,
     ) {
-        let bls_keys = generate_private_keys(n);
-        let bls_public = bls_public_keys::<V>(&bls_keys);
-        let ed25519_associated = ordered_ed25519_identities(n);
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_, _, schemes, verifier) = bls_multisig_fixture::<V, _>(&mut rng, n as u32);
 
-        // Create participants as tuples (ed25519::PublicKey, V::Public)
-        let participants: OrderedAssociated<_, _> = ed25519_associated
-            .iter()
-            .cloned()
-            .zip(bls_public.into_iter())
-            .collect();
-
-        let schemes = bls_keys
-            .into_iter()
-            .map(|key| Scheme::new(participants.clone(), key))
-            .collect();
+        let participants = schemes
+            .first()
+            .map(|scheme| match scheme {
+                Scheme { participants, .. } => participants.clone(),
+            })
+            .unwrap_or_else(|| match verifier {
+                Scheme { participants, .. } => participants,
+            });
 
         (schemes, participants)
     }
