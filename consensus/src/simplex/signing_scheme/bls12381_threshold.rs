@@ -93,7 +93,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .collect::<OrderedAssociated<_, _>>();
 
         let public_key = share.public::<V>();
-        if participants.values().iter().any(|p| p == &public_key) {
+        if let Some(index) = participants.values().iter().position(|p| p == &public_key) {
+            assert_eq!(
+                index as u32, share.index,
+                "share index must match participant index"
+            );
             Self::Signer {
                 participants,
                 identity,
