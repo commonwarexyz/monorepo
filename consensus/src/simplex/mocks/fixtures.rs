@@ -30,9 +30,7 @@ where
     assert!(n > 0);
     let t = quorum(n);
 
-    let mut ed25519_keys: Vec<_> = (0..n)
-        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-        .collect();
+    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
     ed25519_keys.sort_by_key(|k| k.public_key());
 
     let ed25519_public = ed25519_keys
@@ -66,9 +64,7 @@ where
 {
     assert!(n > 0);
 
-    let mut ed25519_keys: Vec<_> = (0..n)
-        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-        .collect();
+    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
     ed25519_keys.sort_by_key(|k| k.public_key());
 
     let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
@@ -98,15 +94,13 @@ where
 ///
 /// Returns `(ed25519_private_keys, ed25519_public_keys, ed25519_schemes, ed25519_scheme_verifier)`
 /// where all vectors share the same ordering.
-pub fn ed25519_fixture<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
+pub fn ed25519_fixture<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
 {
     assert!(n > 0);
 
-    let mut ed25519_keys: Vec<_> = (0..n)
-        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-        .collect();
+    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
     ed25519_keys.sort_by_key(|k| k.public_key());
 
     let ed25519_public = ed25519_keys
