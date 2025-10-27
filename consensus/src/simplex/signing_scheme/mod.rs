@@ -65,6 +65,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
+
     /// Returns the index of "self" in the participant set, if available.
     /// Returns `None` if the scheme is a verifier-only instance.
     fn me(&self) -> Option<u32>;
@@ -79,11 +80,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn participant_index(&self, key: &Self::PublicKey) -> Option<u32>;
 
     /// Returns all participant public keys ordered by their committee index.
-    fn participant_keys(&self) -> Vec<Self::PublicKey> {
-        (0..self.participant_len() as u32)
-            .filter_map(|idx| self.participant_key(idx).cloned())
-            .collect()
-    }
+    fn participant_keys(&self) -> Vec<Self::PublicKey>;
 
     /// Returns the quorum size (2f + 1) for the participant set.
     fn participant_quorum(&self) -> u32 {
