@@ -58,6 +58,7 @@ where
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
+    pub boundary_finalization_rate_limit: governor::Quota,
     pub dkg_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
@@ -170,6 +171,7 @@ where
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
+                boundary_finalization_rate_limit: config.boundary_finalization_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
@@ -190,7 +192,7 @@ where
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         pending: (
@@ -213,6 +215,10 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        boundary_finalizations: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
         backfill_network: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
@@ -226,13 +232,14 @@ where
                 resolver,
                 broadcast,
                 dkg,
+                boundary_finalizations,
                 backfill_network
             )
             .await
         )
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn run(
         self,
         pending: (
@@ -252,6 +259,10 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         dkg: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        boundary_finalizations: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -275,7 +286,9 @@ where
         let marshal_handle =
             self.marshal
                 .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
-        let orchestrator_handle = self.orchestrator.start(pending, recovered, resolver);
+        let orchestrator_handle =
+            self.orchestrator
+                .start(pending, recovered, resolver, boundary_finalizations);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

@@ -5,7 +5,7 @@ use crate::{
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::Encode;
+use commonware_codec::{varint::UInt, DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
@@ -20,7 +20,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::mux::{Builder, MuxHandle, Muxer},
+    utils::mux::{Builder, GlobalSender, MuxHandle, Muxer},
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
@@ -28,9 +28,12 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
+    RateLimiter,
+};
 use rand::{CryptoRng, Rng};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for the orchestrator.
@@ -51,6 +54,7 @@ where
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
+    pub boundary_finalization_rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -78,6 +82,9 @@ where
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
+    #[allow(clippy::type_complexity)]
+    rate_limiter:
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     pool_ref: PoolRef,
 }
 
@@ -95,6 +102,8 @@ where
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
+        let rate_limiter =
+            RateLimiter::hashmap_with_clock(config.boundary_finalization_rate_limit, &context);
 
         (
             Self {
@@ -107,6 +116,7 @@ where
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
+                rate_limiter,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -127,8 +137,16 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        boundary_finalizations: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(pending, recovered, resolver,).await)
+        spawn_cell!(
+            self.context,
+            self.run(pending, recovered, resolver, boundary_finalizations)
+                .await
+        )
     }
 
     async fn run(
@@ -142,6 +160,10 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         (resolver_sender, resolver_receiver): (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        (mut boundary_finalization_sender, mut boundary_finalization_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -174,51 +196,69 @@ where
         mux.start();
 
         // Wait for instructions to transition epochs.
-        let mut engines = HashMap::new();
+        let mut engines = BTreeMap::new();
         loop {
             select! {
                 message = pending_backup.next() => {
                     // If a message is received in an unregistered sub-channel in the pending network,
                     // attempt to forward the boundary finalization for the epoch.
-                    let Some((epoch, (from, _))) = message else {
+                    let Some((their_epoch, (from, _))) = message else {
                         warn!("pending mux backup channel closed, shutting down orchestrator");
                         break;
                     };
-                    let Some(latest_epoch) = engines.keys().last().copied() else {
-                        debug!(epoch, ?from, "received message from unregistered epoch with no known epochs");
+                    let Some(our_epoch) = engines.keys().last().copied() else {
+                        debug!(their_epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
                     };
-                    if epoch >= latest_epoch {
-                        // The sender is operating in a newer epoch or the current, ignore. We cannot block them,
-                        // since they may be validly ahead.
-                        debug!(epoch, ?from, "received backup message from current or future epoch");
-                        continue;
+                    if their_epoch > our_epoch {
+                        // If we're not in the committee of the latest epoch we know about and we observe another
+                        // participant that is ahead of us, send a message on the global pending channel to prompt
+                        // them to send us the finalization of the epoch boundary block for our latest known epoch.
+                        // If we do not directly ask, we will never receive the finalization, since our consensus engine
+                        // may never send messages over the pending channel for that epoch.
+
+                        if self.rate_limiter.check_key(&from).is_err() {
+                            continue;
+                        }
+
+                        // Only request the boundary finalization if we don't already have it.
+                        let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
+                        if self.marshal.get_finalization(boundary_height).await.is_some() {
+                            continue;
+                        };
+
+                        debug!(
+                            their_epoch,
+                            ?from,
+                            "received backup message from future epoch, requesting boundary finalization"
+                        );
+
+                        let _ = boundary_finalization_sender.send(
+                            Recipients::One(from),
+                            UInt(our_epoch).encode().freeze(),
+                            true
+                        ).await;
                     }
-
-                    // Fetch the finalization certificate for the last block within the subchannel's epoch.
-                    // If the node is state synced, marshal may not have the finalization locally, and the
-                    // peer will need to fetch it from another node on the network.
-                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
-                    let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                        debug!(epoch, ?from, "missing finalization for old epoch");
-                        continue;
+                },
+                message = boundary_finalization_receiver.recv() => {
+                    let Ok((from, bytes)) = message else {
+                        warn!("boundary finalization channel closed, shutting down orchestrator");
+                        break;
                     };
-                    debug!(
-                        epoch,
-                        boundary_height,
-                        ?from,
-                        "received message on pending network from old epoch. forwarding boundary finalization"
-                    );
-
-                    // Forward the finalization to the sender. This operation is best-effort.
-                    let message = Voter::<S, H::Digest>::Finalization(finalization);
-                    if let Err(err) = recovered_global_sender.send(
-                        epoch,
-                        Recipients::One(from),
-                        message.encode().freeze(),
-                        true
-                    ).await {
-                        error!(?err, "failed to forward boundary finalization to peer - muxer shut down");
+                    let epoch = match UInt::<Epoch>::decode(bytes.as_ref()) {
+                        Ok(epoch) => epoch,
+                        Err(err) => {
+                            debug!(?err, ?from, "failed to decode epoch from boundary finalization request");
+                            self.oracle.block(from).await;
+                            continue;
+                        }
+                    };
+                    if Self::fetch_and_forward_finalization(
+                        from,
+                        epoch.0,
+                        &mut self.marshal,
+                        &mut recovered_global_sender,
+                    ).await.is_none() {
                         break;
                     }
                 },
@@ -324,5 +364,51 @@ where
         let resolver_sc = resolver_mux.register(epoch).await.unwrap();
 
         engine.start(pending_sc, recovered_sc, resolver_sc)
+    }
+
+    /// Fetches a finalization certificate from the boundary block of the given epoch and forwards it to
+    /// the given [GlobalSender].
+    ///
+    /// If the message fails to be sent, `None` is returned to indicate that the orchestrator should shut down.
+    async fn fetch_and_forward_finalization(
+        from: C::PublicKey,
+        epoch: Epoch,
+        marshal: &mut marshal::Mailbox<S, Block<H, C, V>>,
+        recovered_global_sender: &mut GlobalSender<impl Sender<PublicKey = C::PublicKey>>,
+    ) -> Option<()> {
+        // Fetch the finalization certificate for the last block within the subchannel's epoch.
+        // If the node is state synced, marshal may not have the finalization locally, and the
+        // peer will need to fetch it from another node on the network.
+        let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
+        let Some(finalization) = marshal.get_finalization(boundary_height).await else {
+            debug!(epoch, ?from, "missing finalization for old epoch");
+            return Some(());
+        };
+        debug!(
+            epoch,
+            boundary_height,
+            ?from,
+            "received message on pending network from old epoch. forwarding boundary finalization"
+        );
+
+        // Forward the finalization to the sender. This operation is best-effort.
+        let message = Voter::<S, H::Digest>::Finalization(finalization);
+        if let Err(err) = recovered_global_sender
+            .send(
+                epoch,
+                Recipients::One(from),
+                message.encode().freeze(),
+                true,
+            )
+            .await
+        {
+            error!(
+                ?err,
+                "failed to forward boundary finalization to peer - muxer shut down"
+            );
+            return None;
+        }
+
+        Some(())
     }
 }

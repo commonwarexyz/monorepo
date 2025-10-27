@@ -11,12 +11,11 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
-use commonware_utils::{union, union_unique};
+use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
     time::Duration,
 };
 use tracing::{error, info};
@@ -29,6 +28,7 @@ const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
+const BOUNDARY_FINALIZATION_CHANNEL: u64 = 6;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
@@ -79,23 +79,30 @@ where
     // Register all possible peers
     oracle.register(0, peer_config.all_peers()).await;
 
-    let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
+    let pending_limit = Quota::per_second(NZU32!(128));
     let pending = network.register(PENDING_CHANNEL, pending_limit, MESSAGE_BACKLOG);
 
-    let recovered_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
+    let recovered_limit = Quota::per_second(NZU32!(128));
     let recovered = network.register(RECOVERED_CHANNEL, recovered_limit, MESSAGE_BACKLOG);
 
-    let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
+    let resolver_limit = Quota::per_second(NZU32!(128));
     let resolver = network.register(RESOLVER_CHANNEL, resolver_limit, MESSAGE_BACKLOG);
 
-    let broadcaster_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
+    let broadcaster_limit = Quota::per_second(NZU32!(8));
     let broadcaster = network.register(BROADCASTER_CHANNEL, broadcaster_limit, MESSAGE_BACKLOG);
 
-    let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
+    let backfill_quota = Quota::per_second(NZU32!(8));
     let backfill = network.register(BACKFILL_BY_DIGEST_CHANNEL, backfill_quota, MESSAGE_BACKLOG);
 
-    let dkg_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
+    let dkg_limit = Quota::per_second(NZU32!(128));
     let dkg_channel = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
+
+    let boundary_finalization_rate_limit = Quota::per_second(NZU32!(1));
+    let boundary_finalization_channel = network.register(
+        BOUNDARY_FINALIZATION_CHANNEL,
+        boundary_finalization_rate_limit,
+        MESSAGE_BACKLOG,
+    );
 
     // Create a static resolver for backfill
     let coordinator = Coordinator::new(peer_config.all_peers());
@@ -105,7 +112,7 @@ where
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
-            rate_limit: Quota::per_second(NonZeroU32::new(8).unwrap()),
+            rate_limit: Quota::per_second(NZU32!(8)),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
         },
@@ -127,6 +134,7 @@ where
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch as usize,
+            boundary_finalization_rate_limit,
             dkg_rate_limit: dkg_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
@@ -141,6 +149,7 @@ where
         resolver,
         broadcaster,
         dkg_channel,
+        boundary_finalization_channel,
         p2p_resolver,
     );
 
@@ -174,7 +183,6 @@ mod test {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{HashMap, HashSet},
-        num::NonZeroU32,
         time::Duration,
     };
 
@@ -186,6 +194,7 @@ mod test {
     ) -> HashMap<
         PublicKey,
         (
+            (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
@@ -212,6 +221,7 @@ mod test {
                 oracle.register(validator.clone(), 3).await.unwrap();
             let backfill = oracle.register(validator.clone(), 4).await.unwrap();
             let (dkg_sender, dkg_receiver) = oracle.register(validator.clone(), 5).await.unwrap();
+            let boundary_finalizations = oracle.register(validator.clone(), 6).await.unwrap();
 
             // Create a static resolver for backfill
             let coordinator = Coordinator::new(ordered_validators.clone());
@@ -221,7 +231,7 @@ mod test {
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     me: Some(validator.clone()),
-                    rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                    rate_limit: Quota::per_second(NZU32!(5)),
                     initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                 },
@@ -239,6 +249,7 @@ mod test {
                     (resolver_sender, resolver_receiver),
                     (broadcast_sender, broadcast_receiver),
                     (dkg_sender, dkg_receiver),
+                    boundary_finalizations,
                     p2p_resolver,
                 ),
             );
@@ -333,8 +344,15 @@ mod test {
                 public_keys.insert(public_key.clone());
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                    registrations.remove(&public_key).unwrap();
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
 
                 let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
                     context.with_label("engine"),
@@ -348,7 +366,8 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                        boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -360,8 +379,9 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    backfill,
                     dkg_channel,
+                    boundary_finalizations,
+                    backfill,
                 );
             }
 
@@ -549,7 +569,8 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -557,8 +578,15 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                    registrations.remove(&public_key).unwrap();
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 let handle = engine.start(
@@ -566,8 +594,9 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    backfill,
                     dkg_channel,
+                    boundary_finalizations,
+                    backfill,
                 );
                 engine_handles.push(handle);
             }
@@ -666,7 +695,8 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -674,8 +704,15 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                    registrations.remove(&public_key).unwrap();
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -683,8 +720,9 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    backfill,
                     dkg_channel,
+                    boundary_finalizations,
+                    backfill,
                 );
             }
 
@@ -736,7 +774,7 @@ mod test {
         });
     }
 
-    fn test_backfill<S>()
+    fn test_backfill<S>(seed: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -747,7 +785,10 @@ mod test {
         let threshold = quorum(n);
         let initial_container_required = BLOCKS_PER_EPOCH / 2 + 1;
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
-        let executor = Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(60)));
+        let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -812,7 +853,8 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                        boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -820,8 +862,15 @@ mod test {
                 .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                    registrations.remove(&public_key).unwrap();
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -829,8 +878,9 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    backfill,
                     dkg_channel,
+                    boundary_finalizations,
+                    backfill,
                 );
             }
 
@@ -893,7 +943,8 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -901,8 +952,15 @@ mod test {
             .await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                registrations.remove(&public_key).unwrap();
+            let (
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg_channel,
+                boundary_finalizations,
+                backfill,
+            ) = registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -910,8 +968,9 @@ mod test {
                 recovered,
                 resolver,
                 broadcast,
-                backfill,
                 dkg_channel,
+                boundary_finalizations,
+                backfill,
             );
 
             // Poll metrics
@@ -948,20 +1007,25 @@ mod test {
                 // Still waiting for all validators to complete
                 context.sleep(Duration::from_secs(1)).await;
             }
-        });
+
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
     fn test_backfill_ed() {
-        test_backfill::<EdScheme>();
+        assert_eq!(test_backfill::<EdScheme>(1), test_backfill::<EdScheme>(1));
     }
 
     #[test_traced]
     fn test_backfill_threshold() {
-        test_backfill::<ThresholdScheme<MinSig>>();
+        assert_eq!(
+            test_backfill::<ThresholdScheme<MinSig>>(1),
+            test_backfill::<ThresholdScheme<MinSig>>(1)
+        );
     }
 
-    fn test_backfill_multi_epoch<S>()
+    fn test_backfill_multi_epoch<S>(seed: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -972,7 +1036,10 @@ mod test {
         let threshold = quorum(n);
         let initial_container_required = BLOCKS_PER_EPOCH + (BLOCKS_PER_EPOCH / 2);
         let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
-        let executor = Runner::timed(Duration::from_secs(60));
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(60)));
+        let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1038,7 +1105,8 @@ mod test {
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -1046,8 +1114,15 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                    registrations.remove(&public_key).unwrap();
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -1055,8 +1130,9 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    backfill,
                     dkg_channel,
+                    boundary_finalizations,
+                    backfill,
                 );
             }
 
@@ -1119,7 +1195,8 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1127,8 +1204,15 @@ mod test {
             .await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                registrations.remove(&public_key).unwrap();
+            let (
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg_channel,
+                boundary_finalizations,
+                backfill,
+            ) = registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -1136,8 +1220,9 @@ mod test {
                 recovered,
                 resolver,
                 broadcast,
-                backfill,
                 dkg_channel,
+                boundary_finalizations,
+                backfill,
             );
 
             // Poll metrics
@@ -1184,17 +1269,289 @@ mod test {
                 // Still waiting for all validators to complete
                 context.sleep(Duration::from_secs(1)).await;
             }
-        });
+
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
     fn test_backfill_multi_epoch_ed() {
-        test_backfill_multi_epoch::<EdScheme>();
+        assert_eq!(
+            test_backfill_multi_epoch::<EdScheme>(1),
+            test_backfill_multi_epoch::<EdScheme>(1)
+        );
+    }
+
+    #[test_traced("INFO")]
+    fn test_backfill_multi_epoch_threshold() {
+        assert_eq!(
+            test_backfill_multi_epoch::<ThresholdScheme<MinSig>>(1),
+            test_backfill_multi_epoch::<ThresholdScheme<MinSig>>(1)
+        );
+    }
+
+    fn test_backfill_multi_epoch_non_member_of_committee<S: Scheme>(seed: u64) -> String
+    where
+        SchemeProvider<S, ed25519::PrivateKey>:
+            EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+    {
+        // Create context
+        let n = 5;
+        let threshold = quorum(n - 1);
+        let initial_container_required = BLOCKS_PER_EPOCH + (BLOCKS_PER_EPOCH / 2);
+        let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(60)));
+        let executor = Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, MinSig>(&mut context, None, n - 1, threshold);
+
+            // Register participants
+            let mut signers = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let signer = PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
+                signers.push(signer);
+                validators.push(pk);
+            }
+            validators.sort();
+            signers.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
+
+            // Link all validators (except 0)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                link.clone(),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Create instances
+            for (idx, signer) in signers.iter().enumerate() {
+                // Skip first
+                if idx == 0 {
+                    continue;
+                }
+
+                let public_key = signer.public_key();
+                let engine =
+                    engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                        context.with_label(&format!("engine_{idx}")),
+                        engine::Config {
+                            signer: signer.clone(),
+                            blocker: oracle.control(public_key.clone()),
+                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                            participant_config: None,
+                            polynomial: Some(polynomial.clone()),
+                            share: Some(shares[idx - 1].clone()),
+                            active_participants: validators[1..].to_vec(),
+                            inactive_participants: validators[..1].to_vec(),
+                            num_participants_per_epoch: validators.len() - 1,
+                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            partition_prefix: format!("validator_{idx}"),
+                            freezer_table_initial_size: 1024, // 1mb
+                        },
+                    )
+                    .await;
+
+                // Get networking
+                let (
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                ) = registrations.remove(&public_key).unwrap();
+
+                // Start engine
+                engine.start(
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg_channel,
+                    boundary_finalizations,
+                    backfill,
+                );
+            }
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = false;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with processed_height, ensure it is at least initial_container_required
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= initial_container_required {
+                            success = true;
+                            break;
+                        }
+                    }
+                }
+                if success {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            // Link first peer
+            link_validators(
+                &mut oracle,
+                &validators,
+                link,
+                Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+            )
+            .await;
+
+            // Set up the peer to backfill. Note that this peer is _not_ a part of the committee
+            // in the first epoch.
+            let signer = signers[0].clone();
+            let public_key = signer.public_key();
+            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: None,
+                    active_participants: validators[1..].to_vec(),
+                    inactive_participants: validators[..1].to_vec(),
+                    num_participants_per_epoch: validators.len() - 1,
+                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(128)),
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
+
+            // Get networking
+            let (
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg_channel,
+                boundary_finalizations,
+                backfill,
+            ) = registrations.remove(&public_key).unwrap();
+
+            // Start engine
+            engine.start(
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg_channel,
+                boundary_finalizations,
+                backfill,
+            );
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut completed_validators = HashSet::new();
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    if metric.ends_with("_failed_rounds_total") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with processed_height, ensure it is at least final_container_required
+                    for idx in 0..n {
+                        if metric.contains(&format!("engine_{idx}"))
+                            && metric.ends_with("_processed_height")
+                        {
+                            let value = value.parse::<u64>().unwrap();
+                            if value >= final_container_required {
+                                completed_validators.insert(idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if completed_validators.len() == n as usize {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
-    fn test_backfill_multi_epoch_threshold() {
-        test_backfill_multi_epoch::<ThresholdScheme<MinSig>>();
+    fn test_backfill_multi_epoch_non_member_of_committee_ed() {
+        assert_eq!(
+            test_backfill_multi_epoch_non_member_of_committee::<EdScheme>(1),
+            test_backfill_multi_epoch_non_member_of_committee::<EdScheme>(1)
+        );
+    }
+
+    #[test_traced]
+    fn test_backfill_multi_epoch_non_member_of_committee_threshold() {
+        assert_eq!(
+            test_backfill_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
+            test_backfill_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
+        );
     }
 
     fn test_unclean_shutdown<S>()
@@ -1274,7 +1631,8 @@ mod test {
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
                                 num_participants_per_epoch: validators.len(),
-                                dkg_rate_limit: Quota::per_second(NonZeroU32::new(128).unwrap()),
+                                boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                                dkg_rate_limit: Quota::per_second(NZU32!(128)),
                                 partition_prefix: format!("validator_{idx}"),
                                 freezer_table_initial_size: 1024, // 1mb
                             },
@@ -1282,8 +1640,15 @@ mod test {
                         .await;
 
                     // Get networking
-                    let (pending, recovered, resolver, broadcast, backfill, dkg_channel) =
-                        registrations.remove(&public_key).unwrap();
+                    let (
+                        pending,
+                        recovered,
+                        resolver,
+                        broadcast,
+                        dkg_channel,
+                        boundary_finalizations,
+                        backfill,
+                    ) = registrations.remove(&public_key).unwrap();
 
                     // Start engine
                     engine.start(
@@ -1291,8 +1656,9 @@ mod test {
                         recovered,
                         resolver,
                         broadcast,
-                        backfill,
                         dkg_channel,
+                        boundary_finalizations,
+                        backfill,
                     );
                 }
 
