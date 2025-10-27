@@ -22,6 +22,14 @@ type VecIntoIter<T> = std::vec::IntoIter<T>;
 pub struct Ordered<T>(Vec<T>);
 
 impl<T> Ordered<T> {
+    /// Constructs an [`Ordered`] from an iterator of items using their natural ordering.
+    pub fn from_iter(items: impl IntoIterator<Item = T>) -> Self
+    where
+        T: Ord,
+    {
+        items.into_iter().collect()
+    }
+
     /// Returns the size of the ordered collection.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -83,6 +91,24 @@ impl<T: Ord> From<Vec<T>> for Ordered<T> {
         items.sort();
         items.dedup();
         Self(items)
+    }
+}
+
+impl<T: Ord + Clone> From<&[T]> for Ordered<T> {
+    fn from(items: &[T]) -> Self {
+        items.iter().cloned().collect()
+    }
+}
+
+impl<T: Ord, const N: usize> From<[T; N]> for Ordered<T> {
+    fn from(items: [T; N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<T: Ord + Clone, const N: usize> From<&[T; N]> for Ordered<T> {
+    fn from(items: &[T; N]) -> Self {
+        items.as_slice().into()
     }
 }
 
@@ -157,6 +183,14 @@ pub struct OrderedWrapped<K, V> {
 }
 
 impl<K, V> OrderedWrapped<K, V> {
+    /// Constructs an [`OrderedWrapped`] from an iterator of key/value pairs.
+    pub fn from_iter(items: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Ord,
+    {
+        items.into_iter().collect()
+    }
+
     /// Returns the number of entries in the map.
     pub fn len(&self) -> usize {
         self.keys.len()
@@ -262,9 +296,27 @@ impl<K: Ord, V> FromIterator<(K, V)> for OrderedWrapped<K, V> {
     }
 }
 
+impl<K: Ord + Clone, V: Clone> From<&[(K, V)]> for OrderedWrapped<K, V> {
+    fn from(items: &[(K, V)]) -> Self {
+        items.iter().cloned().collect()
+    }
+}
+
 impl<K: Ord, V> From<Vec<(K, V)>> for OrderedWrapped<K, V> {
     fn from(items: Vec<(K, V)>) -> Self {
         items.into_iter().collect()
+    }
+}
+
+impl<K: Ord, V, const N: usize> From<[(K, V); N]> for OrderedWrapped<K, V> {
+    fn from(items: [(K, V); N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, const N: usize> From<&[(K, V); N]> for OrderedWrapped<K, V> {
+    fn from(items: &[(K, V); N]) -> Self {
+        items.as_slice().into()
     }
 }
 
@@ -405,6 +457,20 @@ mod test {
     }
 
     #[test]
+    fn test_ordered_from_slice() {
+        let items = [3u8, 1u8, 2u8, 2u8];
+        let ordered = Ordered::from(&items[..]);
+        assert_eq!(ordered.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_ordered_from_iterator() {
+        let items = [3u8, 1u8, 2u8, 2u8];
+        let ordered = Ordered::from_iter(items.iter().copied());
+        assert_eq!(ordered.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
     fn test_ordered_map_dedup_and_access() {
         let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
 
@@ -415,6 +481,24 @@ mod test {
         assert_eq!(map.get_value(&1), Some(&"a"));
         assert_eq!(map.get_value(&4), None);
         assert_eq!(map.value(1), Some(&"b"));
+    }
+
+    #[test]
+    fn test_ordered_wrapped_from_slice() {
+        let pairs = [(3u8, "c"), (1u8, "a"), (2u8, "b")];
+        let wrapped = OrderedWrapped::from(&pairs[..]);
+
+        assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(wrapped.get_value(&2), Some(&"b"));
+    }
+
+    #[test]
+    fn test_ordered_wrapped_from_iterator() {
+        let pairs = [(3u8, "c"), (1u8, "a"), (2u8, "b")];
+        let wrapped = OrderedWrapped::from_iter(pairs.iter().map(|(k, v)| (*k, *v)));
+
+        assert_eq!(wrapped.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(wrapped.get_value(&1), Some(&"a"));
     }
 
     #[test]

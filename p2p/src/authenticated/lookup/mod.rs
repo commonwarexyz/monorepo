@@ -120,7 +120,7 @@
 //!     // the composition of a validator set changes).
 //!     oracle.register(
 //!         0,
-//!         Ordered::new_by_key([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)], |(pk, _)| pk)
+//!         Ordered::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
 //!     ).await;
 //!
 //!     // Register some channel
@@ -258,8 +258,6 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let peers = peers.clone();
-            // All public keys (except self) sorted
             let mut public_keys = peers
                 .iter()
                 .filter_map(|(pk, _)| {
@@ -273,6 +271,7 @@ mod tests {
             public_keys.sort();
             context.with_label("agent").spawn({
                 let mut complete_sender = complete_sender.clone();
+                let peers = peers.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
                     let receiver = context.with_label("receiver").spawn(move |_| async move {
@@ -519,12 +518,12 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, OrderedWrapped::from(vec![peers[0].clone()]))
+                    .register(0, OrderedWrapped::from([peers[0].clone()]))
                     .await;
                 oracle
                     .register(
                         1,
-                        OrderedWrapped::from(vec![peers[1].clone(), peers[2].clone()]),
+                        OrderedWrapped::from([peers[1].clone(), peers[2].clone()]),
                     )
                     .await;
                 oracle
@@ -602,7 +601,7 @@ mod tests {
                 let iter = peers_and_sks
                     .iter()
                     .map(|(_, pk, addr)| (pk.clone(), *addr));
-                OrderedWrapped::from(iter.collect::<Vec<_>>())
+                OrderedWrapped::from_iter(iter)
             };
 
             // Create network
@@ -656,9 +655,8 @@ mod tests {
             let peers = {
                 let iter = peers_and_sks
                     .iter()
-                    .map(|(_, pk, addr)| (pk.clone(), *addr))
-                    .collect::<Vec<_>>();
-                OrderedWrapped::from(iter)
+                    .map(|(_, pk, addr)| (pk.clone(), *addr));
+                OrderedWrapped::from_iter(iter)
             };
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();

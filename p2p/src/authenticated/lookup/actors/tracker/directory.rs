@@ -304,7 +304,7 @@ mod tests {
 
             let deleted = directory.add_set(
                 0,
-                OrderedWrapped::from(vec![(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                OrderedWrapped::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
             );
             assert!(
                 deleted.is_empty(),
@@ -313,7 +313,7 @@ mod tests {
 
             let deleted = directory.add_set(
                 1,
-                OrderedWrapped::from(vec![(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
+                OrderedWrapped::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
             );
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
