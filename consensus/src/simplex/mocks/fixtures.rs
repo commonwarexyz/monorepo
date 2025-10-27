@@ -8,15 +8,28 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{
-    quorum,
-    set::{Ordered, OrderedAssociated},
-};
+use commonware_utils::{quorum, set::OrderedAssociated};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
 pub type Fixture<S> = (Vec<ed25519::PrivateKey>, Vec<ed25519::PublicKey>, Vec<S>, S);
+
+fn generate_ed25519_identities<R>(
+    rng: &mut R,
+    n: u32,
+) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
+where
+    R: RngCore + CryptoRng,
+{
+    (0..n)
+        .map(|_| {
+            let private_key = ed25519::PrivateKey::from_rng(rng);
+            let public_key = private_key.public_key();
+            (public_key, private_key)
+        })
+        .collect()
+}
 
 /// Builds ed25519 identities and matching BLS threshold schemes for tests.
 ///
@@ -33,17 +46,13 @@ where
     assert!(n > 0);
     let t = quorum(n);
 
-    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
-    ed25519_keys.sort_by_key(|k| k.public_key());
-
-    let ed25519_public = ed25519_keys
-        .iter()
-        .map(|k| k.public_key())
-        .collect::<Vec<_>>();
+    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let participants = ed25519_associated.keys().clone();
+    let ed25519_public: Vec<_> = participants.clone().into();
+    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
-    let participants = Ordered::from(ed25519_public.clone());
     let schemes = shares
         .into_iter()
         .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
@@ -67,10 +76,10 @@ where
 {
     assert!(n > 0);
 
-    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
-    ed25519_keys.sort_by_key(|k| k.public_key());
-
-    let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
+    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let ordered_public_keys = ed25519_associated.keys().clone();
+    let ed25519_public: Vec<_> = ordered_public_keys.clone().into();
+    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
     let bls_public: Vec<_> = bls_privates
@@ -78,9 +87,8 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
-    let participants = ed25519_public
-        .iter()
-        .cloned()
+    let participants = ordered_public_keys
+        .into_iter()
         .zip(bls_public)
         .collect::<OrderedAssociated<_, _>>();
 
@@ -103,13 +111,9 @@ where
 {
     assert!(n > 0);
 
-    let mut ed25519_keys: Vec<_> = (0..n).map(|_| ed25519::PrivateKey::from_rng(rng)).collect();
-    ed25519_keys.sort_by_key(|k| k.public_key());
-
-    let ed25519_public = ed25519_keys
-        .iter()
-        .map(|k| k.public_key())
-        .collect::<Ordered<_>>();
+    let ed25519_associated = generate_ed25519_identities(rng, n);
+    let ed25519_public = ed25519_associated.keys().clone();
+    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let schemes = ed25519_keys
         .iter()

@@ -351,6 +351,18 @@ mod tests {
         keys.iter().map(|key| compute_public::<V>(key)).collect()
     }
 
+    fn ordered_ed25519_identities(
+        n: usize,
+    ) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey> {
+        (0..n)
+            .map(|i| {
+                let private_key = ed25519::PrivateKey::from_seed(i as u64);
+                let public_key = private_key.public_key();
+                (public_key, private_key)
+            })
+            .collect()
+    }
+
     #[allow(clippy::type_complexity)]
     fn signing_schemes<V: Variant>(
         n: usize,
@@ -360,19 +372,13 @@ mod tests {
     ) {
         let bls_keys = generate_private_keys(n);
         let bls_public = bls_public_keys::<V>(&bls_keys);
-
-        // Generate ed25519 keys for participant identities
-        let mut ed25519_keys: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        ed25519_keys.sort_by_key(|k| k.public_key());
-        let ed25519_public: Vec<_> = ed25519_keys.iter().map(|k| k.public_key()).collect();
+        let ed25519_associated = ordered_ed25519_identities(n);
 
         // Create participants as tuples (ed25519::PublicKey, V::Public)
-        let participants: OrderedAssociated<_, _> = ed25519_public
+        let participants: OrderedAssociated<_, _> = ed25519_associated
             .iter()
-            .zip(bls_public.iter())
-            .map(|(p, bls)| (p.clone(), *bls))
+            .cloned()
+            .zip(bls_public.into_iter())
             .collect();
 
         let schemes = bls_keys
