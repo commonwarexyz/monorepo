@@ -14,7 +14,7 @@ use rand::{CryptoRng, RngCore};
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
 pub struct Fixture<S> {
-    pub public_keys: Vec<ed25519::PublicKey>,
+    pub participants: Vec<ed25519::PublicKey>,
     pub schemes: Vec<S>,
     pub verifier: S,
 }
@@ -46,18 +46,18 @@ where
     assert!(n > 0);
 
     let ed25519_associated = ed25519_participants(rng, n);
-    let ed25519_public = ed25519_associated.keys().clone();
+    let participants = ed25519_associated.keys().clone();
     let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let schemes = ed25519_keys
         .iter()
         .cloned()
-        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
+        .map(|sk| ed_scheme::Scheme::new(participants.clone(), sk))
         .collect();
-    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
+    let verifier = ed_scheme::Scheme::verifier(participants.clone());
 
     Fixture {
-        public_keys: ed25519_public.into(),
+        participants: participants.into(),
         schemes,
         verifier,
     }
@@ -77,8 +77,7 @@ where
     assert!(n > 0);
 
     let ed25519_associated = ed25519_participants(rng, n);
-    let ordered_public_keys = ed25519_associated.keys().clone();
-    let ed25519_public: Vec<_> = ordered_public_keys.clone().into();
+    let participants = ed25519_associated.keys().clone();
 
     let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
     let bls_public: Vec<_> = bls_privates
@@ -86,19 +85,20 @@ where
         .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
         .collect();
 
-    let participants = ordered_public_keys
+    let signers = participants
+        .clone()
         .into_iter()
         .zip(bls_public)
         .collect::<OrderedAssociated<_, _>>();
 
     let schemes: Vec<_> = bls_privates
         .into_iter()
-        .map(|sk| bls12381_multisig::Scheme::new(participants.clone(), sk))
+        .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
         .collect();
-    let verifier = bls12381_multisig::Scheme::verifier(participants);
+    let verifier = bls12381_multisig::Scheme::verifier(signers.clone());
 
     Fixture {
-        public_keys: ed25519_public,
+        participants: participants.into(),
         schemes,
         verifier,
     }
@@ -120,7 +120,6 @@ where
 
     let ed25519_associated = ed25519_participants(rng, n);
     let participants = ed25519_associated.keys().clone();
-    let ed25519_public: Vec<_> = participants.clone().into();
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
@@ -128,10 +127,10 @@ where
         .into_iter()
         .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
         .collect();
-    let verifier = bls12381_threshold::Scheme::verifier(participants, &polynomial.clone());
+    let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), &polynomial.clone());
 
     Fixture {
-        public_keys: ed25519_public,
+        participants: participants.into(),
         schemes,
         verifier,
     }

@@ -316,7 +316,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
@@ -325,11 +325,11 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
-            for (i, validator) in public_keys.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(public_keys.clone()),
+                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -339,7 +339,7 @@ mod tests {
             }
 
             // Add links between all peers
-            setup_network_links(&mut oracle, &public_keys, link.clone()).await;
+            setup_network_links(&mut oracle, &participants, link.clone()).await;
 
             // Generate blocks, skipping the genesis block.
             let mut blocks = Vec::<B>::new();
@@ -427,13 +427,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in public_keys.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
@@ -446,7 +446,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            setup_network_links(&mut oracle, &public_keys, LINK).await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block = B::new::<Sha256>(parent, 1, 1);
@@ -479,17 +479,17 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in public_keys.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(public_keys.clone()),
+                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -498,7 +498,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            setup_network_links(&mut oracle, &public_keys, LINK).await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -551,17 +551,17 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in public_keys.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(public_keys.clone()),
+                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -570,7 +570,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            setup_network_links(&mut oracle, &public_keys, LINK).await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -615,17 +615,17 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
-            for (i, validator) in public_keys.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(public_keys.clone()),
+                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -634,7 +634,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            setup_network_links(&mut oracle, &public_keys, LINK).await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -717,13 +717,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
@@ -778,13 +778,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             // Single validator actor
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
@@ -855,12 +855,12 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
@@ -913,16 +913,16 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(public_keys),
+                p2p::mocks::Coordinator::new(participants),
                 validator,
                 schemes[0].clone().into(),
             )
@@ -972,12 +972,12 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,

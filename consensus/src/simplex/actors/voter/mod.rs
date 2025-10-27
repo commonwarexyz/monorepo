@@ -142,16 +142,16 @@ mod tests {
 
             // Get participants
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = fixture(&mut context, n);
 
             // Initialize voter actor
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: public_keys.clone().into(),
+                participants: participants.clone().into(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -198,7 +198,7 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = public_keys[1].clone();
+            let peer = participants[1].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -406,17 +406,17 @@ mod tests {
 
             // Get participants
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: public_keys.clone().into(),
+                participants: participants.clone().into(),
                 scheme: signing.clone(),
             };
             let reporter =
@@ -461,7 +461,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = public_keys[1].clone();
+            let peer = participants[1].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -715,7 +715,7 @@ mod tests {
 
             // Get participants
             let Fixture {
-                public_keys,
+                participants,
                 schemes,
                 ..
             } = fixture(&mut context, n);
@@ -723,7 +723,7 @@ mod tests {
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: public_keys.clone().into(),
+                participants: participants.clone().into(),
                 scheme: schemes[0].clone(),
             };
             let reporter =
@@ -732,7 +732,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: public_keys[0].clone(),
+                participant: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -743,7 +743,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                blocker: oracle.control(public_keys[0].clone()),
+                blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -768,7 +768,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
-            let validator = public_keys[0].clone();
+            let validator = participants[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
