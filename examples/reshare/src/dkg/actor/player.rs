@@ -9,7 +9,7 @@ use commonware_cryptography::{
     PrivateKey, PublicKey,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use futures::{
     channel::{
         mpsc,
@@ -18,6 +18,9 @@ use futures::{
     select_biased, FutureExt, SinkExt as _, StreamExt as _,
 };
 use std::collections::BTreeMap;
+
+mod state;
+use state::State;
 
 /// The output of a player after finalizing.
 ///
@@ -63,10 +66,12 @@ where
 /// the player with these logs, and it will post its output and share.
 pub struct Actor<E, V, C, S, R>
 where
+    E: Clock + Storage + Metrics,
     V: Variant,
     C: PrivateKey,
 {
     ctx: ContextCell<E>,
+    state: State<E, V, C::PublicKey>,
     to_dealers: S,
     from_dealers: R,
     inbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -77,7 +82,7 @@ where
 
 impl<E, V, C, S, R> Actor<E, V, C, S, R>
 where
-    E: Spawner,
+    E: Clock + Storage + Metrics + Spawner,
     V: Variant,
     C: PrivateKey,
     S: Sender<PublicKey = C::PublicKey>,
@@ -90,20 +95,31 @@ where
     /// `from_dealers` lets us receive messages from the dealers.
     /// `round_info` is the configuration for this round of the DKG.
     /// `me` is the private key identifying this player.
-    pub fn new(
+    pub async fn init(
         ctx: E,
+        storage_partition: String,
         to_dealers: S,
         from_dealers: R,
         round_info: RoundInfo<V, C::PublicKey>,
         me: C,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
+        let state = State::load(
+            ctx.with_label("storage"),
+            storage_partition,
+            round_info.round(),
+            round_info.max_read_size(),
+        )
+        .await;
+
         let (outbox, inbox) = mpsc::channel(1);
         let mailbox = Mailbox(outbox);
 
         let max_read_size = round_info.max_read_size();
         let player = Player::new(round_info, me).expect("should be able to create player");
-        let this = Self {
+
+        let mut this = Self {
             ctx: ContextCell::new(ctx),
+            state,
             to_dealers,
             from_dealers,
             inbox,
@@ -111,6 +127,12 @@ where
             player,
             acks: BTreeMap::new(),
         };
+
+        let priv_msgs = this.state.msgs().iter().cloned().collect::<Vec<_>>();
+        for (dealer, pub_msg, priv_msg) in priv_msgs {
+            this.dealer_message(true, dealer, pub_msg, priv_msg).await;
+        }
+
         (this, mailbox)
     }
 
@@ -138,7 +160,7 @@ where
                         // If we can't read the message, ignore it.
                         continue;
                     };
-                    self.dealer_message(dealer, pub_msg, priv_msg).await;
+                    self.dealer_message(false, dealer, pub_msg, priv_msg).await;
                 }
                 res = self.inbox.next() => {
                     let Some(msg) = res else {
@@ -161,15 +183,19 @@ where
 
     async fn dealer_message(
         &mut self,
+        replay: bool,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
     ) {
-        if let Some(ack) = self
-            .player
-            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+        if let Some(ack) =
+            self.player
+                .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
-            self.acks.insert(dealer, ack);
+            self.acks.insert(dealer.clone(), ack);
+            if !replay {
+                self.state.put_msg(dealer, pub_msg, priv_msg).await;
+            }
         };
     }
 
