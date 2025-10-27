@@ -49,10 +49,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// If the provided private key does not match any consensus key in the participant set,
     /// the instance will act as a verifier (unable to sign votes).
     pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
+        let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
-            .position(|p| p == &compute_public::<V>(&private_key))
+            .position(|p| p == &public_key)
             .map(|index| (index as u32, private_key));
 
         Self {
