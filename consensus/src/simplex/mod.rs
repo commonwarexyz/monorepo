@@ -652,20 +652,20 @@ mod tests {
 
             // Register participants (active)
             let Fixture {
-                private_keys: mut schemes,
-                public_keys: validators,
-                schemes: signing_schemes,
-                verifier: observer,
+                mut private_keys,
+                public_keys,
+                schemes,
+                verifier,
             } = fixture(&mut context, n_active);
 
             // Add observer (no share)
-            let scheme_observer = ed25519::PrivateKey::from_seed(n_active as u64);
-            let pk_observer = scheme_observer.public_key();
-            schemes.push(scheme_observer);
+            let private_key_observer = ed25519::PrivateKey::from_seed(n_active as u64);
+            let public_key_observer = private_key_observer.public_key();
+            private_keys.push(private_key_observer);
 
             // Register all (including observer) with the network
-            let mut all_validators = validators.clone();
-            all_validators.push(pk_observer.clone());
+            let mut all_validators = public_keys.clone();
+            all_validators.push(public_key_observer.clone());
             all_validators.sort();
             let mut registrations = register_validators(&mut oracle, &all_validators).await;
 
@@ -681,22 +681,21 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
 
-            for (idx, scheme) in schemes.into_iter().enumerate() {
-                let is_observer = scheme.public_key() == pk_observer;
+            for (idx, validator) in public_keys.iter().enumerate() {
+                let is_observer = *validator == public_key_observer;
 
                 // Create scheme context
-                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+                let context = context.with_label(&format!("validator-{}", *validator));
 
                 // Configure engine
-                let validator = scheme.public_key();
                 let signing = if is_observer {
-                    observer.clone()
+                    verifier.clone()
                 } else {
-                    signing_schemes[idx].clone()
+                    schemes[idx].clone()
                 };
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone().into(),
+                    participants: public_keys.clone().into(),
                     scheme: signing.clone(),
                 };
                 let reporter =
@@ -742,7 +741,7 @@ mod tests {
 
                 // Start engine
                 let (pending, recovered, resolver) = registrations
-                    .remove(&validator)
+                    .remove(validator)
                     .expect("validator should be registered");
                 engine.start(pending, recovered, resolver);
             }
