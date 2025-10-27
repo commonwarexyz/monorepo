@@ -1,4 +1,4 @@
-//! [`Vec<T>`] wrapper that guarantees the contained items are sorted and deduplicated upon construction.
+//! Ordered collections that guarantee sorted, deduplicated keys.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -6,20 +6,24 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
-    ops::{Index, Range},
+    ops::{Deref, Index, Range},
 };
 
-/// A wrapper around a [`Vec<T>`] that guarantees the contained items are sorted and deduplicated
-/// upon construction.
+#[cfg(not(feature = "std"))]
+type VecIntoIter<T> = alloc::vec::IntoIter<T>;
+#[cfg(feature = "std")]
+type VecIntoIter<T> = std::vec::IntoIter<T>;
+
+/// An ordered, deduplicated slice of items.
 ///
-/// After construction, the contained [Vec] is sealed and cannot be modified. To unseal the
-/// inner [Vec], use the [`Into<Vec<T>>`] impl.
+/// After construction, the contained [`Vec<T>`] is sealed and cannot be modified. To unseal the
+/// inner [`Vec<T>`], use the [`Into<Vec<T>>`] impl.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ordered<T>(Vec<T>);
 
 impl<T> Ordered<T> {
-    /// Constructs a new [Ordered] array from an iterator, sorting and deduplicating the items
-    /// using the mapped key.
+    /// Constructs a new [`Ordered`] from an iterator, sorting and deduplicating the items using the
+    /// mapped key.
     pub fn new_by_key<K: Ord>(items: impl IntoIterator<Item = T>, f: impl Fn(&T) -> &K) -> Self {
         let mut items: Vec<_> = items.into_iter().collect();
         items.sort_by(|l, r| f(l).cmp(f(r)));
@@ -27,12 +31,12 @@ impl<T> Ordered<T> {
         Self(items)
     }
 
-    /// Returns the size of the [Ordered].
+    /// Returns the size of the ordered collection.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns true if the [Ordered] is empty.
+    /// Returns `true` if the collection is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -42,7 +46,7 @@ impl<T> Ordered<T> {
         self.0.get(index)
     }
 
-    /// Returns the position of a given item in the [Ordered], if it exists.
+    /// Returns the position of a given item in the collection, if it exists.
     pub fn position(&self, item: &T) -> Option<usize>
     where
         T: Ord,
@@ -50,7 +54,7 @@ impl<T> Ordered<T> {
         self.0.binary_search(item).ok()
     }
 
-    /// Returns an iterator over the items in the set.
+    /// Returns an iterator over the items in the collection.
     pub fn iter(&self) -> core::slice::Iter<'_, T> {
         self.into_iter()
     }
@@ -93,10 +97,7 @@ impl<T: Ord> From<Vec<T>> for Ordered<T> {
 
 impl<T> IntoIterator for Ordered<T> {
     type Item = T;
-    #[cfg(not(feature = "std"))]
-    type IntoIter = alloc::vec::IntoIter<T>;
-    #[cfg(feature = "std")]
-    type IntoIter = std::vec::IntoIter<T>;
+    type IntoIter = VecIntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -135,7 +136,7 @@ impl<T> AsRef<[T]> for Ordered<T> {
 }
 
 impl<T: fmt::Display> fmt::Display for Ordered<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[")?;
         for (i, item) in self.0.iter().enumerate() {
             if i > 0 {
@@ -150,6 +151,237 @@ impl<T: fmt::Display> fmt::Display for Ordered<T> {
 impl<T: Ord> From<Ordered<T>> for Vec<T> {
     fn from(set: Ordered<T>) -> Self {
         set.0
+    }
+}
+
+/// An ordered view over keys paired with hidden associated values.
+///
+/// The ordering and deduplication rules match [`Ordered`], but additional values can be retrieved
+/// when required. Consumers that only need the ordered keys can treat an [`OrderedMap`] as an
+/// [`Ordered`] through deref coercions.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct OrderedMap<K, V> {
+    keys: Ordered<K>,
+    values: Vec<V>,
+}
+
+impl<K, V> OrderedMap<K, V> {
+    /// Creates a map from an existing ordered set of keys and a parallel set of values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `keys.len() != values.len()`.
+    pub fn from_ordered(keys: Ordered<K>, values: Vec<V>) -> Self {
+        assert_eq!(
+            keys.len(),
+            values.len(),
+            "ordered keys and values must match length"
+        );
+        Self { keys, values }
+    }
+
+    /// Returns the number of entries in the map.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Returns `true` if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Returns a key by index, if it exists.
+    pub fn get(&self, index: usize) -> Option<&K> {
+        self.keys.get(index)
+    }
+
+    /// Returns the position of the provided key, if it exists.
+    pub fn position(&self, key: &K) -> Option<usize>
+    where
+        K: Ord,
+    {
+        self.keys.position(key)
+    }
+
+    /// Returns the ordered keys as an [`Ordered`] reference.
+    pub fn keys(&self) -> &Ordered<K> {
+        &self.keys
+    }
+
+    /// Consumes the map and returns the ordered keys.
+    pub fn into_keys(self) -> Ordered<K> {
+        self.keys
+    }
+
+    /// Returns the associated value at `index`, if it exists.
+    pub fn value(&self, index: usize) -> Option<&V> {
+        self.values.get(index)
+    }
+
+    /// Returns the associated value for `key`, if it exists.
+    pub fn get_value(&self, key: &K) -> Option<&V>
+    where
+        K: Ord,
+    {
+        self.position(key).and_then(|index| self.values.get(index))
+    }
+
+    /// Returns the associated values.
+    pub fn values(&self) -> &[V] {
+        &self.values
+    }
+
+    /// Returns a zipped iterator over keys and values.
+    pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.keys.iter().zip(self.values.iter())
+    }
+
+    /// Returns an iterator over the ordered keys.
+    pub fn iter(&self) -> core::slice::Iter<'_, K> {
+        self.keys.iter()
+    }
+
+    /// Consumes the map and returns the associated values.
+    pub fn into_values(self) -> Vec<V> {
+        self.values
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("OrderedMap")
+            .field(&self.iter_pairs().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl<K, V> AsRef<[K]> for OrderedMap<K, V> {
+    fn as_ref(&self) -> &[K] {
+        self.keys.as_ref()
+    }
+}
+
+impl<K, V> AsRef<Ordered<K>> for OrderedMap<K, V> {
+    fn as_ref(&self) -> &Ordered<K> {
+        &self.keys
+    }
+}
+
+impl<K, V> Deref for OrderedMap<K, V> {
+    type Target = Ordered<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.keys
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for OrderedMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut items: Vec<(K, V)> = iter.into_iter().collect();
+        items.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        items.dedup_by(|l, r| l.0 == r.0);
+
+        let mut keys = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            keys.push(key);
+            values.push(value);
+        }
+
+        Self::from_ordered(keys.into(), values)
+    }
+}
+
+impl<K: Ord, V> From<Vec<(K, V)>> for OrderedMap<K, V> {
+    fn from(items: Vec<(K, V)>) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord, V> From<OrderedMap<K, V>> for Vec<(K, V)> {
+    fn from(map: OrderedMap<K, V>) -> Self {
+        map.into_iter().collect()
+    }
+}
+
+impl<K: Write, V: Write> Write for OrderedMap<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.keys.write(buf);
+        self.values.write(buf);
+    }
+}
+
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedMap<K, V> {
+    fn encode_size(&self) -> usize {
+        self.keys.encode_size() + self.values.encode_size()
+    }
+}
+
+impl<K: Read, V: Read> Read for OrderedMap<K, V> {
+    type Cfg = ((RangeCfg<usize>, K::Cfg), (RangeCfg<usize>, V::Cfg));
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let (key_cfg, value_cfg) = cfg;
+        let keys = Ordered::<K>::read_cfg(buf, key_cfg)?;
+        let values = Vec::<V>::read_cfg(buf, value_cfg)?;
+        if keys.len() != values.len() {
+            return Err(commonware_codec::Error::Invalid(
+                "utils::set::OrderedMap",
+                "decoded keys and values length mismatch",
+            ));
+        }
+        Ok(Self { keys, values })
+    }
+}
+
+impl<K, V> IntoIterator for OrderedMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = OrderedMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OrderedMapIntoIter {
+            keys: self.keys.into_iter(),
+            values: self.values.into_iter(),
+        }
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a OrderedMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.keys.iter().zip(self.values.iter())
+    }
+}
+
+/// Owning iterator over an [`OrderedMap`].
+pub struct OrderedMapIntoIter<K, V> {
+    keys: VecIntoIter<K>,
+    values: VecIntoIter<V>,
+}
+
+impl<K, V> Iterator for OrderedMapIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next()?;
+        let value = self.values.next()?;
+        Some((key, value))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl<K, V> ExactSizeIterator for OrderedMapIntoIter<K, V> {}
+
+impl<K, V> DoubleEndedIterator for OrderedMapIntoIter<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let key = self.keys.next_back()?;
+        let value = self.values.next_back()?;
+        Some((key, value))
     }
 }
 
@@ -208,5 +440,41 @@ mod test {
             sorted.to_string(),
             "[ex(1), ex(2), ex(3), ex(4), ex(5), ex(6), ex(7), ex(8), ex(9)]"
         );
+    }
+
+    #[test]
+    fn test_ordered_map_dedup_and_access() {
+        let items = vec![(3u8, "c"), (1u8, "a"), (2u8, "b"), (1u8, "duplicate")];
+
+        let map: OrderedMap<_, _> = items.into_iter().collect();
+
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(map.get_value(&1), Some(&"a"));
+        assert_eq!(map.get_value(&4), None);
+        assert_eq!(map.value(1), Some(&"b"));
+    }
+
+    #[test]
+    fn test_ordered_map_deref_to_ordered() {
+        fn sum(set: &Ordered<u8>) -> u32 {
+            set.iter().map(|v| *v as u32).sum()
+        }
+
+        let map: OrderedMap<_, _> = vec![(2u8, "b"), (1u8, "a")].into_iter().collect();
+        assert_eq!(sum(&map), 3);
+    }
+
+    #[test]
+    fn test_ordered_map_from_ordered() {
+        let ordered: Ordered<_> = vec![3u8, 1u8, 2u8].into_iter().collect();
+        let values = vec!['a', 'b', 'c'];
+        let map = OrderedMap::from_ordered(ordered.clone(), values.clone());
+
+        assert_eq!(
+            map.iter().copied().collect::<Vec<_>>(),
+            ordered.iter().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(map.values(), values.as_slice());
     }
 }
