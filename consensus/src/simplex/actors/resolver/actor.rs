@@ -249,11 +249,11 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
-        let participant_keys = cfg.scheme.participant_keys();
+        let participants = cfg.scheme.participants();
         let me = cfg
             .scheme
             .me()
-            .and_then(|index| cfg.scheme.participant_key(index).cloned());
+            .and_then(|index| cfg.scheme.participant(index).cloned());
 
         let config = requester::Config {
             me,
@@ -262,7 +262,7 @@ impl<
             timeout: cfg.fetch_timeout,
         };
         let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        requester.reconcile(&participant_keys);
+        requester.reconcile(&participants);
 
         // Initialize metrics
         let outstanding = Gauge::default();

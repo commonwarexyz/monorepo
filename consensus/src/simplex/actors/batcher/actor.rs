@@ -379,7 +379,7 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let participants = Ordered::from(cfg.scheme.participant_keys());
+        let participants = Ordered::from(cfg.scheme.participants());
         (
             Self {
                 context: ContextCell::new(context),

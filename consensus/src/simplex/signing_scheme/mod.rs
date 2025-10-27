@@ -56,6 +56,7 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// - `PublicKey` represents participant identity, used for ordering and indexing the committee
 /// - Consensus keys (scheme-specific) are used for signing and verification of votes/certificates
 /// - Implementations may use the same key for both identity and consensus (e.g., [`ed25519`])
+#[allow(clippy::len_without_is_empty)]
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Public key type for participant identity used to order and index the committee.
     type PublicKey: PublicKey + Clone;
@@ -71,25 +72,25 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn me(&self) -> Option<u32>;
 
     /// Returns the number of participants managed by the scheme.
-    fn participant_len(&self) -> usize;
+    fn len(&self) -> usize;
 
     /// Returns the public key for the given participant index.
-    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey>;
+    fn participant(&self, index: u32) -> Option<&Self::PublicKey>;
 
     /// Returns the index for a given participant key, if present.
-    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32>;
+    fn index(&self, key: &Self::PublicKey) -> Option<u32>;
 
     /// Returns all participant public keys ordered by their committee index.
-    fn participant_keys(&self) -> Vec<Self::PublicKey>;
+    fn participants(&self) -> Vec<Self::PublicKey>;
 
     /// Returns the quorum size (2f + 1) for the participant set.
-    fn participant_quorum(&self) -> u32 {
-        quorum(self.participant_len() as u32)
+    fn quorum(&self) -> u32 {
+        quorum(self.len() as u32)
     }
 
     /// Returns the maximum number of tolerated faults.
-    fn participant_max_faults(&self) -> u32 {
-        max_faults(self.participant_len() as u32)
+    fn max_faults(&self) -> u32 {
+        max_faults(self.len() as u32)
     }
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.

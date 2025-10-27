@@ -318,19 +318,19 @@ impl<P: PublicKey + Clone, V: Variant + Send + Sync> signing_scheme::Scheme for 
         }
     }
 
-    fn participant_len(&self) -> usize {
+    fn len(&self) -> usize {
         self.participants().len()
     }
 
-    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey> {
+    fn participant(&self, index: u32) -> Option<&Self::PublicKey> {
         self.participants().get(index as usize)
     }
 
-    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32> {
+    fn index(&self, key: &Self::PublicKey) -> Option<u32> {
         self.participants().position(key).map(|index| index as u32)
     }
 
-    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+    fn participants(&self) -> Vec<Self::PublicKey> {
         self.participants().iter().cloned().collect()
     }
 
@@ -382,7 +382,7 @@ impl<P: PublicKey + Clone, V: Variant + Send + Sync> signing_scheme::Scheme for 
             })
             .unzip();
 
-        let quorum = self.participant_quorum();
+        let quorum = self.quorum();
         if vote_partials.len() < quorum as usize {
             return None;
         }

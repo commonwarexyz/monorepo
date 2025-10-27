@@ -241,7 +241,7 @@ pub(crate) fn interesting(
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
 pub fn select_leader<S: Scheme>(scheme: &S, round: Round, seed: Option<S::Seed>) -> u32 {
-    let participants = scheme.participant_len();
+    let participants = scheme.len();
     let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants as u64) as usize
     } else {

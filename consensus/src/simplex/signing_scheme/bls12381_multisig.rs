@@ -134,21 +134,21 @@ impl<P: PublicKey + Ord + Clone, V: Variant + Send + Sync> signing_scheme::Schem
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participant_len(&self) -> usize {
+    fn len(&self) -> usize {
         self.participants.len()
     }
 
-    fn participant_key(&self, index: u32) -> Option<&Self::PublicKey> {
+    fn participant(&self, index: u32) -> Option<&Self::PublicKey> {
         self.participants.get(index as usize).map(|(key, _)| key)
     }
 
-    fn participant_index(&self, key: &Self::PublicKey) -> Option<u32> {
+    fn index(&self, key: &Self::PublicKey) -> Option<u32> {
         self.participants
             .position_by_first(key)
             .map(|index| index as u32)
     }
 
-    fn participant_keys(&self) -> Vec<Self::PublicKey> {
+    fn participants(&self) -> Vec<Self::PublicKey> {
         self.participants
             .iter()
             .map(|(key, _)| key.clone())
