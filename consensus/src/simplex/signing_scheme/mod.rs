@@ -56,9 +56,9 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// is used for assigning a unique order to the committee and authenticating connections whereas the consensus key
 /// is used for actually signing and verifying votes/certificates.
 ///
-/// This flexibility is supported because some cryptographic schemes are not efficient enough to be used
-/// for both purposes (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]).
-/// Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
+/// This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
+/// (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
+/// for an example of a scheme that uses the same key for both purposes.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Public key type for participant identity used to order and index the committee.
     type PublicKey: PublicKey;
