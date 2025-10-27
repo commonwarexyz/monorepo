@@ -99,4 +99,4 @@ path = "src/rmap/benches/bench.rs"
 [[bench]]
 name="store"
 harness = false
-path = "src/store/benches/bench.rs"
+path = "src/adb/store/benches/bench.rs"

@@ -7,9 +7,9 @@ use commonware_storage::{
     adb::{
         self,
         any::fixed::{unordered::Any, Config},
+        operation,
     },
     mmr::{Location, Proof, StandardHasher as Standard},
-    store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -18,7 +18,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::Fixed<Key, Value>;
+pub type Operation = operation::fixed::unordered::Operation<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> Config<Translator> {
