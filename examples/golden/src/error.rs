@@ -1,5 +1,9 @@
-use crate::dkg::{
-    broadcast::BroadcastMsgError, ciphered_share::ShareError, participant::registry::RegistryError,
+use crate::{
+    dkg::{
+        broadcast::BroadcastMsgError, ciphered_share::ShareError,
+        participant::registry::RegistryError,
+    },
+    greetings::GreetingsError,
 };
 use commonware_codec::Error as CodecError;
 use thiserror::Error;
@@ -14,4 +18,6 @@ pub enum Error {
     RegistryError(#[from] RegistryError),
     #[error("Codec error: {0}")]
     Codecerror(#[from] CodecError),
+    #[error("Greetings error: {0}")]
+    GreetingsError(#[from] GreetingsError),
 }

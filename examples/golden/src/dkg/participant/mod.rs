@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::dkg::broadcast::BroadcastMsg;
 use crate::dkg::ciphered_share::CipheredShare;
-use crate::dkg::error::Error;
+use crate::error::Error;
 
 pub mod evrf;
 pub mod registry;
@@ -73,11 +73,15 @@ impl Participant {
         self.registry.get_group_pubkey()
     }
 
-    pub fn players_pubkeys(&self) -> &HashMap<u32, G1> {
-        self.registry.players_pubkeys()
-    }
-
     pub fn get_share(&self) -> Option<&Scalar> {
         self.registry.get_share()
+    }
+
+    pub fn pubkey_shares(&self) -> Option<&HashMap<u32, G1>> {
+        self.registry.pubkey_shares()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.registry.is_ready()
     }
 }

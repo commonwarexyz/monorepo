@@ -1,6 +1,6 @@
 use crate::dkg::broadcast::BroadcastMsg;
-use crate::dkg::error::Error;
 use crate::dkg::participant::evrf::EVRF;
+use crate::error::Error;
 use commonware_cryptography::bls12381::primitives::group::Element;
 use commonware_cryptography::bls12381::primitives::group::Scalar;
 use commonware_cryptography::bls12381::primitives::group::G1;
@@ -22,7 +22,7 @@ pub enum RegistryError {
 #[derive(Clone)]
 pub struct Registry {
     dealer_broadcasted: HashSet<u32>,
-    players_pubkeys: HashMap<u32, G1>,
+    pubkey_shares: HashMap<u32, G1>,
     share: Scalar,
     group_pubkey: G1,
     ready: bool,
@@ -32,7 +32,7 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             dealer_broadcasted: Default::default(),
-            players_pubkeys: Default::default(),
+            pubkey_shares: Default::default(),
             share: Scalar::zero(),
             group_pubkey: G1::zero(),
             ready: false,
@@ -100,20 +100,27 @@ impl Registry {
         Some(PublicKey::from(self.group_pubkey))
     }
 
-    pub fn get_player_pubkey(&self, k: u32) -> Option<PublicKey> {
+    pub fn pubkey_share(&self, k: u32) -> Option<PublicKey> {
         if !self.ready {
             return None;
         }
-        self.players_pubkeys.get(&k).map(|x| PublicKey::from(*x))
+        self.pubkey_shares.get(&k).map(|x| PublicKey::from(*x))
     }
 
-    pub fn players_pubkeys(&self) -> &HashMap<u32, G1> {
-        &self.players_pubkeys
+    pub fn pubkey_shares(&self) -> Option<&HashMap<u32, G1>> {
+        if !self.ready {
+            return None;
+        }
+        Some(&self.pubkey_shares)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready
     }
 
     fn update_share_commitments(&mut self, share_commitments: Vec<(u32, G1)>) {
         for (player, share_commitment) in share_commitments {
-            let entry = self.players_pubkeys.entry(player).or_insert(G1::zero());
+            let entry = self.pubkey_shares.entry(player).or_insert(G1::zero());
 
             entry.add(&share_commitment);
         }

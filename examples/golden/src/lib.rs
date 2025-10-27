@@ -1,16 +1,17 @@
 pub mod dkg {
     pub mod broadcast;
     pub mod ciphered_share;
-    pub mod error;
     pub mod participant;
 }
 pub mod actor;
 pub mod cli;
+pub mod error;
+pub mod greetings;
 
 #[cfg(test)]
 mod test {
-    use crate::dkg::error::Error;
     use crate::dkg::participant::{evrf::EVRF, registry::Registry, Participant};
+    use crate::error::Error;
     use commonware_cryptography::bls12381::primitives::group::{Element, Scalar};
     use commonware_cryptography::bls12381::primitives::ops::{
         sign_message, threshold_signature_recover,
@@ -157,10 +158,11 @@ mod test {
 
         assert!(eq_group, "Group pubkey mismatch");
 
-        let expected_pubkeys = participants[0].players_pubkeys();
+        let expected_pubkeys = participants[0].pubkey_shares();
+        assert!(expected_pubkeys.is_some());
 
         let eq_pubkeys = participants.iter().all(|x| {
-            let pubkeys = x.players_pubkeys();
+            let pubkeys = x.pubkey_shares();
             pubkeys == expected_pubkeys
         });
 

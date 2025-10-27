@@ -45,31 +45,42 @@ pub struct Cli {
 
 impl Cli {
     const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_GOLDEN_";
-    const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
+    const MAX_MESSAGE_SIZE: usize = 1024 * 1024 * 2; // 2 MB
     const DKG_CHANNEL: u64 = 0;
+    const GREETINGS_CHANNEL: u64 = 1;
     const DEFAULT_MESSAGE_BACKLOG: usize = 256;
 
     pub async fn run(self, ctx: Context) {
         let players = self.whitelisted_peers();
         let mut network = self.setup_network(&ctx, players.clone()).await;
 
-        // // Register peer
-        let (sender, receiver) = network.register(
+        // Register Golden DKG channel
+        let dkg_net = network.register(
             Self::DKG_CHANNEL,
             Quota::per_second(NZU32!(10)),
             Self::DEFAULT_MESSAGE_BACKLOG,
         );
 
-        // // Connect the network layer to the broadcast layer
-        let actor = self.setup_actor(&ctx, players);
+        // Register Greetings channel
+        let greet_net = network.register(
+            Self::GREETINGS_CHANNEL,
+            Quota::per_second(NZU32!(10)),
+            Self::DEFAULT_MESSAGE_BACKLOG,
+        );
+
+        let dkg_actor = self.setup_dkg_actor(&ctx, players);
 
         select! {
-            _=actor.start(sender, receiver)=>{
-                panic!("Actor finished")
+            res=dkg_actor.start(dkg_net, greet_net)=>{
+                if let Err(e) = res{
+                    panic!("Actor finished with error {e}")
+                }
+
             },
             _=network.start()=>{
                 panic!("Network finished")
             }
+
         }
     }
 
@@ -112,7 +123,7 @@ impl Cli {
         network
     }
 
-    fn setup_actor(&self, ctx: &Context, players: Ordered<PublicKey>) -> Actor {
+    fn setup_dkg_actor(&self, ctx: &Context, players: Ordered<PublicKey>) -> Actor {
         let beta = Scalar::one();
         let sk_i = Scalar::from_index(self.peer_index);
         let evrf = EVRF::new(sk_i.clone(), beta);

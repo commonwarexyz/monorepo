@@ -6,7 +6,6 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-# bulletproofs = { version = "5.0.0", features = ["yoloproofs"] }
 rand.workspace = true
 bytes.workspace = true
 serde.workspace = true
