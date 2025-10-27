@@ -622,7 +622,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{bls12381_threshold, Fixture},
+            mocks::fixtures::{bls12381_threshold, ed25519_participants, Fixture},
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
@@ -661,6 +661,21 @@ mod tests {
             view.saturating_sub(1),
             Sha256::hash(&[tag]),
         )
+    }
+
+    fn signer_shares_must_match_participant_indices<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 4);
+        let (polynomial, mut shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        shares[0].index = 999;
+        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+    }
+
+    #[test]
+    #[should_panic(expected = "share index must match participant index")]
+    fn test_signer_shares_must_match_participant_indices() {
+        signer_shares_must_match_participant_indices::<MinPk>();
+        signer_shares_must_match_participant_indices::<MinSig>();
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {

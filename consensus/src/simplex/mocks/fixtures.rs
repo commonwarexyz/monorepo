@@ -23,7 +23,7 @@ pub struct Fixture<S> {
 }
 
 /// Generates ed25519 participants.
-fn ed25519_participants<R>(
+pub fn ed25519_participants<R>(
     rng: &mut R,
     n: u32,
 ) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
