@@ -14,7 +14,6 @@ use rand::{CryptoRng, RngCore};
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
 pub struct Fixture<S> {
-    pub private_keys: Vec<ed25519::PrivateKey>,
     pub public_keys: Vec<ed25519::PublicKey>,
     pub schemes: Vec<S>,
     pub verifier: S,
@@ -58,7 +57,6 @@ where
     let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 
     Fixture {
-        private_keys: ed25519_keys,
         public_keys: ed25519_public.into(),
         schemes,
         verifier,
@@ -81,7 +79,6 @@ where
     let ed25519_associated = ed25519_participants(rng, n);
     let ordered_public_keys = ed25519_associated.keys().clone();
     let ed25519_public: Vec<_> = ordered_public_keys.clone().into();
-    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let bls_privates: Vec<_> = (0..n).map(|_| group::Private::from_rand(rng)).collect();
     let bls_public: Vec<_> = bls_privates
@@ -101,7 +98,6 @@ where
     let verifier = bls12381_multisig::Scheme::verifier(participants);
 
     Fixture {
-        private_keys: ed25519_keys,
         public_keys: ed25519_public,
         schemes,
         verifier,
@@ -125,7 +121,6 @@ where
     let ed25519_associated = ed25519_participants(rng, n);
     let participants = ed25519_associated.keys().clone();
     let ed25519_public: Vec<_> = participants.clone().into();
-    let ed25519_keys: Vec<_> = ed25519_associated.into_iter().map(|(_, sk)| sk).collect();
 
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
@@ -136,7 +131,6 @@ where
     let verifier = bls12381_threshold::Scheme::verifier(participants, &polynomial.clone());
 
     Fixture {
-        private_keys: ed25519_keys,
         public_keys: ed25519_public,
         schemes,
         verifier,
