@@ -157,12 +157,16 @@ impl signing_scheme::Scheme for Scheme {
     type Signature = ed25519::Signature;
     type Certificate = Certificate;
     type Seed = ();
+    type ParticipantSet<'a>
+        = &'a Ordered<ed25519::PublicKey>
+    where
+        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> Self::ParticipantSet<'_> {
         &self.participants
     }
 

@@ -209,6 +209,7 @@ pub mod mocks;
 
 use crate::types::{Round, View};
 use commonware_codec::Encode;
+use commonware_utils::set::OrderedKeySet;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
@@ -240,14 +241,19 @@ pub(crate) fn interesting(
 /// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
-pub fn select_leader<S, P>(participants: &[P], round: Round, seed: Option<S::Seed>) -> u32
+pub fn select_leader<S, P>(
+    participants: impl OrderedKeySet<P>,
+    round: Round,
+    seed: Option<S::Seed>,
+) -> u32
 where
     S: Scheme,
 {
+    let len = participants.len();
     let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
+        commonware_utils::modulo(seed.encode().as_ref(), len as u64) as usize
     } else {
-        (round.epoch() + round.view()) as usize % participants.len()
+        (round.epoch() + round.view()) as usize % len
     };
 
     idx as u32

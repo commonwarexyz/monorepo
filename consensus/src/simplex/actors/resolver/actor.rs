@@ -21,6 +21,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::set::OrderedKeySet;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::{
@@ -255,6 +256,7 @@ impl<
             .me()
             .and_then(|index| participants.key(index))
             .cloned();
+        let participant_keys: Vec<_> = participants.iter().cloned().collect();
 
         let config = requester::Config {
             me,
@@ -263,7 +265,7 @@ impl<
             timeout: cfg.fetch_timeout,
         };
         let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        requester.reconcile(participants.as_ref());
+        requester.reconcile(&participant_keys);
 
         // Initialize metrics
         let outstanding = Gauge::default();

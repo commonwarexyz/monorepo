@@ -310,6 +310,10 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
     type Seed = Seed<V>;
+    type ParticipantSet<'a>
+        = &'a Ordered<P>
+    where
+        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         match self {
@@ -318,7 +322,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> Self::ParticipantSet<'_> {
         self.participants()
     }
 

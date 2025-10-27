@@ -137,12 +137,16 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     type Signature = V::Signature;
     type Certificate = Certificate<V>;
     type Seed = ();
+    type ParticipantSet<'a>
+        = &'a Ordered<P>
+    where
+        Self: 'a;
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
-    fn participants(&self) -> &Ordered<Self::PublicKey> {
+    fn participants(&self) -> Self::ParticipantSet<'_> {
         &self.participants
     }
 

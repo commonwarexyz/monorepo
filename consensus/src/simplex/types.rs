@@ -8,7 +8,10 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum, set::Ordered};
+use commonware_utils::{
+    max_faults, quorum,
+    set::{Ordered, OrderedKeySet},
+};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -157,7 +160,11 @@ pub trait OrderedExt<P> {
     fn index(&self, key: &P) -> Option<u32>;
 }
 
-impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
+impl<T, P> OrderedExt<P> for T
+where
+    P: PublicKey,
+    T: OrderedKeySet<P> + ?Sized,
+{
     fn quorum(&self) -> u32 {
         quorum(self.len() as u32)
     }

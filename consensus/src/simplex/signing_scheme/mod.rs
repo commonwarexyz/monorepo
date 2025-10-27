@@ -39,7 +39,10 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{set::Ordered, union};
+use commonware_utils::{
+    set::{Ordered, OrderedKeySet},
+    union,
+};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -65,13 +68,17 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
+    /// View over the ordered participant set.
+    type ParticipantSet<'a>: OrderedKeySet<Self::PublicKey> + ?Sized
+    where
+        Self: 'a;
 
     /// Returns the index of "self" in the participant set, if available.
     /// Returns `None` if the scheme is a verifier-only instance.
     fn me(&self) -> Option<u32>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Ordered<Self::PublicKey>;
+    fn participants(&self) -> Self::ParticipantSet<'_>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

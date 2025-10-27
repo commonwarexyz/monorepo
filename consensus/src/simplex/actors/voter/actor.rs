@@ -27,6 +27,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
+use commonware_utils::set::OrderedKeySet;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -155,7 +156,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader = select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
+        let leader = select_leader::<S, _>(self.scheme.participants(), self.round, seed);
         self.leader = Some(leader);
     }
 

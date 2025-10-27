@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedKeySet};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
@@ -379,7 +379,12 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let participants = cfg.scheme.participants().clone();
+        let participants = cfg
+            .scheme
+            .participants()
+            .iter()
+            .cloned()
+            .collect::<Ordered<_>>();
         (
             Self {
                 context: ContextCell::new(context),
