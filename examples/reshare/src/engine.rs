@@ -58,8 +58,8 @@ where
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
-    pub boundary_finalization_rate_limit: governor::Quota,
     pub dkg_rate_limit: governor::Quota,
+    pub orchestrator_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
@@ -171,7 +171,7 @@ where
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                boundary_finalization_rate_limit: config.boundary_finalization_rate_limit,
+                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
@@ -215,11 +215,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        boundary_finalizations: (
+        orchestrator: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -232,8 +232,8 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                boundary_finalizations,
-                backfill_network
+                orchestrator,
+                marshal
             )
             .await
         )
@@ -262,11 +262,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        boundary_finalizations: (
+        orchestrator: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -283,12 +283,12 @@ where
             .application
             .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
-        let marshal_handle =
-            self.marshal
-                .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
+        let marshal_handle = self
+            .marshal
+            .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
         let orchestrator_handle =
             self.orchestrator
-                .start(pending, recovered, resolver, boundary_finalizations);
+                .start(pending, recovered, resolver, orchestrator);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
