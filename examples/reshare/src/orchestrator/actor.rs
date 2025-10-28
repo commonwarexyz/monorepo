@@ -400,6 +400,6 @@ where
                 false,
             )
             .await
-            .is_err()
+            .is_ok()
     }
 }
