@@ -204,25 +204,21 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
     /// Initialize a journal in a fully pruned state at a specific logical size.
     ///
-    /// This creates a journal that reports `size()` as `start_size` but contains no data.
+    /// This creates a journal that reports `size()` as `size` but contains no data.
     /// The `oldest_retained_pos()` will return `None`, indicating all positions before
-    /// `start_size` have been pruned. This is useful for state sync when starting from
+    /// `size` have been pruned. This is useful for state sync when starting from
     /// a non-zero position without historical data.
     ///
     /// # Arguments
     ///
-    /// * `start_size` - The logical size to initialize at. The next append will get position `start_size`.
+    /// * `size` - The logical size to initialize at.
     ///
     /// # Post-conditions
     ///
-    /// * `size()` returns `start_size`
+    /// * `size()` returns `size`
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
-    /// * Next append receives position `start_size`
-    pub async fn init_at_size(
-        context: E,
-        cfg: Config<V::Cfg>,
-        start_size: u64,
-    ) -> Result<Self, Error> {
+    /// * Next append receives position `size`
+    pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         let data_partition = cfg.data_partition();
         let offsets_partition = cfg.offsets_partition();
 
@@ -248,7 +244,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
             },
-            start_size,
+            size,
         )
         .await?;
 
@@ -256,8 +252,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             data,
             offsets,
             items_per_section: cfg.items_per_section.get(),
-            size: start_size,
-            oldest_retained_pos: start_size,
+            size,
+            oldest_retained_pos: size,
         })
     }
 

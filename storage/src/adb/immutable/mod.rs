@@ -229,7 +229,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // Get the start location from the log.
         let start_loc = match log.oldest_retained_pos().await? {
             Some(pos) => pos,
-            None => log.size().await.map_err(Error::Journal)?,
+            None => log.size().await?,
         };
 
         // The number of operations in the log.
