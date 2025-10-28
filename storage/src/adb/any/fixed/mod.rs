@@ -167,11 +167,10 @@ pub(crate) async fn init_mmr_and_log<
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-///
-/// # Panic
-///
-/// Panics if `target_prune_loc` is greater than the inactivity floor.
+/// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
+///   [crate::mmr::MAX_LOCATION].
+/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `target_prune_loc` is greater than the
+///   inactivity floor.
 async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut Journal<E, O>,
@@ -185,6 +184,9 @@ where
     O: FixedOperation,
     H: CHasher,
 {
+    if target_prune_loc > inactivity_floor_loc {
+        return Err(crate::mmr::Error::RangeOutOfBounds(target_prune_loc).into());
+    }
     let target_prune_pos = Position::try_from(target_prune_loc)?;
 
     assert!(target_prune_loc <= inactivity_floor_loc);

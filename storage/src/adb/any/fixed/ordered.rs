@@ -693,12 +693,10 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `target_prune_loc` is greater than the
+    ///   inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
