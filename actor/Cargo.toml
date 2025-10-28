@@ -1,0 +1,32 @@
+[package]
+name = "commonware-actor"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Coordinate actors with protocol-driven ingress and lane-aware control loops."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/actor"
+documentation = "https://docs.rs/commonware-actor"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-actor-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
+commonware-runtime.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
+futures.workspace = true
+governor.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[lib]
+bench = false
+crate-type = ["rlib", "cdylib"]
