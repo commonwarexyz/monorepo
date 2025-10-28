@@ -16,7 +16,7 @@ commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-commonware-consensus = { workspace = true }
+commonware-consensus = { workspace = true, features = ["websocket-reporter"] }
 commonware-storage = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 rand = { workspace = true }

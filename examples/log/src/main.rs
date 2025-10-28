@@ -48,7 +48,7 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex;
+use commonware_consensus::{simplex, simplex::signing_scheme::Scheme};
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -84,6 +84,13 @@ fn main() {
                 .help("All participants (arbiter and contributors)"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
+        .arg(
+            Arg::new("ws-port")
+                .long("ws-port")
+                .required(false)
+                .value_parser(value_parser!(u16))
+                .help("WebSocket reporter port"),
+        )
         .get_matches();
 
     // Configure my identity
@@ -198,6 +205,20 @@ fn main() {
                 private_key: signer.clone(),
             },
         );
+
+        // Wrap with WebSocket reporter
+        let (reporter, ws_server) = simplex::reporters::WebSocketReporter::new(
+            context.with_label("websocket-reporter"),
+            scheme.participants().clone(),
+            scheme.me(),
+            reporter,
+        );
+
+        // Only start server if port was provided
+        if let Some(&port) = matches.get_one::<u16>("ws-port") {
+            let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            ws_server.start(ws_addr);
+        }
 
         // Initialize consensus
         let cfg = simplex::Config {
