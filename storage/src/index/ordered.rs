@@ -312,6 +312,7 @@ mod tests {
     use crate::translator::OneCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::hex;
 
     #[test_traced]
     fn test_ordered_index_ordering() {
@@ -320,10 +321,10 @@ mod tests {
             let mut index = Index::<_, u64>::init(context, OneCap);
             assert_eq!(index.keys(), 0);
 
-            let k1 = &[0x0b, 0x02, 0xAA]; // translated key 0b
-            let k2 = &[0x1c, 0x04, 0xCC]; // translated key 1c
-            let k2_collides = &[0x1c, 0x03, 0x11];
-            let k3 = &[0x2d, 0x06, 0xEE]; // translated key 2d
+            let k1 = &hex!("0x0b02AA"); // translated key 0b
+            let k2 = &hex!("0x1c04CC"); // translated key 1c
+            let k2_collides = &hex!("0x1c0311");
+            let k3 = &hex!("0x2d06EE"); // translated key 2d
             index.insert(k1, 1);
             index.insert(k2, 21);
             index.insert(k2_collides, 22);
@@ -341,19 +342,19 @@ mod tests {
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x0b is 1c.
-            let mut next = index.next_translated_key(&[0x0b, 0x01, 0x02]);
+            let mut next = index.next_translated_key(&hex!("0x0b0102"));
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key(&[0x1b, 0x01, 0x02, 0x03]);
+            let mut next = index.next_translated_key(&hex!("0x1b010203"));
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key(&[0x2a, 0x01, 0x02, 0x03, 0x04]);
+            let mut next = index.next_translated_key(&hex!("0x2a01020304"));
             assert_eq!(next.next().unwrap(), &3);
             assert_eq!(next.next(), None);
 
@@ -361,7 +362,7 @@ mod tests {
             let mut next = index.next_translated_key(k3);
             assert_eq!(next.next(), None);
 
-            let mut next = index.next_translated_key(&[0x2e, 0xFF]);
+            let mut next = index.next_translated_key(&hex!("0x2eFF"));
             assert_eq!(next.next(), None);
 
             // Previous translated key is None.
@@ -369,18 +370,18 @@ mod tests {
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key(&[0x0c, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&hex!("0x0c0102"));
             assert_eq!(prev.next().unwrap(), &1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key(&[0x1d, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&hex!("0x1d0102"));
             assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key(&[0xCC, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&hex!("0xCC0102"));
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 

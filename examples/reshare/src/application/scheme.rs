@@ -19,7 +19,7 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<V>;
+pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
 pub type EdScheme = signing_scheme::ed25519::Scheme;
@@ -79,9 +79,9 @@ pub trait EpochSchemeProvider {
     ) -> Self::Scheme;
 }
 
-impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, C> {
+impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25519::PrivateKey> {
     type Variant = V;
-    type PublicKey = C::PublicKey;
+    type PublicKey = ed25519::PublicKey;
     type Scheme = ThresholdScheme<V>;
 
     fn scheme_for_epoch(
@@ -89,8 +89,8 @@ impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdSche
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
         if let Some(share) = transition.share.as_ref() {
-            ThresholdScheme::<V>::new(
-                transition.participants.as_ref(),
+            ThresholdScheme::new(
+                transition.participants.clone(),
                 transition
                     .poly
                     .as_ref()
@@ -98,8 +98,8 @@ impl<V: Variant, C: Signer> EpochSchemeProvider for SchemeProvider<ThresholdSche
                 share.clone(),
             )
         } else {
-            ThresholdScheme::<V>::verifier(
-                transition.participants.as_ref(),
+            ThresholdScheme::verifier(
+                transition.participants.clone(),
                 transition
                     .poly
                     .as_ref()

@@ -816,6 +816,7 @@ impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
 
@@ -1012,7 +1013,7 @@ mod tests {
     #[test]
     fn test_chunk_operations() {
         let mut bv: BitMap<4> = BitMap::new();
-        let test_chunk = [0xAB, 0xCD, 0xEF, 0x12];
+        let test_chunk = hex!("0xABCDEF12");
 
         // Test push_chunk
         bv.push_chunk(&test_chunk);
@@ -1070,7 +1071,7 @@ mod tests {
         const CHUNK_SIZE: u64 = BitMap::<3>::CHUNK_SIZE_BITS;
 
         // Test 1: Pop a single chunk and verify it returns the correct data
-        let chunk1 = [0xAA, 0xBB, 0xCC];
+        let chunk1 = hex!("0xAABBCC");
         bv.push_chunk(&chunk1);
         assert_eq!(bv.len(), CHUNK_SIZE);
         let popped = bv.pop_chunk();
@@ -1079,9 +1080,9 @@ mod tests {
         assert!(bv.is_empty());
 
         // Test 2: Pop multiple chunks in reverse order
-        let chunk2 = [0x11, 0x22, 0x33];
-        let chunk3 = [0x44, 0x55, 0x66];
-        let chunk4 = [0x77, 0x88, 0x99];
+        let chunk2 = hex!("0x112233");
+        let chunk3 = hex!("0x445566");
+        let chunk4 = hex!("0x778899");
 
         bv.push_chunk(&chunk2);
         bv.push_chunk(&chunk3);
@@ -1098,8 +1099,8 @@ mod tests {
         assert_eq!(bv.len(), 0);
 
         // Test 3: Verify data integrity when popping chunks
-        let first_chunk = [0xAA, 0xBB, 0xCC];
-        let second_chunk = [0x11, 0x22, 0x33];
+        let first_chunk = hex!("0xAABBCC");
+        let second_chunk = hex!("0x112233");
         bv.push_chunk(&first_chunk);
         bv.push_chunk(&second_chunk);
 
@@ -1341,8 +1342,8 @@ mod tests {
         let mut bv2: BitMap<4> = BitMap::new();
 
         // Fill multiple chunks
-        let chunk1 = [0xAA, 0xBB, 0xCC, 0xDD]; // 10101010 10111011 11001100 11011101
-        let chunk2 = [0x55, 0x66, 0x77, 0x88]; // 01010101 01100110 01110111 10001000
+        let chunk1 = hex!("0xAABBCCDD"); // 10101010 10111011 11001100 11011101
+        let chunk2 = hex!("0x55667788"); // 01010101 01100110 01110111 10001000
 
         bv1.push_chunk(&chunk1);
         bv1.push_chunk(&chunk1);

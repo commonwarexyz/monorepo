@@ -1,26 +1,29 @@
-//! An append-only log for storing arbitrary data.
+//! An interface for journaling with position-indexed reads.
 //!
-//! Journals provide append-only logging for persisting arbitrary data with fast replay, historical
-//! pruning, and rudimentary support for fetching individual items. A journal can be used on its own
-//! to serve as a backing store for some in-memory data structure, or as a building block for a more
-//! complex construction that prescribes some meaning to items in the log.
+//! This module includes:
+//!
+//! - [Contiguous]: Trait for append-only log
+//! - [Variable]: Wrapper for [super::variable::Journal] that implements [Contiguous]
+//! - Implementation of [Contiguous] for [super::fixed::Journal]
 
+use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
-use thiserror::Error;
 
-pub mod contiguous;
-pub mod fixed;
-pub mod variable;
+mod fixed;
+mod variable;
+
+// Re-export public types
+pub use variable::{Config, Variable};
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
-/// Core trait for journals supporting sequential append operations.
+/// Core trait for contiguous journals supporting sequential append operations.
 ///
-/// A journal maintains a consecutively increasing position counter where each
+/// A contiguous journal maintains a consecutively increasing position counter where each
 /// appended item receives a unique position starting from 0.
-pub trait Journal {
+pub trait Contiguous {
     /// The type of items stored in the journal.
     type Item;
 
@@ -141,64 +144,4 @@ pub trait Journal {
     /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
     /// permanently removing a journal.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-}
-
-impl<E, Op> crate::adb::sync::Journal for fixed::Journal<E, Op>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
-{
-    type Op = Op;
-    type Error = Error;
-
-    async fn size(&self) -> Result<u64, Self::Error> {
-        fixed::Journal::size(self).await
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        fixed::Journal::append(self, op).await.map(|_| ())
-    }
-}
-
-/// Errors that can occur when interacting with `Journal`.
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
-    #[error("codec error: {0}")]
-    Codec(#[from] commonware_codec::Error),
-    #[error("invalid blob name: {0}")]
-    InvalidBlobName(String),
-    #[error("invalid blob size: index={0} size={1}")]
-    InvalidBlobSize(u64, u64),
-    #[error("checksum mismatch: expected={0} actual={1}")]
-    ChecksumMismatch(u32, u32),
-    #[error("item too large: size={0}")]
-    ItemTooLarge(usize),
-    #[error("already pruned to section: {0}")]
-    AlreadyPrunedToSection(u64),
-    #[error("section out of range: {0}")]
-    SectionOutOfRange(u64),
-    #[error("usize too small")]
-    UsizeTooSmall,
-    #[error("offset overflow")]
-    OffsetOverflow,
-    #[error("unexpected size: expected={0} actual={1}")]
-    UnexpectedSize(u32, u32),
-    #[error("missing blob: {0}")]
-    MissingBlob(u64),
-    #[error("item out of range: {0}")]
-    ItemOutOfRange(u64),
-    #[error("item pruned: {0}")]
-    ItemPruned(u64),
-    #[error("invalid rewind: {0}")]
-    InvalidRewind(u64),
-    #[error("compression failed")]
-    CompressionFailed,
-    #[error("decompression failed")]
-    DecompressionFailed,
-    #[error("corruption detected: {0}")]
-    Corruption(String),
-    #[error("invalid configuration: {0}")]
-    InvalidConfiguration(String),
 }
