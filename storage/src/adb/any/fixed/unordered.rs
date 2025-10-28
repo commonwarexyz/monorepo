@@ -9,7 +9,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{Index as _, Unordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     translator::Translator,
@@ -128,13 +128,11 @@ impl<
                     let loc = Location::new_unchecked(i);
                     match op {
                         Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, loc).await?;
+                            let result = super::delete_key(snapshot, log, &key, loc).await?;
                             callback(false, result);
                         }
                         Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, loc).await?;
+                            let result = super::update_loc(snapshot, log, &key, loc).await?;
                             callback(true, result);
                         }
                         Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
@@ -144,33 +142,6 @@ impl<
         }
 
         Ok(())
-    }
-
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present.
-    async fn update_loc(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then update its location.
-        if let Some(loc) = super::find_update_op(log, &mut cursor, key).await? {
-            assert!(new_loc > loc);
-            cursor.update(new_loc);
-            return Ok(Some(loc));
-        }
-
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_loc);
-
-        Ok(None)
     }
 
     /// Get the update operation from `log` corresponding to a known location.
@@ -236,8 +207,7 @@ impl<
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res =
-            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = super::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.as_shared().apply_op(op).await?;
@@ -253,37 +223,13 @@ impl<
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
         let loc = self.op_count();
-        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
+        let r = super::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
         };
 
         Ok(r)
-    }
-
-    /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it.
-    async fn delete_key(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        delete_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then delete it.
-        if let Some(loc) = super::find_update_op(log, &mut cursor, key).await? {
-            assert!(loc < delete_loc);
-            cursor.delete();
-            return Ok(Some(loc));
-        }
-
-        // The key isn't in the conflicting keys, so this is a no-op.
-        Ok(None)
     }
 
     // Returns a wrapper around the db's state that can be used to perform shared functions.

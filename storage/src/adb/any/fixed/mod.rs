@@ -21,7 +21,6 @@ use crate::{
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt as _},
     try_join,
@@ -263,18 +262,74 @@ where
     Ok((proof, ops))
 }
 
+async fn update_loc<E, I: Index<Value = Location>, O>(
+    snapshot: &mut I,
+    log: &Journal<E, O>,
+    key: &<O as FixedOperation>::Key,
+    new_loc: Location,
+) -> Result<Option<Location>, Error>
+where
+    E: Storage + Clock + Metrics,
+    O: FixedOperation,
+{
+    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+        return Ok(None);
+    };
+
+    // Find the matching key among all conflicts, then update its location.
+    if let Some(loc) = find_update_op(log, &mut cursor, key).await? {
+        assert!(new_loc > loc);
+        cursor.update(new_loc);
+        return Ok(Some(loc));
+    }
+
+    // The key wasn't in the snapshot, so add it to the cursor.
+    cursor.insert(new_loc);
+
+    Ok(None)
+}
+
+/// Delete `key` from the snapshot if it exists, returning the location that was previously
+/// associated with it.
+async fn delete_key<E, I, O>(
+    snapshot: &mut I,
+    log: &Journal<E, O>,
+    key: &O::Key,
+    delete_loc: Location,
+) -> Result<Option<Location>, Error>
+where
+    E: Storage + Clock + Metrics,
+    I: Index<Value = Location>,
+    O: FixedOperation,
+{
+    // If the translated key is in the snapshot, get a cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut(key) else {
+        return Ok(None);
+    };
+
+    // Find the matching key among all conflicts, then delete it.
+    let Some(loc) = find_update_op(log, &mut cursor, key).await? else {
+        return Ok(None);
+    };
+    assert!(loc < delete_loc);
+    cursor.delete();
+
+    Ok(Some(loc))
+}
+
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
-async fn find_update_op<E, C, K, O>(
+async fn find_update_op<E, C, O>(
     log: &Journal<E, O>,
     cursor: &mut C,
-    key: &K,
+    key: &<O as FixedOperation>::Key,
 ) -> Result<Option<Location>, Error>
 where
     E: Storage + Clock + Metrics,
     C: Cursor<Value = Location>,
-    K: Array,
-    O: FixedOperation<Key = K>,
+    O: FixedOperation,
 {
     while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
@@ -426,7 +481,7 @@ where
     }
 
     /// Sync the log and process the updates to the MMR in parallel.
-    async fn sync_and_process_updates(self) -> Result<(), Error> {
+    async fn sync_and_process_updates(&mut self) -> Result<(), Error> {
         let mmr_fut = async {
             self.mmr.process_updates(self.hasher);
             Ok::<(), Error>(())
@@ -437,7 +492,7 @@ where
     }
 
     /// Sync the log and the MMR to disk.
-    async fn sync(self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
             self.mmr.sync(self.hasher).map_err(Error::Mmr)

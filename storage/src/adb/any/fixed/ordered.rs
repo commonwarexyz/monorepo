@@ -13,7 +13,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Cursor, Index as _, Ordered as Index},
+    index::{Cursor as _, Index as _, Ordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     translator::Translator,
@@ -139,13 +139,11 @@ impl<
             let loc = Location::new_unchecked(i);
             match op {
                 Operation::Delete(key) => {
-                    let old_loc =
-                        Any::<E, K, V, H, T>::replay_delete(snapshot, log, &key, loc).await?;
+                    let old_loc = super::delete_key(snapshot, log, &key, loc).await?;
                     callback(false, old_loc);
                 }
                 Operation::Update(data) => {
-                    let old_loc =
-                        Any::<E, K, V, H, T>::replay_update(snapshot, log, &data.key, loc).await?;
+                    let old_loc = super::update_loc(snapshot, log, &data.key, loc).await?;
                     callback(true, old_loc);
                 }
                 Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
@@ -194,32 +192,6 @@ impl<
         cursor.update(new_loc);
 
         Ok(())
-    }
-
-    /// insert it if the key isn't already present. For use by log-replay.
-    async fn replay_update(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        next_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, next_loc) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then update its location.
-        if let Some(loc) = super::find_update_op(log, &mut cursor, key).await? {
-            assert!(next_loc > loc);
-            cursor.update(next_loc);
-            return Ok(Some(loc));
-        }
-
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(next_loc);
-
-        Ok(None)
     }
 
     /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
@@ -621,32 +593,6 @@ impl<
         self.steps += 1;
 
         Ok(())
-    }
-
-    /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it. For use by log-replay. Because replay begins from the inactivity floor,
-    /// it's possible that certain keys referenced by subsequent delete operations might not have
-    /// been previously added to the snapshot, so we do not treat not-found as a consistency error.
-    async fn replay_delete(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        delete_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // Get a cursor to look for the key if it exists in the snapshot.
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts if it exists, then delete it.
-        let Some(loc) = super::find_update_op(log, &mut cursor, key).await? else {
-            return Ok(None);
-        };
-
-        assert!(loc < delete_loc);
-        cursor.delete();
-
-        Ok(Some(loc))
     }
 
     // Returns a wrapper around the db's state that can be used to perform shared functions.
