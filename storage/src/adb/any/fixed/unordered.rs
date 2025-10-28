@@ -5,16 +5,16 @@ use crate::{
         any::fixed::{
             historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
         },
-        operation::fixed::{unordered::Operation, FixedOperation},
+        operation::fixed::unordered::Operation,
         store::{self, Db},
         Error,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{Index as _, Unordered as Index},
     journal::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _};
+use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
@@ -120,83 +120,25 @@ impl<
         pin_mut!(stream);
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
-            match result {
-                Err(e) => {
-                    return Err(Error::Journal(e));
+            let (i, op) = result?;
+            match op {
+                Operation::Delete(key) => {
+                    let result = super::delete_key(snapshot, log, &key).await?;
+                    callback(false, result);
                 }
-                Ok((i, op)) => {
-                    let loc = Location::new_unchecked(i);
-                    match op {
-                        Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, loc).await?;
-                            callback(false, result);
-                        }
-                        Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, loc).await?;
-                            callback(true, result);
-                        }
-                        Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-                    }
+                Operation::Update(key, _) => {
+                    let new_loc = Location::new_unchecked(i);
+                    let old_loc = super::update_loc(snapshot, log, &key, new_loc).await?;
+                    callback(true, old_loc);
                 }
+                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
             }
         }
 
         Ok(())
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present.
-    async fn update_loc(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then update its location.
-        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(new_loc > loc);
-            cursor.update(new_loc);
-            return Ok(Some(loc));
-        }
-
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_loc);
-
-        Ok(None)
-    }
-
-    /// Find and return the location of the update operation for `key`, if it exists. The cursor is
-    /// positioned at the matching location, and can be used to update or delete the key.
-    async fn find_update_op(
-        log: &Journal<E, Operation<K, V>>,
-        cursor: &mut impl Cursor<Value = Location>,
-        key: &K,
-    ) -> Result<Option<Location>, Error> {
-        while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
-            if k == *key {
-                return Ok(Some(loc));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Get the update operation from `log` corresponding to a known location.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the location does not reference an update operation. This should never happen
-    /// unless the snapshot is buggy, or this method is being used to look up an operation
-    /// independent of the snapshot contents.
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
         loc: Location,
@@ -259,11 +201,10 @@ impl<
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res =
-            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = super::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
-        self.apply_op(op).await?;
+        self.as_shared().apply_op(op).await?;
         if res.is_some() {
             self.steps += 1;
         }
@@ -275,38 +216,25 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let loc = self.op_count();
-        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
+        let r = super::delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
-            self.apply_op(Operation::Delete(key)).await?;
+            self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
         };
 
         Ok(r)
     }
 
-    /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it.
-    async fn delete_key(
-        snapshot: &mut Index<T, Location>,
-        log: &Journal<E, Operation<K, V>>,
-        key: &K,
-        delete_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-
-        // Find the matching key among all conflicts, then delete it.
-        if let Some(loc) = Self::find_update_op(log, &mut cursor, key).await? {
-            assert!(loc < delete_loc);
-            cursor.delete();
-            return Ok(Some(loc));
+    /// Returns a wrapper around the db's state that can be used to perform shared functions.
+    pub(crate) fn as_shared(
+        &mut self,
+    ) -> super::Shared<'_, E, Index<T, Location>, Operation<K, V>, H> {
+        super::Shared {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
         }
-
-        // The key isn't in the conflicting keys, so this is a no-op.
-        Ok(None)
     }
 
     /// Return the root of the db.
@@ -316,22 +244,6 @@ impl<
     /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
         self.mmr.root(hasher)
-    }
-
-    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
-    /// until the next successful `commit`.
-    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        let encoded_op = op.encode();
-
-        // Append operation to the log and update the MMR in parallel.
-        try_join!(
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
-            self.log.append(op).map_err(Error::Journal)
-        )?;
-
-        Ok(())
     }
 
     /// Generate and return:
@@ -386,96 +298,26 @@ impl<
         } else {
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
-                self.raise_floor().await?;
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
             }
         }
         self.steps = 0;
 
         // Apply the commit operation with the new inactivity floor.
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
-            .await?;
+        let loc = self.inactivity_floor_loc;
+        let mut shared = self.as_shared();
+        shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR in parallel.
-        let mmr_fut = async {
-            self.mmr.process_updates(&mut self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
-
-        Ok(())
+        // Sync the log and process the updates to the MMR.
+        shared.sync_and_process_updates().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
-        )?;
-
-        Ok(())
-    }
-
-    // Moves the given operation to the tip of the log if it is active, rendering its old location
-    // inactive. If the operation was not active, then this is a no-op. Returns the old location
-    // of the operation if it was active.
-    pub(crate) async fn move_op_if_active(
-        &mut self,
-        op: Operation<K, V>,
-        old_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.key() else {
-            return Ok(None); // operations without keys cannot be active
-        };
-        let tip_loc = self.op_count();
-        let Some(mut cursor) = self.snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-
-        // Find the snapshot entry corresponding to the operation.
-        if cursor.find(|&loc| *loc == old_loc) {
-            // Update the operation's snapshot location to point to tip.
-            cursor.update(tip_loc);
-            drop(cursor);
-
-            // Apply the operation at tip.
-            self.apply_op(op).await?;
-            return Ok(Some(old_loc));
-        }
-
-        // The operation is not active, so this is a no-op.
-        Ok(None)
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one.
-    ///
-    /// # Errors
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and returns Error
-    /// otherwise.
-    async fn raise_floor(&mut self) -> Result<(), Error> {
-        // Search for the first active operation above the inactivity floor and move it to tip.
-        //
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
-        let mut op = self.log.read(*self.inactivity_floor_loc).await?;
-        while self
-            .move_op_if_active(op, self.inactivity_floor_loc)
-            .await?
-            .is_none()
-        {
-            self.inactivity_floor_loc += 1;
-            op = self.log.read(*self.inactivity_floor_loc).await?;
-        }
-
-        // Increment the floor to the next operation since we know the current one is inactive.
-        self.inactivity_floor_loc += 1;
-
-        Ok(())
+        self.as_shared().sync().await
     }
 
     /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
@@ -483,12 +325,10 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `target_prune_loc` is greater than the
+    ///   inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
@@ -603,7 +443,10 @@ impl<
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::{operation::fixed::unordered::Operation, verify_proof},
+        adb::{
+            operation::fixed::{unordered::Operation, FixedOperation as _},
+            verify_proof,
+        },
         index::{Index as IndexTrait, Unordered as Index},
         mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
@@ -822,7 +665,8 @@ pub(super) mod test {
 
             // take one floor raising step, which should move the first active op (at location 3) to
             // tip, leaving the floor at the next location (4).
-            db.raise_floor().await.unwrap();
+            let loc = db.inactivity_floor_loc;
+            db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
