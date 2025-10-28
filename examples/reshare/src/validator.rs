@@ -429,7 +429,7 @@ mod test {
         })
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_good_links_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -445,7 +445,7 @@ mod test {
         }
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_good_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -462,7 +462,7 @@ mod test {
         }
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_bad_links_ed() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -478,7 +478,7 @@ mod test {
         }
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_bad_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -495,7 +495,7 @@ mod test {
         }
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     #[ignore]
     fn test_1k() {
         let link = Link {
@@ -506,15 +506,17 @@ mod test {
         all_online::<ThresholdScheme<MinSig>>(10, 0, link.clone(), 1000);
     }
 
-    #[test_traced]
-    fn test_reshare_failed() {
+    fn reshare_failed(seed: u64) -> String {
         // Create context
         let n = 6;
         let active = 4;
         let threshold = quorum(active);
         let initial_container_required = BLOCKS_PER_EPOCH / 2;
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
-        let executor = Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -763,7 +765,14 @@ mod test {
                 metric.ends_with("_failed_rounds_total") && value.parse::<u64>().unwrap() == 1
             });
             assert!(round_failed);
-        });
+
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced("INFO")]
+    fn test_reshare_failed() {
+        assert_eq!(reshare_failed(1), reshare_failed(1));
     }
 
     fn test_marshal<S>(seed: u64) -> String
@@ -990,12 +999,12 @@ mod test {
         })
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_marshal_threshold() {
         assert_eq!(
             test_marshal::<ThresholdScheme<MinSig>>(1),
@@ -1238,7 +1247,7 @@ mod test {
         })
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
             test_marshal_multi_epoch::<EdScheme>(1),
@@ -1488,7 +1497,7 @@ mod test {
         })
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
@@ -1496,7 +1505,7 @@ mod test {
         );
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
@@ -1684,7 +1693,7 @@ mod test {
         prev_ctx.expect("no previous context").auditor().state()
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
             test_unclean_shutdown::<EdScheme>(1),
@@ -1692,7 +1701,7 @@ mod test {
         );
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
