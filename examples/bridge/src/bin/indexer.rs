@@ -130,13 +130,7 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(
-            public,
-            (
-                Scheme::certificate_verifier(validators.clone(), public),
-                namespace,
-            ),
-        );
+        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }

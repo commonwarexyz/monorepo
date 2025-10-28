@@ -122,6 +122,10 @@ impl<
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
         assert!(
+            !self.scheme.participants().is_empty(),
+            "there must be at least one participant"
+        );
+        assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
         );

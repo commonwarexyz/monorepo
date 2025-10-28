@@ -49,10 +49,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 indexer: config.indexer,
                 namespace: config.namespace,
                 public: *poly::public::<MinSig>(&config.identity),
-                other_certificate_verifier: Scheme::certificate_verifier(
-                    config.participants.clone(),
-                    config.other_public,
-                ),
+                other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
                 hasher: config.hasher,
                 mailbox,
             },
