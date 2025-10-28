@@ -50,12 +50,12 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 /// Configuration for a variable-length journal.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The partition to use for storing variable-length data.
+    /// The storage partition to use for the data journal.
     pub data_partition: String,
 
-    /// The partition to use for storing the offsets index.
+    /// The storage partition to use for the offsets journal.
     ///
-    /// Must be different from `partition`.
+    /// Must be different from `data_partition`.
     pub offsets_partition: String,
 
     /// The number of items to store in each section.
@@ -985,7 +985,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 data_partition: "same_partition".to_string(),
-                offsets_partition: "same_partition".to_string(),
+                offsets_partition: "same_partition".to_string(), // Same as data partition!
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
