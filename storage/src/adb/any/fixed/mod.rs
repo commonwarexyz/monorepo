@@ -432,9 +432,10 @@ where
         // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
         loop {
             let tip_loc = Location::new_unchecked(self.log.size().await?);
-            if tip_loc <= *inactivity_floor_loc {
-                panic!("no active operations above the inactivity floor");
-            }
+            assert!(
+                tip_loc <= *inactivity_floor_loc,
+                "no active operations above the inactivity floor"
+            );
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
