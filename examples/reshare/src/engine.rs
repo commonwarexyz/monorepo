@@ -71,7 +71,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme,
+    S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -95,7 +95,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme,
+    S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, B, V>) -> Self {
@@ -164,7 +164,6 @@ where
             context.with_label("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                signer: config.signer.clone(),
                 application: application_mailbox.clone(),
                 scheme_provider,
                 marshal: marshal_mailbox.clone(),

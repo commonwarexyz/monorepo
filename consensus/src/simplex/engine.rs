@@ -16,7 +16,7 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     P: PublicKey,
-    S: Scheme,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -29,7 +29,7 @@ pub struct Engine<
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, P, S, B, D, F>,
-    batcher_mailbox: batcher::Mailbox<P, S, D>,
+    batcher_mailbox: batcher::Mailbox<S, D>,
 
     resolver: resolver::Actor<E, P, S, B, D>,
     resolver_mailbox: resolver::Mailbox<S, D>,
@@ -38,7 +38,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         P: PublicKey,
-        S: Scheme,
+        S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -55,7 +55,6 @@ impl<
         let (batcher, batcher_mailbox) = batcher::Actor::new(
             context.with_label("batcher"),
             batcher::Config {
-                participants: cfg.participants.clone(),
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
@@ -71,8 +70,6 @@ impl<
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
             voter::Config {
-                me: cfg.me.clone(),
-                participants: cfg.participants.clone(),
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
@@ -97,8 +94,6 @@ impl<
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
-                me: cfg.me,
-                participants: cfg.participants,
                 scheme: cfg.scheme,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
