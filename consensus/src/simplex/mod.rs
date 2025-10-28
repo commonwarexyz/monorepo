@@ -398,7 +398,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -451,6 +451,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -469,8 +470,8 @@ mod tests {
                     epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
+                    notarization_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(1),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
@@ -714,6 +715,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -872,6 +874,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -1056,6 +1059,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1177,6 +1181,7 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1250,7 +1255,7 @@ mod tests {
         let skip_timeout = 5;
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(1_000));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1314,6 +1319,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1560,6 +1566,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
+                        certify_latency: (10_000.0, 5.0),
                     }
                 } else {
                     mocks::application::Config {
@@ -1568,6 +1575,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1737,6 +1745,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1941,6 +1950,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2147,6 +2157,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2357,6 +2368,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2531,6 +2543,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2706,6 +2719,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2872,6 +2886,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3035,6 +3050,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3212,6 +3228,7 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3357,6 +3374,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
+                    certify_latency: (50.0, 40.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3512,6 +3530,7 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3864,6 +3883,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),

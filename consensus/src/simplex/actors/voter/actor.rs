@@ -278,7 +278,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
         // Ensure we haven't already broadcast
-        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
+        if !force && self.broadcast_notarization {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
         }
@@ -313,7 +313,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     async fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
         // Ensure we haven't already broadcast
-        if !force && (self.broadcast_nullification || self.broadcast_notarization) {
+        if !force && self.broadcast_nullification {
             return None;
         }
 
@@ -329,6 +329,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             return None;
         }
         debug!(round = ?self.round, "broadcasting nullification");
+
+        // It is not possible to have a nullification if there is a finalization.
+        // If detected, there is a critical bug or there has been a safety violation.
+        assert!(
+            self.finalization.is_none(),
+            "finalization should not be set"
+        );
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
@@ -365,8 +372,15 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             "broadcasting finalization"
         );
 
-        // It is not possible to have a finalization that does not match the notarization proposal. If this
-        // is detected, there is a critical bug or there has been a safety violation.
+        // It is not possible to have a finalization if there is a nullification.
+        // If detected, there is a critical bug or there has been a safety violation.
+        assert!(
+            self.nullification.is_none(),
+            "nullification should not be set"
+        );
+
+        // It is not possible to have a finalization that does not match the notarization proposal.
+        // If detected, there is a critical bug or there has been a safety violation.
         if let Some(notarization) = &self.notarization {
             assert_eq!(
                 notarization.proposal, proposal,
@@ -565,11 +579,14 @@ impl<
         scheme.me().map(|me| me == other).unwrap_or(false)
     }
 
+    /// Returns the payload of the notarized proposal for the given view.
     fn is_notarized(&self, view: View) -> Option<&D> {
-        if view == GENESIS_VIEW {
-            return Some(self.genesis.as_ref().unwrap());
+        // Finalized blocks are notarized.
+        if let Some(finalization) = self.is_finalized(view) {
+            return Some(finalization);
         }
 
+        // Check that the proposal is notarized.
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
             return Some(&notarization.proposal.payload);
@@ -584,26 +601,22 @@ impl<
 
     /// Returns the payload of the certified proposal for the given view.
     fn is_certified(&self, view: View) -> Option<&D> {
-        if view == GENESIS_VIEW {
-            return Some(self.genesis.as_ref().unwrap());
-        }
-
         // Finalized blocks are certified
         if let Some(finalization) = self.is_finalized(view) {
             return Some(finalization);
         }
 
-        // Otherwise, check that the proposal is certified. If so, it must have a notarization.
+        // Return `None` early if the view is not certified.
         let round = self.views.get(&view)?;
-        if round.certified_proposal == Some(true) {
-            let result = self
-                .is_notarized(view)
-                .expect("certified proposal should be notarized");
-            return Some(result);
+        if round.certified_proposal != Some(true) {
+            return None;
         }
-        None
+
+        // Return the result of `is_notarized`
+        self.is_notarized(view)
     }
 
+    /// Returns `true` if the view has a nullification, otherwise `false`.
     fn is_nullified(&self, view: View) -> bool {
         let round = match self.views.get(&view) {
             Some(round) => round,
@@ -613,11 +626,14 @@ impl<
         round.nullification.is_some() || round.nullifies.len() >= quorum
     }
 
+    /// Returns the payload of the finalized proposal for the given view.
     fn is_finalized(&self, view: View) -> Option<&D> {
+        // Special case for genesis view
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().unwrap());
         }
 
+        // Check for finalization
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
             return Some(&finalization.proposal.payload);
@@ -640,16 +656,9 @@ impl<
                 return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
             }
 
-            // If notarized and certified, return
+            // If certified, return.
+            // This means that the parent is either 1) finalized or 2) notarized and certified.
             let parent = self.is_certified(cursor);
-            if let Some(parent) = parent {
-                return Ok((cursor, *parent));
-            }
-
-            // If have finalization, return
-            //
-            // We never want to build on some view less than finalized and this prevents that
-            let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
                 return Ok((cursor, *parent));
             }
@@ -981,7 +990,11 @@ impl<
         Some(Request(context, receiver))
     }
 
-    async fn certify(&mut self, view: View, resolver: &mut resolver::Mailbox<S, D>) -> Option<Request<D, bool>> {
+    async fn certify(
+        &mut self,
+        view: View,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<Request<D, bool>> {
         let round = self.views.get_mut(&view)?;
 
         // Request certification only once
@@ -1065,13 +1078,6 @@ impl<
         // Mark proposal as certified
         round.certified_proposal = Some(success);
 
-        // We should have a notarization for this view,
-        // otherwise we would not have asked for certification in the first place.
-        let notarization = round
-            .notarization
-            .as_ref()
-            .expect("certified proposal should have a notarization");
-
         // Persist certification result for recovery
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Certification(Rnd::new(self.epoch, view), success);
@@ -1081,13 +1087,23 @@ impl<
                 .expect("unable to append to journal");
         }
 
-        // Enter next view
+        // Log the result and exit early if certification failed since we should not move to the
+        // next view until a nullification is formed.
+        debug!(certified = ?success, view, "certify result");
+        if !success {
+            return;
+        }
+
+        // Enter next view. We should have a notarization for this view,
+        // otherwise we would not have asked for certification in the first place.
+        let notarization = round
+            .notarization
+            .as_ref()
+            .expect("certified proposal should have a notarization");
         let seed = self
             .scheme
             .seed(notarization.round(), &notarization.certificate);
         self.enter_view(view + 1, seed);
-
-        debug!(view, "certified proposal");
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {

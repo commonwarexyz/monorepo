@@ -163,6 +163,7 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -427,6 +428,7 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -452,7 +454,7 @@ mod tests {
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
@@ -626,15 +628,21 @@ mod tests {
                 .expect("failed to send notarization");
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.view(), problematic_view);
+            loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Notarized { notarization } => {
+                        assert_eq!(notarization.view(), problematic_view);
+                        break;
+                    }
+                    resolver::Message::Fetch { .. } => {
+                        continue;
+                    }
+                    _ => panic!("unexpected resolver message"),
                 }
-                _ => panic!("unexpected resolver message"),
             }
 
             // Send Finalization to new view (100)
@@ -669,15 +677,17 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+            loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => {
+                        assert_eq!(view, 100);
+                    }
+                    _ => panic!("unexpected resolver message"),
                 }
-                _ => panic!("unexpected resolver message"),
             }
         });
     }
@@ -733,6 +743,7 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
