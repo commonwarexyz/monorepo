@@ -8,11 +8,7 @@ use commonware_consensus::{
     },
     types::Round,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
-    ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt, Signer,
-};
+use commonware_cryptography::{bls12381::primitives::variant::{MinPk, MinSig}, ed25519::{PrivateKey, PublicKey}, PrivateKeyExt, Signer};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -36,14 +32,14 @@ struct FuzzInput {
 
 type Ed25519Scheme = commonware_consensus::simplex::signing_scheme::ed25519::Scheme;
 type Bls12381MultisigMinPk =
-    commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<MinPk>;
+    commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<PublicKey, MinPk>;
 type Bls12381MultisigMinSig =
-    commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<MinSig>;
+    commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<PublicKey, MinSig>;
 
 type Bls12381ThresholdMinPk =
-    commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<MinPk>;
+    commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<PublicKey, MinPk>;
 type Bls12381ThresholdMinSig =
-    commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<MinSig>;
+    commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
     let participants: Vec<PublicKey> = (0..input.participants_count)
