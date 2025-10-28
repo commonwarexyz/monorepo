@@ -55,11 +55,6 @@ fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
         .collect();
 
     let round = Round::new(input.round_epoch, input.round_view);
-
-    if participants.is_empty() {
-        return;
-    }
-
     let _ = select_leader::<S, PublicKey>(&participants, round, seed);
 }
 
