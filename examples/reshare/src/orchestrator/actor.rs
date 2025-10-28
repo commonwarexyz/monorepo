@@ -20,7 +20,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
-    utils::mux::{Builder, GlobalSender, MuxHandle, Muxer},
+    utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
@@ -227,6 +227,7 @@ where
                         "received backup message from future epoch, requesting orchestrator"
                     );
 
+                    // Send the request to the orchestrator. This operation is best-effort.
                     if orchestrator_sender.send(
                         Recipients::One(from),
                         UInt(our_epoch).encode().freeze(),
@@ -242,22 +243,44 @@ where
                         break;
                     };
                     let epoch = match UInt::<Epoch>::decode(bytes.as_ref()) {
-                        Ok(epoch) => epoch,
+                        Ok(epoch) => epoch.0,
                         Err(err) => {
                             debug!(?err, ?from, "failed to decode epoch from orchestrator request");
                             self.oracle.block(from).await;
                             continue;
                         }
                     };
-                    if !Self::forward_finalization(
-                        from,
-                        epoch.0,
-                        &mut self.marshal,
-                        &mut recovered_global_sender,
-                    ).await {
-                        warn!("failed to forward finalization, shutting down orchestrator");
-                        break;
-                    }
+
+                    // Fetch the finalization certificate for the last block within the subchannel's epoch.
+                    // If the node is state synced, marshal may not have the finalization locally, and the
+                    // peer will need to fetch it from another node on the network.
+                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
+                    let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
+                        debug!(epoch, ?from, "missing finalization for old epoch");
+                        continue;
+                    };
+                    debug!(
+                        epoch,
+                        boundary_height,
+                        ?from,
+                        "received message on pending network from old epoch. forwarding orchestrator"
+                    );
+
+                    // Forward the finalization to the sender. This operation is best-effort.
+                    //
+                    // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
+                    let message = Voter::<S, H::Digest>::Finalization(finalization);
+                    if recovered_global_sender
+                        .send(
+                            epoch,
+                            Recipients::One(from),
+                            message.encode().freeze(),
+                            false,
+                        )
+                        .await.is_err() {
+                            warn!("failed to forward finalization, shutting down orchestrator");
+                            break;
+                        }
                 },
                 transition = self.mailbox.next() => {
                     let Some(transition) = transition else {
@@ -361,45 +384,5 @@ where
         let resolver_sc = resolver_mux.register(epoch).await.unwrap();
 
         engine.start(pending_sc, recovered_sc, resolver_sc)
-    }
-
-    /// Fetches a finalization certificate from the boundary block of the given epoch and forwards it to
-    /// the given [GlobalSender].
-    ///
-    /// If the message fails to be sent, `false` is returned to indicate that the orchestrator should shut down.
-    async fn forward_finalization(
-        from: C::PublicKey,
-        epoch: Epoch,
-        marshal: &mut marshal::Mailbox<S, Block<H, C, V>>,
-        recovered_global_sender: &mut GlobalSender<impl Sender<PublicKey = C::PublicKey>>,
-    ) -> bool {
-        // Fetch the finalization certificate for the last block within the subchannel's epoch.
-        // If the node is state synced, marshal may not have the finalization locally, and the
-        // peer will need to fetch it from another node on the network.
-        let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
-        let Some(finalization) = marshal.get_finalization(boundary_height).await else {
-            debug!(epoch, ?from, "missing finalization for old epoch");
-            return true;
-        };
-        debug!(
-            epoch,
-            boundary_height,
-            ?from,
-            "received message on pending network from old epoch. forwarding orchestrator"
-        );
-
-        // Forward the finalization to the sender. This operation is best-effort.
-        //
-        // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-        let message = Voter::<S, H::Digest>::Finalization(finalization);
-        recovered_global_sender
-            .send(
-                epoch,
-                Recipients::One(from),
-                message.encode().freeze(),
-                false,
-            )
-            .await
-            .is_ok()
     }
 }
