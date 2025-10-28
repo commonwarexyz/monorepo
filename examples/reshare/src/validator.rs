@@ -28,7 +28,7 @@ const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
-const BOUNDARY_FINALIZATION_CHANNEL: u64 = 6;
+const ORCHESTRATOR_CHANNEL: u64 = 6;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
@@ -94,15 +94,11 @@ where
     let backfill_quota = Quota::per_second(NZU32!(8));
     let backfill = network.register(BACKFILL_BY_DIGEST_CHANNEL, backfill_quota, MESSAGE_BACKLOG);
 
-    let dkg_limit = Quota::per_second(NZU32!(128));
-    let dkg_channel = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
+    let orchestrator_limit = Quota::per_second(NZU32!(1));
+    let orchestrator = network.register(ORCHESTRATOR_CHANNEL, orchestrator_limit, MESSAGE_BACKLOG);
 
-    let boundary_finalization_rate_limit = Quota::per_second(NZU32!(1));
-    let boundary_finalization_channel = network.register(
-        BOUNDARY_FINALIZATION_CHANNEL,
-        boundary_finalization_rate_limit,
-        MESSAGE_BACKLOG,
-    );
+    let dkg_limit = Quota::per_second(NZU32!(128));
+    let dkg = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
     // Create a static resolver for backfill
     let coordinator = Coordinator::new(peer_config.all_peers());
@@ -134,8 +130,8 @@ where
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch as usize,
-            boundary_finalization_rate_limit,
             dkg_rate_limit: dkg_limit,
+            orchestrator_rate_limit: orchestrator_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
         },
@@ -148,8 +144,8 @@ where
         recovered,
         resolver,
         broadcaster,
-        dkg_channel,
-        boundary_finalization_channel,
+        dkg,
+        orchestrator,
         p2p_resolver,
     );
 
@@ -221,7 +217,7 @@ mod test {
                 oracle.register(validator.clone(), 3).await.unwrap();
             let backfill = oracle.register(validator.clone(), 4).await.unwrap();
             let (dkg_sender, dkg_receiver) = oracle.register(validator.clone(), 5).await.unwrap();
-            let boundary_finalizations = oracle.register(validator.clone(), 6).await.unwrap();
+            let orchestrator = oracle.register(validator.clone(), 6).await.unwrap();
 
             // Create a static resolver for backfill
             let coordinator = Coordinator::new(ordered_validators.clone());
@@ -249,7 +245,7 @@ mod test {
                     (resolver_sender, resolver_receiver),
                     (broadcast_sender, broadcast_receiver),
                     (dkg_sender, dkg_receiver),
-                    boundary_finalizations,
+                    orchestrator,
                     p2p_resolver,
                 ),
             );
@@ -344,15 +340,8 @@ mod test {
                 public_keys.insert(public_key.clone());
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
                     context.with_label("engine"),
@@ -366,8 +355,8 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -379,8 +368,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
             }
@@ -569,8 +558,8 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -578,15 +567,8 @@ mod test {
                     .await;
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 let handle = engine.start(
@@ -594,8 +576,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
                 engine_handles.push(handle);
@@ -695,8 +677,8 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -704,15 +686,8 @@ mod test {
                     .await;
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -720,8 +695,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
             }
@@ -853,7 +828,7 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
@@ -862,15 +837,8 @@ mod test {
                 .await;
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -878,8 +846,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
             }
@@ -943,7 +911,7 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
@@ -952,15 +920,8 @@ mod test {
             .await;
 
             // Get networking
-            let (
-                pending,
-                recovered,
-                resolver,
-                broadcast,
-                dkg_channel,
-                boundary_finalizations,
-                backfill,
-            ) = registrations.remove(&public_key).unwrap();
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -968,8 +929,8 @@ mod test {
                 recovered,
                 resolver,
                 broadcast,
-                dkg_channel,
-                boundary_finalizations,
+                dkg,
+                orchestrator,
                 backfill,
             );
 
@@ -1105,8 +1066,8 @@ mod test {
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len(),
-                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -1114,15 +1075,8 @@ mod test {
                     .await;
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -1130,8 +1084,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
             }
@@ -1195,7 +1149,7 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
@@ -1204,15 +1158,8 @@ mod test {
             .await;
 
             // Get networking
-            let (
-                pending,
-                recovered,
-                resolver,
-                broadcast,
-                dkg_channel,
-                boundary_finalizations,
-                backfill,
-            ) = registrations.remove(&public_key).unwrap();
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -1220,8 +1167,8 @@ mod test {
                 recovered,
                 resolver,
                 broadcast,
-                dkg_channel,
-                boundary_finalizations,
+                dkg,
+                orchestrator,
                 backfill,
             );
 
@@ -1369,7 +1316,7 @@ mod test {
                             active_participants: validators[1..].to_vec(),
                             inactive_participants: validators[..1].to_vec(),
                             num_participants_per_epoch: validators.len() - 1,
-                            boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
@@ -1378,15 +1325,8 @@ mod test {
                     .await;
 
                 // Get networking
-                let (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
-                    backfill,
-                ) = registrations.remove(&public_key).unwrap();
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    registrations.remove(&public_key).unwrap();
 
                 // Start engine
                 engine.start(
@@ -1394,8 +1334,8 @@ mod test {
                     recovered,
                     resolver,
                     broadcast,
-                    dkg_channel,
-                    boundary_finalizations,
+                    dkg,
+                    orchestrator,
                     backfill,
                 );
             }
@@ -1460,7 +1400,7 @@ mod test {
                     active_participants: validators[1..].to_vec(),
                     inactive_participants: validators[..1].to_vec(),
                     num_participants_per_epoch: validators.len() - 1,
-                    boundary_finalization_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(128)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
@@ -1469,15 +1409,8 @@ mod test {
             .await;
 
             // Get networking
-            let (
-                pending,
-                recovered,
-                resolver,
-                broadcast,
-                dkg_channel,
-                boundary_finalizations,
-                backfill,
-            ) = registrations.remove(&public_key).unwrap();
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -1485,8 +1418,8 @@ mod test {
                 recovered,
                 resolver,
                 broadcast,
-                dkg_channel,
-                boundary_finalizations,
+                dkg,
+                orchestrator,
                 backfill,
             );
 
@@ -1631,7 +1564,7 @@ mod test {
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
                                 num_participants_per_epoch: validators.len(),
-                                boundary_finalization_rate_limit: Quota::per_second(NZU32!(1)),
+                                orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                                 dkg_rate_limit: Quota::per_second(NZU32!(128)),
                                 partition_prefix: format!("validator_{idx}"),
                                 freezer_table_initial_size: 1024, // 1mb
@@ -1640,15 +1573,8 @@ mod test {
                         .await;
 
                     // Get networking
-                    let (
-                        pending,
-                        recovered,
-                        resolver,
-                        broadcast,
-                        dkg_channel,
-                        boundary_finalizations,
-                        backfill,
-                    ) = registrations.remove(&public_key).unwrap();
+                    let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                        registrations.remove(&public_key).unwrap();
 
                     // Start engine
                     engine.start(
@@ -1656,8 +1582,8 @@ mod test {
                         recovered,
                         resolver,
                         broadcast,
-                        dkg_channel,
-                        boundary_finalizations,
+                        dkg,
+                        orchestrator,
                         backfill,
                     );
                 }
