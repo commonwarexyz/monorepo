@@ -148,6 +148,11 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 4. Use `just fix-fmt` for formatting
 5. Run full CI checks locally before creating PR
 
+## Reviewing PRs
+When reviewing PRs, focus the majority of your effort on correctness and performance (not style). Pay special attention to bugs
+that can be caused by malicious participants when a function accepts untrusted input. This repository is designed to be
+used in adversarial environments, and as such, we should be extra careful to ensure that the code is robust.
+
 ## Deterministic Async Testing
 Exclusively use the deterministic runtime (`runtime/src/deterministic.rs`) for reproducible async tests:
 ```rust
