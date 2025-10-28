@@ -395,7 +395,7 @@ where
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
-        mut self,
+        &mut self,
         status: &mut BitMap<H, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
