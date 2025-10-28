@@ -54,7 +54,7 @@ where
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
-    pub boundary_finalization_rate_limit: governor::Quota,
+    pub rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -82,9 +82,7 @@ where
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
-    #[allow(clippy::type_complexity)]
-    rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    rate_limit: governor::Quota,
     pool_ref: PoolRef,
 }
 
@@ -102,8 +100,6 @@ where
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
-        let rate_limiter =
-            RateLimiter::hashmap_with_clock(config.boundary_finalization_rate_limit, &context);
 
         (
             Self {
@@ -116,7 +112,7 @@ where
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                rate_limiter,
+                rate_limit: config.rate_limit,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -195,6 +191,9 @@ where
         );
         mux.start();
 
+        // Create rate limiter for boundary finalizations
+        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, &self.context);
+
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         loop {
@@ -210,35 +209,35 @@ where
                         debug!(their_epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
                     };
-                    if their_epoch > our_epoch {
-                        // If we're not in the committee of the latest epoch we know about and we observe another
-                        // participant that is ahead of us, send a message on the global pending channel to prompt
-                        // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                        // If we do not directly ask, we will never receive the finalization, since our consensus engine
-                        // may never send messages over the pending channel for that epoch.
-
-                        if self.rate_limiter.check_key(&from).is_err() {
-                            continue;
-                        }
-
-                        // Only request the boundary finalization if we don't already have it.
-                        let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
-                        if self.marshal.get_finalization(boundary_height).await.is_some() {
-                            continue;
-                        };
-
-                        debug!(
-                            their_epoch,
-                            ?from,
-                            "received backup message from future epoch, requesting boundary finalization"
-                        );
-
-                        let _ = boundary_finalization_sender.send(
-                            Recipients::One(from),
-                            UInt(our_epoch).encode().freeze(),
-                            true
-                        ).await;
+                    if their_epoch <= our_epoch {
+                        debug!(their_epoch, our_epoch, ?from, "received message from past epoch");
+                        continue;
                     }
+
+                    // If we're not in the committee of the latest epoch we know about and we observe another
+                    // participant that is ahead of us, send a message on the global pending channel to prompt
+                    // them to send us the finalization of the epoch boundary block for our latest known epoch.
+                    // If we do not directly ask, we will never receive the finalization, since our consensus engine
+                    // may never send messages over the pending channel for that epoch.
+                    if rate_limiter.check_key(&from).is_err() {
+                        continue;
+                    }
+                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
+                    if self.marshal.get_finalization(boundary_height).await.is_some() {
+                        // Only request the boundary finalization if we don't already have it.
+                        continue;
+                    };
+                    debug!(
+                        their_epoch,
+                        ?from,
+                        "received backup message from future epoch, requesting boundary finalization"
+                    );
+
+                    let _ = boundary_finalization_sender.send(
+                        Recipients::One(from),
+                        UInt(our_epoch).encode().freeze(),
+                        true
+                    ).await;
                 },
                 message = boundary_finalization_receiver.recv() => {
                     let Ok((from, bytes)) = message else {
