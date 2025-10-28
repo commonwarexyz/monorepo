@@ -229,14 +229,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
         // Get the start location from the log.
         let start_loc = match log.oldest_retained_pos().await? {
-            Some(pos) => pos,
+            Some(loc) => loc,
             None => log.size().await?,
         };
 
         // The number of operations in the log.
         let mut log_size = Location::new_unchecked(start_loc);
         // The location of the first operation to follow the last known commit point.
-        let mut after_last_commit: Option<u64> = None;
+        let mut after_last_commit: Option<Location> = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
         let mut uncommitted_ops = Vec::new();
 
@@ -248,17 +248,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (pos, op) = result.map_err(Error::Journal)?;
+                let (loc, op) = result?;
 
-                let loc = Location::new_unchecked(pos); // location of the current operation.
+                let loc = Location::new_unchecked(loc); // location of the current operation.
                 if after_last_commit.is_none() {
-                    after_last_commit = Some(pos);
+                    after_last_commit = Some(loc);
                 }
 
                 log_size = loc + 1;
 
                 if log_size > mmr_leaves {
-                    debug!(pos, "operation was missing from MMR");
+                    debug!(?loc, "operation was missing from MMR");
                     mmr.add(hasher, &op.encode()).await?;
                     mmr_leaves += 1;
                 }
@@ -274,7 +274,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
                         after_last_commit = None;
                     }
                     _ => {
-                        unreachable!("unsupported operation at position {pos}");
+                        unreachable!("unsupported operation at location {loc}");
                     }
                 }
             }
@@ -285,12 +285,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
-                log_size = end_loc,
+                log_size = *end_loc,
                 "rewinding over uncommitted operations at end of log"
             );
-            log.rewind(end_loc).await.map_err(Error::Journal)?;
+            log.rewind(*end_loc).await.map_err(Error::Journal)?;
             log.sync().await.map_err(Error::Journal)?;
-            log_size = Location::new_unchecked(end_loc);
+            log_size = end_loc;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
