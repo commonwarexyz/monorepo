@@ -6,7 +6,7 @@ use crate::{
         poly::{self, new_with_constant, Eval, Poly, Public, Weight},
         variant::Variant,
     },
-    transcript::Transcript,
+    transcript::{Summary, Transcript},
     PrivateKey, PublicKey,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
@@ -62,7 +62,7 @@ pub enum Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
-    round: u32,
+    hash: Summary,
     players: Ordered<P>,
     public: Public<V>,
 }
@@ -87,13 +87,13 @@ impl<V: Variant, P: PublicKey> Output<V, P> {
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.players.encode_size() + self.public.encode_size()
+        self.hash.encode_size() + self.players.encode_size() + self.public.encode_size()
     }
 }
 
 impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.round.write(buf);
+        self.hash.write(buf);
         self.players.write(buf);
         self.public.write(buf);
     }
@@ -108,6 +108,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             round: ReadExt::read(buf)?,
+            hash: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
             public: Read::read_cfg(buf, &RangeCfg::from(NZUsize!(1)..=max_players))?,
         })
@@ -116,10 +117,12 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 
 #[derive(Clone)]
 pub struct RoundInfo<V: Variant, P: PublicKey> {
-    round: u32,
+    round: u64,
     previous: Option<Output<V, P>>,
     dealers: Ordered<P>,
     players: Ordered<P>,
+    /// Never written when encoded, always computed from the previous fields.
+    hash: Summary,
 }
 
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
@@ -196,17 +199,13 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
 
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     pub fn new(
+        round: u64,
         previous: Option<Output<V, P>>,
         dealers: Ordered<P>,
         players: Ordered<P>,
     ) -> Result<Self, Error> {
         assert!(dealers.len() <= u32::MAX as usize);
         assert!(players.len() <= u32::MAX as usize);
-        let round = if let Some(previous) = previous.as_ref() {
-            previous.round + 1
-        } else {
-            0
-        };
         if let Some(previous) = previous.as_ref() {
             if dealers
                 .iter()
@@ -218,11 +217,18 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
                 return Err(Error::InsufficientDealers(dealers.len()));
             }
         }
+        let hash = Transcript::new(NAMESPACE)
+            .commit(round.encode())
+            .commit(previous.encode())
+            .commit(dealers.encode())
+            .commit(players.encode())
+            .summarize();
         Ok(Self {
             round,
             previous,
             dealers,
             players,
+            hash,
         })
     }
 
@@ -232,6 +238,13 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     /// bytes, to avoid allocating buffers that are too large for the round.
     pub fn max_read_size(&self) -> usize {
         self.threshold() as usize
+    }
+
+    /// Return the round number for this round.
+    ///
+    /// Round numbers should increase sequentially.
+    pub fn round(&self) -> u64 {
+        self.round
     }
 }
 
@@ -260,12 +273,13 @@ impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
         buf: &mut impl bytes::Buf,
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            round: ReadExt::read(buf)?,
-            previous: Read::read_cfg(buf, &max_players)?,
-            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
-        })
+        Ok(Self::new(
+            ReadExt::read(buf)?,
+            Read::read_cfg(buf, &max_players)?,
+            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
+            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
+        )
+        .map_err(|_| commonware_codec::Error::Invalid("RoundInfo", "validation"))?)
     }
 }
 
@@ -528,9 +542,7 @@ impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
 }
 
 fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
-    let mut transcript = Transcript::new(NAMESPACE);
-    transcript.commit(round_info.encode());
-    transcript
+    Transcript::resume(round_info.hash)
 }
 
 fn transcript_for_dealer<V: Variant, P: PublicKey>(
@@ -699,7 +711,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             (public, None)
         };
         let output = Output {
-            round: round_info.round,
+            hash: round_info.hash,
             players: round_info.players,
             public,
         };
@@ -888,6 +900,7 @@ mod test {
                     .collect::<Ordered<_>>();
 
                 let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+                    round_idx as u64,
                     std::mem::take(&mut previous_output),
                     dealer_set.clone(),
                     player_set.clone(),
