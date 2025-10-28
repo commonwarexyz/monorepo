@@ -211,10 +211,8 @@ where
                     }
 
                     // If we're not in the committee of the latest epoch we know about and we observe another
-                    // participant that is ahead of us, send a message on the global pending channel to prompt
+                    // participant that is ahead of us, send a message on the orchestrator channel to prompt
                     // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                    // If we do not directly ask, we will never receive the finalization, since our consensus engine
-                    // may never send messages over the pending channel for that epoch.
                     if rate_limiter.check_key(&from).is_err() {
                         continue;
                     }
@@ -385,6 +383,8 @@ where
         );
 
         // Forward the finalization to the sender. This operation is best-effort.
+        //
+        // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
         let message = Voter::<S, H::Digest>::Finalization(finalization);
         let _ = recovered_global_sender
             .send(
