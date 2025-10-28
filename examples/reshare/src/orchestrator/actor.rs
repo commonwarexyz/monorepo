@@ -28,13 +28,10 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
-    RateLimiter,
-};
+use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S>
@@ -133,15 +130,14 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        boundary_finalizations: (
+        orchestrator: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending, recovered, resolver, boundary_finalizations)
-                .await
+            self.run(pending, recovered, resolver, orchestrator).await
         )
     }
 
@@ -159,7 +155,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        (mut boundary_finalization_sender, mut boundary_finalization_receiver): (
+        (mut orchestrator_sender, mut orchestrator_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -233,13 +229,13 @@ where
                         "received backup message from future epoch, requesting boundary finalization"
                     );
 
-                    let _ = boundary_finalization_sender.send(
+                    let _ = orchestrator_sender.send(
                         Recipients::One(from),
                         UInt(our_epoch).encode().freeze(),
                         true
                     ).await;
                 },
-                message = boundary_finalization_receiver.recv() => {
+                message = orchestrator_receiver.recv() => {
                     let Ok((from, bytes)) = message else {
                         warn!("boundary finalization channel closed, shutting down orchestrator");
                         break;
@@ -252,14 +248,12 @@ where
                             continue;
                         }
                     };
-                    if Self::fetch_and_forward_finalization(
+                    Self::forward_finalization(
                         from,
                         epoch.0,
                         &mut self.marshal,
                         &mut recovered_global_sender,
-                    ).await.is_none() {
-                        break;
-                    }
+                    ).await;
                 },
                 transition = self.mailbox.next() => {
                     let Some(transition) = transition else {
@@ -369,19 +363,19 @@ where
     /// the given [GlobalSender].
     ///
     /// If the message fails to be sent, `None` is returned to indicate that the orchestrator should shut down.
-    async fn fetch_and_forward_finalization(
+    async fn forward_finalization(
         from: C::PublicKey,
         epoch: Epoch,
         marshal: &mut marshal::Mailbox<S, Block<H, C, V>>,
         recovered_global_sender: &mut GlobalSender<impl Sender<PublicKey = C::PublicKey>>,
-    ) -> Option<()> {
+    ) {
         // Fetch the finalization certificate for the last block within the subchannel's epoch.
         // If the node is state synced, marshal may not have the finalization locally, and the
         // peer will need to fetch it from another node on the network.
         let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
         let Some(finalization) = marshal.get_finalization(boundary_height).await else {
             debug!(epoch, ?from, "missing finalization for old epoch");
-            return Some(());
+            return;
         };
         debug!(
             epoch,
@@ -392,22 +386,13 @@ where
 
         // Forward the finalization to the sender. This operation is best-effort.
         let message = Voter::<S, H::Digest>::Finalization(finalization);
-        if let Err(err) = recovered_global_sender
+        let _ = recovered_global_sender
             .send(
                 epoch,
                 Recipients::One(from),
                 message.encode().freeze(),
-                true,
+                false,
             )
-            .await
-        {
-            error!(
-                ?err,
-                "failed to forward boundary finalization to peer - muxer shut down"
-            );
-            return None;
-        }
-
-        Some(())
+            .await;
     }
 }
