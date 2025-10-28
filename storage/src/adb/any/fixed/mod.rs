@@ -324,9 +324,9 @@ where
         Ok(())
     }
 
-    // Moves the given operation to the tip of the log if it is active, rendering its old location
-    // inactive. If the operation was not active, then this is a no-op. Returns the old location
-    // of the operation if it was active.
+    /// Moves the given operation to the tip of the log if it is active, rendering its old location
+    /// inactive. If the operation was not active, then this is a no-op. Returns the old location of
+    /// the operation if it was active.
     pub(crate) async fn move_op_if_active(
         &mut self,
         op: O,
