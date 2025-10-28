@@ -184,6 +184,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // Validate and repair offsets journal to match data journal
         let (oldest_retained_pos, size) =
             Self::repair_journals(&mut data, &mut offsets, items_per_section).await?;
+        assert!(
+            oldest_retained_pos.is_multiple_of(items_per_section),
+            "oldest_retained_pos is not section-aligned"
+        );
 
         Ok(Self {
             data,
@@ -833,7 +837,7 @@ mod tests {
                     Variable::<_, u64>::init(
                         context,
                         Config {
-                            partition: format!("generic_test_{}", test_name),
+                            partition: format!("generic_test_{test_name}"),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
