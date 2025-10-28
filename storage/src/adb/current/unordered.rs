@@ -290,28 +290,17 @@ impl<
     /// upon return from this function. Also raises the inactivity floor according to the schedule.
     /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
-        self.commit_ops().await?; // (1)
+        self.commit_ops().await?; // recovery is ensured after this returns
 
+        // Merkleize the new bitmap entries.
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
+        // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
-
-        // Write the pruned portion of the bitmap to disk, which is required for recovery. Active
-        // part is not persisted but restored by replay on restart.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/2019): optimize this.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?; // (2)
 
         Ok(())
     }
@@ -323,10 +312,20 @@ impl<
 
     /// Prune all operations prior to `target_prune_loc` from the db.
     ///
-    /// # Panic
+    /// # Errors
     ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// Returns error if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
         self.any.prune(target_prune_loc).await
     }
 
