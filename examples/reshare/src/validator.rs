@@ -1665,7 +1665,10 @@ mod test {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_ctx {
                 Runner::from(prev_checkpoint)
             } else {
-                Runner::timed(Duration::from_secs(30))
+                let cfg = deterministic::Config::default()
+                    .with_seed(seed)
+                    .with_timeout(Some(Duration::from_secs(30)));
+                Runner::new(cfg)
             }
             .start_and_recover(f);
 
