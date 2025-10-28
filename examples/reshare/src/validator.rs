@@ -1504,7 +1504,7 @@ mod test {
         );
     }
 
-    fn test_unclean_shutdown<S>()
+    fn test_unclean_shutdown<S>(seed: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -1516,7 +1516,7 @@ mod test {
         let required_container = 2 * BLOCKS_PER_EPOCH + 1;
 
         // Derive threshold
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(seed);
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
@@ -1668,24 +1668,32 @@ mod test {
                 Runner::timed(Duration::from_secs(30))
             }
             .start_and_recover(f);
+
+            // If complete, break out of the loop
+            prev_ctx = Some(checkpoint);
             if complete {
                 break;
             }
-
-            // Prepare for next run
-            prev_ctx = Some(checkpoint);
             runs += 1;
         }
         assert!(runs > 1);
+
+        prev_ctx.expect("no previous context").auditor().state()
     }
 
     #[test_traced]
     fn test_unclean_shutdown_ed() {
-        test_unclean_shutdown::<EdScheme>();
+        assert_eq!(
+            test_unclean_shutdown::<EdScheme>(1),
+            test_unclean_shutdown::<EdScheme>(1)
+        );
     }
 
     #[test_traced]
     fn test_unclean_shutdown_threshold() {
-        test_unclean_shutdown::<ThresholdScheme<MinSig>>();
+        assert_eq!(
+            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
+            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1)
+        );
     }
 }

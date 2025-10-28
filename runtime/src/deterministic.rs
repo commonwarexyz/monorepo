@@ -365,6 +365,13 @@ pub struct Checkpoint {
     catch_panics: bool,
 }
 
+impl Checkpoint {
+    /// Get a reference to the auditor.
+    pub fn auditor(&self) -> &Auditor {
+        &self.auditor
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
