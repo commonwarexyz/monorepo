@@ -366,9 +366,9 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Get a reference to the auditor.
-    pub fn auditor(&self) -> &Auditor {
-        &self.auditor
+    /// Get a reference to the [Auditor].
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
     }
 }
 
