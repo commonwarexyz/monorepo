@@ -233,8 +233,6 @@ fn main() {
         let engine = Engine::new(
             context.with_label("engine"),
             simplex::Config {
-                me: signer.public_key(),
-                participants: validators.clone(),
                 scheme,
                 blocker: oracle,
                 automaton: mailbox.clone(),

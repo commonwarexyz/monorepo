@@ -23,6 +23,7 @@ pub use sequence::{Array, Span};
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
+pub mod hex_literal;
 #[cfg(feature = "std")]
 pub mod net;
 pub mod set;
@@ -264,13 +265,13 @@ mod tests {
         assert_eq!(from_hex(&h).unwrap(), b.to_vec());
 
         // Test case 1: single byte
-        let b = &[0x01];
+        let b = &hex!("0x01");
         let h = hex(b);
         assert_eq!(h, "01");
         assert_eq!(from_hex(&h).unwrap(), b.to_vec());
 
         // Test case 2: multiple bytes
-        let b = &[0x01, 0x02, 0x03];
+        let b = &hex!("0x010203");
         let h = hex(b);
         assert_eq!(h, "010203");
         assert_eq!(from_hex(&h).unwrap(), b.to_vec());
@@ -300,13 +301,13 @@ mod tests {
         assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
 
         // Test case 1: single byte
-        let b = &[0x01];
+        let b = &hex!("0x01");
         let h = hex(b);
         assert_eq!(h, "01");
         assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
 
         // Test case 2: multiple bytes
-        let b = &[0x01, 0x02, 0x03];
+        let b = &hex!("0x010203");
         let h = hex(b);
         assert_eq!(h, "010203");
         assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
@@ -393,12 +394,12 @@ mod tests {
         assert_eq!(union(&[], &[]), []);
 
         // Test case 1: empty and non-empty slices
-        assert_eq!(union(&[], &[0x01, 0x02, 0x03]), [0x01, 0x02, 0x03]);
+        assert_eq!(union(&[], &hex!("0x010203")), hex!("0x010203"));
 
         // Test case 2: non-empty and non-empty slices
         assert_eq!(
-            union(&[0x01, 0x02, 0x03], &[0x04, 0x05, 0x06]),
-            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+            union(&hex!("0x010203"), &hex!("0x040506")),
+            hex!("0x010203040506")
         );
     }
 
@@ -456,10 +457,10 @@ mod tests {
         assert_eq!(modulo(&[], 1), 0);
 
         // Test case 1: single byte
-        assert_eq!(modulo(&[0x01], 1), 0);
+        assert_eq!(modulo(&hex!("0x01"), 1), 0);
 
         // Test case 2: multiple bytes
-        assert_eq!(modulo(&[0x01, 0x02, 0x03], 10), 1);
+        assert_eq!(modulo(&hex!("0x010203"), 10), 1);
 
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
@@ -489,7 +490,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_modulo_zero_panics() {
-        modulo(&[0x01, 0x02, 0x03], 0);
+        modulo(&hex!("0x010203"), 0);
     }
 
     #[test]

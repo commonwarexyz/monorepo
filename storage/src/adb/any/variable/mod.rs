@@ -5,7 +5,12 @@
 //! instead for better performance._
 
 use crate::{
-    adb::{align_mmr_and_locations, operation::variable::Operation, Error},
+    adb::{
+        align_mmr_and_locations,
+        operation::variable::Operation,
+        store::{self, Db},
+        Error,
+    },
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -929,6 +934,55 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         Ok(())
+    }
+}
+
+impl<E, K, V, H, T> Db<E, K, V, T> for Any<E, K, V, H, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
+        self.get(key).await.map_err(Into::into)
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
+        self.update(key, value).await.map_err(Into::into)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
+        self.delete(key).await.map_err(Into::into)
+    }
+
+    async fn commit(&mut self) -> Result<(), store::Error> {
+        self.commit(None).await.map_err(Into::into)
+    }
+
+    async fn sync(&mut self) -> Result<(), store::Error> {
+        self.sync().await.map_err(Into::into)
+    }
+
+    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
+        self.prune(target_prune_loc).await.map_err(Into::into)
+    }
+
+    async fn close(self) -> Result<(), store::Error> {
+        self.close().await.map_err(Into::into)
+    }
+
+    async fn destroy(self) -> Result<(), store::Error> {
+        self.destroy().await.map_err(Into::into)
     }
 }
 

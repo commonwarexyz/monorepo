@@ -91,6 +91,14 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
         }
     }
 
+    /// Creates a `RangeCfg` that only accepts exactly `value`.
+    pub fn exact(value: T) -> Self {
+        Self {
+            start: Bound::Included(value),
+            end: Bound::Included(value),
+        }
+    }
+
     /// Returns true if the value is within this range.
     pub fn contains(&self, value: &T) -> bool {
         // Exclude by start bound

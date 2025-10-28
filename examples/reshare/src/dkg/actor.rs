@@ -21,7 +21,7 @@ use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    hex, quorum,
+    fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,
 };
@@ -37,7 +37,7 @@ use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 use tracing::info;
 
-const EPOCH_METADATA_KEY: FixedBytes<1> = FixedBytes::new([0xFF]);
+const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
 pub struct Config<C> {
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
@@ -205,7 +205,7 @@ where
         }
 
         // Inform the orchestrator of the epoch transition
-        let dealers = Ordered::from_iter(dealers);
+        let dealers = dealers.into_iter().collect::<Ordered<_>>();
         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
             epoch: current_epoch,
             poly: current_public.clone(),
@@ -225,7 +225,7 @@ where
             current_share,
             &mut self.signer,
             dealers,
-            Ordered::from_iter(players),
+            players.into_iter().collect::<Ordered<_>>(),
             &mut dkg_mux,
             self.rate_limit,
             &mut self.round_metadata,
@@ -386,14 +386,13 @@ where
                             next_participants.clone()
                         } else {
                             // Pseudorandomly select some random players to receive shares for the next epoch.
-                            Ordered::from_iter(
-                                Self::choose_from_all(
-                                    &all_participants,
-                                    self.num_participants_per_epoch,
-                                    next_epoch,
-                                )
-                                .into_iter(),
+                            Self::choose_from_all(
+                                &all_participants,
+                                self.num_participants_per_epoch,
+                                next_epoch,
                             )
+                            .into_iter()
+                            .collect::<Ordered<_>>()
                         };
 
                         // Inform the orchestrator of the epoch transition

@@ -7,7 +7,6 @@ use crate::{
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Ordered;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -21,13 +20,6 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Identity of the participant.
-    pub me: P,
-
-    /// List of validators for the consensus engine, this is static for the
-    /// lifetime of the engine (i.e. the epoch).
-    pub participants: Ordered<P>,
-
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
@@ -129,6 +121,10 @@ impl<
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
+        assert!(
+            !self.scheme.participants().is_empty(),
+            "there must be at least one participant"
+        );
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"

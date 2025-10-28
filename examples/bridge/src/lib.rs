@@ -154,9 +154,9 @@
 )]
 
 use commonware_consensus::simplex::signing_scheme::bls12381_threshold;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 
-pub type Scheme = bls12381_threshold::Scheme<MinSig>;
+pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[doc(hidden)]
 pub mod application;
