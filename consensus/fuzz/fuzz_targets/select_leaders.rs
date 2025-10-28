@@ -8,7 +8,11 @@ use commonware_consensus::{
     },
     types::Round,
 };
-use commonware_cryptography::{bls12381::primitives::variant::{MinPk, MinSig}, ed25519::{PrivateKey, PublicKey}, PrivateKeyExt, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinPk, MinSig},
+    ed25519::{PrivateKey, PublicKey},
+    PrivateKeyExt, Signer,
+};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
