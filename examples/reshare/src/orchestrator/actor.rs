@@ -187,7 +187,7 @@ where
         );
         mux.start();
 
-        // Create rate limiter for boundary finalizations
+        // Create rate limiter for orchestrators
         let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, &self.context);
 
         // Wait for instructions to transition epochs.
@@ -196,7 +196,7 @@ where
             select! {
                 message = pending_backup.next() => {
                     // If a message is received in an unregistered sub-channel in the pending network,
-                    // attempt to forward the boundary finalization for the epoch.
+                    // attempt to forward the orchestrator for the epoch.
                     let Some((their_epoch, (from, _))) = message else {
                         warn!("pending mux backup channel closed, shutting down orchestrator");
                         break;
@@ -218,13 +218,13 @@ where
                     }
                     let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                     if self.marshal.get_finalization(boundary_height).await.is_some() {
-                        // Only request the boundary finalization if we don't already have it.
+                        // Only request the orchestrator if we don't already have it.
                         continue;
                     };
                     debug!(
                         their_epoch,
                         ?from,
-                        "received backup message from future epoch, requesting boundary finalization"
+                        "received backup message from future epoch, requesting orchestrator"
                     );
 
                     let _ = orchestrator_sender.send(
@@ -235,13 +235,13 @@ where
                 },
                 message = orchestrator_receiver.recv() => {
                     let Ok((from, bytes)) = message else {
-                        warn!("boundary finalization channel closed, shutting down orchestrator");
+                        warn!("orchestrator channel closed, shutting down orchestrator");
                         break;
                     };
                     let epoch = match UInt::<Epoch>::decode(bytes.as_ref()) {
                         Ok(epoch) => epoch,
                         Err(err) => {
-                            debug!(?err, ?from, "failed to decode epoch from boundary finalization request");
+                            debug!(?err, ?from, "failed to decode epoch from orchestrator request");
                             self.oracle.block(from).await;
                             continue;
                         }
@@ -379,7 +379,7 @@ where
             epoch,
             boundary_height,
             ?from,
-            "received message on pending network from old epoch. forwarding boundary finalization"
+            "received message on pending network from old epoch. forwarding orchestrator"
         );
 
         // Forward the finalization to the sender. This operation is best-effort.
