@@ -828,8 +828,8 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -911,8 +911,8 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1149,8 +1149,8 @@ mod test {
                     active_participants: validators.clone(),
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1316,8 +1316,8 @@ mod test {
                             active_participants: validators[1..].to_vec(),
                             inactive_participants: validators[..1].to_vec(),
                             num_participants_per_epoch: validators.len() - 1,
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -1400,8 +1400,8 @@ mod test {
                     active_participants: validators[1..].to_vec(),
                     inactive_participants: validators[..1].to_vec(),
                     num_participants_per_epoch: validators.len() - 1,
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(128)),
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1564,8 +1564,8 @@ mod test {
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
                                 num_participants_per_epoch: validators.len(),
-                                orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                                 dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                                orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                                 partition_prefix: format!("validator_{idx}"),
                                 freezer_table_initial_size: 1024, // 1mb
                             },
