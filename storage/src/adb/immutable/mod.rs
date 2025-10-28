@@ -226,8 +226,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // Get current MMR size
         let mut mmr_leaves = mmr.leaves();
 
-        // Get the start location from the log
-        let start_loc = log.oldest_retained_pos().await?.unwrap_or(0);
+        // Get the start location from the log.
+        let start_loc = match log.oldest_retained_pos().await? {
+            Some(pos) => pos,
+            None => log.size().await.map_err(Error::Journal)?,
+        };
 
         // The number of operations in the log.
         let mut log_size = Location::new_unchecked(start_loc);
@@ -332,13 +335,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // event of failures, with no need for special recovery.
         self.log.prune(*loc).await?;
 
-        // Get the oldest retained location based on what the log actually pruned
-        let oldest_retained_loc = self
-            .log
-            .oldest_retained_pos()
-            .await?
-            .map(Location::new_unchecked)
-            .unwrap_or(Location::new_unchecked(0));
+        // Get the oldest retained location based on what the log actually pruned.
+        let oldest_retained_loc = match self.log.oldest_retained_pos().await? {
+            Some(pos) => Location::new_unchecked(pos),
+            None => {
+                let size = self.log.size().await?;
+                Location::new_unchecked(size)
+            }
+        };
 
         // Prune the MMR up to the oldest retained item in the log after pruning.
         self.mmr
