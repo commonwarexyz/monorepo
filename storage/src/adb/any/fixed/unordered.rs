@@ -120,24 +120,18 @@ impl<
         pin_mut!(stream);
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
-            match result {
-                Err(e) => {
-                    return Err(Error::Journal(e));
+            let (i, op) = result?;
+            let loc = Location::new_unchecked(i);
+            match op {
+                Operation::Delete(key) => {
+                    let result = super::delete_key(snapshot, log, &key, loc).await?;
+                    callback(false, result);
                 }
-                Ok((i, op)) => {
-                    let loc = Location::new_unchecked(i);
-                    match op {
-                        Operation::Delete(key) => {
-                            let result = super::delete_key(snapshot, log, &key, loc).await?;
-                            callback(false, result);
-                        }
-                        Operation::Update(key, _) => {
-                            let result = super::update_loc(snapshot, log, &key, loc).await?;
-                            callback(true, result);
-                        }
-                        Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-                    }
+                Operation::Update(key, _) => {
+                    let result = super::update_loc(snapshot, log, &key, loc).await?;
+                    callback(true, result);
                 }
+                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
             }
         }
 
