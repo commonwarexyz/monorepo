@@ -15,7 +15,7 @@ pub trait Journal {
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
-impl<E, V> Journal for crate::journal::contiguous::Variable<E, V>
+impl<E, V> Journal for crate::journal::variable::Journal<E, V>
 where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
     V: commonware_codec::Codec + Send,
@@ -24,11 +24,11 @@ where
     type Error = crate::journal::Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
-        crate::journal::contiguous::Variable::size(self).await
+        crate::journal::variable::Journal::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        crate::journal::contiguous::Variable::append(self, op).await?;
+        crate::journal::variable::Journal::append(self, op).await?;
         Ok(())
     }
 }

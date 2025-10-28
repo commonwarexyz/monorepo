@@ -88,11 +88,9 @@
 use crate::{
     adb::operation::variable::Operation,
     index::{Cursor, Index as _, Unordered as Index},
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::Location,
+    multijournal::{Config as VConfig, Journal as VJournal},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};

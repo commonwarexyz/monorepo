@@ -12,14 +12,12 @@ use crate::{
         Error,
     },
     index::{Cursor, Index as _, Unordered as Index},
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
+    multijournal::{Config as VConfig, Journal as VJournal},
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};

@@ -1,6 +1,6 @@
 use crate::{
     adb::{immutable, operation::variable::Operation, sync, Error},
-    journal::contiguous,
+    journal,
     mmr::{Location, StandardHasher as Standard},
     translator::Translator,
 };
@@ -19,7 +19,7 @@ where
     T: Translator,
 {
     type Op = Operation<K, V>;
-    type Journal = contiguous::Variable<E, Self::Op>;
+    type Journal = journal::variable::Journal<E, Self::Op>;
     type Hasher = H;
     type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
@@ -31,9 +31,9 @@ where
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
         // Initialize contiguous journal for the sync range
-        contiguous::Variable::init_sync(
+        journal::variable::Journal::init_sync(
             context.with_label("log"),
-            contiguous::Config {
+            journal::variable::Config {
                 items_per_section: config.log_items_per_section,
                 partition: config.log_partition.clone(),
                 compression: config.log_compression,
@@ -130,7 +130,7 @@ where
 
     /// The [immutable::Immutable]'s log of operations. It has elements within the range.
     /// Reports the range start as its pruning boundary (oldest retained operation index).
-    pub log: contiguous::Variable<E, Operation<K, V>>,
+    pub log: journal::variable::Journal<E, Operation<K, V>>,
 
     /// Sync range - operations outside this range are pruned or not synced.
     pub range: Range<Location>,

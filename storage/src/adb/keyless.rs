@@ -11,14 +11,12 @@
 
 use crate::{
     adb::{align_mmr_and_locations, operation::keyless::Operation, Error},
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
+    multijournal::{Config as VConfig, Journal as VJournal},
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;

@@ -28,7 +28,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::variable::{Config as JConfig, Journal};
+use commonware_storage::multijournal::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
 use futures::{
     future::{self, Either},

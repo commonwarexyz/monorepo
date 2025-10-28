@@ -4,7 +4,7 @@
 use crate::{
     adb::{operation::variable::Operation, Error},
     index::{Index as _, Unordered as Index},
-    journal::contiguous,
+    journal,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
@@ -85,7 +85,7 @@ pub struct Immutable<
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its position in this log, and corresponds to its leaf number in the MMR.
-    log: contiguous::Variable<E, Operation<K, V>>,
+    log: journal::variable::Journal<E, Operation<K, V>>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -126,9 +126,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         )
         .await?;
 
-        let mut log = contiguous::Variable::init(
+        let mut log = journal::variable::Journal::init(
             context.with_label("log"),
-            contiguous::Config {
+            journal::variable::Config {
                 partition: cfg.log_partition,
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
@@ -220,7 +220,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     pub(super) async fn build_snapshot_from_log(
         hasher: &mut Standard<H>,
         mmr: &mut Mmr<E, H>,
-        log: &mut contiguous::Variable<E, Operation<K, V>>,
+        log: &mut journal::variable::Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, Location>,
     ) -> Result<Location, Error> {
         // Get current MMR size
