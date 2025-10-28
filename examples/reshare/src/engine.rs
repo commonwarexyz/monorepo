@@ -59,6 +59,7 @@ where
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
     pub dkg_rate_limit: governor::Quota,
+    pub orchestrator_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
@@ -170,6 +171,7 @@ where
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
+                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
@@ -190,7 +192,7 @@ where
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         pending: (
@@ -213,7 +215,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        orchestrator: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -226,13 +232,14 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                backfill_network
+                orchestrator,
+                marshal
             )
             .await
         )
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn run(
         self,
         pending: (
@@ -255,7 +262,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        orchestrator: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -272,10 +283,12 @@ where
             .application
             .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
-        let marshal_handle =
-            self.marshal
-                .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
-        let orchestrator_handle = self.orchestrator.start(pending, recovered, resolver);
+        let marshal_handle = self
+            .marshal
+            .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
+        let orchestrator_handle =
+            self.orchestrator
+                .start(pending, recovered, resolver, orchestrator);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

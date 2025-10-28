@@ -9,7 +9,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::Unordered as Index,
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
@@ -256,19 +256,23 @@ impl<
         // Raise the inactivity floor by taking `self.steps` steps.
         let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
         for _ in 0..steps_to_take {
-            if self.any.snapshot.keys() == 0 {
+            if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
                 debug!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
-            self.raise_floor().await?;
+            let loc = self.any.inactivity_floor_loc;
+            let mut shared = self.any.as_shared();
+            self.any.inactivity_floor_loc = shared
+                .raise_floor_with_bitmap(&mut self.status, loc)
+                .await?;
         }
         self.any.steps = 0;
 
         // Apply the commit operation with the new inactivity floor.
-        self.any
-            .apply_op(Operation::CommitFloor(self.any.inactivity_floor_loc))
-            .await?;
+        let loc = self.any.inactivity_floor_loc;
+        let mut shared = self.any.as_shared();
+        shared.apply_op(Operation::CommitFloor(loc)).await?;
         self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
         self.status.push(true); // Always treat most recent commit op as active.
 
@@ -278,34 +282,6 @@ impl<
             Ok::<(), Error>(())
         };
         try_join!(self.any.log.sync().map_err(Error::Journal), mmr_fut)?;
-
-        Ok(())
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one.
-    ///
-    /// # Panics if there is not at least one active operation above the inactivity floor.
-    async fn raise_floor(&mut self) -> Result<(), Error> {
-        // Use the status bitmap to find the first active operation above the inactivity floor.
-        while !self.status.get_bit(*self.any.inactivity_floor_loc) {
-            self.any.inactivity_floor_loc += 1;
-        }
-
-        // Move the active operation to tip.
-        let op = self.any.log.read(*self.any.inactivity_floor_loc).await?;
-        let loc = self
-            .any
-            .move_op_if_active(op, self.any.inactivity_floor_loc)
-            .await?
-            .expect("op should be active based on status bitmap");
-        self.status.set_bit(*loc, false);
-        self.status.push(true);
-
-        // Advance inactivity floor above the moved operation since we know it's inactive.
-        self.any.inactivity_floor_loc += 1;
 
         Ok(())
     }
