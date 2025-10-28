@@ -416,9 +416,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub async fn op_count(&self) -> Result<Location, Error> {
-        Ok(Location::new_unchecked(
-            self.log.size().await.map_err(Error::Journal)?,
-        ))
+        Ok(Location::new_unchecked(self.log.size().await?))
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
