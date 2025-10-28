@@ -189,7 +189,6 @@ where
     }
     let target_prune_pos = Position::try_from(target_prune_loc)?;
 
-    assert!(target_prune_loc <= inactivity_floor_loc);
     if mmr.size() == 0 {
         // DB is empty, nothing to prune.
         return Ok(());
