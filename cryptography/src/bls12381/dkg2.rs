@@ -237,7 +237,9 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     /// This will need to be passed to various structs when reading them from
     /// bytes, to avoid allocating buffers that are too large for the round.
     pub fn max_read_size(&self) -> usize {
-        self.threshold() as usize
+        // This isn't as tight as it could be, but provides a nice upper bound
+        // for various things, like polynomial sizes, messages, etc.
+        self.players.len() + self.dealers.len()
     }
 
     /// Return the round number for this round.
@@ -301,14 +303,14 @@ impl<V: Variant> Write for DealerPubMsg<V> {
 }
 
 impl<V: Variant> Read for DealerPubMsg<V> {
-    type Cfg = usize;
+    type Cfg = NonZeroUsize;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
         &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            commitment: Read::read_cfg(buf, &RangeCfg::from(0..=max_size))?,
+            commitment: Read::read_cfg(buf, &RangeCfg::from(NZUsize!(1)..=max_size))?,
         })
     }
 }
@@ -489,6 +491,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
 
 #[derive(Clone, Debug)]
 pub struct SignedDealerLog<V: Variant, S: PrivateKey> {
+    dealer: S::PublicKey,
     log: DealerLog<V, S::PublicKey>,
     sig: S::Signature,
 }
@@ -500,28 +503,32 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
         log: DealerLog<V, S::PublicKey>,
     ) -> Self {
         let sig = transcript_for_round(round_info).sign(sk);
-        Self { log, sig }
+        Self {
+            dealer: sk.public_key(),
+            log,
+            sig,
+        }
     }
 
     pub fn check(
         self,
-        dealer: &S::PublicKey,
         round_info: &RoundInfo<V, S::PublicKey>,
-    ) -> Option<DealerLog<V, S::PublicKey>> {
-        if !transcript_for_round(round_info).verify(dealer, &self.sig) {
+    ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
+        if !transcript_for_round(round_info).verify(&self.dealer, &self.sig) {
             return None;
         }
-        Some(self.log)
+        Some((self.dealer, self.log))
     }
 }
 
 impl<V: Variant, S: PrivateKey> EncodeSize for SignedDealerLog<V, S> {
     fn encode_size(&self) -> usize {
-        self.log.encode_size() + self.sig.encode_size()
+        self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
     }
 }
 impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.dealer.write(buf);
         self.log.write(buf);
         self.sig.write(buf);
     }
@@ -535,6 +542,7 @@ impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
+            dealer: ReadExt::read(buf)?,
             log: Read::read_cfg(buf, cfg)?,
             sig: ReadExt::read(buf)?,
         })
@@ -947,9 +955,9 @@ mod test {
                             .expect("should be able to accept ack");
                     }
 
-                    let checked_log = dealer
+                    let (dealer_pub, checked_log) = dealer
                         .finalize()
-                        .check(&dealer_pub, &round_info)
+                        .check(&round_info)
                         .expect("check should succeed");
                     log.insert(dealer_pub, checked_log);
                 }

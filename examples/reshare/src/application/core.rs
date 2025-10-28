@@ -10,7 +10,7 @@ use commonware_consensus::{
     Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Hasher, Signer,
+    bls12381::primitives::variant::Variant, Committable, Hasher, PrivateKey, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
@@ -23,7 +23,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     dkg: dkg::Mailbox<H, C, V>,
@@ -35,7 +35,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
@@ -51,7 +51,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     type Context = Context<H::Digest, C::PublicKey>;
@@ -92,7 +92,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     async fn verify(

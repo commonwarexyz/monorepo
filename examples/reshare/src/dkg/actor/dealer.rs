@@ -35,7 +35,10 @@ pub struct Mailbox<V: Variant, C: PrivateKey>(mpsc::Sender<Message<V, C>>);
 impl<V: Variant, C: PrivateKey> Mailbox<V, C> {
     pub async fn finalize(mut self) -> Result<SignedDealerLog<V, C>, Canceled> {
         let (cb_in, cb_out) = oneshot::channel();
-        self.0.send(Message::Finalize { cb_in }).await;
+        self.0
+            .send(Message::Finalize { cb_in })
+            .await
+            .map_err(|_| Canceled)?;
         cb_out.await
     }
 
@@ -88,7 +91,7 @@ where
         from_players: R,
         round_info: RoundInfo<V, C::PublicKey>,
         me: C,
-        share: Share,
+        share: Option<Share>,
     ) -> (Self, Mailbox<V, C>) {
         let mut state = State::load::<V>(
             ctx.with_label("storage"),
@@ -105,7 +108,7 @@ where
             Transcript::resume(state.seed(ctx.as_mut()).await).noise(b"dealer rng"),
             round_info,
             me,
-            Some(share),
+            share,
         )
         .expect("should be able to create dealer");
 
