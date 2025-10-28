@@ -262,6 +262,8 @@ where
     Ok((proof, ops))
 }
 
+/// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
+/// it if the key isn't already present.
 async fn update_loc<E, I: Index<Value = Location>, O>(
     snapshot: &mut I,
     log: &Journal<E, O>,
