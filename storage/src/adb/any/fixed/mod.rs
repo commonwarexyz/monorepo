@@ -433,7 +433,7 @@ where
         loop {
             let tip_loc = Location::new_unchecked(self.log.size().await?);
             assert!(
-                tip_loc <= *inactivity_floor_loc,
+                *inactivity_floor_loc < tip_loc,
                 "no active operations above the inactivity floor"
             );
             let old_loc = inactivity_floor_loc;
