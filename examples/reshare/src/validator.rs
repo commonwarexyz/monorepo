@@ -6,7 +6,7 @@ use crate::{
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
-    marshal::resolver::p2p as p2p_resolver, simplex::signing_scheme::Scheme,
+    marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
 use commonware_p2p::{authenticated::discovery, utils::requester};
@@ -102,7 +102,7 @@ where
 
     // Create a static resolver for marshal
     let coordinator = Coordinator::new(peer_config.all_peers());
-    let resolver_cfg = p2p_resolver::Config {
+    let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
         coordinator: coordinator.clone(),
         mailbox_size: 200,
@@ -116,7 +116,7 @@ where
         priority_requests: false,
         priority_responses: false,
     };
-    let marshal = p2p_resolver::init(&context, resolver_cfg, marshal);
+    let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
     let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
         context.with_label("engine"),
@@ -238,7 +238,7 @@ mod test {
 
             // Create a static resolver for marshal
             let coordinator = Coordinator::new(ordered_validators.clone());
-            let resolver_cfg = p2p_resolver::Config {
+            let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),
                 coordinator: coordinator.clone(),
                 mailbox_size: 200,
@@ -252,7 +252,7 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = p2p_resolver::init(context, resolver_cfg, marshal);
+            let marshal = marshal_resolver::init(context, resolver_cfg, marshal);
 
             registrations.insert(
                 validator.clone(),
