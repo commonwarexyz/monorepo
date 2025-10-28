@@ -559,7 +559,7 @@ mod tests {
             0816ed13ba3303ac5deb911548908025
             ",
         );
-        let message: [u8; 2] = [0xaf, 0x82];
+        let message = hex!("0xaf82");
         let signature = parse_signature(
             "
             6291d657deec24024827e69c3abe01a3

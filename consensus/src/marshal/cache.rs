@@ -14,7 +14,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -26,7 +26,7 @@ use std::{
 use tracing::{debug, info};
 
 // The key used to store the current epoch in the metadata store.
-const CACHED_EPOCHS_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
+const CACHED_EPOCHS_KEY: FixedBytes<1> = fixed_bytes!("0x00");
 
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
