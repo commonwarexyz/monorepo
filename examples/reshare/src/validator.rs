@@ -207,19 +207,19 @@ mod test {
         let mut registrations = HashMap::new();
         let ordered_validators = validators.iter().cloned().collect::<Ordered<_>>();
         for validator in validators.iter() {
-            let (pending_sender, pending_receiver) = oracle
+            let pending = oracle
                 .register(validator.clone(), PENDING_CHANNEL)
                 .await
                 .unwrap();
-            let (recovered_sender, recovered_receiver) = oracle
+            let recovered = oracle
                 .register(validator.clone(), RECOVERED_CHANNEL)
                 .await
                 .unwrap();
-            let (resolver_sender, resolver_receiver) = oracle
+            let resolver = oracle
                 .register(validator.clone(), RESOLVER_CHANNEL)
                 .await
                 .unwrap();
-            let (broadcast_sender, broadcast_receiver) = oracle
+            let broadcast = oracle
                 .register(validator.clone(), BROADCASTER_CHANNEL)
                 .await
                 .unwrap();
@@ -227,7 +227,7 @@ mod test {
                 .register(validator.clone(), MARSHAL_CHANNEL)
                 .await
                 .unwrap();
-            let (dkg_sender, dkg_receiver) = oracle
+            let dkg = oracle
                 .register(validator.clone(), DKG_CHANNEL)
                 .await
                 .unwrap();
@@ -257,11 +257,11 @@ mod test {
             registrations.insert(
                 validator.clone(),
                 (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
-                    (resolver_sender, resolver_receiver),
-                    (broadcast_sender, broadcast_receiver),
-                    (dkg_sender, dkg_receiver),
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg,
                     orchestrator,
                     marshal,
                 ),
