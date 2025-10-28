@@ -26,7 +26,7 @@ const PENDING_CHANNEL: u64 = 0;
 const RECOVERED_CHANNEL: u64 = 1;
 const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
-const BACKFILL_BY_DIGEST_CHANNEL: u64 = 4;
+const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
 const ORCHESTRATOR_CHANNEL: u64 = 6;
 
@@ -91,8 +91,8 @@ where
     let broadcaster_limit = Quota::per_second(NZU32!(8));
     let broadcaster = network.register(BROADCASTER_CHANNEL, broadcaster_limit, MESSAGE_BACKLOG);
 
-    let backfill_quota = Quota::per_second(NZU32!(8));
-    let backfill = network.register(BACKFILL_BY_DIGEST_CHANNEL, backfill_quota, MESSAGE_BACKLOG);
+    let marshal_limit = Quota::per_second(NZU32!(8));
+    let marshal = network.register(MARSHAL_CHANNEL, marshal_limit, MESSAGE_BACKLOG);
 
     let orchestrator_limit = Quota::per_second(NZU32!(1));
     let orchestrator = network.register(ORCHESTRATOR_CHANNEL, orchestrator_limit, MESSAGE_BACKLOG);
@@ -100,7 +100,7 @@ where
     let dkg_limit = Quota::per_second(NZU32!(128));
     let dkg = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
-    // Create a static resolver for backfill
+    // Create a static resolver for marshal
     let coordinator = Coordinator::new(peer_config.all_peers());
     let resolver_cfg = p2p_resolver::Config {
         public_key: config.signing_key.public_key(),
@@ -108,7 +108,7 @@ where
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
-            rate_limit: Quota::per_second(NZU32!(8)),
+            rate_limit: marshal_limit,
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
         },
@@ -116,7 +116,7 @@ where
         priority_requests: false,
         priority_responses: false,
     };
-    let p2p_resolver = p2p_resolver::init(&context, resolver_cfg, backfill);
+    let marshal = p2p_resolver::init(&context, resolver_cfg, marshal);
 
     let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
         context.with_label("engine"),
@@ -146,7 +146,7 @@ where
         broadcaster,
         dkg,
         orchestrator,
-        p2p_resolver,
+        marshal,
     );
 
     if let Err(e) = try_join_all(vec![p2p_handle, engine_handle]).await {
@@ -207,19 +207,36 @@ mod test {
         let mut registrations = HashMap::new();
         let ordered_validators = validators.iter().cloned().collect::<Ordered<_>>();
         for validator in validators.iter() {
-            let (pending_sender, pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
-                oracle.register(validator.clone(), 2).await.unwrap();
-            let (broadcast_sender, broadcast_receiver) =
-                oracle.register(validator.clone(), 3).await.unwrap();
-            let backfill = oracle.register(validator.clone(), 4).await.unwrap();
-            let (dkg_sender, dkg_receiver) = oracle.register(validator.clone(), 5).await.unwrap();
-            let orchestrator = oracle.register(validator.clone(), 6).await.unwrap();
+            let (pending_sender, pending_receiver) = oracle
+                .register(validator.clone(), PENDING_CHANNEL)
+                .await
+                .unwrap();
+            let (recovered_sender, recovered_receiver) = oracle
+                .register(validator.clone(), RECOVERED_CHANNEL)
+                .await
+                .unwrap();
+            let (resolver_sender, resolver_receiver) = oracle
+                .register(validator.clone(), RESOLVER_CHANNEL)
+                .await
+                .unwrap();
+            let (broadcast_sender, broadcast_receiver) = oracle
+                .register(validator.clone(), BROADCASTER_CHANNEL)
+                .await
+                .unwrap();
+            let marshal = oracle
+                .register(validator.clone(), MARSHAL_CHANNEL)
+                .await
+                .unwrap();
+            let (dkg_sender, dkg_receiver) = oracle
+                .register(validator.clone(), DKG_CHANNEL)
+                .await
+                .unwrap();
+            let orchestrator = oracle
+                .register(validator.clone(), ORCHESTRATOR_CHANNEL)
+                .await
+                .unwrap();
 
-            // Create a static resolver for backfill
+            // Create a static resolver for marshal
             let coordinator = Coordinator::new(ordered_validators.clone());
             let resolver_cfg = p2p_resolver::Config {
                 public_key: validator.clone(),
@@ -235,7 +252,7 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let p2p_resolver = p2p_resolver::init(context, resolver_cfg, backfill);
+            let marshal = p2p_resolver::init(context, resolver_cfg, marshal);
 
             registrations.insert(
                 validator.clone(),
@@ -246,7 +263,7 @@ mod test {
                     (broadcast_sender, broadcast_receiver),
                     (dkg_sender, dkg_receiver),
                     orchestrator,
-                    p2p_resolver,
+                    marshal,
                 ),
             );
         }
@@ -340,7 +357,7 @@ mod test {
                 public_keys.insert(public_key.clone());
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 let engine = engine::Engine::<_, _, _, Sha256, MinSig, S>::new(
@@ -370,7 +387,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
             }
 
@@ -567,7 +584,7 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
@@ -578,7 +595,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
                 engine_handles.push(handle);
             }
@@ -686,7 +703,7 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
@@ -697,7 +714,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
             }
 
@@ -749,7 +766,7 @@ mod test {
         });
     }
 
-    fn test_backfill<S>(seed: u64) -> String
+    fn test_marshal<S>(seed: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -837,7 +854,7 @@ mod test {
                 .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
@@ -848,7 +865,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
             }
 
@@ -920,7 +937,7 @@ mod test {
             .await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                 registrations.remove(&public_key).unwrap();
 
             // Start engine
@@ -931,7 +948,7 @@ mod test {
                 broadcast,
                 dkg,
                 orchestrator,
-                backfill,
+                marshal,
             );
 
             // Poll metrics
@@ -974,19 +991,19 @@ mod test {
     }
 
     #[test_traced]
-    fn test_backfill_ed() {
-        assert_eq!(test_backfill::<EdScheme>(1), test_backfill::<EdScheme>(1));
+    fn test_marshal_ed() {
+        assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
     #[test_traced]
-    fn test_backfill_threshold() {
+    fn test_marshal_threshold() {
         assert_eq!(
-            test_backfill::<ThresholdScheme<MinSig>>(1),
-            test_backfill::<ThresholdScheme<MinSig>>(1)
+            test_marshal::<ThresholdScheme<MinSig>>(1),
+            test_marshal::<ThresholdScheme<MinSig>>(1)
         );
     }
 
-    fn test_backfill_multi_epoch<S>(seed: u64) -> String
+    fn test_marshal_multi_epoch<S>(seed: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -1075,7 +1092,7 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
@@ -1086,7 +1103,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
             }
 
@@ -1158,7 +1175,7 @@ mod test {
             .await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                 registrations.remove(&public_key).unwrap();
 
             // Start engine
@@ -1169,7 +1186,7 @@ mod test {
                 broadcast,
                 dkg,
                 orchestrator,
-                backfill,
+                marshal,
             );
 
             // Poll metrics
@@ -1222,22 +1239,22 @@ mod test {
     }
 
     #[test_traced]
-    fn test_backfill_multi_epoch_ed() {
+    fn test_marshal_multi_epoch_ed() {
         assert_eq!(
-            test_backfill_multi_epoch::<EdScheme>(1),
-            test_backfill_multi_epoch::<EdScheme>(1)
+            test_marshal_multi_epoch::<EdScheme>(1),
+            test_marshal_multi_epoch::<EdScheme>(1)
         );
     }
 
     #[test_traced("INFO")]
-    fn test_backfill_multi_epoch_threshold() {
+    fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
-            test_backfill_multi_epoch::<ThresholdScheme<MinSig>>(1),
-            test_backfill_multi_epoch::<ThresholdScheme<MinSig>>(1)
+            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
+            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1)
         );
     }
 
-    fn test_backfill_multi_epoch_non_member_of_committee<S: Scheme>(seed: u64) -> String
+    fn test_marshal_multi_epoch_non_member_of_committee<S: Scheme>(seed: u64) -> String
     where
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
@@ -1325,7 +1342,7 @@ mod test {
                     .await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
@@ -1336,7 +1353,7 @@ mod test {
                     broadcast,
                     dkg,
                     orchestrator,
-                    backfill,
+                    marshal,
                 );
             }
 
@@ -1384,7 +1401,7 @@ mod test {
             )
             .await;
 
-            // Set up the peer to backfill. Note that this peer is _not_ a part of the committee
+            // Set up the peer to marshal. Note that this peer is _not_ a part of the committee
             // in the first epoch.
             let signer = signers[0].clone();
             let public_key = signer.public_key();
@@ -1409,7 +1426,7 @@ mod test {
             .await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                 registrations.remove(&public_key).unwrap();
 
             // Start engine
@@ -1420,7 +1437,7 @@ mod test {
                 broadcast,
                 dkg,
                 orchestrator,
-                backfill,
+                marshal,
             );
 
             // Poll metrics
@@ -1472,18 +1489,18 @@ mod test {
     }
 
     #[test_traced]
-    fn test_backfill_multi_epoch_non_member_of_committee_ed() {
+    fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
-            test_backfill_multi_epoch_non_member_of_committee::<EdScheme>(1),
-            test_backfill_multi_epoch_non_member_of_committee::<EdScheme>(1)
+            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
+            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1)
         );
     }
 
     #[test_traced]
-    fn test_backfill_multi_epoch_non_member_of_committee_threshold() {
+    fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
-            test_backfill_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
-            test_backfill_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
+            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
+            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
         );
     }
 
@@ -1573,7 +1590,7 @@ mod test {
                         .await;
 
                     // Get networking
-                    let (pending, recovered, resolver, broadcast, dkg, orchestrator, backfill) =
+                    let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                         registrations.remove(&public_key).unwrap();
 
                     // Start engine
@@ -1584,7 +1601,7 @@ mod test {
                         broadcast,
                         dkg,
                         orchestrator,
-                        backfill,
+                        marshal,
                     );
                 }
 
