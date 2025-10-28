@@ -39,6 +39,7 @@ use prometheus_client::metrics::{
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    mem::take,
     num::NonZeroUsize,
     pin::Pin,
     sync::{atomic::AtomicI64, Arc},
@@ -980,7 +981,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    async fn certify(&mut self, view: View) -> Option<Request<D, bool>> {
+    async fn certify(&mut self, view: View, resolver: &mut resolver::Mailbox<S, D>) -> Option<Request<D, bool>> {
         let round = self.views.get_mut(&view)?;
 
         // Request certification only once
@@ -998,10 +999,16 @@ impl<
             .expect("notarized proposal should have a proposal");
 
         // Get the context for the proposal.
+        let parent_view = proposal.parent;
         // Since we have a notarization, the parent does not need to be certified by us. It is
         // implicitly certified by the fact that participants notarized the current proposal.
-        let parent_view = proposal.parent;
-        let parent_payload = self.is_notarized(parent_view)?;
+        let Some(parent_payload) = self.is_notarized(parent_view) else {
+            // However, if the parent is not notarized, then we cannot be sure what the parent is.
+            // We should attempt to fetch its notarization and to certify this view later.
+            resolver.fetch(vec![parent_view], vec![]).await;
+            self.certification_candidates.insert(view);
+            return None;
+        };
         let context = Context {
             round: proposal.round,
             parent: (parent_view, *parent_payload),
@@ -1221,10 +1228,10 @@ impl<
                     .await
                     .expect("unable to append to journal");
             }
-
-            // Record that this view may be eligible for certification.
-            self.certification_candidates.insert(view);
         }
+
+        // Record that this view may be eligible for certification.
+        self.certification_candidates.insert(view);
 
         // Do not yet move to the next view, we need to wait for certification.
     }
@@ -1872,8 +1879,11 @@ impl<
             }
 
             // Drain pending certifications triggered by notarizations
-            while let Some(v) = self.certification_candidates.pop_first() {
-                if let Some(Request(ctx, receiver)) = self.certify(v).await {
+            let candidates = take(&mut self.certification_candidates)
+                .into_iter()
+                .collect::<Vec<_>>();
+            for v in candidates {
+                if let Some(Request(ctx, receiver)) = self.certify(v, &mut resolver).await {
                     let view = ctx.view();
                     let handle = certify_pool.push(async move { (ctx, receiver.await) });
                     self.views
