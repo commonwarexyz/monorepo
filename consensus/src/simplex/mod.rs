@@ -201,6 +201,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
+        pub mod reporters;
     }
 }
 
@@ -3649,7 +3650,7 @@ mod tests {
                 );
 
                 // Wrap with `AttributableReporter`
-                let attributable_reporter = signing_scheme::reporter::AttributableReporter::new(
+                let attributable_reporter = reporters::AttributableReporter::new(
                     context.with_label("rng"),
                     schemes[idx].clone(),
                     namespace.clone(),

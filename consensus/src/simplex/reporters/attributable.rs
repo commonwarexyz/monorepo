@@ -13,7 +13,7 @@
 //!
 //! # Security Rationale
 //!
-//! With [`super::bls12381_threshold`], any `t` valid partial signatures
+//! With [`crate::simplex::signing_scheme::bls12381_threshold`], any `t` valid partial signatures
 //! can be used to forge a partial signature for any participant. If per-validator activities
 //! were exposed for such schemes, adversaries could fabricate evidence of either liveness or of committing a fault.
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
