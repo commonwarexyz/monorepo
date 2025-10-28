@@ -1,3 +1,5 @@
+//! Benchmark the generation of a large database with fixed-size values across each (a)db variant.
+
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -44,8 +46,8 @@ cfg_if::cfg_if! {
         const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
         const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
     } else {
-        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 2];
-        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 2];
+        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 10];
+        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 10];
     }
 }
 

@@ -244,7 +244,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
     use rand::{Rng, RngCore};
 
     const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
@@ -829,7 +829,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], size)
+                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();

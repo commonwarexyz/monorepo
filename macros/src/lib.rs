@@ -6,7 +6,9 @@
 )]
 
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro2::Span;
+use proc_macro_crate::{crate_name, FoundCrate};
+use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
@@ -133,6 +135,122 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
             });
         }
     };
+    TokenStream::from(expanded)
+}
+
+/// Capture logs from a test run into an in-memory store.
+///
+/// This macro defaults to a log level of `DEBUG` on the [mod@tracing_subscriber::fmt] layer if no level is provided.
+///
+/// This macro is powered by the [tracing](https://docs.rs/tracing),
+/// [tracing-subscriber](https://docs.rs/tracing-subscriber), and
+/// [commonware-runtime](https://docs.rs/commonware-runtime) crates.
+///
+/// # Note
+///
+/// This macro requires the resolution of the `commonware-runtime`, `tracing`, and `tracing_subscriber` crates.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::test_collect_traces;
+/// use commonware_runtime::telemetry::traces::collector::TraceStorage;
+/// use tracing::{debug, info};
+///
+/// #[test_collect_traces("INFO")]
+/// fn test_info_level(traces: TraceStorage) {
+///     // Filter applies to console output (FmtLayer)
+///     info!("This is an info log");
+///     debug!("This is a debug log (won't be shown in console output)");
+///
+///     // All traces are collected, regardless of level, by the CollectingLayer.
+///     assert_eq!(traces.get_all().len(), 2);
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn test_collect_traces(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+
+    // Parse the attribute argument for log level
+    let log_level = if attr.is_empty() {
+        // Default log level is DEBUG
+        quote! { ::tracing_subscriber::filter::LevelFilter::DEBUG }
+    } else {
+        // Parse the attribute as a string literal
+        let level_str = parse_macro_input!(attr as LitStr);
+        let level_ident = level_str.value().to_uppercase();
+        match level_ident.as_str() {
+            "TRACE" => quote! { ::tracing_subscriber::filter::LevelFilter::TRACE },
+            "DEBUG" => quote! { ::tracing_subscriber::filter::LevelFilter::DEBUG },
+            "INFO" => quote! { ::tracing_subscriber::filter::LevelFilter::INFO },
+            "WARN" => quote! { ::tracing_subscriber::filter::LevelFilter::WARN },
+            "ERROR" => quote! { ::tracing_subscriber::filter::LevelFilter::ERROR },
+            _ => {
+                // Return a compile error for invalid log levels
+                return Error::new_spanned(
+                    level_str,
+                    "Invalid log level. Expected one of: TRACE, DEBUG, INFO, WARN, ERROR.",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    };
+
+    let attrs = input.attrs;
+    let vis = input.vis;
+    let sig = input.sig;
+    let block = input.block;
+
+    // Create the signature of the inner function that takes the TraceStorage.
+    let inner_ident = format_ident!("__{}_inner_traced", sig.ident);
+    let mut inner_sig = sig.clone();
+    inner_sig.ident = inner_ident.clone();
+
+    // Create the signature of the outer test function.
+    let mut outer_sig = sig;
+    outer_sig.inputs.clear();
+
+    // Detect the path of the `commonware-runtime` crate. If it has been renamed or
+    // this macro is being used within the `commonware-runtime` crate itself, adjust
+    // the path accordingly.
+    let rt_path = match crate_name("commonware-runtime") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, Span::call_site());
+            quote!(#ident)
+        }
+        Err(_) => quote!(::commonware_runtime), // fallback
+    };
+
+    let expanded = quote! {
+        // Inner test function runs the actual test logic, accepting the TraceStorage
+        // created by the harness.
+        #(#attrs)*
+        #vis #inner_sig #block
+
+        #[test]
+        #vis #outer_sig {
+            use ::tracing_subscriber::{Layer, fmt, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+            use ::tracing::{Dispatch, dispatcher};
+            use #rt_path::telemetry::traces::collector::{CollectingLayer, TraceStorage};
+
+            let trace_store = TraceStorage::default();
+            let collecting_layer = CollectingLayer::new(trace_store.clone());
+
+            let fmt_layer = fmt::layer()
+                .with_test_writer()
+                .with_line_number(true)
+                .with_span_events(fmt::format::FmtSpan::CLOSE)
+                .with_filter(#log_level);
+
+            let subscriber = Registry::default().with(collecting_layer).with(fmt_layer);
+            let dispatcher = Dispatch::new(subscriber);
+            dispatcher::with_default(&dispatcher, || {
+                #inner_ident(trace_store);
+            });
+        }
+    };
+
     TokenStream::from(expanded)
 }
 

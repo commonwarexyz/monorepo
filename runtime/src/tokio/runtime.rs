@@ -21,6 +21,7 @@ use crate::{
     Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
+use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -38,6 +39,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
+use tracing::{info_span, Instrument};
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -344,6 +346,7 @@ impl crate::Runner for Runner {
             network,
             tree: Tree::root(),
             execution: Execution::default(),
+            instrumented: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -378,6 +381,7 @@ pub struct Context {
     network: Network,
     tree: Arc<Tree>,
     execution: Execution,
+    instrumented: bool,
 }
 
 impl Clone for Context {
@@ -391,6 +395,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
+            instrumented: false,
         }
     }
 }
@@ -413,6 +418,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn instrumented(mut self) -> Self {
+        self.instrumented = true;
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -420,12 +430,14 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (_, metric) = spawn_metrics!(self);
+        let (label, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
+        let is_instrumented = self.instrumented;
         self.execution = Execution::default();
+        self.instrumented = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -434,7 +446,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = f(self);
+        let future: BoxFuture<T> = if is_instrumented {
+            f(self)
+                .instrument(info_span!("task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,
