@@ -300,7 +300,6 @@ async fn delete_key<E, I, O>(
     snapshot: &mut I,
     log: &Journal<E, O>,
     key: &O::Key,
-    delete_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -316,7 +315,6 @@ where
     let Some(loc) = find_update_op(log, &mut cursor, key).await? else {
         return Ok(None);
     };
-    assert!(loc < delete_loc);
     cursor.delete();
 
     Ok(Some(loc))

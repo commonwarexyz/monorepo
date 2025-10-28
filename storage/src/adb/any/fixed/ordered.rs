@@ -136,14 +136,14 @@ impl<
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
             let (i, op) = result?;
-            let loc = Location::new_unchecked(i);
             match op {
                 Operation::Delete(key) => {
-                    let old_loc = super::delete_key(snapshot, log, &key, loc).await?;
+                    let old_loc = super::delete_key(snapshot, log, &key).await?;
                     callback(false, old_loc);
                 }
                 Operation::Update(data) => {
-                    let old_loc = super::update_loc(snapshot, log, &data.key, loc).await?;
+                    let new_loc = Location::new_unchecked(i);
+                    let old_loc = super::update_loc(snapshot, log, &data.key, new_loc).await?;
                     callback(true, old_loc);
                 }
                 Operation::CommitFloor(_) => callback(i == last_commit_loc, None),

@@ -121,15 +121,15 @@ impl<
         let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
             let (i, op) = result?;
-            let loc = Location::new_unchecked(i);
             match op {
                 Operation::Delete(key) => {
-                    let result = super::delete_key(snapshot, log, &key, loc).await?;
+                    let result = super::delete_key(snapshot, log, &key).await?;
                     callback(false, result);
                 }
                 Operation::Update(key, _) => {
-                    let result = super::update_loc(snapshot, log, &key, loc).await?;
-                    callback(true, result);
+                    let new_loc = Location::new_unchecked(i);
+                    let old_loc = super::update_loc(snapshot, log, &key, new_loc).await?;
+                    callback(true, old_loc);
                 }
                 Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
             }
@@ -216,8 +216,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let loc = self.op_count();
-        let r = super::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
+        let r = super::delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
