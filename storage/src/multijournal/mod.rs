@@ -1,6 +1,6 @@
 //! An append-only log for storing arbitrary variable length items.
 //!
-//! `variable::Journal` is an append-only log for storing arbitrary variable length data on disk. In
+//! `multijournal::Journal` is an append-only log for storing arbitrary variable length data on disk. In
 //! addition to replay, stored items can be directly retrieved given their section number and offset
 //! within the section.
 //!
