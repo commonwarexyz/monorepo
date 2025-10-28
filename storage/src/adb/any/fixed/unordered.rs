@@ -225,7 +225,7 @@ impl<
         Ok(r)
     }
 
-    // Returns a wrapper around the db's state that can be used to perform shared functions.
+    /// Returns a wrapper around the db's state that can be used to perform shared functions.
     pub(crate) fn as_shared(
         &mut self,
     ) -> super::Shared<'_, E, Index<T, Location>, Operation<K, V>, H> {
