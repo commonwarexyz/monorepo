@@ -319,7 +319,7 @@ mod tests {
     ) -> Fetcher<Context, Ed25519PublicKey, MockKey, MockSender> {
         let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
         let requester_config = RequesterConfig {
-            public_key,
+            me: Some(public_key),
             rate_limit: Quota::per_second(std::num::NonZeroU32::new(10).unwrap()),
             initial: Duration::from_millis(100),
             timeout: Duration::from_secs(5),

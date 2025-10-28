@@ -33,7 +33,7 @@ pub type ID = u64;
 /// performant peers and/or periodically set `shuffle` in `request`.
 pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     context: E,
-    public_key: P,
+    me: Option<P>,
     metrics: super::Metrics,
     initial: Duration,
     timeout: Duration,
@@ -81,7 +81,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         let metrics = super::Metrics::init(context.clone());
         Self {
             context,
-            public_key: config.public_key,
+            me: config.me,
             metrics,
             initial: config.initial,
             timeout: config.timeout,
@@ -130,7 +130,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         // Look for a participant that can handle request
         for (participant, _) in participant_iter {
             // Check if me
-            if *participant == self.public_key {
+            if Some(participant) == self.me.as_ref() {
                 continue;
             }
 
@@ -275,7 +275,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                public_key: scheme.public_key(),
+                me: Some(scheme.public_key()),
                 rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
@@ -383,7 +383,7 @@ mod tests {
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
-                public_key: scheme.public_key(),
+                me: Some(scheme.public_key()),
                 rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,

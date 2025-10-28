@@ -327,8 +327,9 @@ impl<
 
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
 
-        // Write the pruned portion of the bitmap to disk, which is required for
-        // recovery. Active part is not persisted but restored by reply on restart.
+        // Write the pruned portion of the bitmap to disk, which is required for recovery. Active
+        // part is not persisted but restored by replay on restart.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/2019): optimize this.
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),

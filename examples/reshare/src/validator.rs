@@ -35,8 +35,9 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Run the validator node service.
-pub async fn run<S: Scheme>(context: tokio::Context, args: super::ParticipantArgs)
+pub async fn run<S>(context: tokio::Context, args: super::ParticipantArgs)
 where
+    S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
         EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -103,7 +104,7 @@ where
         coordinator: coordinator.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
-            public_key: config.signing_key.public_key(),
+            me: Some(config.signing_key.public_key()),
             rate_limit: Quota::per_second(NonZeroU32::new(8).unwrap()),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
@@ -219,7 +220,7 @@ mod test {
                 coordinator: coordinator.clone(),
                 mailbox_size: 200,
                 requester_config: requester::Config {
-                    public_key: validator.clone(),
+                    me: Some(validator.clone()),
                     rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
                     initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
@@ -279,8 +280,9 @@ mod test {
         }
     }
 
-    fn all_online<S: Scheme>(n: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S>(n: u32, seed: u64, link: Link, required: u64) -> String
     where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -734,8 +736,9 @@ mod test {
         });
     }
 
-    fn test_backfill<S: Scheme>()
+    fn test_backfill<S>()
     where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -958,8 +961,9 @@ mod test {
         test_backfill::<ThresholdScheme<MinSig>>();
     }
 
-    fn test_backfill_multi_epoch<S: Scheme>()
+    fn test_backfill_multi_epoch<S>()
     where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -1193,8 +1197,9 @@ mod test {
         test_backfill_multi_epoch::<ThresholdScheme<MinSig>>();
     }
 
-    fn test_unclean_shutdown<S: Scheme>()
+    fn test_unclean_shutdown<S>()
     where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {

@@ -78,6 +78,7 @@ impl<const N: usize> From<[u8; N]> for FixedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixed_bytes;
     use bytes::{Buf, BytesMut};
     use commonware_codec::{DecodeExt, Encode};
 
@@ -141,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let bytes = FixedBytes::new([0x01, 0x02, 0x03, 0x04]);
+        let bytes = fixed_bytes!("0x01020304");
         assert_eq!(format!("{bytes}"), "01020304");
     }
 
