@@ -129,7 +129,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         let mut log = journal::variable::Journal::init(
             context.with_label("log"),
             journal::variable::Config {
-                partition: cfg.log_partition.clone(),
+                data_partition: cfg.log_partition.clone(),
                 offsets_partition: format!("{}_offsets", cfg.log_partition),
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,

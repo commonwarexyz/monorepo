@@ -51,7 +51,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 #[derive(Clone)]
 pub struct Config<C> {
     /// The partition to use for storing variable-length data.
-    pub partition: String,
+    pub data_partition: String,
 
     /// The partition to use for storing the offsets index.
     ///
@@ -145,21 +145,19 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
-        if cfg.partition == cfg.offsets_partition {
+        if cfg.data_partition == cfg.offsets_partition {
             return Err(Error::InvalidConfiguration(
                 "partition and offsets_partition must be different".to_string(),
             ));
         }
 
-        let data_partition = cfg.partition.clone();
-        let offsets_partition = cfg.offsets_partition.clone();
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable data journal
         let mut data = multijournal::Journal::init(
             context.clone(),
             multijournal::Config {
-                partition: data_partition,
+                partition: cfg.data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
@@ -172,7 +170,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let mut offsets = fixed::Journal::init(
             context,
             fixed::Config {
-                partition: offsets_partition,
+                partition: cfg.offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
@@ -210,21 +208,18 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        // Validate configuration
-        if cfg.partition == cfg.offsets_partition {
+        // Validate that partitions are different to prevent blob name collisions
+        if cfg.data_partition == cfg.offsets_partition {
             return Err(Error::InvalidConfiguration(
                 "partition and offsets_partition must be different".to_string(),
             ));
         }
 
-        let data_partition = cfg.partition.clone();
-        let offsets_partition = cfg.offsets_partition.clone();
-
         // Initialize empty data journal
         let data = multijournal::Journal::init(
             context.clone(),
             multijournal::Config {
-                partition: data_partition,
+                partition: cfg.data_partition.clone(),
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
@@ -237,7 +232,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let offsets = crate::adb::any::fixed::sync::init_journal_at_size(
             context,
             fixed::Config {
-                partition: offsets_partition,
+                partition: cfg.offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
@@ -876,7 +871,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "offsets_loss_after_prune".to_string(),
+                data_partition: "offsets_loss_after_prune".to_string(),
                 offsets_partition: "offsets_loss_after_prune_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -926,7 +921,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "data_loss_test".to_string(),
+                data_partition: "data_loss_test".to_string(),
                 offsets_partition: "data_loss_test_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -949,7 +944,7 @@ mod tests {
 
             // === Simulate data loss: Delete data partition but keep offsets ===
             context
-                .remove(&cfg.partition, None)
+                .remove(&cfg.data_partition, None)
                 .await
                 .expect("Failed to remove data partition");
 
@@ -989,7 +984,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "same_partition".to_string(),
+                data_partition: "same_partition".to_string(),
                 offsets_partition: "same_partition".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1019,7 +1014,7 @@ mod tests {
                     Journal::<_, u64>::init(
                         context,
                         Config {
-                            partition: format!("generic_test_{}", test_name),
+                            data_partition: format!("generic_test_{}", test_name),
                             offsets_partition: format!("generic_test_{}_offsets", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
@@ -1042,7 +1037,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "sequential_prunes".to_string(),
+                data_partition: "sequential_prunes".to_string(),
                 offsets_partition: "sequential_prunes_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1131,7 +1126,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "prune_all_reinit".to_string(),
+                data_partition: "prune_all_reinit".to_string(),
                 offsets_partition: "prune_all_reinit_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1214,7 +1209,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_prune_crash".to_string(),
+                data_partition: "recovery_prune_crash".to_string(),
                 offsets_partition: "recovery_prune_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1276,7 +1271,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_offsets_ahead".to_string(),
+                data_partition: "recovery_offsets_ahead".to_string(),
                 offsets_partition: "recovery_offsets_ahead_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1313,7 +1308,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
-                partition: "recovery_append_crash".to_string(),
+                data_partition: "recovery_append_crash".to_string(),
                 offsets_partition: "recovery_append_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1369,7 +1364,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_multiple_prunes".to_string(),
+                data_partition: "recovery_multiple_prunes".to_string(),
                 offsets_partition: "recovery_multiple_prunes_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1437,7 +1432,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data across multiple sections ===
             let cfg = Config {
-                partition: "recovery_rewind_crash".to_string(),
+                data_partition: "recovery_rewind_crash".to_string(),
                 offsets_partition: "recovery_rewind_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1497,7 +1492,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "recovery_empty_after_prune".to_string(),
+                data_partition: "recovery_empty_after_prune".to_string(),
                 offsets_partition: "recovery_empty_after_prune_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1565,7 +1560,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "concurrent_sync_recovery".to_string(),
+                data_partition: "concurrent_sync_recovery".to_string(),
                 offsets_partition: "concurrent_sync_recovery_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
@@ -1608,7 +1603,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_zero".to_string(),
+                data_partition: "init_at_size_zero".to_string(),
                 offsets_partition: "init_at_size_zero_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1642,7 +1637,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_boundary".to_string(),
+                data_partition: "init_at_size_boundary".to_string(),
                 offsets_partition: "init_at_size_boundary_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1682,7 +1677,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_mid".to_string(),
+                data_partition: "init_at_size_mid".to_string(),
                 offsets_partition: "init_at_size_mid_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1717,7 +1712,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_persist".to_string(),
+                data_partition: "init_at_size_persist".to_string(),
                 offsets_partition: "init_at_size_persist_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1769,7 +1764,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_large".to_string(),
+                data_partition: "init_at_size_large".to_string(),
                 offsets_partition: "init_at_size_large_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1801,7 +1796,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_prune".to_string(),
+                data_partition: "init_at_size_prune".to_string(),
                 offsets_partition: "init_at_size_prune_offsets".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1847,7 +1842,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_fresh_start".into(),
+                data_partition: "test_fresh_start".into(),
                 offsets_partition: "test_fresh_start_offsets".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1886,7 +1881,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_overlap".into(),
+                data_partition: "test_overlap".into(),
                 offsets_partition: "test_overlap_offsets".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1956,7 +1951,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_invalid".into(),
+                data_partition: "test_invalid".into(),
                 offsets_partition: "test_invalid_offsets".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
@@ -1982,7 +1977,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_exact_match".to_string(),
+                data_partition: "test_exact_match".to_string(),
                 offsets_partition: "test_exact_match_offsets".to_string(),
                 items_per_section,
                 compression: None,
@@ -2052,7 +2047,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_unexpected_data".into(),
+                data_partition: "test_unexpected_data".into(),
                 offsets_partition: "test_unexpected_data_offsets".into(),
                 items_per_section,
                 compression: None,
@@ -2096,7 +2091,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_stale".into(),
+                data_partition: "test_stale".into(),
                 offsets_partition: "test_stale_offsets".into(),
                 items_per_section,
                 compression: None,
@@ -2149,7 +2144,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_boundaries".into(),
+                data_partition: "test_boundaries".into(),
                 offsets_partition: "test_boundaries_offsets".into(),
                 items_per_section,
                 compression: None,
@@ -2218,7 +2213,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_same_section".into(),
+                data_partition: "test_same_section".into(),
                 offsets_partition: "test_same_section_offsets".into(),
                 items_per_section,
                 compression: None,

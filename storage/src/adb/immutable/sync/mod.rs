@@ -35,7 +35,7 @@ where
             context.with_label("log"),
             journal::variable::Config {
                 items_per_section: config.log_items_per_section,
-                partition: config.log_partition.clone(),
+                data_partition: config.log_partition.clone(),
                 offsets_partition: format!("{}_offsets", config.log_partition),
                 compression: config.log_compression,
                 codec_config: config.log_codec_config.clone(),
