@@ -22,7 +22,7 @@
 
 use crate::{
     iouring::{self, should_retry},
-    Error,
+    Blob as _, Error,
 };
 use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
@@ -36,9 +36,28 @@ use std::{
     fs::{self, File},
     io::Error as IoError,
     os::fd::AsRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Syncs a directory to ensure directory entry changes are durable.
+/// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
+fn sync_dir(path: &Path) -> Result<(), Error> {
+    let dir = File::open(path).map_err(|e| {
+        Error::BlobOpenFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })?;
+    dir.sync_all().map_err(|e| {
+        Error::BlobSyncFailed(
+            path.to_string_lossy().to_string(),
+            "directory".to_string(),
+            e,
+        )
+    })
+}
 
 #[derive(Clone, Debug)]
 /// Configuration for a [Storage].
@@ -87,10 +106,13 @@ impl crate::Storage for Storage {
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
+        // Check if partition exists before creating
+        let parent_existed = parent.exists();
+
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Open the file in read-write mode, create if it does not exist
+        // Open the file, creating it if it doesn't exist
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -99,13 +121,28 @@ impl crate::Storage for Storage {
             .open(&path)
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
-        // Get the file length
+        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+        let newly_created = len == 0;
 
-        Ok((
-            Blob::new(partition.into(), name, file, self.io_sender.clone()),
-            len,
-        ))
+        // Create the blob
+        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+
+        // Only sync if we created a new file
+        if newly_created {
+            // Sync the blob to ensure it is durably created
+            blob.sync().await?;
+
+            // Sync the parent directory to ensure the directory entry is durable
+            sync_dir(parent)?;
+
+            // Sync storage directory if parent directory did not exist
+            if !parent_existed {
+                sync_dir(&self.storage_directory)?;
+            }
+        }
+
+        Ok((blob, len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -114,8 +151,14 @@ impl crate::Storage for Storage {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+
+            // Sync the partition directory to ensure the removal is durable.
+            sync_dir(&path)?;
         } else {
-            fs::remove_dir_all(path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+
+            // Sync the storage directory to ensure the removal is durable.
+            sync_dir(&self.storage_directory)?;
         }
         Ok(())
     }
