@@ -330,7 +330,6 @@ where
     pub(crate) async fn move_op_if_active(
         &mut self,
         op: O,
-        tip_loc: Location,
         old_loc: Location,
     ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
@@ -344,6 +343,7 @@ where
         // Find the snapshot entry corresponding to the operation.
         if cursor.find(|&loc| *loc == old_loc) {
             // Update the operation's snapshot location to point to tip.
+            let tip_loc = Location::new_unchecked(self.log.size().await?);
             cursor.update(tip_loc);
             drop(cursor);
 
@@ -382,11 +382,7 @@ where
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
-            if self
-                .move_op_if_active(op, tip_loc, old_loc)
-                .await?
-                .is_some()
-            {
+            if self.move_op_if_active(op, old_loc).await?.is_some() {
                 return Ok(inactivity_floor_loc);
             }
         }
@@ -416,9 +412,8 @@ where
 
         // Move the active operation to tip.
         let op = self.log.read(*inactivity_floor_loc).await?;
-        let tip_loc = Location::new_unchecked(self.log.size().await?);
         let loc = self
-            .move_op_if_active(op, tip_loc, inactivity_floor_loc)
+            .move_op_if_active(op, inactivity_floor_loc)
             .await?
             .expect("op should be active based on status bitmap");
         status.set_bit(*loc, false);
