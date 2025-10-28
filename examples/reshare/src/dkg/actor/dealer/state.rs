@@ -6,12 +6,10 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::sequence::U64;
 use rand_core::CryptoRngCore;
 
-type Key = FixedBytes<4>;
-
-type Data<P: PublicKey> = (Option<Summary>, Vec<(P, PlayerAck<P>)>);
+type Data<P> = (Option<Summary>, Vec<(P, PlayerAck<P>)>);
 
 /// A handle over the state maintained by the dealer.
 pub struct State<E, P>
@@ -19,9 +17,9 @@ where
     E: Clock + Storage + Metrics,
     P: PublicKey,
 {
-    key: Key,
+    key: U64,
     max_read_size: usize,
-    storage: Metadata<E, Key, Data<P>>,
+    storage: Metadata<E, U64, Data<P>>,
 }
 
 impl<E, P> State<E, P>
@@ -37,10 +35,10 @@ where
     pub async fn load<V: Variant>(
         ctx: E,
         partition: String,
-        round: u32,
+        round: u64,
         max_read_size: usize,
     ) -> Self {
-        let storage = Metadata::<E, Key, Data<P>>::init(
+        let storage = Metadata::<E, U64, Data<P>>::init(
             ctx,
             metadata::Config {
                 partition,
@@ -50,7 +48,7 @@ where
         .await
         .expect("should be able to create dealer storage");
         Self {
-            key: round.to_le_bytes().into(),
+            key: round.into(),
             max_read_size,
             storage,
         }
@@ -88,7 +86,7 @@ where
             Some(x @ &mut (None, _)) => {
                 let seed = Summary::random(rng);
                 x.0 = Some(seed);
-                self.storage.sync();
+                self.sync().await;
                 seed
             }
             None => {

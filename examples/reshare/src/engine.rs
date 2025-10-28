@@ -14,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
-    Hasher, Signer,
+    Hasher, PrivateKey,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
@@ -45,8 +45,8 @@ const MAX_REPAIR: NonZero<u64> = NZU64!(50);
 
 pub struct Config<C, P, B, V>
 where
-    C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -71,7 +71,7 @@ where
 pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: Signer,
+    C: PrivateKey,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -103,7 +103,7 @@ where
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: Signer,
+    C: PrivateKey,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -114,7 +114,6 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let dkg_namespace = union(&config.namespace, b"_DKG");
         let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
@@ -122,11 +121,9 @@ where
             dkg::Config {
                 manager: config.manager.clone(),
                 participant_config: config.participant_config.clone(),
-                namespace: dkg_namespace,
                 signer: config.signer.clone(),
                 num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.dkg_rate_limit,
                 partition_prefix: config.partition_prefix.clone(),
             },
         )
@@ -287,8 +284,7 @@ where
         ),
     ) {
         let dkg_handle = self.dkg.start(
-            self.config.polynomial,
-            self.config.share,
+            todo!(),
             self.config.active_participants,
             self.config.inactive_participants,
             self.orchestrator_mailbox,
