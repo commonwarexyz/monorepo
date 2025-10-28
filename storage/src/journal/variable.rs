@@ -144,11 +144,12 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// The data journal is the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Validate configuration
+        // Validate that partitions are different to prevent blob name collisions
         if cfg.data_partition == cfg.offsets_partition {
-            return Err(Error::InvalidConfiguration(
-                "partition and offsets_partition must be different".to_string(),
-            ));
+            return Err(Error::InvalidConfiguration(format!(
+                "data_partition and offsets_partition must be different: both are '{}'",
+                cfg.data_partition
+            )));
         }
 
         let items_per_section = cfg.items_per_section.get();
@@ -210,9 +211,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Validate that partitions are different to prevent blob name collisions
         if cfg.data_partition == cfg.offsets_partition {
-            return Err(Error::InvalidConfiguration(
-                "partition and offsets_partition must be different".to_string(),
-            ));
+            return Err(Error::InvalidConfiguration(format!(
+                "data_partition and offsets_partition must be different: both are '{}'",
+                cfg.data_partition
+            )));
         }
 
         // Initialize empty data journal
