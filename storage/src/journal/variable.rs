@@ -22,12 +22,6 @@ use tracing::{debug, info};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Suffix appended to the base partition name for the data journal.
-const DATA_SUFFIX: &str = "_data";
-
-/// Suffix appended to the base partition name for the offsets journal.
-const OFFSETS_SUFFIX: &str = "_offsets";
-
 /// Calculate the section number for a given position.
 ///
 /// # Arguments
@@ -56,8 +50,13 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 /// Configuration for a variable-length journal.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
+    /// The partition to use for storing variable-length data.
     pub partition: String,
+
+    /// The partition to use for storing the offsets index.
+    ///
+    /// Must be different from `partition`.
+    pub offsets_partition: String,
 
     /// The number of items to store in each section.
     ///
@@ -76,18 +75,6 @@ pub struct Config<C> {
 
     /// Write buffer size for each section.
     pub write_buffer: NonZeroUsize,
-}
-
-impl<C> Config<C> {
-    /// Returns the partition name for the data journal.
-    fn data_partition(&self) -> String {
-        format!("{}{}", self.partition, DATA_SUFFIX)
-    }
-
-    /// Returns the partition name for the offsets journal.
-    fn offsets_partition(&self) -> String {
-        format!("{}{}", self.partition, OFFSETS_SUFFIX)
-    }
 }
 
 /// A position-based journal for variable-length items.
@@ -157,8 +144,15 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// The data journal is the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let data_partition = cfg.data_partition();
-        let offsets_partition = cfg.offsets_partition();
+        // Validate configuration
+        if cfg.partition == cfg.offsets_partition {
+            return Err(Error::InvalidConfiguration(
+                "partition and offsets_partition must be different".to_string(),
+            ));
+        }
+
+        let data_partition = cfg.partition.clone();
+        let offsets_partition = cfg.offsets_partition.clone();
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable data journal
@@ -216,8 +210,15 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        let data_partition = cfg.data_partition();
-        let offsets_partition = cfg.offsets_partition();
+        // Validate configuration
+        if cfg.partition == cfg.offsets_partition {
+            return Err(Error::InvalidConfiguration(
+                "partition and offsets_partition must be different".to_string(),
+            ));
+        }
+
+        let data_partition = cfg.partition.clone();
+        let offsets_partition = cfg.offsets_partition.clone();
 
         // Initialize empty data journal
         let data = multijournal::Journal::init(
@@ -872,6 +873,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "offsets_loss_after_prune".to_string(),
+                offsets_partition: "offsets_loss_after_prune_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -898,7 +900,7 @@ mod tests {
 
             // === Phase 2: Simulate complete offsets partition loss ===
             context
-                .remove(&cfg.offsets_partition(), None)
+                .remove(&cfg.offsets_partition, None)
                 .await
                 .expect("Failed to remove offsets partition");
 
@@ -921,6 +923,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "data_loss_test".to_string(),
+                offsets_partition: "data_loss_test_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -942,7 +945,7 @@ mod tests {
 
             // === Simulate data loss: Delete data partition but keep offsets ===
             context
-                .remove(&cfg.data_partition(), None)
+                .remove(&cfg.partition, None)
                 .await
                 .expect("Failed to remove data partition");
 
@@ -983,6 +986,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "same_partition".to_string(),
+                offsets_partition: "same_partition".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1012,6 +1016,7 @@ mod tests {
                         context,
                         Config {
                             partition: format!("generic_test_{}", test_name),
+                            offsets_partition: format!("generic_test_{}_offsets", test_name),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
@@ -1034,6 +1039,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "sequential_prunes".to_string(),
+                offsets_partition: "sequential_prunes_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1122,6 +1128,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "prune_all_reinit".to_string(),
+                offsets_partition: "prune_all_reinit_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1204,6 +1211,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery_prune_crash".to_string(),
+                offsets_partition: "recovery_prune_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1265,6 +1273,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery_offsets_ahead".to_string(),
+                offsets_partition: "recovery_offsets_ahead_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1301,6 +1310,7 @@ mod tests {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
                 partition: "recovery_append_crash".to_string(),
+                offsets_partition: "recovery_append_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1356,6 +1366,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery_multiple_prunes".to_string(),
+                offsets_partition: "recovery_multiple_prunes_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1423,6 +1434,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data across multiple sections ===
             let cfg = Config {
                 partition: "recovery_rewind_crash".to_string(),
+                offsets_partition: "recovery_rewind_crash_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1482,6 +1494,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery_empty_after_prune".to_string(),
+                offsets_partition: "recovery_empty_after_prune_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1549,6 +1562,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "concurrent_sync_recovery".to_string(),
+                offsets_partition: "concurrent_sync_recovery_offsets".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
