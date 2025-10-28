@@ -50,6 +50,7 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
+pub mod actor;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 
