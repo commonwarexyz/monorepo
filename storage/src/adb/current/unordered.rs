@@ -307,7 +307,17 @@ impl<
 
     /// Sync data to disk, ensuring clean recovery.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     /// Prune all operations prior to `target_prune_loc` from the db.
