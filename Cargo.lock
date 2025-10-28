@@ -986,6 +986,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor"
+version = "2026.2.0"
+dependencies = [
+ "commonware-actor-macros",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "rand 0.8.5",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "commonware-actor-macros"
+version = "2026.2.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "commonware-bridge"
 version = "2026.2.0"
 dependencies = [
