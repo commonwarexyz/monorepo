@@ -6,3 +6,8 @@
 
 mod attributable;
 pub use attributable::AttributableReporter;
+
+#[cfg(feature = "websocket-reporter")]
+mod websocket;
+#[cfg(feature = "websocket-reporter")]
+pub use websocket::WebSocketReporter;
