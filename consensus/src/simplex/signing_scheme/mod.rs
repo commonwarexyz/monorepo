@@ -38,8 +38,8 @@ use crate::{
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
-use commonware_cryptography::Digest;
-use commonware_utils::union;
+use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::{set::Ordered, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -49,13 +49,32 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// quorum certificates, checks recovered certificates and, when available, derives a randomness
 /// seed for leader rotation. Implementations may override the provided defaults to take advantage
 /// of scheme-specific batching strategies.
+///
+/// # Identity Keys vs Consensus Keys
+///
+/// A participant may supply both an identity key and a consensus key. The identity key
+/// is used for assigning a unique order to the committee and authenticating connections whereas the consensus key
+/// is used for actually signing and verifying votes/certificates.
+///
+/// This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
+/// (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
+/// for an example of a scheme that uses the same key for both purposes.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
+    /// Public key type for participant identity used to order and index the committee.
+    type PublicKey: PublicKey;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
+
+    /// Returns the index of "self" in the participant set, if available.
+    /// Returns `None` if the scheme is a verifier-only instance.
+    fn me(&self) -> Option<u32>;
+
+    /// Returns the ordered set of participant public identity keys managed by the scheme.
+    fn participants(&self) -> &Ordered<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).

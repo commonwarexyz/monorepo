@@ -118,7 +118,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
-    pub participant: P,
+    pub me: P,
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
@@ -127,7 +127,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
     hasher: H,
-    participant: P,
+    me: P,
 
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
@@ -145,7 +145,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
-        let broadcast = cfg.relay.register(cfg.participant.clone());
+        let broadcast = cfg.relay.register(cfg.me.clone());
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -157,7 +157,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             Self {
                 context: ContextCell::new(context),
                 hasher: cfg.hasher,
-                participant: cfg.participant,
+                me: cfg.me,
 
                 relay: cfg.relay,
                 broadcast,
@@ -176,7 +176,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     }
 
     fn panic(&self, msg: &str) -> ! {
-        panic!("[{:?}] {}", self.participant, msg);
+        panic!("[{:?}] {}", self.me, msg);
     }
 
     fn genesis(&mut self, epoch: Epoch) -> H::Digest {
@@ -244,9 +244,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay
-            .broadcast(&self.participant, (payload, contents))
-            .await;
+        self.relay.broadcast(&self.me, (payload, contents)).await;
     }
 
     pub fn start(mut self) -> Handle<()> {

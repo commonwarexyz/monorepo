@@ -201,8 +201,6 @@ fn main() {
 
         // Initialize consensus
         let cfg = simplex::Config {
-            me: signer.public_key(),
-            participants: validators.clone(),
             scheme,
             blocker: oracle,
             automaton: mailbox.clone(),

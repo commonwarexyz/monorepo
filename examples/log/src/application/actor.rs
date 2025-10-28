@@ -28,7 +28,6 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-
         (
             Self {
                 context: ContextCell::new(context),

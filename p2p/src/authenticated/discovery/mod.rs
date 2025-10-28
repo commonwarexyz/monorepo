@@ -577,12 +577,12 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, Ordered::from_iter([addresses[0].clone()]))
+                    .register(0, Ordered::from([addresses[0].clone()]))
                     .await;
                 oracle
                     .register(
                         1,
-                        Ordered::from_iter([addresses[1].clone(), addresses[2].clone()]),
+                        Ordered::from([addresses[1].clone(), addresses[2].clone()]),
                     )
                     .await;
                 oracle

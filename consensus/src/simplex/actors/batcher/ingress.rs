@@ -2,17 +2,17 @@ use crate::{
     simplex::{signing_scheme::Scheme, types::Voter},
     types::View,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use tracing::error;
 
-pub enum Message<P: PublicKey, S: Scheme, D: Digest> {
+pub enum Message<S: Scheme, D: Digest> {
     Update {
         current: View,
-        leader: P,
+        leader: u32,
         finalized: View,
 
         active: oneshot::Sender<bool>,
@@ -21,16 +21,16 @@ pub enum Message<P: PublicKey, S: Scheme, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: PublicKey, S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<P, S, D>>,
+pub struct Mailbox<S: Scheme, D: Digest> {
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
-    pub fn new(sender: mpsc::Sender<Message<P, S, D>>) -> Self {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
+    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn update(&mut self, current: View, leader: P, finalized: View) -> bool {
+    pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
         let (active, active_receiver) = oneshot::channel();
         if let Err(err) = self
             .sender

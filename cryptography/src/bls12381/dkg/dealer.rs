@@ -90,8 +90,8 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
             }
         }
         Some(Output {
-            active: Ordered::from_iter(active),
-            inactive: Ordered::from_iter(inactive),
+            active: active.into_iter().collect(),
+            inactive: inactive.into_iter().collect(),
         })
     }
 }
