@@ -988,7 +988,6 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme: &S,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
     ) -> Option<Self> {
-        let notarizes: Vec<&'a Notarize<S, D>> = notarizes.into_iter().collect();
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
@@ -1393,7 +1392,6 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         scheme: &S,
         finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
     ) -> Option<Self> {
-        let finalizes: Vec<&'a Finalize<S, D>> = finalizes.into_iter().collect();
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate = scheme.assemble_certificate(iter.map(|f| f.vote.clone()))?;
