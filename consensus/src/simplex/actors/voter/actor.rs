@@ -112,6 +112,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
+        // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
+        // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
+        // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
+        // to ensure we only count a message from a given signer once.
         let participants = scheme.participants().len();
         let notarizes = AttributableVec::new(participants);
         let nullifies = AttributableVec::new(participants);
