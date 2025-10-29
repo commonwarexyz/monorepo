@@ -50,36 +50,47 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-pub struct AttributableVec<T: Attributable + Clone> {
+/// AttributableVec is a vector of [Attributable] items where a given [Attributable::signer()]
+/// can add at most one item.
+pub struct AttributableVec<T: Attributable> {
     data: Vec<Option<T>>,
     added: usize,
 }
 
-impl<T: Attributable + Clone> AttributableVec<T> {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            data: vec![None; capacity],
-            added: 0,
-        }
+impl<T: Attributable> AttributableVec<T> {
+    /// Creates a new [AttributableVec] with the given number of participants.
+    pub fn new(participants: usize) -> Self {
+        // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
+        let mut data = Vec::with_capacity(participants);
+        data.resize_with(participants, || None);
+
+        Self { data, added: 0 }
     }
 
-    pub fn push(&mut self, item: T) {
+    /// Adds an item to the [AttributableVec] if it has not been added yet.
+    ///
+    /// Returns `true` if the item was added, `false` if it was already added.
+    pub fn push(&mut self, item: T) -> bool {
         let index = item.signer() as usize;
         if self.data[index].is_some() {
-            return;
+            return false;
         }
         self.data[index] = Some(item);
         self.added += 1;
+        true
     }
 
+    /// Returns the number of items in the [AttributableVec].
     pub fn len(&self) -> usize {
         self.added
     }
 
+    /// Returns `true` if the [AttributableVec] is empty.
     pub fn is_empty(&self) -> bool {
         self.added == 0
     }
 
+    /// Returns an iterator over the items in the [AttributableVec].
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.data.iter().filter_map(|o| o.as_ref())
     }
