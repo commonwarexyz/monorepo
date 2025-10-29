@@ -968,6 +968,12 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
             return None;
         }
 
+        // Notarize votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(notarizes.len());
+        if !notarizes.iter().all(|n| seen.insert(n.vote.signer)) {
+            return None;
+        }
+
         let notarization_certificate =
             scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
 
@@ -1169,6 +1175,12 @@ impl<S: Scheme> Nullification<S> {
 
         // Nullify votes must all target the same round.
         if nullifies.iter().skip(1).any(|n| n.round != round) {
+            return None;
+        }
+
+        // Nullify votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(nullifies.len());
+        if !nullifies.iter().all(|n| seen.insert(n.vote.signer)) {
             return None;
         }
 
@@ -1386,6 +1398,12 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
 
         // Finalize votes must agree on the exact proposal that is being committed.
         if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
+            return None;
+        }
+
+        // Finalize votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(finalizes.len());
+        if !finalizes.iter().all(|f| seen.insert(f.vote.signer)) {
             return None;
         }
 

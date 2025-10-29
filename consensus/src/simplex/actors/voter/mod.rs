@@ -685,6 +685,10 @@ mod tests {
                 match msg {
                     resolver::Message::Finalized { view } => {
                         assert_eq!(view, 100);
+                        break;
+                    }
+                    resolver::Message::Fetch { .. } => {
+                        continue;
                     }
                     _ => panic!("unexpected resolver message"),
                 }

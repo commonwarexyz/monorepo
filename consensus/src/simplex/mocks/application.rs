@@ -19,7 +19,7 @@ use futures::{
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -302,14 +302,20 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
-        let mut waiters: HashMap<H::Digest, Vec<Waiter<H::Digest>>> = HashMap::new();
+        let mut waiters: BTreeMap<H::Digest, Vec<Waiter<H::Digest>>> = BTreeMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
         loop {
+            // Request any missing payloads
+            for payload in waiters.keys() {
+                self.relay.request(*payload, self.me.clone()).await;
+            }
+
+            // Wait for a message or a broadcast
             select! {
                 message = self.mailbox.next() => {
-                    let message =match message {
+                    let message = match message {
                         Some(message) => message,
                         None => break,
                     };
@@ -331,14 +337,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                     .entry(payload)
                                     .or_default()
                                     .push(Waiter::Verify(context, response));
-                                continue;
                             }
                         }
                         Message::Certify { context, payload, response } => {
-                            // TODO: remove
-                            let _ = response.send(true);
-                            continue;
-
                             if let Some(contents) = seen.get(&payload) {
                                 let certified = self.certify(context, payload, contents.clone()).await;
                                 let _ = response.send(certified);
@@ -347,7 +348,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                     .entry(payload)
                                     .or_default()
                                     .push(Waiter::Certify(context, response));
-                                continue;
                             }
                         }
                         Message::Broadcast { payload } => {

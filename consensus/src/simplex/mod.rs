@@ -820,6 +820,9 @@ mod tests {
             ..
         } = fixture(&mut rng, n);
 
+        // Create block relay, shared across restarts.
+        let relay = Arc::new(mocks::relay::Relay::new());
+
         loop {
             let rng = rng.clone();
             let participants = participants.clone();
@@ -827,6 +830,8 @@ mod tests {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
+            let relay = relay.clone();
+            relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
@@ -853,7 +858,6 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
-                let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
@@ -894,7 +898,7 @@ mod tests {
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        nullify_retry: Duration::from_secs(2),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
@@ -927,7 +931,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(5_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -962,7 +966,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(60))
+                deterministic::Runner::timed(Duration::from_secs(600))
             }
             .start_and_recover(f);
 
@@ -3694,6 +3698,7 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
