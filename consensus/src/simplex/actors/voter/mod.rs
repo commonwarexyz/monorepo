@@ -960,12 +960,30 @@ mod tests {
             );
             let (notarize_votes, expected_notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+            let (finalize_votes, expected_finalization) =
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
-            for notarize in notarize_votes.iter().take(quorum as usize - 1).cloned() {
+            // Submit just short of enough finalize votes
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+            }
+
+            // Submit enough notarize votes to broadcast and force a sync
+            for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
                 mailbox.verified(vec![Voter::Notarize(notarize)]).await;
             }
 
-            context.sleep(Duration::from_secs(1)).await;
+            // Wait for a notarization to be recorded
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    if matches!(notarizations.get(&view), Some(expected) if expected == &expected_notarization) {
+                        break;
+                    }
+                }
+
+                context.sleep(Duration::from_millis(10)).await;
+            }
 
             // Restart voter
             handle.abort();
@@ -1022,41 +1040,41 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
+                    assert_eq!(current, 3);
                     assert_eq!(finalized, 0);
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Provide duplicate notarize votes
-            for notarize in notarize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+            // Provide duplicate finalize votes
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
             }
 
-            // Verify no notarization was recorded
+            // Verify no finalization was recorded
             for _ in 0..10 {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
-                    assert!(notarizations.is_empty());
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    assert!(finalizations.is_empty());
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            info!("providing the final notarize vote");
+            info!("providing the final finalize vote");
 
-            // Provide the final notarize vote
+            // Provide the final finalize vote
             mailbox
-                .verified(vec![Voter::Notarize(
-                    notarize_votes.last().unwrap().clone(),
+                .verified(vec![Voter::Finalize(
+                    finalize_votes.last().unwrap().clone(),
                 )])
                 .await;
 
-            // Verify the notarization was recorded
+            // Verify the finalization was recorded
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
-                    if matches!(notarizations.get(&view), Some(expected) if expected == &expected_notarization) {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    if matches!(finalizations.get(&view), Some(expected) if expected == &expected_finalization) {
                         break;
                     }
                 }

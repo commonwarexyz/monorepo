@@ -84,7 +84,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: Vec<Notarize<S, D>>,
+    notarizes: AttributableVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -97,7 +97,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: AttributableVec<Finalize<S, D>>,
+    finalizes: Vec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -117,9 +117,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
         // to ensure we only count a message from a given signer once.
         let participants = scheme.participants().len();
-        let notarizes = Vec::new();
+        let notarizes = AttributableVec::new(participants);
         let nullifies = AttributableVec::new(participants);
-        let finalizes = AttributableVec::new(participants);
+        let finalizes = Vec::new();
 
         Self {
             start: context.current(),
@@ -1040,9 +1040,6 @@ impl<
                 .append(view, msg)
                 .await
                 .expect("unable to append to journal");
-            journal.sync(view).await.expect("unable to sync journal");
-        } else {
-            info!(?notarize, "no journal found");
         }
 
         // Create round (if it doesn't exist) and add verified notarize
