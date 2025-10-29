@@ -336,7 +336,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log.prune(*loc).await?;
 
         // Get the oldest retained location based on what the log actually pruned.
-        let oldest_retained_loc = match self.log.oldest_retained_pos().await? {
+        let pruning_boundary = match self.log.oldest_retained_pos().await? {
             Some(pos) => Location::new_unchecked(pos),
             None => {
                 let size = self.log.size().await?;
@@ -346,7 +346,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
         // Prune the MMR up to the oldest retained item in the log after pruning.
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(oldest_retained_loc)?)
+            .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
             .await?;
         Ok(())
     }

@@ -160,14 +160,16 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// it will be updated to match the data journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_section = cfg.items_per_section.get();
+        let data_partition = cfg.data_partition();
+        let offsets_partition = cfg.offsets_partition();
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
             context.clone(),
             variable::Config {
-                partition: cfg.data_partition(),
+                partition: data_partition,
                 compression: cfg.compression,
-                codec_config: cfg.codec_config.clone(),
+                codec_config: cfg.codec_config,
                 buffer_pool: cfg.buffer_pool.clone(),
                 write_buffer: cfg.write_buffer,
             },
@@ -178,7 +180,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let mut offsets = fixed::Journal::init(
             context,
             fixed::Config {
-                partition: cfg.offsets_partition(),
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
@@ -189,6 +191,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
+        assert!(
+            oldest_retained_pos.is_multiple_of(items_per_section),
+            "oldest_retained_pos is not section-aligned"
+        );
 
         Ok(Self {
             data,
