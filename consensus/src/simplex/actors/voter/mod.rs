@@ -994,7 +994,7 @@ mod tests {
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
-            // Register new network channels for the validator
+            // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 2).await.unwrap();
             let (recovered_sender, recovered_receiver) =
@@ -1036,7 +1036,7 @@ mod tests {
                     let notarizations = reporter.notarizations.lock().unwrap();
                     assert!(notarizations.is_empty());
                 }
-                context.sleep(Duration::from_millis(1)).await;
+                context.sleep(Duration::from_millis(10)).await;
             }
 
             // Provide the final notarize vote
@@ -1054,7 +1054,7 @@ mod tests {
                         break;
                     }
                 }
-                context.sleep(Duration::from_millis(1)).await;
+                context.sleep(Duration::from_millis(10)).await;
             }
         });
     }
