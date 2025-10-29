@@ -91,7 +91,9 @@ impl PeakIterator {
         let mut right = size_val; // MMR size >= leaf count, so N <= size
 
         while left < right {
-            let mid = (left + right).div_ceil(2);
+            // Use (left + right + 1) / 2 for upper-biased midpoint in binary search
+            #[allow(clippy::manual_div_ceil)]
+            let mid = (left + right + 1) / 2;
             let mmr_size = 2 * mid - mid.count_ones() as u64;
 
             if mmr_size <= size_val {
@@ -344,31 +346,26 @@ mod tests {
 
     #[test]
     fn test_to_nearest_size_specific_cases() {
-        // Test some specific known cases
-        // MMR sizes by number of leaves (using formula: 2*N - popcount(N)):
-        // 0 leaves: size = 0
-        // 1 leaf:   size = 1
-        // 2 leaves: size = 3
-        // 3 leaves: size = 4
-        // 4 leaves: size = 7
-        // 5 leaves: size = 8
+        // Test edge cases including maximum allowed input
+        let mut expected = Position::new(0);
+        for size in 0..=20 {
+            let rounded = PeakIterator::to_nearest_size(Position::new(size));
+            assert_eq!(rounded, expected);
+            if Position::new(size + 1).is_mmr_size() {
+                expected = Position::new(size + 1);
+            }
+        }
 
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(0)), 0);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(1)), 1);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(2)), 1);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(3)), 3);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(4)), 4);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(5)), 4);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(6)), 4);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(7)), 7);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(8)), 8);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(9)), 8);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(10)), 10);
-
-        // Test with large values
+        // Test with large value
         let large_size = Position::new(1_000_000);
         let rounded = PeakIterator::to_nearest_size(large_size);
         assert!(rounded.is_mmr_size());
         assert!(rounded <= large_size);
+
+        // Test maximum allowed input (all bits except topmost are 1)
+        let largest_valid_size = Position::new(u64::MAX >> 1);
+        let rounded = PeakIterator::to_nearest_size(largest_valid_size);
+        assert!(rounded.is_mmr_size());
+        assert_eq!(rounded, largest_valid_size);
     }
 }
