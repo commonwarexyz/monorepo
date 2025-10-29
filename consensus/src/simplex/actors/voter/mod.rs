@@ -980,7 +980,6 @@ mod tests {
                         break;
                     }
                 }
-
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -1045,7 +1044,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Provide duplicate finalize votes
+            // Provide duplicate finalize votes (should be ignored)
             for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;
             }
@@ -1082,9 +1081,9 @@ mod tests {
     #[test_traced]
     fn test_replay_duplicate_votes() {
         replay_duplicate_votes(bls12381_threshold::<MinPk, _>);
-        // replay_duplicate_votes(bls12381_threshold::<MinSig, _>);
-        // replay_duplicate_votes(bls12381_multisig::<MinPk, _>);
-        // replay_duplicate_votes(bls12381_multisig::<MinSig, _>);
-        // replay_duplicate_votes(ed25519);
+        replay_duplicate_votes(bls12381_threshold::<MinSig, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinPk, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinSig, _>);
+        replay_duplicate_votes(ed25519);
     }
 }
