@@ -27,13 +27,11 @@ pub fn create_config() -> Config<Translator, ()> {
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: "log_journal".into(),
+        log_partition: "log".into(),
         log_items_per_section: NZU64!(512),
         log_compression: None,
         log_codec_config: (),
         log_write_buffer: NZUsize!(1024),
-        locations_journal_partition: "locations_journal".into(),
-        locations_items_per_blob: NZU64!(4096),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -107,13 +105,15 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn op_count(&self) -> Result<Location, adb::Error> {
+        self.op_count().await
     }
 
-    fn lower_bound(&self) -> Location {
-        self.oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap())
+    async fn lower_bound(&self) -> Result<Location, adb::Error> {
+        Ok(self
+            .oldest_retained_loc()
+            .await?
+            .unwrap_or(Location::new(0).unwrap()))
     }
 
     fn historical_proof(
