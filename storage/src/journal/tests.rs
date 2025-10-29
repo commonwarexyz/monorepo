@@ -851,7 +851,7 @@ where
 
     // Try to rewind to pruned position (invalid)
     let result = journal.rewind(5).await;
-    assert!(matches!(result, Err(Error::InvalidRewind(5))));
+    assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     journal.destroy().await.unwrap();
 }
@@ -947,10 +947,7 @@ where
 
     // Attempt to rewind to a pruned position should fail
     let result = journal.rewind(5).await;
-    assert!(
-        matches!(result, Err(Error::InvalidRewind(5))),
-        "rewinding to pruned position should fail"
-    );
+    assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     // Verify journal state is unchanged after failed rewind
     assert_eq!(journal.size().await.unwrap(), 20);

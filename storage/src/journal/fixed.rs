@@ -4,7 +4,7 @@
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
 //! pruning.
 //!
-//! _See [crate::multijournal] for a journal that supports variable length items._
+//! _See [super::variable] for a journal that supports variable length items._
 //!
 //! # Format
 //!

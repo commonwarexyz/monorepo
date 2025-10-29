@@ -45,7 +45,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
     position / items_per_section
 }
 
-/// Configuration for a variable-length journal.
+/// Configuration for a [Journal].
 #[derive(Clone)]
 pub struct Config<C> {
     /// The storage partition to use for the data journal.
@@ -63,7 +63,7 @@ pub struct Config<C> {
     /// Optional compression level for stored items.
     pub compression: Option<u8>,
 
-    /// Codec configuration for encoding/decoding items.
+    /// [Codec] configuration for encoding/decoding items.
     pub codec_config: C,
 
     /// Buffer pool for caching data.
@@ -89,7 +89,7 @@ pub struct Config<C> {
 ///
 /// The data journal is always the source of truth. The offsets journal is an index
 /// that may temporarily diverge during crashes. Divergences are automatically
-/// repaired during init():
+/// aligned during init():
 /// * If offsets.size() < data.size(): Rebuild missing offsets by replaying data.
 ///   (This can happen if we crash after writing data journal but before writing offsets journal)
 /// * If offsets.size() > data.size(): Rewind offsets to match data size.
@@ -175,9 +175,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         )
         .await?;
 
-        // Validate and repair offsets journal to match data journal
+        // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
-            Self::repair_journals(&mut data, &mut offsets, items_per_section).await?;
+            Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
         Ok(Self {
             data,
@@ -196,10 +196,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
-    /// Returns an error if the underlying storage operation fails.
     ///
-    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Journal::init].
+    /// Underlying storage operations may leave the journal in an inconsistent state.
+    /// The journal should be closed and reopened to trigger alignment in [Journal::init].
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {
@@ -210,7 +209,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         // Rewind never updates oldest_retained_pos.
         if size < self.oldest_retained_pos {
-            return Err(Error::InvalidRewind(size));
+            return Err(Error::ItemPruned(size));
         }
 
         // Read the offset of the first item to discard (at position 'size').
@@ -231,8 +230,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// Append a new item to the journal, returning its position.
     ///
     /// The position returned is a stable, consecutively increasing value starting from 0.
-    /// This position is independent of section boundaries and remains constant even after
-    /// pruning.
+    /// This position remains constant after pruning.
     ///
     /// When a section becomes full, both the data journal and offsets journal are synced
     /// to maintain the invariant that all non-final sections are full and consistent.
@@ -243,7 +241,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// be encoded.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Journal::init].
+    /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         // Calculate which section this position belongs to
         let section = self.current_section();
@@ -291,14 +289,12 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
-    /// This prunes both the data journal and the offsets journal to maintain consistency.
-    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Journal::init].
+    /// reopened to trigger alignment in [Journal::init].
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         if min_position <= self.oldest_retained_pos {
             return Ok(false);
@@ -440,7 +436,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         position_to_section(self.size, self.items_per_section)
     }
 
-    /// Repair the offsets journal and data journal to be consistent in case a crash occured
+    /// Align the offsets journal and data journal to be consistent in case a crash occured
     /// on a previous run and left the journals in an inconsistent state.
     ///
     /// The data journal is the source of truth. This function scans it to determine
@@ -449,7 +445,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// # Returns
     ///
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
-    async fn repair_journals(
+    async fn align_journals(
         data: &mut multijournal::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         items_per_section: u64,
@@ -497,7 +493,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             // 2. The data journal was never opened.
             if let Some(oldest) = offsets.oldest_retained_pos().await? {
                 if oldest < size {
-                    // Offsets has unpruned entries but data is gone - repair by pruning
+                    // Offsets has unpruned entries but data is gone - align by pruning
                     info!("crash repair: pruning offsets to {size} (prune-all crash)");
                     offsets.prune(size).await?;
                     offsets.sync().await?;
@@ -585,10 +581,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// The data journal is the source of truth. This function brings the offsets
     /// journal up to date by replaying data items and indexing their positions.
     ///
-    /// # Invariants
+    /// # Warning
     ///
-    /// - `data.blobs` must not be empty (data journal has at least one section)
-    /// - `offsets_size < data.size()` (offsets is behind data)
+    /// - Panics if `data.blobs` is empty
+    /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &multijournal::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
@@ -752,15 +748,15 @@ mod tests {
         });
     }
 
-    /// Test that init repairs state when data is pruned/lost but offsets survives.
+    /// Test that init aligns state when data is pruned/lost but offsets survives.
     ///
     /// This handles both:
     /// 1. Crash during prune-all (data pruned, offsets not yet)
     /// 2. External data partition loss
     ///
-    /// In both cases, we repair by pruning offsets to match.
+    /// In both cases, we align by pruning offsets to match.
     #[test_traced]
-    fn test_variable_repair_data_offsets_mismatch() {
+    fn test_variable_align_data_offsets_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -791,10 +787,10 @@ mod tests {
                 .await
                 .expect("Failed to remove data partition");
 
-            // === Verify init repairs the mismatch ===
+            // === Verify init aligns the mismatch ===
             let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Should repair offsets to match empty data");
+                .expect("Should align offsets to match empty data");
 
             // Size should be preserved
             assert_eq!(journal.size().await.unwrap(), 20);
