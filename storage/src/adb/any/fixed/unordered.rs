@@ -2,9 +2,7 @@
 
 use crate::{
     adb::{
-        any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
-        },
+        any::fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
         operation::fixed::unordered::Operation,
         store::{self, Db},
         Error,
@@ -17,8 +15,8 @@ use crate::{
 use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, try_join, StreamExt as _, TryFutureExt as _};
+use commonware_utils::Array;
+use futures::{try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -86,7 +84,8 @@ impl<
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        Self::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
+            .await?;
 
         let db = Any {
             mmr,
@@ -98,44 +97,6 @@ impl<
         };
 
         Ok(db)
-    }
-
-    /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
-    /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
-    /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
-    /// status updates. The first argument of the callback is the activity status of the operation,
-    /// and the second argument is the location of the operation it inactivates (if any).
-    pub(crate) async fn build_snapshot_from_log<F>(
-        inactivity_floor_loc: Location,
-        log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, Location>,
-        mut callback: F,
-    ) -> Result<(), Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        let stream = log
-            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
-            .await?;
-        pin_mut!(stream);
-        let last_commit_loc = log.size().await.saturating_sub(1);
-        while let Some(result) = stream.next().await {
-            let (i, op) = result?;
-            match op {
-                Operation::Delete(key) => {
-                    let result = super::delete_key(snapshot, log, &key).await?;
-                    callback(false, result);
-                }
-                Operation::Update(key, _) => {
-                    let new_loc = Location::new_unchecked(i);
-                    let old_loc = super::update_loc(snapshot, log, &key, new_loc).await?;
-                    callback(true, old_loc);
-                }
-                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-            }
-        }
-
-        Ok(())
     }
 
     /// Get the update operation from `log` corresponding to a known location.
@@ -444,7 +405,8 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            operation::fixed::{unordered::Operation, FixedOperation as _},
+            any::fixed::build_snapshot_from_log,
+            operation::{fixed::unordered::Operation, Keyed as _},
             verify_proof,
         },
         index::{Index as IndexTrait, Unordered as Index},
@@ -459,7 +421,7 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZUsize, NZU64};
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
@@ -1106,11 +1068,11 @@ pub(super) mod test {
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
-            AnyTest::build_snapshot_from_log(
+            build_snapshot_from_log(
                 inactivity_floor_loc,
                 &log,
                 &mut snapshot,
-                |append, loc| {
+                |append: bool, loc: Option<Location>| {
                     bitmap.push(append);
                     if let Some(loc) = loc {
                         bitmap.set_bit(*loc, false);

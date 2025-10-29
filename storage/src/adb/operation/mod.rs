@@ -4,7 +4,9 @@
 //! persistent log of operations based on a `crate::Journal`. The _fixed_ variants additionally
 //! implement [commonware_codec::CodecFixed].
 
-use commonware_codec::Error as CodecError;
+use crate::mmr::Location;
+use commonware_codec::{Error as CodecError, Read, Write};
+use commonware_utils::Array;
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -37,6 +39,25 @@ pub enum Error {
     InvalidCommitFloorOp,
 }
 
+/// Methods common to operation types for keyed databases.
+pub trait Keyed: Read<Cfg = ()> + Write {
+    /// The key type for this operation.
+    type Key: Array;
+
+    /// Returns the key if this operation involves a key, None otherwise.
+    fn key(&self) -> Option<&Self::Key>;
+
+    /// If this operation updates its key's value.
+    fn is_update(&self) -> bool;
+
+    /// If this operation deletes its key's value.
+    fn is_delete(&self) -> bool;
+
+    /// The commit floor location if this operation is a commit operation with a floor value, None
+    /// otherwise.
+    fn commit_floor(&self) -> Option<Location>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,7 +66,7 @@ mod tests {
             fixed::{
                 ordered::{KeyData as OrderedKeyData, Operation as FixedOrdered},
                 unordered::Operation as FixedUnordered,
-                FixedOperation as _,
+                FixedSize as _,
             },
             keyless::Operation as Keyless,
         },
