@@ -118,20 +118,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: Vec<Notarize<S, D>>,
+    notarizes: DedupedVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Vec<Nullify<S>>,
+    nullifies: DedupedVec<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: Vec<Finalize<S, D>>,
+    finalizes: DedupedVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -147,9 +147,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         round: Rnd,
     ) -> Self {
         let participants = scheme.participants();
-        let notarizes = Vec::with_capacity(participants.len());
-        let nullifies = Vec::with_capacity(participants.len());
-        let finalizes = Vec::with_capacity(participants.len());
+        let notarizes = DedupedVec::new(participants.len());
+        let nullifies = DedupedVec::new(participants.len());
+        let finalizes = DedupedVec::new(participants.len());
 
         Self {
             start: context.current(),
@@ -299,7 +299,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.scheme, &self.notarizes)
+        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.as_ref())
             .expect("failed to recover notarization certificate");
         timer.observe();
 
@@ -328,7 +328,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.scheme, &self.nullifies)
+        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.as_ref())
             .expect("failed to recover nullification certificate");
         timer.observe();
 
@@ -372,7 +372,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.scheme, &self.finalizes)
+        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.as_ref())
             .expect("failed to recover finalization certificate");
         timer.observe();
 
