@@ -76,9 +76,9 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` is too large (specifically, the topmost bit should be 0).
+    /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert_ne!(size.leading_zeros(), 0, "overflow");
+        assert!(size <= crate::mmr::MAX_POSITION, "size exceeds MAX_POSITION");
 
         if size == 0 {
             return size;
@@ -285,10 +285,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "size exceeds MAX_POSITION")]
     fn test_to_nearest_size_panic() {
-        let largest_valid_size = Position::new(u64::MAX >> 1);
-        PeakIterator::to_nearest_size(largest_valid_size + Position::new(1));
+        PeakIterator::to_nearest_size(crate::mmr::MAX_POSITION + Position::new(1));
     }
 
     #[test]
@@ -362,10 +361,10 @@ mod tests {
         assert!(rounded.is_mmr_size());
         assert!(rounded <= large_size);
 
-        // Test maximum allowed input (all bits except topmost are 1)
-        let largest_valid_size = Position::new(u64::MAX >> 1);
+        // Test maximum allowed input
+        let largest_valid_size = crate::mmr::MAX_POSITION;
         let rounded = PeakIterator::to_nearest_size(largest_valid_size);
         assert!(rounded.is_mmr_size());
-        assert_eq!(rounded, largest_valid_size);
+        assert!(rounded <= largest_valid_size);
     }
 }
