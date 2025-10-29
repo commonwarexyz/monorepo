@@ -87,24 +87,24 @@ impl PeakIterator {
         // Binary search for the largest N (number of leaves) such that
         // mmr_size(N) = 2*N - popcount(N) <= size
         let size_val = size.as_u64();
-        let mut left = 0u64;
-        let mut right = size_val; // MMR size >= leaf count, so N <= size
+        let mut low = 0u64;
+        let mut high = size_val; // MMR size >= leaf count, so N <= size
 
-        while left < right {
-            // Use (left + right + 1) / 2 for upper-biased midpoint in binary search
+        while low < high {
+            // Use (low + high + 1) / 2 for upper-biased midpoint in binary search
             #[allow(clippy::manual_div_ceil)]
-            let mid = (left + right + 1) / 2;
+            let mid = (low + high + 1) / 2;
             let mmr_size = 2 * mid - mid.count_ones() as u64;
 
             if mmr_size <= size_val {
-                left = mid;
+                low = mid;
             } else {
-                right = mid - 1;
+                high = mid - 1;
             }
         }
 
-        // left is the largest N where mmr_size(N) <= size
-        let result = 2 * left - left.count_ones() as u64;
+        // low is the largest N where mmr_size(N) <= size
+        let result = 2 * low - low.count_ones() as u64;
         Position::new(result)
     }
 }
