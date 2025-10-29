@@ -323,7 +323,10 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
                     self.finalizes.push(finalize);
                 }
             }
-            Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
+            Voter::Notarization(_)
+            | Voter::Nullification(_)
+            | Voter::Finalization(_)
+            | Voter::Certification(_, _) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
             }
         }
@@ -640,6 +643,8 @@ pub enum Voter<S: Scheme, D: Digest> {
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization (scheme-specific)
     Finalization(Finalization<S, D>),
+    /// A local record indicating the proposal for this round was certified by the automaton
+    Certification(Round, bool),
 }
 
 impl<S: Scheme, D: Digest> Write for Voter<S, D> {
@@ -669,6 +674,11 @@ impl<S: Scheme, D: Digest> Write for Voter<S, D> {
                 5u8.write(writer);
                 v.write(writer);
             }
+            Voter::Certification(r, b) => {
+                6u8.write(writer);
+                r.write(writer);
+                b.write(writer);
+            }
         }
     }
 }
@@ -682,6 +692,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Voter<S, D> {
             Voter::Nullification(v) => v.encode_size(),
             Voter::Finalize(v) => v.encode_size(),
             Voter::Finalization(v) => v.encode_size(),
+            Voter::Certification(r, b) => r.encode_size() + b.encode_size(),
         }
     }
 }
@@ -716,6 +727,11 @@ impl<S: Scheme, D: Digest> Read for Voter<S, D> {
                 let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Voter::Finalization(v))
             }
+            6 => {
+                let r = Round::read(reader)?;
+                let b = bool::read(reader)?;
+                Ok(Voter::Certification(r, b))
+            }
             _ => Err(Error::Invalid("consensus::simplex::Voter", "Invalid type")),
         }
     }
@@ -732,6 +748,7 @@ impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
             Voter::Nullification(v) => v.epoch(),
             Voter::Finalize(v) => v.epoch(),
             Voter::Finalization(v) => v.epoch(),
+            Voter::Certification(r, _) => r.epoch(),
         }
     }
 }
@@ -747,6 +764,7 @@ impl<S: Scheme, D: Digest> Viewable for Voter<S, D> {
             Voter::Nullification(v) => v.view(),
             Voter::Finalize(v) => v.view(),
             Voter::Finalization(v) => v.view(),
+            Voter::Certification(r, _) => r.view(),
         }
     }
 }
@@ -947,6 +965,12 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
 
         // All votes must endorse the same proposal to be aggregated into a single certificate.
         if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
+            return None;
+        }
+
+        // Notarize votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(notarizes.len());
+        if !notarizes.iter().all(|n| seen.insert(n.vote.signer)) {
             return None;
         }
 
@@ -1151,6 +1175,12 @@ impl<S: Scheme> Nullification<S> {
 
         // Nullify votes must all target the same round.
         if nullifies.iter().skip(1).any(|n| n.round != round) {
+            return None;
+        }
+
+        // Nullify votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(nullifies.len());
+        if !nullifies.iter().all(|n| seen.insert(n.vote.signer)) {
             return None;
         }
 
@@ -1368,6 +1398,12 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
 
         // Finalize votes must agree on the exact proposal that is being committed.
         if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
+            return None;
+        }
+
+        // Finalize votes must be from distinct signers.
+        let mut seen = HashSet::with_capacity(finalizes.len());
+        if !finalizes.iter().all(|f| seen.insert(f.vote.signer)) {
             return None;
         }
 
