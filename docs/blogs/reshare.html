@@ -92,14 +92,23 @@
         <p>
             What do? A new formulation of this problem by y Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
             Roughgarden and Ertem Nusret Tas in <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a> offers a generic solution
-            to this problem by blackboxing consensus (allowing for the same technique to work no matter how the inner consensus is defined).
+            to this problem by blackboxing consensus (allowing for the same technique to work no matter how the inner consensus is defined). Treat the global
+            log as a number of segmented logs (each of epoch length) and work on finalizing each (transitioning to the next epoch when the some block at the epoch boundary
+            is directly finalized).
         </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
             <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance,
-                if this hasn't happened yet we repropose the same block.
+                if this hasn't happened yet we repropose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
             </div>
         </div>
+        <p>
+            With an eye towards supporting multiple consensus protocols (TODO: link to Minimmit) in the Commonware Library, we opted to implement this generic technique.
+        </p>
+        <h2>Resharing</h2>
+        <p>
+            Now imagine that in addition to just changing validators, you also want to update their key material...
+        </p>
 
         Epoching (Motivated by Faster-than-Finality View) -> Resharing -> Bootstrapping -> Example
         <p>
