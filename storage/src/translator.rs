@@ -6,14 +6,15 @@ use std::hash::{BuildHasher, Hash, Hasher};
 ///
 /// # Warning
 ///
-/// The output of [Translator::transform] is often used as a key in a hash table. If the output is not
-/// uniformly distributed, the performance of said hash table will degrade substantially.
+/// The output of [Translator::transform] is often used as a key in a hash table. If the output is
+/// not uniformly distributed, the performance of said hash table will degrade substantially.
 pub trait Translator: Clone + BuildHasher {
     /// The type of the internal representation of keys.
     ///
-    /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
-    /// with any hash table that wraps [Translator].
-    type Key: Eq + Hash + Copy;
+    /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
+    /// compatibility with any hash table that wraps [Translator]. We also require [Ord] for
+    /// compatibility with ordered collections.
+    type Key: Ord + Hash + Copy;
 
     /// Transform a key into its new representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
@@ -25,7 +26,8 @@ pub trait Translator: Clone + BuildHasher {
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
 /// [std::collections::HashMap] this identity hasher instead:
 ///
-/// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the input into an internal field;
+/// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
+///   input into an internal field;
 /// * [Hasher::finish] returns that value unchanged.
 ///
 /// # Warning
@@ -96,7 +98,7 @@ macro_rules! define_cap_translator {
             #[inline]
             fn transform(&self, key: &[u8]) -> Self::Key {
                 let capped = cap::<$size>(key);
-                <$int>::from_le_bytes(capped)
+                <$int>::from_be_bytes(capped)
             }
         }
 
@@ -112,7 +114,7 @@ macro_rules! define_cap_translator {
     };
 }
 
-// Define translators for different sizes.
+// Define order-preserving translators for different sizes.
 define_cap_translator!(OneCap, 1, u8);
 define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
@@ -126,46 +128,56 @@ mod tests {
     #[test]
     fn test_one_cap() {
         let t = OneCap;
-        assert_eq!(t.transform(b"").to_le_bytes(), [0]);
-        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a']);
-        assert_eq!(t.transform(b"ab").to_le_bytes(), [b'a']);
-        assert_eq!(t.transform(b"abc").to_le_bytes(), [b'a']);
+        assert_eq!(t.transform(b""), 0);
+        assert_eq!(t.transform(b"a"), b'a');
+        assert_eq!(t.transform(b"ab"), b'a');
+        assert_eq!(t.transform(b"abc"), b'a');
     }
 
     #[test]
     fn test_two_cap() {
         let t = TwoCap;
-        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0]);
-        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0]);
-        assert_eq!(t.transform(b"ab").to_le_bytes(), [b'a', b'b']);
-        assert_eq!(t.transform(b"abc").to_le_bytes(), [b'a', b'b']);
+        assert_eq!(t.transform(b""), 0);
+        assert_eq!(t.transform(b"abc"), t.transform(b"ab"));
+        assert!(t.transform(b"") < t.transform(b"a"));
+        assert!(t.transform(b"a") < t.transform(b"b"));
+        assert!(t.transform(b"ab") < t.transform(b"ac"));
+        assert!(t.transform(b"z") < t.transform(b"zz"));
+        assert_eq!(t.transform(b"zz"), t.transform(b"zzabc"));
     }
 
     #[test]
     fn test_four_cap() {
         let t = FourCap;
-        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0, 0, 0]);
-        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0, 0, 0]);
-        assert_eq!(t.transform(b"abcd").to_le_bytes(), [b'a', b'b', b'c', b'd']);
-        assert_eq!(
-            t.transform(b"abcdef").to_le_bytes(),
-            [b'a', b'b', b'c', b'd']
-        );
+        let t1 = t.transform(b"");
+        let t2 = t.transform(b"a");
+        let t3 = t.transform(b"abcd");
+        let t4 = t.transform(b"abcdef");
+        let t5 = t.transform(b"b");
+
+        assert_eq!(t1, 0);
+        assert!(t1 < t2);
+        assert!(t2 < t3);
+        assert_eq!(t3, t4);
+        assert!(t3 < t5);
+        assert!(t4 < t5);
     }
 
     #[test]
     fn test_eight_cap() {
         let t = EightCap;
-        assert_eq!(t.transform(b"").to_le_bytes(), [0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(t.transform(b"a").to_le_bytes(), [b'a', 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            t.transform(b"abcdefgh").to_le_bytes(),
-            [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
-        );
-        assert_eq!(
-            t.transform(b"abcdefghijk").to_le_bytes(),
-            [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
-        );
+        let t1 = t.transform(b"");
+        let t2 = t.transform(b"a");
+        let t3 = t.transform(b"abcdefghaaaaaaa");
+        let t4 = t.transform(b"abcdefghijkzzzzzzzzzzzzzzzzzz");
+        let t5 = t.transform(b"b");
+
+        assert_eq!(t1, 0);
+        assert!(t1 < t2);
+        assert!(t2 < t3);
+        assert_eq!(t3, t4);
+        assert!(t3 < t5);
+        assert!(t4 < t5);
     }
 
     #[test]

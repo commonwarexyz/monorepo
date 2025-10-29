@@ -10,6 +10,7 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
+const MAX_OPERATIONS: usize = 50;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -34,6 +35,10 @@ enum FuzzOperation {
         pool_capacity: u16,
     },
     ReadExact {
+        size: u16,
+    },
+    ReadExactRandomBuf {
+        buf: Vec<u8>,
         size: u16,
     },
     ReadSeekTo {
@@ -89,7 +94,7 @@ fn fuzz(input: FuzzInput) {
 
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
-            let initial_data: Vec<u8> = (0..prefill).map(|i| (i as u8)).collect();
+            let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
             let _ = blob.write_at(initial_data, 0).await;
         }
 
@@ -99,7 +104,7 @@ fn fuzz(input: FuzzInput) {
         let mut pool_ref = None;
         let mut pool_page_size_ref = None;
 
-        for op in input.operations {
+        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 FuzzOperation::CreateRead {
                     blob_size,
@@ -171,6 +176,15 @@ fn fuzz(input: FuzzInput) {
                             let mut buf = vec![0u8; size];
                             let _ = reader.read_exact(&mut buf, size).await;
                         }
+                    }
+                }
+
+                FuzzOperation::ReadExactRandomBuf { mut buf, size } => {
+                    if size > buf.len() as u16 {
+                        continue;
+                    }
+                    if let Some(ref mut reader) = read_buffer {
+                        let _ = reader.read_exact(&mut buf, size as usize).await;
                     }
                 }
 

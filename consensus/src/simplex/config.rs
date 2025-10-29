@@ -1,21 +1,48 @@
-use super::types::{Activity, Context, View};
-use crate::{Automaton, Relay, Reporter, Supervisor};
-use commonware_cryptography::{Digest, Signer};
+use super::types::{Activity, Context};
+use crate::{
+    simplex::signing_scheme::Scheme,
+    types::{Epoch, View},
+    Automaton, Relay, Reporter,
+};
+use commonware_cryptography::{Digest, PublicKey};
+use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
+use commonware_utils::set::Set;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    C: Signer,
+    P: PublicKey,
+    S: Scheme,
+    B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D>,
-    R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<C::Signature, D>>,
-    S: Supervisor<Index = View>,
+    A: Automaton<Context = Context<D>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Cryptographic primitives.
-    pub crypto: C,
+    /// Identity of the participant.
+    pub me: P,
+
+    /// List of validators for the consensus engine, this is static for the
+    /// lifetime of the engine (i.e. the epoch).
+    pub participants: Set<P>,
+
+    /// Signing scheme for the consensus engine.
+    ///
+    /// Consensus messages can be signed with a cryptosystem that differs from the static
+    /// participant identity keys exposed in `participants`. For example, we can authenticate peers
+    /// on the network with [commonware_cryptography::ed25519] keys while signing votes with shares distributed
+    /// via [commonware_cryptography::bls12381::dkg] (which change each epoch). The scheme implementation is
+    /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
+    /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
+    /// the wrong validator.
+    pub scheme: S,
+
+    /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
+    pub blocker: B,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -26,15 +53,15 @@ pub struct Config<
     /// Reporter for the consensus engine.
     pub reporter: F,
 
-    /// Supervisor for the consensus engine.
-    pub supervisor: S,
-
-    /// Partition for consensus engine storage.
+    /// Partition for the consensus engine.
     pub partition: String,
 
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,
+
+    /// Epoch for the consensus engine. Each running engine should have a unique epoch.
+    pub epoch: Epoch,
 
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,
@@ -64,13 +91,6 @@ pub struct Config<
     /// and persist activity derived from validator messages.
     pub activity_timeout: View,
 
-    /// Maximum number of participants to track in a single round.
-    ///
-    /// This is used to limit the size of notarization, nullification, and finalization messages,
-    /// which include up to one signature per participant. This number can be set to a reasonably high
-    /// value that we never expect to reach (it is just how many signatures we are willing to parse, not verify).
-    pub max_participants: usize,
-
     /// Move to nullify immediately if the selected leader has been inactive
     /// for this many views.
     ///
@@ -86,7 +106,7 @@ pub struct Config<
 
     /// Maximum rate of requests to send to a given peer.
     ///
-    /// Inbound rate limiting is handled by `commonware-p2p`.
+    /// Inbound rate limiting is handled by [commonware_p2p].
     pub fetch_rate_per_peer: Quota,
 
     /// Number of concurrent requests to make at once.
@@ -94,13 +114,14 @@ pub struct Config<
 }
 
 impl<
-        C: Signer,
+        P: PublicKey,
+        S: Scheme,
+        B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
-        R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View>,
-    > Config<C, D, A, R, F, S>
+        A: Automaton<Context = Context<D>>,
+        R: Relay,
+        F: Reporter<Activity = Activity<S, D>>,
+    > Config<P, S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

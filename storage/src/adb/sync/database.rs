@@ -1,12 +1,11 @@
-use crate::adb::sync::Journal;
+use crate::{adb::sync::Journal, mmr::Location};
 use commonware_cryptography::Digest;
-use std::future::Future;
+use std::{future::Future, ops::Range};
 
 /// A database that can be synced
 pub trait Database: Sized {
     type Op;
     type Journal: Journal<Op = Self::Op>;
-    type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
@@ -15,18 +14,17 @@ pub trait Database: Sized {
         + Clone;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
-    /// Create/open a journal for syncing range [lower_bound, upper_bound].
+    /// Create/open a journal for syncing the given range.
     ///
     /// The implementation must:
-    /// - Reuse any on-disk data whose logical locations lie within [lower_bound, upper_bound].
-    /// - Discard/ignore any data strictly below `lower_bound` and strictly above `upper_bound`.
+    /// - Reuse any on-disk data whose logical locations lie within the range.
+    /// - Discard/ignore any data outside the range.
     /// - Report `size()` equal to the next location to be filled.
     fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
+        range: Range<Location>,
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -34,26 +32,24 @@ pub trait Database: Sized {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: u64,
-        upper_bound: u64,
+        range: Range<Location>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, Self::Error>>;
+    ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 
-    /// Resize an existing journal to a new inclusive range [lower_bound, upper_bound].
+    /// Resize an existing journal to a new range.
     ///
     /// The implementation must:
-    /// - If current `size() <= lower_bound`: close the journal and return a newly prepared one
+    /// - If current `size() <= range.start`: close the journal and return a newly prepared one
     ///   (equivalent to `create_journal`).
-    /// - Else: prune/discard data strictly below `lower_bound` and strictly above `upper_bound`.
+    /// - Else: prune/discard data outside the range.
     /// - Report `size()` as the next location to be set by the sync engine.
     fn resize_journal(
         journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
+        range: Range<Location>,
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 }

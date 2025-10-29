@@ -1,92 +1,72 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::{
-    simplex::types::{Finalize, Nullify, View, Voter},
-    Supervisor, Viewable,
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Finalize, Nullify, Voter},
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Hasher, Signer};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<C: Signer, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
-    pub crypto: C,
-    pub supervisor: S,
+pub struct Config<S: Scheme> {
+    pub scheme: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<
-    E: Spawner,
-    C: Signer,
-    H: Hasher,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-> {
-    context: E,
-    crypto: C,
-    supervisor: S,
-    _hasher: PhantomData<H>,
-
+pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
+    context: ContextCell<E>,
+    scheme: S,
     namespace: Vec<u8>,
+    _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
-    Nuller<E, C, H, S>
-{
-    pub fn new(context: E, cfg: Config<C, S>) -> Self {
+impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
-            crypto: cfg.crypto,
-            supervisor: cfg.supervisor,
-            _hasher: PhantomData,
-
+            context: ContextCell::new(context),
+            scheme: cfg.scheme,
             namespace: cfg.namespace,
+            _hasher: PhantomData,
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter_network))
+    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        spawn_cell!(self.context, self.run(pending_network).await)
     }
 
-    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = voter_network;
+    async fn run(self, pending_network: (impl Sender, impl Receiver)) {
+        let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<C::Signature, H::Digest>::decode_cfg(msg, &usize::MAX) {
+            let msg = match Voter::<S, H::Digest>::decode_cfg(
+                msg,
+                &self.scheme.certificate_codec_config(),
+            ) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
                     continue;
                 }
             };
-            let view = msg.view();
 
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Get our index
-                    let public_key_index = self
-                        .supervisor
-                        .is_participant(view, &self.crypto.public_key())
-                        .unwrap();
-
                     // Nullify
-                    let msg =
-                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
-                    let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
-                        .encode()
-                        .into();
+                    let n =
+                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
+                            .unwrap();
+                    let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let msg = Finalize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        notarize.proposal,
-                    );
-                    let msg = Voter::Finalize(msg).encode().into();
+                    let proposal = notarize.proposal;
+                    let f =
+                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal).unwrap();
+                    let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

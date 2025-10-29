@@ -2,37 +2,34 @@
 
 /// Prepare metrics for a spawned task.
 ///
-/// This macro returns a tuple `(Label, Gauge)`:
-/// - `Label`: A label representing the task's metrics.
-/// - `Gauge`: A gauge tracking the number of running tasks with the given label.
+/// Returns a `(Label, MetricHandle)` pair for tracking spawned tasks.
+///
+/// The `Label` identifies the task in the metrics registry and the
+/// `MetricHandle` immediately increments the `tasks_running` gauge for that
+/// label. Call `MetricHandle::finish` once the task completes to decrement the
+/// gauge.
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks
-    ($ctx:ident, future) => {
+    ($ctx:ident) => {
         $crate::spawn_metrics!(
-            $crate::telemetry::metrics::task::Label::future($ctx.name.clone()),
+            $crate::telemetry::metrics::task::Label::task(
+                $ctx.name.clone(),
+                $ctx.execution,
+            ),
             @make $ctx
         )
     };
 
-    // Handle blocking tasks
-    ($ctx:ident, blocking, $dedicated:expr) => {
-        $crate::spawn_metrics!(
-            if $dedicated {
-                $crate::telemetry::metrics::task::Label::blocking_dedicated($ctx.name.clone())
-            } else {
-                $crate::telemetry::metrics::task::Label::blocking_shared($ctx.name.clone())
-            },
-            @make $ctx
-        )
-    };
-
-    // Increment the number of spawned tasks and return a gauge for the number of running tasks
+    // Increment the number of spawned tasks and return a metrics tracker that
+    // keeps the running tasks gauge accurate
     ($label:expr, @make $ctx:ident) => {{
         let label = $label;
-        let metrics = &$ctx.executor.metrics;
+        let metrics = $ctx.metrics();
         metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = metrics.tasks_running.get_or_create(&label).clone();
-        (label, gauge)
+        let metric = $crate::utils::MetricHandle::new(
+            metrics.tasks_running.get_or_create(&label).clone(),
+        );
+        (label, metric)
     }};
 }

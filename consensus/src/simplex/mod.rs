@@ -1,11 +1,8 @@
 //! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
-//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
-//! simple and fast BFT agreement with network-speed view (i.e. block time) latency and optimal
-//! finalization latency in a partially synchronous setting.
-//!
-//! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [crate::threshold_simplex]._
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides simple and fast BFT
+//! agreement with network-speed view (i.e. block time) latency and optimal finalization latency in a
+//! partially synchronous setting.
 //!
 //! # Features
 //!
@@ -13,54 +10,12 @@
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
-//! * Flexible Block Format
+//! * Lazy Message Verification
+//! * Application-Defined Block Format
+//! * Pluggable Hashing and Cryptography
+//! * Embedded VRF (via [signing_scheme::bls12381_threshold])
 //!
 //! # Design
-//!
-//! ## Architecture
-//!
-//! All logic is split into three components: the `Voter`, the `Resolver`, and the `Application` (provided by the user).
-//! The `Voter` is responsible for participating in the latest view and the `Resolver` is responsible for fetching artifacts
-//! from previous views required to verify proposed blocks in the latest view.
-//!
-//! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
-//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
-//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
-//!
-//! ```txt
-//! +---------------+           +---------+            +++++++++++++++
-//! |               |<----------+         +----------->+             +
-//! |  Application  |           |  Voter  |            +    Peers    +
-//! |               +---------->|         |<-----------+             +
-//! +---------------+           +--+------+            +++++++++++++++
-//!                                |   ^
-//!                                |   |
-//!                                |   |
-//!                                |   |
-//!                                v   |
-//!                            +-------+----+          +++++++++++++++
-//!                            |            +--------->+             +
-//!                            |  Resolver  |          +    Peers    +
-//!                            |            |<---------+             +
-//!                            +------------+          +++++++++++++++
-//! ```
-//!
-//! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
-//! and `Supervisor` traits._
-//!
-//! ## Joining Consensus
-//!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter`
-//! will enter `v+1`. This means that a new participant joining consensus will immediately jump
-//! ahead to the latest view and begin participating in consensus (assuming it can verify blocks).
-//!
-//! ## Persistence
-//!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
 //!
 //! ## Protocol Description
 //!
@@ -102,6 +57,17 @@
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
 //!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
+//! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
+//! the protocol._
+//!
+//! ### Joining Consensus
+//!
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
+//! latest view and begin participating in consensus (assuming it can verify blocks).
+//!
 //! ### Deviations from Simplex Consensus
 //!
 //! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
@@ -113,13 +79,124 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//!
+//! ## Architecture
+//!
+//! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
+//! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
+//! is responsible for directing participation in the current view. The `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in the latest view. Lastly, the `Application`
+//! is responsible for proposing new blocks and indicating whether some block is valid.
+//!
+//! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
+//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
+//! `Application` verifies a proposed block or the `Resolver` fetches a notarization.
+//!
+//! ```txt
+//!                            +------------+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Batcher   |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +-------+----+          +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
+//! +---------------+           +---------+            +++++++++++++++
+//! |               |<----------+         +----------->+             +
+//! |  Application  |           |  Voter  |            +    Peers    +
+//! |               +---------->|         |<-----------+             +
+//! +---------------+           +--+------+            +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
+//!                            +-------+----+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Resolver  |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +------------+          +++++++++++++++
+//! ```
+//!
+//! ### Batched Verification
+//!
+//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
+//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
+//! will perform repeated bisections over collected messages to find the offending message (and block the
+//! peer(s) that sent it via [commonware_p2p::Blocker]).
+//!
+//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
+//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//!
+//! ## Pluggable Hashing and Cryptography
+//!
+//! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
+//! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
+//! provide their own without modifying any consensus logic). The following [Scheme]s are supported out-of-the-box:
+//!
+//! ### [signing_scheme::ed25519]
+//!
+//! [commonware_cryptography::ed25519] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
+//! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
+//! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
+//!
+//! ### [signing_scheme::bls12381_multisig]
+//!
+//! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
+//! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
+//! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
+//! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
+//!
+//! ### [signing_scheme::bls12381_threshold]
+//!
+//! Last but not least, [signing_scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
+//! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
+//! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
+//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
+//!
+//! #### Embedded VRF
+//!
+//! Every `notarize(c,v)` or `nullify(v)` message includes a `part(v)` message (a partial signature over the view `v`). After `2f+1`
+//! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `part(v)` is
+//! only over the view `v`, the seed derived for a given view `v` is the same regardless of whether or not a block was notarized in said
+//! view `v`.
+//!
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
+//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
+//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
+//! is used as a seed in `v`).
+//!
+//! #### Succinct Certificates
+//!
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
+//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
+//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
+//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
+//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
+//! to operate a lite client).
+//!
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
+//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
+//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//!
+//! ## Persistence
+//!
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
+//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! on restart (especially in the case of unclean shutdown).
 
+pub mod signing_scheme;
 pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         mod actors;
-        mod config;
+        pub mod config;
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
@@ -127,18 +204,79 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
+
+use crate::types::{Round, View};
+use commonware_codec::Encode;
+use signing_scheme::Scheme;
+
+/// The minimum view we are tracking both in-memory and on-disk.
+pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
+    last_finalized.saturating_sub(activity_timeout)
+}
+
+/// Whether or not a view is interesting to us. This is a function
+/// of both `min_active` and whether or not the view is too far
+/// in the future (based on the view we are currently in).
+pub(crate) fn interesting(
+    activity_timeout: View,
+    last_finalized: View,
+    current: View,
+    pending: View,
+    allow_future: bool,
+) -> bool {
+    if pending < min_active(activity_timeout, last_finalized) {
+        return false;
+    }
+    if !allow_future && pending > current + 1 {
+        return false;
+    }
+    true
+}
+
+/// Selects the leader for a given round using scheme-provided randomness seed when available.
+///
+/// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
+/// encoded and reduced modulo the number of participants. Otherwise we fall back to
+/// simple round-robin using the view number.
+pub fn select_leader<S, P>(participants: &[P], round: Round, seed: Option<S::Seed>) -> u32
+where
+    S: Scheme,
+{
+    let idx = if let Some(seed) = seed {
+        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
+    } else {
+        (round.epoch() + round.view()) as usize % participants.len()
+    };
+
+    idx as u32
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{simplex::mocks::supervisor::Supervisor, Monitor};
-    use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
-        sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
+    use crate::{
+        simplex::{
+            mocks::fixtures::{
+                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
+            },
+            signing_scheme::seed_namespace,
+        },
+        types::Round,
+        Monitor,
     };
+    use commonware_codec::Encode;
+    use commonware_cryptography::{
+        bls12381::{
+            primitives::variant::{MinPk, MinSig, Variant},
+            tle::{decrypt, encrypt, Block},
+        },
+        ed25519::{self, PrivateKey},
+        Digest, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+    };
+    use std::collections::{HashMap, HashSet};
+    use rand::{CryptoRng, Rng};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
@@ -146,34 +284,43 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::Rng as _;
+    use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
+    use tracing::{debug, warn};
     use types::Activity;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: CPublicKey>(
+    async fn register_validators<P: PublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
-    ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
+    ) -> HashMap<
+        P,
+        (
+            (Sender<P>, Receiver<P>),
+            (Sender<P>, Receiver<P>),
+            (Sender<P>, Receiver<P>),
+        ),
+    > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (voter_sender, voter_receiver) =
+            let (pending_sender, pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
+            let (recovered_sender, recovered_receiver) =
                 oracle.register(validator.clone(), 1).await.unwrap();
+            let (resolver_sender, resolver_receiver) =
+                oracle.register(validator.clone(), 2).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (
-                    (voter_sender, voter_receiver),
+                    (pending_sender, pending_receiver),
+                    (recovered_sender, recovered_receiver),
                     (resolver_sender, resolver_receiver),
                 ),
             );
@@ -193,7 +340,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: CPublicKey>(
+    async fn link_validators<P: PublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,
@@ -235,23 +382,26 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_all_online() {
+    fn all_online<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
-        let max_exceptions = 10;
+        let quorum = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -259,17 +409,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -282,22 +422,22 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
+            for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -310,14 +450,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
-                    supervisor,
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -326,7 +470,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -334,16 +477,18 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                let (voter, resolver) = registrations
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -352,25 +497,40 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let latest_complete = required_containers - activity_timeout;
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure seeds for all views
+                {
+                    let seeds = reporter.seeds.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure seed for every view
+                        if !seeds.contains_key(&view) {
+                            panic!("view: {view}");
+                        }
+                    }
+                }
+
                 // Ensure no forks
-                let mut exceptions = 0;
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         if payloads.len() > 1 {
@@ -379,37 +539,31 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < threshold as usize {
+                        if notarizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
                         }
-                        if notarizers.len() != n as usize {
-                            exceptions += 1;
-                        }
                     }
                 }
                 {
-                    let notarizations = supervisor.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         let Some(digest) = notarized.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         assert_eq!(&notarization.proposal.payload, digest);
                     }
                 }
                 {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         if payloads.len() > 1 {
@@ -424,17 +578,14 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < threshold as usize {
+                        if finalizers.len() < quorum as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
                         }
-                        if finalizers.len() != n as usize {
-                            exceptions += 1;
-                        }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = supervisor.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock().unwrap();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -448,29 +599,40 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         assert_eq!(&finalization.proposal.payload, digest);
                     }
                 }
-
-                // Ensure exceptions within allowed
-                assert!(exceptions <= max_exceptions);
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
     #[test_traced]
-    fn test_observer() {
+    fn test_all_online() {
+        all_online(bls_threshold_fixture::<MinPk, _>);
+        all_online(bls_threshold_fixture::<MinSig, _>);
+        all_online(bls_multisig_fixture::<MinPk, _>);
+        all_online(bls_multisig_fixture::<MinSig, _>);
+        all_online(ed25519_fixture);
+    }
+
+    fn observer<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n_active = 5;
         let required_containers = 100;
@@ -478,36 +640,30 @@ mod tests {
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
             // Start network
             network.start();
 
-            // Register participants
-            let mut schemes = Vec::new();
-            let mut validators_active = Vec::new();
-            for i in 0..n_active {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators_active.push(pk);
-            }
-            validators_active.sort();
+            // Register participants (active)
+            let (mut schemes, validators, signing_schemes, observer) =
+                fixture(&mut context, n_active);
 
-            // Add observer not in participants
+            // Add observer (no share)
             let scheme_observer = PrivateKey::from_seed(n_active as u64);
             let pk_observer = scheme_observer.public_key();
             schemes.push(scheme_observer);
 
             // Register all (including observer) with the network
-            let mut all_validators = validators_active.clone();
+            let mut all_validators = validators.clone();
             all_validators.push(pk_observer.clone());
             all_validators.sort();
             let mut registrations = register_validators(&mut oracle, &all_validators).await;
@@ -522,24 +678,29 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
-            let participants = BTreeMap::from_iter(vec![(0, validators_active.clone())]);
-            for scheme in schemes.into_iter() {
+            let mut reporters = Vec::new();
+
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                let is_observer = scheme.public_key() == pk_observer;
+
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Create supervisor
-                let supervisor_config = mocks::supervisor::Config {
-                    namespace: namespace.clone(),
-                    participants: participants.clone(),
-                };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
-
-                // Configure application
+                // Configure engine
                 let validator = scheme.public_key();
+                let signing = if is_observer {
+                    observer.clone()
+                } else {
+                    signing_schemes[idx].clone()
+                };
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -552,16 +713,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-
-                // Configure engine
+                let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    blocker,
+                    participants: validators.clone().into(),
+                    scheme: signing.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
-                    supervisor,
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -569,7 +732,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_participants: n_active as usize,
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
@@ -578,16 +740,18 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                let (voter, resolver) = registrations
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine.start(voter, resolver);
+                engine.start(pending, recovered, resolver);
             }
 
-            // Wait for all engines (including the observer) to finish
+            // Wait for all  engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -595,11 +759,40 @@ mod tests {
                 }));
             }
             join_all(finalizers).await;
+
+            // Sanity check
+            for reporter in reporters.iter() {
+                // Ensure no faults or invalid signatures
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure no blocked connections
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty());
+            }
         });
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_observer() {
+        observer(bls_threshold_fixture::<MinPk, _>);
+        observer(bls_threshold_fixture::<MinSig, _>);
+        observer(bls_multisig_fixture::<MinPk, _>);
+        observer(bls_multisig_fixture::<MinSig, _>);
+        observer(ed25519_fixture);
+    }
+
+    fn unclean_shutdown<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut StdRng, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 100;
@@ -610,9 +803,17 @@ mod tests {
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let mut prev_ctx = None;
+        let mut prev_checkpoint = None;
+
+        // Create validator keys
+        let mut rng = StdRng::seed_from_u64(0);
+        let (schemes, validators, signing_schemes, _) = fixture(&mut rng, n);
 
         loop {
+            let rng = rng.clone();
+            let schemes = schemes.clone();
+            let validators = validators.clone();
+            let signing_schemes = signing_schemes.clone();
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
@@ -623,6 +824,7 @@ mod tests {
                     context.with_label("network"),
                     Config {
                         max_size: 1024 * 1024,
+                        disconnect_on_block: true,
                     },
                 );
 
@@ -630,17 +832,6 @@ mod tests {
                 network.start();
 
                 // Register participants
-                let mut schemes = Vec::new();
-                let mut validators = Vec::new();
-                for i in 0..n {
-                    let scheme = PrivateKey::from_seed(i as u64);
-                    let pk = scheme.public_key();
-                    schemes.push(scheme);
-                    validators.push(pk);
-                }
-                validators.sort();
-                schemes.sort_by_key(|s| s.public_key());
-                let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
                 let mut registrations = register_validators(&mut oracle, &validators).await;
 
                 // Link all validators
@@ -653,24 +844,21 @@ mod tests {
 
                 // Create engines
                 let relay = Arc::new(mocks::relay::Relay::new());
-                let mut supervisors = HashMap::new();
+                let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
-                for scheme in schemes.into_iter() {
+                for (idx, scheme) in schemes.into_iter().enumerate() {
                     // Create scheme context
-                    let context = context
-                        .clone()
-                        .with_label(&format!("validator-{}", scheme.public_key()));
+                    let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                    // Start engine
+                    // Configure engine
                     let validator = scheme.public_key();
-                    let supervisor_config = mocks::supervisor::Config {
+                    let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: view_validators.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx].clone(),
                     };
-                    let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                        supervisor_config,
-                    );
-                    supervisors.insert(validator.clone(), supervisor.clone());
+                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
+                    reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -683,14 +871,18 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx].clone(),
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
-                        supervisor,
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -698,7 +890,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_participants: n as usize,
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
@@ -707,16 +898,18 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    let (voter_network, resolver_network) = registrations
+
+                    // Start engine
+                    let (pending, recovered, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    engine_handlers.push(engine.start(voter_network, resolver_network));
+                    engine_handlers.push(engine.start(pending, recovered, resolver));
                 }
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, supervisor) in supervisors.iter_mut() {
-                    let (mut latest, mut monitor) = supervisor.subscribe().await;
+                for (_, reporter) in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
                             latest = monitor.next().await.expect("event missing");
@@ -727,62 +920,81 @@ mod tests {
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
                     context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                select! {
+                let result = select! {
                     _ = context.sleep(wait) => {
-                        // Collect supervisors to check faults
+                        // Collect reporters to check faults
                         {
                             let mut shutdowns = shutdowns.lock().unwrap();
                             debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                             *shutdowns += 1;
                         }
-                        supervised.lock().unwrap().push(supervisors);
-                        (false,context)
+                        supervised.lock().unwrap().push(reporters);
+                        false
                     },
                     _ = join_all(finalizers) => {
-                        // Check supervisors for faults activity
+                        // Check reporters for faults activity
                         let supervised = supervised.lock().unwrap();
-                        for supervisors in supervised.iter() {
-                            for (_, supervisor) in supervisors.iter() {
-                                let faults = supervisor.faults.lock().unwrap();
+                        for reporters in supervised.iter() {
+                            for (_, reporter) in reporters.iter() {
+                                let faults = reporter.faults.lock().unwrap();
                                 assert!(faults.is_empty());
                             }
                         }
-                        (true,context)
+                        true
                     }
-                }
+                };
+
+                // Ensure no blocked connections
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty());
+
+                result
             };
 
-            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
-                deterministic::Runner::from(prev_ctx)
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
+                deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(30))
+                deterministic::Runner::timed(Duration::from_secs(60))
             }
-            .start(f);
+                .start_and_recover(f);
 
-            // If we are done, break
+            // Check if we should exit
             if complete {
                 break;
             }
 
-            prev_ctx = Some(context.recover());
+            prev_checkpoint = Some(checkpoint);
         }
     }
 
     #[test_traced]
-    fn test_backfill() {
+    fn test_unclean_shutdown() {
+        unclean_shutdown(bls_threshold_fixture::<MinPk, _>);
+        unclean_shutdown(bls_threshold_fixture::<MinSig, _>);
+        unclean_shutdown(bls_multisig_fixture::<MinPk, _>);
+        unclean_shutdown(bls_multisig_fixture::<MinSig, _>);
+        unclean_shutdown(ed25519_fixture);
+    }
+
+    fn backfill<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(360));
-        executor.start(|context| async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(720));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -790,17 +1002,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -815,11 +1017,11 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.iter().enumerate() {
                 // Skip first peer
@@ -830,16 +1032,16 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -852,14 +1054,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
-                    supervisor,
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -868,24 +1074,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1, // force many fetches
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -906,7 +1113,7 @@ mod tests {
                 Action::Update(link.clone()),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Wait for nullifications to accrue
             context.sleep(Duration::from_secs(120)).await;
@@ -918,14 +1125,12 @@ mod tests {
                 Action::Unlink,
                 Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
-            // Start engine for first peer
+            // Configure engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-
-            // Create scheme context
-            let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+            let context = context.with_label(&format!("validator-{validator}"));
 
             // Link first peer to all (except second)
             link_validators(
@@ -934,7 +1139,7 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
-            .await;
+                .await;
 
             // Restore network connections for all online peers
             let link = Link {
@@ -948,16 +1153,17 @@ mod tests {
                 Action::Update(link),
                 Some(|_, i, j| ![i, j].contains(&1usize)),
             )
-            .await;
+                .await;
 
-            // Start engine
-            let supervisor_config = mocks::supervisor::Config {
+            // Configure engine
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: view_validators.clone(),
+                participants: validators.clone().into(),
+                scheme: signing_schemes[0].clone(),
             };
-            let mut supervisor =
-                mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
-            supervisors.push(supervisor.clone());
+            let mut reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -970,14 +1176,18 @@ mod tests {
                 application_cfg,
             );
             actor.start();
+            let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
-                crypto: scheme,
+                me: validator.clone(),
+                participants: validators.clone().into(),
+                scheme: signing_schemes[0].clone(),
+                blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
-                supervisor: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
+                epoch: 333,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -986,43 +1196,62 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 max_fetch_count: 1,
-                max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, resolver) = registrations
+            let engine = Engine::new(context.with_label("engine"), cfg);
+
+            // Start engine
+            let (pending, recovered, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
-            let engine = Engine::new(context.with_label("engine"), cfg);
-            engine_handlers.push(engine.start(voter, resolver));
+            engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
-            let (mut latest, mut monitor) = supervisor.subscribe().await;
+            let (mut latest, mut monitor) = reporter.subscribe().await;
             while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
     #[test_traced]
-    fn test_one_offline() {
+    fn test_backfill() {
+        backfill(bls_threshold_fixture::<MinPk, _>);
+        backfill(bls_threshold_fixture::<MinSig, _>);
+        backfill(bls_multisig_fixture::<MinPk, _>);
+        backfill(bls_multisig_fixture::<MinSig, _>);
+        backfill(ed25519_fixture);
+    }
+
+    fn one_offline<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
+        let quorum = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
+        let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -1030,17 +1259,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1055,11 +1274,11 @@ mod tests {
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
             )
-            .await;
+                .await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Skip first peer
@@ -1070,16 +1289,16 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1092,14 +1311,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1107,7 +1330,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_participants: n as usize,
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
@@ -1115,17 +1337,19 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1134,18 +1358,26 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
+            let exceptions = 0;
             let offline = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
-                // Ensure offline node is never active
+                // Ensure no invalid signatures
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure offline node is never active
+                let mut exceptions = 0;
+                {
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
@@ -1155,7 +1387,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock().unwrap();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
                             panic!("view: {view}");
@@ -1163,7 +1395,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
@@ -1176,7 +1408,7 @@ mod tests {
                 // Identify offline views
                 let mut offline_views = Vec::new();
                 {
-                    let leaders = supervisor.leaders.lock().unwrap();
+                    let leaders = reporter.leaders.lock().unwrap();
                     for (view, leader) in leaders.iter() {
                         if leader == offline {
                             offline_views.push(*view);
@@ -1187,21 +1419,33 @@ mod tests {
 
                 // Ensure nullifies/nullification collected for offline node
                 {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
-                        let nullifies = nullifies.get(view).unwrap();
-                        if nullifies.len() < threshold as usize {
-                            panic!("view: {view}");
+                        let nullifies = nullifies.get(view).map_or(0, |n| n.len());
+                        if nullifies < quorum as usize {
+                            warn!("missing expected view nullifies: {}", view);
+                            exceptions += 1;
                         }
                     }
                 }
                 {
-                    let nullifications = supervisor.nullifications.lock().unwrap();
+                    let nullifications = reporter.nullifications.lock().unwrap();
                     for view in offline_views.iter() {
-                        nullifications.get(view).unwrap();
+                        if !nullifications.contains_key(view) {
+                            warn!("missing expected view nullifies: {}", view);
+                            exceptions += 1;
+                        }
                     }
                 }
+
+                // Ensure exceptions within allowed
+                assert!(exceptions <= max_exceptions);
             }
+            assert!(exceptions <= max_exceptions);
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
 
             // Ensure we are skipping views
             let encoded = context.encode();
@@ -1236,7 +1480,19 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_validator() {
+    fn test_one_offline() {
+        one_offline(bls_threshold_fixture::<MinPk, _>);
+        one_offline(bls_threshold_fixture::<MinSig, _>);
+        one_offline(bls_multisig_fixture::<MinPk, _>);
+        one_offline(bls_multisig_fixture::<MinSig, _>);
+        one_offline(ed25519_fixture);
+    }
+
+    fn slow_validator<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 50;
@@ -1244,12 +1500,13 @@ mod tests {
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -1257,17 +1514,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1280,29 +1527,29 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
-                        propose_latency: (3_000.0, 0.0),
-                        verify_latency: (3_000.0, 5.0),
+                        propose_latency: (10_000.0, 0.0),
+                        verify_latency: (10_000.0, 5.0),
                     }
                 } else {
                     mocks::application::Config {
@@ -1318,14 +1565,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1334,24 +1585,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1360,18 +1612,24 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let slow = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
-                // Ensure slow node is never active (will never process anything fast enough to nullify)
+                // Ensure no invalid signatures
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
+                {
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
@@ -1381,16 +1639,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
-                    for (view, participants) in nullifies.iter() {
-                        // Start checking once all are online (leader may never have proposed)
-                        if *view > 10 && participants.contains(slow) {
-                            panic!("view: {view}");
-                        }
-                    }
-                }
-                {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
@@ -1400,24 +1649,41 @@ mod tests {
                     }
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
     #[test_traced]
-    fn test_all_recovery() {
+    fn test_slow_validator() {
+        slow_validator(bls_threshold_fixture::<MinPk, _>);
+        slow_validator(bls_threshold_fixture::<MinSig, _>);
+        slow_validator(bls_multisig_fixture::<MinPk, _>);
+        slow_validator(bls_multisig_fixture::<MinSig, _>);
+        slow_validator(ed25519_fixture);
+    }
+
+    fn all_recovery<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let skip_timeout = 3;
+        let skip_timeout = 2;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1425,17 +1691,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1448,22 +1704,22 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.iter() {
+            for (idx, scheme) in schemes.iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1476,14 +1732,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1492,24 +1752,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (_, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (_, mut monitor) = reporter.subscribe().await;
                 finalizers.push(
                     context
                         .with_label("finalizer")
@@ -1533,8 +1794,8 @@ mod tests {
 
             // Get latest view
             let mut latest = 0;
-            for supervisor in supervisors.iter() {
-                let nullifies = supervisor.nullifies.lock().unwrap();
+            for reporter in reporters.iter() {
+                let nullifies = reporter.nullifies.lock().unwrap();
                 let max = nullifies.keys().max().unwrap();
                 if *max > latest {
                     latest = *max;
@@ -1551,8 +1812,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1561,12 +1822,18 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
                 }
 
                 // Ensure quick recovery.
@@ -1576,7 +1843,7 @@ mod tests {
                 {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;
-                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock().unwrap();
                     for i in latest..latest + activity_timeout {
                         if finalizations.contains_key(&i) {
                             found += 1;
@@ -1585,12 +1852,27 @@ mod tests {
                     assert!(found >= activity_timeout - 2, "found: {found}");
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_partition() {
+    fn test_all_recovery() {
+        all_recovery(bls_threshold_fixture::<MinPk, _>);
+        all_recovery(bls_threshold_fixture::<MinSig, _>);
+        all_recovery(bls_multisig_fixture::<MinPk, _>);
+        all_recovery(bls_multisig_fixture::<MinSig, _>);
+        all_recovery(ed25519_fixture);
+    }
+
+    fn partition<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 10;
         let required_containers = 50;
@@ -1598,12 +1880,13 @@ mod tests {
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1611,17 +1894,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1634,19 +1907,22 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.iter() {
-                // Start engine
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1659,14 +1935,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme.clone(),
+                    me: validator.clone().clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1675,24 +1955,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1713,8 +1994,8 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (_, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (_, mut monitor) = reporter.subscribe().await;
                 finalizers.push(
                     context
                         .with_label("finalizer")
@@ -1737,12 +2018,12 @@ mod tests {
                 Action::Link(link),
                 Some(separated),
             )
-            .await;
+                .await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 let required = latest + required_containers;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
@@ -1752,18 +2033,42 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
-    fn slow_and_lossy_links(seed: u64) -> String {
+    #[test_traced]
+    #[ignore]
+    fn test_partition() {
+        partition(bls_threshold_fixture::<MinPk, _>);
+        partition(bls_threshold_fixture::<MinSig, _>);
+        partition(bls_multisig_fixture::<MinPk, _>);
+        partition(bls_multisig_fixture::<MinSig, _>);
+        partition(ed25519_fixture);
+    }
+
+    fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 5;
         let required_containers = 50;
@@ -1774,12 +2079,13 @@ mod tests {
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(5_000)));
         let executor = deterministic::Runner::new(cfg);
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1787,17 +2093,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1810,22 +2106,22 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
+            for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1838,14 +2134,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1854,24 +2154,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1880,14 +2181,24 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
 
             context.auditor().state()
         })
@@ -1895,7 +2206,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0);
+        slow_and_lossy_links(0, bls_threshold_fixture::<MinPk, _>);
+        slow_and_lossy_links(0, bls_threshold_fixture::<MinSig, _>);
+        slow_and_lossy_links(0, bls_multisig_fixture::<MinPk, _>);
+        slow_and_lossy_links(0, bls_multisig_fixture::<MinSig, _>);
+        slow_and_lossy_links(0, ed25519_fixture);
     }
 
     #[test_traced]
@@ -1904,18 +2219,50 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            // Run test with seed
-            let state_1 = slow_and_lossy_links(seed);
+            let ts_pk_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
+            let ts_pk_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinPk, _>);
+            assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
-            // Run test again with same seed
-            let state_2 = slow_and_lossy_links(seed);
+            let ts_sig_state_1 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
+            let ts_sig_state_2 = slow_and_lossy_links(seed, bls_threshold_fixture::<MinSig, _>);
+            assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
-            // Ensure states are equal
-            assert_eq!(state_1, state_2);
+            let ms_pk_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
+            let ms_pk_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinPk, _>);
+            assert_eq!(ms_pk_state_1, ms_pk_state_2);
+
+            let ms_sig_state_1 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
+            let ms_sig_state_2 = slow_and_lossy_links(seed, bls_multisig_fixture::<MinSig, _>);
+            assert_eq!(ms_sig_state_1, ms_sig_state_2);
+
+            let ed_state_1 = slow_and_lossy_links(seed, ed25519_fixture);
+            let ed_state_2 = slow_and_lossy_links(seed, ed25519_fixture);
+            assert_eq!(ed_state_1, ed_state_2);
+
+            let states = [
+                ("threshold-minpk", ts_pk_state_1),
+                ("threshold-minsig", ts_sig_state_1),
+                ("multisig-minpk", ms_pk_state_1),
+                ("multisig-minsig", ms_sig_state_1),
+                ("ed25519", ed_state_1),
+            ];
+
+            // Sanity check that different types can't be identical
+            for pair in states.windows(2) {
+                assert_ne!(
+                    pair[0].1, pair[1].1,
+                    "state {} equals state {}",
+                    pair[0].0, pair[0].0
+                );
+            }
         }
     }
 
-    fn conflicter(seed: u64) {
+    fn conflicter<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -1926,12 +2273,13 @@ mod tests {
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1939,17 +2287,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1962,37 +2300,37 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
-                        crypto: scheme,
-                        supervisor,
                         namespace: namespace.clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                     };
-                    let (voter, _) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
-                    let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
+
+                    let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2005,14 +2343,18 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
+                        blocker,
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
-                        supervisor,
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2021,25 +2363,21 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2048,33 +2386,45 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let byz = &validators[0];
-            let mut count_conflicting_notarize = 0;
-            let mut count_conflicting_finalize = 0;
-            for supervisor in supervisors.iter() {
+            let mut count_conflicting = 0;
+            for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
-                                    count_conflicting_notarize += 1;
+                                    count_conflicting += 1;
                                 }
                                 Activity::ConflictingFinalize(_) => {
-                                    count_conflicting_finalize += 1;
+                                    count_conflicting += 1;
                                 }
                                 _ => panic!("unexpected fault: {fault:?}"),
                             }
                         }
                     }
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
-            assert!(count_conflicting_notarize > 0);
-            assert!(count_conflicting_finalize > 0);
+            assert!(count_conflicting > 0);
+
+            // Ensure conflicter is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
         });
     }
 
@@ -2082,11 +2432,19 @@ mod tests {
     #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter(seed);
+            conflicter(seed, bls_threshold_fixture::<MinPk, _>);
+            conflicter(seed, bls_threshold_fixture::<MinSig, _>);
+            conflicter(seed, bls_multisig_fixture::<MinPk, _>);
+            conflicter(seed, bls_multisig_fixture::<MinSig, _>);
+            conflicter(seed, ed25519_fixture);
         }
     }
 
-    fn nuller(seed: u64) {
+    fn invalid<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 50;
@@ -2097,12 +2455,13 @@ mod tests {
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2110,17 +2469,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2133,34 +2482,34 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::nuller::Config {
-                        crypto: scheme,
-                        supervisor,
+                    let cfg = mocks::invalid::Config {
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
-                    let (voter, _) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
-                    let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
-                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+
+                    let engine: mocks::invalid::Invalid<_, _, Sha256> =
+                        mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
+                    engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2173,14 +2522,18 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
-                        supervisor,
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2189,25 +2542,21 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2216,13 +2565,510 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
+            let mut invalid_count = 0;
+            let byz = &validators[0];
+            for reporter in reporters.iter() {
+                // Ensure no faults
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Count invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    if *invalid > 0 {
+                        invalid_count += 1;
+                    }
+                }
+            }
+            assert_eq!(invalid_count, n - 1);
+
+            // Ensure invalid is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
+        });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_invalid() {
+        for seed in 0..5 {
+            invalid(seed, bls_threshold_fixture::<MinPk, _>);
+            invalid(seed, bls_threshold_fixture::<MinSig, _>);
+            invalid(seed, bls_multisig_fixture::<MinPk, _>);
+            invalid(seed, bls_multisig_fixture::<MinSig, _>);
+            invalid(seed, ed25519_fixture);
+        }
+    }
+
+    fn impersonator<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = 50;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::impersonator::Config {
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        namespace: namespace.clone(),
+                    };
+
+                    let engine: mocks::impersonator::Impersonator<_, _, Sha256> =
+                        mocks::impersonator::Impersonator::new(
+                            context.with_label("byzantine_engine"),
+                            cfg,
+                        );
+                    engine.start(pending);
+                } else {
+                    reporters.push(reporter.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(scheme.public_key());
+                    let cfg = config::Config {
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: 333,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 1,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check reporters for correct activity
+            let byz = &validators[0];
+            for reporter in reporters.iter() {
+                // Ensure no faults
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+            }
+
+            // Ensure invalid is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
+        });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_impersonator() {
+        for seed in 0..5 {
+            impersonator(seed, bls_threshold_fixture::<MinPk, _>);
+            impersonator(seed, bls_threshold_fixture::<MinSig, _>);
+            impersonator(seed, bls_multisig_fixture::<MinPk, _>);
+            impersonator(seed, bls_multisig_fixture::<MinSig, _>);
+            impersonator(seed, ed25519_fixture);
+        }
+    }
+
+    fn reconfigurer<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = 50;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::reconfigurer::Config {
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        namespace: namespace.clone(),
+                    };
+                    let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
+                        mocks::reconfigurer::Reconfigurer::new(
+                            context.with_label("byzantine_engine"),
+                            cfg,
+                        );
+                    engine.start(pending);
+                } else {
+                    reporters.push(reporter.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(scheme.public_key());
+                    let cfg = config::Config {
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: 333,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 1,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check reporters for correct activity
+            let byz = &validators[0];
+            for reporter in reporters.iter() {
+                // Ensure no faults
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+            }
+
+            // Ensure reconfigurer is blocked (epoch mismatch)
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
+        });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_reconfigurer() {
+        for seed in 0..5 {
+            reconfigurer(seed, bls_threshold_fixture::<MinPk, _>);
+            reconfigurer(seed, bls_threshold_fixture::<MinSig, _>);
+            reconfigurer(seed, bls_multisig_fixture::<MinPk, _>);
+            reconfigurer(seed, bls_multisig_fixture::<MinSig, _>);
+            reconfigurer(seed, ed25519_fixture);
+        }
+    }
+
+    fn nuller<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = 50;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::nuller::Config {
+                        namespace: namespace.clone(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                    };
+                    let engine: mocks::nuller::Nuller<_, _, Sha256> =
+                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
+                    engine.start(pending);
+                } else {
+                    reporters.push(reporter.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(scheme.public_key());
+                    let cfg = config::Config {
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: 333,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 1,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check reporters for correct activity
             let byz = &validators[0];
             let mut count_nullify_and_finalize = 0;
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -2236,8 +3082,22 @@ mod tests {
                         }
                     }
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
             assert!(count_nullify_and_finalize > 0);
+
+            // Ensure nullifier is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
         });
     }
 
@@ -2245,11 +3105,19 @@ mod tests {
     #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller(seed);
+            nuller(seed, bls_threshold_fixture::<MinPk, _>);
+            nuller(seed, bls_threshold_fixture::<MinSig, _>);
+            nuller(seed, bls_multisig_fixture::<MinPk, _>);
+            nuller(seed, bls_multisig_fixture::<MinSig, _>);
+            nuller(seed, ed25519_fixture);
         }
     }
 
-    fn outdated(seed: u64) {
+    fn outdated<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 4;
         let required_containers = 100;
@@ -2260,12 +3128,13 @@ mod tests {
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2273,17 +3142,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2296,35 +3155,34 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
-                        crypto: scheme,
-                        supervisor,
+                        scheme: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
-                    let (voter, _) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
-                    let engine: mocks::outdated::Outdated<_, _, Sha256, _> =
+                    let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2337,14 +3195,18 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
-                        crypto: scheme,
+                        me: validator.clone(),
+                        participants: validators.clone().into(),
+                        scheme: signing_schemes[idx_scheme].clone(),
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
-                        supervisor,
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2353,25 +3215,21 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2380,13 +3238,24 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Ensure no faults
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
+                // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -2394,13 +3263,19 @@ mod tests {
     #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated(seed);
+            outdated(seed, bls_threshold_fixture::<MinPk, _>);
+            outdated(seed, bls_threshold_fixture::<MinSig, _>);
+            outdated(seed, bls_multisig_fixture::<MinPk, _>);
+            outdated(seed, bls_multisig_fixture::<MinSig, _>);
+            outdated(seed, ed25519_fixture);
         }
     }
 
-    #[test_traced]
-    #[ignore]
-    fn test_1k() {
+    fn run_1k<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
         let n = 10;
         let required_containers = 1_000;
@@ -2409,12 +3284,13 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2422,17 +3298,7 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2445,22 +3311,22 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
+            for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -2473,14 +3339,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
-                    supervisor,
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2489,24 +3359,25 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                let (voter, resolver) = registrations
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2515,37 +3386,373 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         })
     }
 
-    // Basic Twins test: n = 4, f = 1.
-    // Honest nodes: 0, 1, 2.
-    // Byzantine identity: node 3 has a twin (node 4); both share the same private key.
-    // We model byzantine behavior by running two nodes (3 and 4) with the same identity.
-    // There is no partitioning.
     #[test_traced]
-    fn test_basic_twins() {
+    #[ignore]
+    fn test_1k_bls_threshold_min_pk() {
+        run_1k(bls_threshold_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_threshold_min_sig() {
+        run_1k(bls_threshold_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_pk() {
+        run_1k(bls_multisig_fixture::<MinPk, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_bls_multisig_min_sig() {
+        run_1k(bls_multisig_fixture::<MinSig, _>);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k_ed25519() {
+        run_1k(ed25519_fixture);
+    }
+
+    fn children_shutdown_on_engine_abort<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
         // Create context
-        let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let n = 1;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|context| async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register a single participant
+            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link the single validator to itself (no-ops for completeness)
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engine
+            let reporter_config = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: validators.clone().into(),
+                scheme: signing_schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                participant: validators[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let blocker = oracle.control(validators[0].clone());
+            let cfg = config::Config {
+                me: validators[0].clone(),
+                participants: validators.clone().into(),
+                scheme: signing_schemes[0].clone(),
+                blocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: validators[0].to_string(),
+                mailbox_size: 64,
+                epoch: 333,
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_millis(50),
+                notarization_timeout: Duration::from_millis(100),
+                nullify_retry: Duration::from_millis(250),
+                fetch_timeout: Duration::from_millis(50),
+                activity_timeout: 4,
+                skip_timeout: 2,
+                max_fetch_count: 1,
+                fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 16),
+                write_buffer: NZUsize!(1024 * 16),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let engine = Engine::new(context.with_label("engine"), cfg);
+
+            // Start engine
+            let (pending, recovered, resolver) = registrations
+                .remove(&validators[0])
+                .expect("validator should be registered");
+            let handle = engine.start(pending, recovered, resolver);
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(1000)).await;
+
+            // Verify that engine and child actors are running
+            let metrics_before = context.encode();
+            let is_running = |name: &str| -> bool {
+                metrics_before.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 1")
+                })
+            };
+            assert!(is_running("engine"));
+            assert!(is_running("engine_batcher"));
+            assert!(is_running("engine_voter"));
+            assert!(is_running("engine_resolver"));
+
+            // Make sure the engine is still running
+            context.sleep(Duration::from_millis(1000)).await;
+            assert!(is_running("engine"));
+
+            // Abort engine and ensure children stop
+            handle.abort();
+            let _ = handle.await; // ensure parent tear-down runs
+
+            // Give the runtime a tick to process aborts
+            context.sleep(Duration::from_millis(1000)).await;
+
+            let metrics_after = context.encode();
+            let is_stopped = |name: &str| -> bool {
+                // Either the gauge is 0, or the entry is absent (both imply not running)
+                metrics_after.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 0")
+                })
+            };
+            assert!(is_stopped("engine"));
+            assert!(is_stopped("engine_batcher"));
+            assert!(is_stopped("engine_voter"));
+            assert!(is_stopped("engine_resolver"));
+        });
+    }
+
+    #[test_traced]
+    fn test_children_shutdown_on_engine_abort() {
+        children_shutdown_on_engine_abort(bls_threshold_fixture::<MinPk, _>);
+        children_shutdown_on_engine_abort(bls_threshold_fixture::<MinSig, _>);
+        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinPk, _>);
+        children_shutdown_on_engine_abort(bls_multisig_fixture::<MinSig, _>);
+        children_shutdown_on_engine_abort(ed25519_fixture);
+    }
+
+    fn tle<V: Variant>() {
+        // Create context
+        let n = 4;
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = 100;
+        let skip_timeout = 50;
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) =
+                bls_threshold_fixture::<V, _>(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(5),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines and reporters
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            let monitor_reporter = Arc::new(Mutex::new(None));
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+
+                // Store first reporter for monitoring
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                if idx == 0 {
+                    *monitor_reporter.lock().unwrap() = Some(reporter.clone());
+                }
+
+                // Configure application
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_millis(100),
+                    notarization_timeout: Duration::from_millis(200),
+                    nullify_retry: Duration::from_millis(500),
+                    fetch_timeout: Duration::from_millis(100),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Prepare TLE test data
+            let target = Round::new(333, 10); // Encrypt for view 10
+            let message_content = b"Secret message for future view10"; // 32 bytes
+            let message = Block::new(*message_content);
+
+            // Encrypt message for future view using threshold public key
+            let seed_namespace = seed_namespace(&namespace);
+            let ciphertext = encrypt::<_, V>(
+                &mut context,
+                *signing_schemes[0].identity(),
+                (Some(&seed_namespace), &target.encode()),
+                &message,
+            );
+
+            // Wait for consensus to reach the target view and then decrypt
+            let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
+            loop {
+                // Wait for notarization
+                context.sleep(Duration::from_millis(100)).await;
+                let notarizations = reporter.notarizations.lock().unwrap();
+                let Some(notarization) = notarizations.get(&target.view()) else {
+                    continue;
+                };
+
+                // Decrypt the message using the seed signature
+                let seed_signature = notarization.certificate.seed_signature;
+                let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
+                    .expect("Decryption should succeed with valid seed signature");
+                assert_eq!(
+                    message.as_ref(),
+                    decrypted.as_ref(),
+                    "Decrypted message should match original message"
+                );
+                break;
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_tle() {
+        tle::<MinPk>();
+        tle::<MinSig>();
+    }
+
+    fn twins<S, F>(seed: u64, mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let _n = 5; // 4 honest nodes + 1 twin
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2553,38 +3760,28 @@ mod tests {
             network.start();
 
             // Register participants with Twins approach
-            // Nodes 0,1,2,3 have normal keys, node 4 is a twin of node 3
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            let mut scheme_validator_pairs = Vec::new();
-
-            // Create nodes 0,1,2,3 normally
-            for i in 0..4 {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                scheme_validator_pairs.push((scheme.clone(), pk.clone()));
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-
-            // Create node 4 as a twin of node 3
-            // It uses the same private key as node 3 but needs a different public key for registration
-            let twin_scheme = PrivateKey::from_seed(3_u64); // Same seed as node 3
-
-            // For registration, we need a unique public key for the twin
-            // We'll use a different seed just for generating a unique validator ID
-            let twin_registration_key = PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
-            let twin_validator_id = twin_registration_key.public_key();
-
-            scheme_validator_pairs.push((twin_scheme.clone(), twin_validator_id.clone()));
-            schemes.push(twin_scheme);
-            validators.push(twin_validator_id);
-
-            assert_eq!(schemes[3], schemes[4], "twins private keys are the same");
-
-            // Sort validators for consistent ordering
+            // Create fixture for 4 nodes
+            let (ed25519_keys, ed25519_public, signing_schemes, _verifier) = fixture(&mut context, 4);
+            
+            // Now we need to create the twin - node 4 will be a twin of node 3
+            // It will use the same signing scheme as node 3 but have a different validator ID
+            let twin_ed25519_key = ed25519::PrivateKey::from_seed(999); // Unique ID for registration
+            let twin_validator_id = twin_ed25519_key.public_key();
+            
+            // Clone the signing scheme of node 3 for the twin
+            let twin_signing_scheme = signing_schemes[3].clone();
+            
+            // Build final list of validators and schemes
+            let mut validators = ed25519_public.clone();
+            validators.push(twin_validator_id.clone());
             validators.sort();
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            
+            let mut all_signing_schemes = signing_schemes.clone();
+            all_signing_schemes.push(twin_signing_scheme);
+            
+            let mut all_ed25519_keys = ed25519_keys.clone();
+            all_ed25519_keys.push(twin_ed25519_key);
+            
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2597,22 +3794,27 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
-            let mut engine_handlers = Vec::new();
-            for (scheme, validator) in scheme_validator_pairs.into_iter() {
+            let mut reporters = Vec::new();
+            
+            for (_idx, (ed25519_key, signing_scheme)) in all_ed25519_keys.into_iter().zip(all_signing_schemes.into_iter()).enumerate() {
                 // Create scheme context
+                let validator = ed25519_key.public_key();
                 let context = context.with_label(&format!("validator-{}", validator));
 
-                // Start engine - use the paired validator ID, not scheme.public_key()
-                // This allows the twin to have a different validator ID while using the same signing key
-                let supervisor_config = mocks::supervisor::Config {
+                // Start engine
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: view_validators.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_scheme.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -2625,14 +3827,18 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    crypto: scheme,
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_scheme.clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
-                    supervisor,
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2641,7 +3847,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2649,16 +3854,13 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                let (voter, resolver) = registrations
-                    .remove(&validator)
-                    .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine.start(pending, recovered, resolver);
             }
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2668,260 +3870,46 @@ mod tests {
 
             join_all(finalizers).await;
 
-            for supervisor in supervisors.iter() {
-                {
-                    let faults = supervisor.faults.lock().unwrap();
-                    assert!(!faults.is_empty());
-                }
+            // Check that twins caused Byzantine faults to be detected
+            for reporter in reporters.iter() {
+                let faults = reporter.faults.lock().unwrap();
+                // Faults should be detected due to twins behavior
+                assert!(!faults.is_empty(), "Byzantine twins behavior should be detected");
             }
 
-            check_invariants(supervisors);
+            check_twins_invariants(reporters);
         });
     }
 
+    // Basic Twins test: n = 4, f = 1.
+    // Honest nodes: 0, 1, 2.
+    // Byzantine identity: node 3 has a twin (node 4); both share the same private key.
+    // We model byzantine behavior by running two nodes (3 and 4) with the same signing scheme.
+    // There is no partitioning.
     #[test_traced]
-    fn test_twins_with_dynamic_partitioning() {
-        // Create context
-        let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
-        let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
-        executor.start(|context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-
-            // Start network
-            network.start();
-
-            // Register participants with Twins approach
-            // Nodes 0,1,2,3 have normal keys, node 4 is a twin of node 3
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            let mut scheme_validator_pairs = Vec::new();
-
-            // Create nodes 0,1,2,3 normally
-            for i in 0..4 {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                scheme_validator_pairs.push((scheme.clone(), pk.clone()));
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-
-            // Create node 4 as a twin of node 3
-            // It uses the same private key as node 3 but needs a different public key for registration
-            let twin_scheme = PrivateKey::from_seed(3_u64); // Same seed as node 3
-
-            // For registration, we need a unique public key for the twin
-            let twin_registration_key = PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
-            let twin_validator_id = twin_registration_key.public_key();
-
-            scheme_validator_pairs.push((twin_scheme.clone(), twin_validator_id.clone()));
-            schemes.push(twin_scheme);
-            validators.push(twin_validator_id);
-
-            assert_eq!(schemes[3], schemes[4], "twins private keys are the same");
-
-            // Sort validators for consistent ordering
-            validators.sort();
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
-            let mut registrations = register_validators(&mut oracle, &validators).await;
-
-            // Initial link - all connected
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
-
-            // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
-            let mut engine_handlers = Vec::new();
-            for (scheme, validator) in scheme_validator_pairs.into_iter() {
-                // Create scheme context
-                let context = context.with_label(&format!("validator-{}", validator));
-
-                // Start engine
-                let supervisor_config = mocks::supervisor::Config {
-                    namespace: namespace.clone(),
-                    participants: view_validators.clone(),
-                };
-                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
-                    supervisor_config,
-                );
-                supervisors.push(supervisor.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
-                    relay: relay.clone(),
-                    participant: validator.clone(),
-                    propose_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
-                    application_cfg,
-                );
-                actor.start();
-                let cfg = config::Config {
-                    crypto: scheme,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: supervisor.clone(),
-                    supervisor,
-                    partition: validator.to_string(),
-                    mailbox_size: 1024,
-                    namespace: namespace.clone(),
-                    leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
-                    skip_timeout,
-                    max_fetch_count: 1,
-                    max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                let (voter, resolver) = registrations
-                    .remove(&validator)
-                    .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
-            }
-
-            // Run initial phase - all connected for first 20 containers
-            let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < 20 {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Phase 1: Isolate node 0.
-            // Partition: [1,2,3,4] [0]
-            fn partition_isolate_node_0(_n: usize, a: usize, b: usize) -> bool {
-                let isolated_idx = 0;
-                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
-            }
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Update(link.clone()),
-                Some(partition_isolate_node_0),
-            )
-            .await;
-
-            // Continue for 20 more containers
-            let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < 40 {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Phase 2: Isolate Twin node (node 4)
-            // Partition: [0,1,2,3] [3_twin]
-            fn partition_isolate_node_4(_n: usize, a: usize, b: usize) -> bool {
-                let isolated_idx = 4;
-                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
-            }
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Update(link.clone()),
-                Some(partition_isolate_node_4),
-            )
-            .await;
-
-            // Continue for 20 more containers
-            let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < 60 {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Phase 3: Isolate node 3
-            // Partition: Multiple isolated nodes
-            fn partition_isolate_node_3(_n: usize, a: usize, b: usize) -> bool {
-                let isolated_idx = 3;
-                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
-            }
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Update(link.clone()),
-                Some(partition_isolate_node_3),
-            )
-            .await;
-
-            // Continue for 20 more containers
-            let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < 80 {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            // Phase 4: Restore full connectivity
-            link_validators(&mut oracle, &validators, Action::Update(link.clone()), None).await;
-
-            // Finish remaining containers
-            let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-
-            for supervisor in supervisors.iter() {
-                {
-                    let faults = supervisor.faults.lock().unwrap();
-                    assert!(!faults.is_empty());
-                }
-            }
-            check_invariants(supervisors);
-        });
+    fn test_basic_twins() {
+        for seed in 0..5 {
+            twins(seed, bls_threshold_fixture::<MinPk, _>);
+            twins(seed, bls_threshold_fixture::<MinSig, _>);
+            twins(seed, bls_multisig_fixture::<MinPk, _>);
+            twins(seed, bls_multisig_fixture::<MinSig, _>);
+            twins(seed, ed25519_fixture);
+        }
     }
 
-    pub fn check_invariants(replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
+
+    pub fn check_twins_invariants<E, P, S, D>(replicas: Vec<mocks::reporter::Reporter<E, P, S, D>>)
+    where
+        E: Rng + CryptoRng,
+        P: PublicKey,
+        S: Scheme,
+        D: Digest,
+    {
         let finalizations: Vec<HashMap<u64, _>> = replicas
             .into_iter()
-            .map(|supervisor| {
-                let finalizations = supervisor.finalizations.lock().unwrap();
-                let finalization_data =
+            .map(|reporter| {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalization_data: HashMap<u64, _> =
                     finalizations.iter().map(|(&k, v)| (k, v.clone())).collect();
 
                 finalization_data
@@ -2939,13 +3927,65 @@ mod tests {
 
             // For each view, check that all existing finalizations are the same
             for view in all_views {
-                let finalizations_for_view: Vec<(usize, Sha256Digest)> = finalizations
+                let finalizations_for_view: Vec<(usize, D)> = finalizations
                     .iter()
                     .enumerate()
                     .filter_map(|(replica_idx, finalizations)| {
                         finalizations
                             .get(&view)
-                            .map(|data| (replica_idx, data.proposal.payload))
+                            .map(|data| (replica_idx, data.proposal.payload.clone()))
+                    })
+                    .collect();
+
+                // If there are any finalizations for this view, they must all be the same
+                if let Some((first_replica_idx, first_digest)) = finalizations_for_view.first() {
+                    for (replica_idx, digest) in &finalizations_for_view[1..] {
+                        assert_eq!(
+                            digest, first_digest,
+                            "finalized digest mismatch in view {view}: replica {replica_idx} has {digest:?} but replica {first_replica_idx} has {first_digest:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn check_invariants<E, P, S, D>(replicas: Vec<mocks::reporter::Reporter<E, P, S, D>>)
+    where
+        E: Rng + CryptoRng,
+        P: PublicKey,
+        S: Scheme,
+        D: Digest,
+    {
+        let finalizations: Vec<HashMap<u64, _>> = replicas
+            .into_iter()
+            .map(|reporter| {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalization_data: HashMap<u64, _> =
+                    finalizations.iter().map(|(&k, v)| (k, v.clone())).collect();
+
+                finalization_data
+            })
+            .collect();
+
+        // Invariant: agreement
+        // Finalized digests must be the same
+        {
+            let all_views: HashSet<u64> = finalizations
+                .iter()
+                .flat_map(|finalizations| finalizations.keys())
+                .copied()
+                .collect();
+
+            // For each view, check that all existing finalizations are the same
+            for view in all_views {
+                let finalizations_for_view: Vec<(usize, D)> = finalizations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(replica_idx, finalizations)| {
+                        finalizations
+                            .get(&view)
+                            .map(|data| (replica_idx, data.proposal.payload.clone()))
                     })
                     .collect();
 

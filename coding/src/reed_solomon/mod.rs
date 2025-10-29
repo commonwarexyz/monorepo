@@ -1,123 +1,10 @@
-//! A SIMD-optimized Reed-Solomon coder that emits [Chunk]s that can be proven against a [bmt].
-//!
-//! # Behavior
-//!
-//! The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
-//! shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
-//! All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
-//! is packaged as a [Chunk] containing the shard data, its index, and a Merkle proof against the [bmt] root.
-//!
-//! ## Encoding
-//!
-//! ```text
-//!               +--------------------------------------+
-//!               |         Original Data (Bytes)        |
-//!               +--------------------------------------+
-//!                                  |
-//!                                  v
-//!               +--------------------------------------+
-//!               | [Length Prefix | Original Data...]   |
-//!               +--------------------------------------+
-//!                                  |
-//!                                  v
-//!              +----------+ +----------+    +-----------+
-//!              |  Shard 0 | |  Shard 1 | .. | Shard k-1 |  (Data Shards)
-//!              +----------+ +----------+    +-----------+
-//!                     |            |             |
-//!                     |            |             |
-//!                     +------------+-------------+
-//!                                  |
-//!                                  v
-//!                        +------------------+
-//!                        | Reed-Solomon     |
-//!                        | Encoder (k, m)   |
-//!                        +------------------+
-//!                                  |
-//!                                  v
-//!              +----------+ +----------+    +-----------+
-//!              |  Shard k | | Shard k+1| .. | Shard n-1 |  (Recovery Shards)
-//!              +----------+ +----------+    +-----------+
-//! ```
-//!
-//! ## Merkle Tree Construction
-//!
-//! All `n` shards (data and recovery) are hashed and used as leaves to build a [bmt].
-//!
-//! ```text
-//! Shards:    [Shard 0, Shard 1, ..., Shard n-1]
-//!             |        |              |
-//!             v        v              v
-//! Hashes:    [H(S_0), H(S_1), ..., H(S_n-1)]
-//!             \       / \       /
-//!              \     /   \     /
-//!               +---+     +---+
-//!                 |         |
-//!                 \         /
-//!                  \       /
-//!                   +-----+
-//!                      |
-//!                      v
-//!                +----------+
-//!                |   Root   |
-//!                +----------+
-//! ```
-//!
-//! The final output is the [bmt] root and a set of `n` [Chunk]s.
-//!
-//! `(Root, [Chunk 0, Chunk 1, ..., Chunk n-1])`
-//!
-//! Each [Chunk] contains:
-//! - `shard`: The shard data (original or recovery).
-//! - `index`: The shard's original index (0 to n-1).
-//! - `proof`: A Merkle proof of the shard's inclusion in the [bmt].
-//!
-//! ## Decoding and Verification
-//!
-//! The decoder requires any `k` [Chunk]s to reconstruct the original data.
-//! 1. Each [Chunk]'s Merkle proof is verified against the [bmt] root.
-//! 2. The shards from the valid [Chunk]s are used to reconstruct the original `k` data shards.
-//! 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
-//!    generated. This new root MUST match the original [bmt] root. This prevents attacks where
-//!    an adversary provides a valid set of chunks that decode to different data.
-//! 4. If the roots match, the original data is extracted from the reconstructed data shards.
-//!
-//! # Example
-//!
-//! ```rust
-//! use commonware_coding::reed_solomon::{encode, decode};
-//! use commonware_cryptography::Sha256;
-//!
-//! // Generate data to encode
-//! let data = b"Hello, world! This is a test of Reed-Solomon encoding.";
-//!
-//! // Configure the encoder to generate 7 total chunks, with a minimum of 4 required for decoding
-//! let total = 7u16;
-//! let min = 4u16;
-//!
-//! // Encode the data
-//! let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-//!
-//! // Pick a few chunks to recover from (a mix of original and recovery shards)
-//! let some_chunks = vec![
-//!     chunks[0].clone(), // original
-//!     chunks[2].clone(), // original
-//!     chunks[5].clone(), // recovery
-//!     chunks[6].clone(), // recovery
-//! ];
-//!
-//! // Decode the data from the subset of chunks
-//! let decoded_data = decode::<Sha256>(total, min, &root, some_chunks).unwrap();
-//!
-//! // Verify that the decoded data matches the original data
-//! assert_eq!(decoded_data, data);
-//! ```
-
+use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::collections::HashSet;
+use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -137,24 +24,26 @@ pub enum Error {
     InvalidDataLength(usize),
     #[error("invalid index: {0}")]
     InvalidIndex(u16),
+    #[error("wrong index: {0}")]
+    WrongIndex(u16),
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
-    pub shard: Vec<u8>,
+    shard: Vec<u8>,
 
     /// The index of [Chunk] in the original data.
-    pub index: u16,
+    index: u16,
 
     /// The proof of the shard in the [bmt] at the given index.
-    pub proof: bmt::Proof<H>,
+    proof: bmt::Proof<H>,
 }
 
 impl<H: Hasher> Chunk<H> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    pub fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
+    fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
         Self {
             shard,
             index,
@@ -163,7 +52,7 @@ impl<H: Hasher> Chunk<H> {
     }
 
     /// Verify a [Chunk] against the given root.
-    pub fn verify(&self, index: u16, root: &H::Digest) -> bool {
+    fn verify(&self, index: u16, root: &H::Digest) -> bool {
         // Ensure the index matches
         if index != self.index {
             return false;
@@ -211,80 +100,13 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
-/// All data shards from a Reed-Solomon encoded object.
-///
-/// This is more efficient than individual chunks when transmitting complete blocks.
-/// Includes a [bmt::RangeProof] to prove the data shards are part of the commitment.
-#[derive(Clone)]
-pub struct Data<H: Hasher> {
-    /// The data shards.
-    pub shards: Vec<Vec<u8>>,
-
-    /// Range proof for indices 0..k (proving all data shards are part of the commitment).
-    pub proof: bmt::RangeProof<H>,
-}
-
-impl<H: Hasher> Data<H> {
-    /// Create a new [Data] from data shards and range proof.
-    pub fn new(shards: Vec<Vec<u8>>, proof: bmt::RangeProof<H>) -> Self {
-        Self { shards, proof }
-    }
-
-    /// Verify the [Data] against a known root.
-    ///
-    /// This verifies that the data shards are part of the [bmt] commitment.
-    pub fn verify(&self, min: u16, root: &H::Digest) -> bool {
-        // Ensure we have the correct number of data shards
-        let k = min as usize;
-        if self.shards.len() != k {
-            return false;
-        }
-
-        // Hash the data shards
-        let mut hasher = H::new();
-        let mut shards = Vec::with_capacity(k);
-        for shard in &self.shards {
-            hasher.update(shard);
-            shards.push(hasher.finalize());
-        }
-
-        // Verify the range proof for indices 0..k
-        self.proof.verify(&mut hasher, 0, &shards, root).is_ok()
-    }
-
-    /// Extract the original data from the [Data].
-    pub fn extract(self) -> Vec<u8> {
-        let k = self.shards.len();
-        extract_data(self.shards, k)
+impl<H: Hasher> PartialEq for Chunk<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.shard == other.shard && self.index == other.index && self.proof == other.proof
     }
 }
 
-impl<H: Hasher> Write for Data<H> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.shards.write(writer);
-        self.proof.write(writer);
-    }
-}
-
-impl<H: Hasher> Read for Data<H> {
-    /// The maximum size of each shard.
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard_count: RangeCfg = (1..=u16::MAX as usize).into();
-        let shard_size: RangeCfg = (..=*cfg).into();
-        let shards = Vec::<Vec<u8>>::read_cfg(reader, &(shard_count, (shard_size, ())))?;
-        let proof = bmt::RangeProof::<H>::read(reader)?;
-
-        Ok(Self { shards, proof })
-    }
-}
-
-impl<H: Hasher> EncodeSize for Data<H> {
-    fn encode_size(&self) -> usize {
-        self.shards.encode_size() + self.proof.encode_size()
-    }
-}
+impl<H: Hasher> Eq for Chunk<H> {}
 
 /// Prepare data for encoding.
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
@@ -294,7 +116,7 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     let mut shard_len = prefixed_len.div_ceil(k);
 
     // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if shard_len % 2 != 0 {
+    if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
 
@@ -330,10 +152,10 @@ fn extract_data(shards: Vec<Vec<u8>>, k: usize) -> Vec<u8> {
 }
 
 /// Type alias for the internal encoding result.
-pub type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
+type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 
-/// Common encoding logic shared by [encode()] and [translate()].
-pub fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
+/// Inner logic for [encode()]
+fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -390,7 +212,7 @@ pub fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<En
 ///
 /// - `root`: The root of the [bmt].
 /// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-pub fn encode<H: Hasher>(
+fn encode<H: Hasher>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -410,41 +232,9 @@ pub fn encode<H: Hasher>(
     Ok((root, chunks))
 }
 
-/// Translate data into a single proof over all data shards.
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `data`: All data shards from the encoded object (and a range proof that they are part of the `root`).
-pub fn translate<H: Hasher>(
-    total: u16,
-    min: u16,
-    data: Vec<u8>,
-) -> Result<(H::Digest, Data<H>), Error> {
-    // Encode data
-    let (tree, mut shards) = encode_inner::<H>(total, min, data)?;
-    let root = tree.root();
-    let k = min as usize;
-
-    // Truncate to data shards only
-    shards.truncate(k);
-
-    // Generate range proof for minimal proof
-    let proof = tree
-        .range_proof(0, (min - 1) as u32)
-        .map_err(|_| Error::InvalidProof)?;
-    let proof = Data::new(shards, proof);
-
-    Ok((root, proof))
-}
-
 /// Decode data from a set of [Chunk]s.
+///
+/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
 ///
 /// # Parameters
 ///
@@ -456,11 +246,11 @@ pub fn translate<H: Hasher>(
 /// # Returns
 ///
 /// - `data`: The decoded data.
-pub fn decode<H: Hasher>(
+fn decode<H: Hasher>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: Vec<Chunk<H>>,
+    chunks: &[Chunk<H>],
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
     assert!(total > min);
@@ -488,16 +278,11 @@ pub fn decode<H: Hasher>(
         }
         seen.insert(index);
 
-        // Verify Merkle proof
-        if !chunk.verify(chunk.index, root) {
-            return Err(Error::InvalidProof);
-        }
-
         // Add to provided shards
         if index < min {
-            provided_originals.push((index as usize, chunk.shard));
+            provided_originals.push((index as usize, chunk.shard.clone()));
         } else {
-            provided_recoveries.push((index as usize - k, chunk.shard));
+            provided_recoveries.push((index as usize - k, chunk.shard.clone()));
         }
     }
 
@@ -559,47 +344,172 @@ pub fn decode<H: Hasher>(
     Ok(extract_data(shards, k))
 }
 
+/// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
+///
+/// # Behavior
+///
+/// The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
+/// shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
+/// All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
+/// is packaged as a chunk containing the shard data, its index, and a Merkle proof against the [bmt] root.
+///
+/// ## Encoding
+///
+/// ```text
+///               +--------------------------------------+
+///               |         Original Data (Bytes)        |
+///               +--------------------------------------+
+///                                  |
+///                                  v
+///               +--------------------------------------+
+///               | [Length Prefix | Original Data...]   |
+///               +--------------------------------------+
+///                                  |
+///                                  v
+///              +----------+ +----------+    +-----------+
+///              |  Shard 0 | |  Shard 1 | .. | Shard k-1 |  (Data Shards)
+///              +----------+ +----------+    +-----------+
+///                     |            |             |
+///                     |            |             |
+///                     +------------+-------------+
+///                                  |
+///                                  v
+///                        +------------------+
+///                        | Reed-Solomon     |
+///                        | Encoder (k, m)   |
+///                        +------------------+
+///                                  |
+///                                  v
+///              +----------+ +----------+    +-----------+
+///              |  Shard k | | Shard k+1| .. | Shard n-1 |  (Recovery Shards)
+///              +----------+ +----------+    +-----------+
+/// ```
+///
+/// ## Merkle Tree Construction
+///
+/// All `n` shards (data and recovery) are hashed and used as leaves to build a [bmt].
+///
+/// ```text
+/// Shards:    [Shard 0, Shard 1, ..., Shard n-1]
+///             |        |              |
+///             v        v              v
+/// Hashes:    [H(S_0), H(S_1), ..., H(S_n-1)]
+///             \       / \       /
+///              \     /   \     /
+///               +---+     +---+
+///                 |         |
+///                 \         /
+///                  \       /
+///                   +-----+
+///                      |
+///                      v
+///                +----------+
+///                |   Root   |
+///                +----------+
+/// ```
+///
+/// The final output is the [bmt] root and a set of `n` chunks.
+///
+/// `(Root, [Chunk 0, Chunk 1, ..., Chunk n-1])`
+///
+/// Each chunk contains:
+/// - `shard`: The shard data (original or recovery).
+/// - `index`: The shard's original index (0 to n-1).
+/// - `proof`: A Merkle proof of the shard's inclusion in the [bmt].
+///
+/// ## Decoding and Verification
+///
+/// The decoder requires any `k` chunks to reconstruct the original data.
+/// 1. Each chunk's Merkle proof is verified against the [bmt] root.
+/// 2. The shards from the valid chunks are used to reconstruct the original `k` data shards.
+/// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
+///    generated. This new root MUST match the original [bmt] root. This prevents attacks where
+///    an adversary provides a valid set of chunks that decode to different data.
+/// 4. If the roots match, the original data is extracted from the reconstructed data shards.
+#[derive(Clone, Copy)]
+pub struct ReedSolomon<H> {
+    _marker: PhantomData<H>,
+}
+
+impl<H> std::fmt::Debug for ReedSolomon<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReedSolomon").finish()
+    }
+}
+
+impl<H: Hasher> Scheme for ReedSolomon<H> {
+    type Commitment = H::Digest;
+
+    type Shard = Chunk<H>;
+    type ReShard = Chunk<H>;
+    type CheckedShard = Chunk<H>;
+    type CheckingData = ();
+
+    type Error = Error;
+
+    fn encode(
+        config: &Config,
+        mut data: impl Buf,
+    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
+        encode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            data,
+        )
+    }
+
+    fn reshard(
+        _config: &Config,
+        commitment: &Self::Commitment,
+        index: u16,
+        shard: Self::Shard,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
+        if shard.index != index {
+            return Err(Error::WrongIndex(index));
+        }
+        if shard.verify(shard.index, commitment) {
+            Ok(((), shard.clone(), shard))
+        } else {
+            Err(Error::InvalidProof)
+        }
+    }
+
+    fn check(
+        _config: &Config,
+        commitment: &Self::Commitment,
+        _checking_data: &Self::CheckingData,
+        index: u16,
+        reshard: Self::ReShard,
+    ) -> Result<Self::CheckedShard, Self::Error> {
+        if reshard.index != index {
+            return Err(Error::WrongIndex(reshard.index));
+        }
+        if !reshard.verify(reshard.index, commitment) {
+            return Err(Error::InvalidProof);
+        }
+        Ok(reshard)
+    }
+
+    fn decode(
+        config: &Config,
+        commitment: &Self::Commitment,
+        _checking_data: Self::CheckingData,
+        shards: &[Self::CheckedShard],
+    ) -> Result<Vec<u8>, Self::Error> {
+        decode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            commitment,
+            shards,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::Sha256;
-
-    #[test]
-    fn test_basic() {
-        let data = b"Hello, Reed-Solomon!";
-        let total = 7u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-        assert_eq!(chunks.len(), total as usize);
-
-        // Verify all chunks
-        for i in 0..total {
-            assert!(chunks[i as usize].verify(i, &root));
-        }
-
-        // Try to decode with exactly min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn test_moderate() {
-        let data = b"Testing with more pieces than minimum";
-        let total = 10u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Try to decode with min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
 
     #[test]
     fn test_recovery() {
@@ -618,7 +528,7 @@ mod tests {
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
+        let decoded = decode::<Sha256>(total, min, &root, &pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -635,7 +545,7 @@ mod tests {
         let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::NotEnoughChunks)));
     }
 
@@ -652,7 +562,7 @@ mod tests {
         let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::DuplicateIndex(0))));
     }
 
@@ -699,8 +609,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -714,8 +624,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -739,11 +649,11 @@ mod tests {
         }
 
         // Collect valid pieces (these are legitimate fragments)
-        let minimal = chunks.into_iter().take(min as usize).collect();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
 
         // Attempt to decode with malicious root
-        let result = decode::<Sha256>(total, min, &malicious_root, minimal);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        let result = decode::<Sha256>(total, min, &malicious_root, &minimal);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
@@ -761,8 +671,8 @@ mod tests {
         }
 
         // Try to decode with the tampered chunk
-        let result = decode::<Sha256>(total, min, &root, chunks);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        let result = decode::<Sha256>(total, min, &root, &chunks);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
@@ -817,28 +727,8 @@ mod tests {
         }
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &malicious_root, pieces);
+        let result = decode::<Sha256>(total, min, &malicious_root, &pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
-    }
-
-    #[test]
-    fn test_odd_shard_len() {
-        let data = b"a";
-        let total = 3u16;
-        let min = 2u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Use a mix of original and recovery pieces
-        let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[2].clone(), // recovery
-        ];
-
-        // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
-        assert_eq!(decoded, data);
     }
 
     #[test]
@@ -859,7 +749,7 @@ mod tests {
         ];
 
         // Fail to decode
-        let result = decode::<Sha256>(total, min, &root, pieces);
+        let result = decode::<Sha256>(total, min, &root, &pieces);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 
@@ -873,8 +763,8 @@ mod tests {
         let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
 
         // Try to decode with min
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
+        let decoded = decode::<Sha256>(total, min, &root, &minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -895,60 +785,5 @@ mod tests {
                 }
             ))
         ));
-    }
-
-    #[test]
-    fn test_translate() {
-        let data = b"Test data for minimal proof functionality";
-        let total = 7u16;
-        let min = 4u16;
-
-        // Encode with minimal proof
-        let (root, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Verify minimal proof
-        assert!(proof.verify(min, &root));
-
-        // Extract data from minimal proof
-        let extracted = proof.extract();
-        assert_eq!(extracted, data);
-    }
-
-    #[test]
-    fn test_translate_wrong_root() {
-        let data = b"Test data for minimal proof";
-        let total = 5u16;
-        let min = 3u16;
-
-        // Encode with minimal proof
-        let (_, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Try to verify with wrong root
-        let mut hasher = Sha256::new();
-        hasher.update(b"wrong_root");
-        let wrong_root = hasher.finalize();
-
-        assert!(!proof.verify(min, &wrong_root));
-    }
-
-    #[test]
-    fn test_translate_serialization() {
-        let data = b"Test serialization of minimal proof";
-        let total = 5u16;
-        let min = 3u16;
-
-        // Encode with minimal proof
-        let (root, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Serialize
-        let serialized = proof.encode();
-
-        // Deserialize
-        let max_shard_size = proof.shards[0].len();
-        let deserialized = Data::<Sha256>::decode_cfg(serialized, &max_shard_size).unwrap();
-
-        // Verify deserialized proof
-        assert!(deserialized.verify(min, &root));
-        assert_eq!(deserialized.extract(), data);
     }
 }

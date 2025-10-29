@@ -56,7 +56,7 @@ impl EncodeSize for TestMessage {
 }
 
 impl Read for TestMessage {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
         let commitment = Vec::<u8>::read_range(buf, *range)?;

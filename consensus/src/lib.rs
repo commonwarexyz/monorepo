@@ -16,7 +16,19 @@ use commonware_cryptography::{Committable, Digestible};
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
-pub mod threshold_simplex;
+pub mod types;
+pub mod utils;
+
+/// Epochable is a trait that provides access to the epoch number.
+/// Any consensus message or object that is associated with a specific epoch should implement this.
+pub trait Epochable {
+    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
+    /// validators is constant.
+    type Epoch;
+
+    /// Returns the epoch associated with this object.
+    fn epoch(&self) -> Self::Epoch;
+}
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
@@ -61,13 +73,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context;
+            type Context: Epochable;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -141,12 +153,9 @@ cfg_if::cfg_if! {
             /// Public key used to identify participants.
             type PublicKey: PublicKey;
 
-            /// Return the leader at a given index for the provided seed.
-            fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
-
             /// Get the **sorted** participants for the given view. This is called when entering a new view before
             /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-            fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>>;
+            fn participants(&self, index: Self::Index) -> Option<&[Self::PublicKey]>;
 
             // Indicate whether some candidate is a participant at the given view.
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
@@ -175,9 +184,6 @@ cfg_if::cfg_if! {
             /// Returns the static identity of the shared secret (typically the constant term
             /// of a polynomial).
             fn identity(&self) -> &Self::Identity;
-
-            /// Return the leader at a given index over the provided seed.
-            fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
             /// Returns the polynomial over which partial signatures are verified at a given index.
             fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;

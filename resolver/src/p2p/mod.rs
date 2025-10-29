@@ -64,7 +64,7 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Returns the current list of peers that can be used to fetch data.
     ///
     /// This is also used to filter requests from peers.
-    fn peers(&self) -> &Vec<Self::PublicKey>;
+    fn peers(&self) -> &[Self::PublicKey];
 
     /// Returns an identifier for the peer set.
     ///
@@ -122,6 +122,7 @@ mod tests {
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                disconnect_on_block: true,
             },
         );
         network.start();

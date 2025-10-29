@@ -3,10 +3,13 @@
 use super::{
     metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
+    types::{Ack, Activity, Error, Index, Item, TipAck},
     Config,
 };
-use crate::{aggregation::types::Certificate, Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{
+    aggregation::types::Certificate, types::Epoch, Automaton, Monitor, Reporter,
+    ThresholdSupervisor,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
@@ -18,11 +21,12 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     buffer::PoolRef,
+    spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
     },
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
@@ -79,7 +83,7 @@ pub struct Engine<
     >,
 > {
     // ---------- Interfaces ----------
-    context: E,
+    context: ContextCell<E>,
     automaton: A,
     monitor: M,
     validators: TSu,
@@ -173,10 +177,11 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
+        // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
-            context,
+            context: ContextCell::new(context),
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
@@ -219,7 +224,7 @@ impl<
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.
@@ -239,11 +244,17 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
+        let journal = Journal::init(self.context.with_label("journal").into(), journal_cfg)
             .await
             .expect("init failed");
-        self.replay(&journal).await;
+        let unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
+
+        // Request digests for unverified indices
+        for index in unverified_indices {
+            trace!(index, "requesting digest for unverified index from replay");
+            self.get_digest(index);
+        }
 
         // Initialize the tip manager
         self.safe_tip.init(
@@ -258,7 +269,11 @@ impl<
             // Propose a new digest if we are processing less than the window
             let next = self.next();
             if next < self.tip + self.window {
-                trace!("requesting new digest: index {}", next);
+                trace!(next, "requesting new digest");
+                assert!(self
+                    .pending
+                    .insert(next, Pending::Unverified(BTreeMap::new()))
+                    .is_none());
                 self.get_digest(next);
                 continue;
             }
@@ -648,13 +663,11 @@ impl<
 
     // ---------- Helpers ----------
 
-    /// Sets `index` as pending and requests the digest from the automaton.
+    /// Requests the digest from the automaton.
+    ///
+    /// Pending must contain the index.
     fn get_digest(&mut self, index: Index) {
-        assert!(self
-            .pending
-            .insert(index, Pending::Unverified(BTreeMap::new()))
-            .is_none());
-
+        assert!(self.pending.contains_key(&index));
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer();
         self.digest_requests.push(async move {
@@ -760,12 +773,13 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
+    /// Returns a list of unverified pending indices that need digest requests.
+    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
         let mut tip = Index::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
-            .replay(self.journal_replay_buffer)
+            .replay(0, 0, self.journal_replay_buffer)
             .await
             .expect("replay failed");
         pin_mut!(stream);
@@ -810,6 +824,7 @@ impl<
         }
 
         // Process each index's acks
+        let mut unverified = Vec::new();
         for (index, mut acks_group) in acks_by_index {
             // Check if we have our own ack (which means we've verified the digest)
             let our_share = self.validators.share(self.epoch);
@@ -849,11 +864,30 @@ impl<
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
+
+                    // Add to unverified indices
+                    unverified.push(index);
                 }
             }
         }
 
-        info!(self.tip, next = self.next(), "replayed journal");
+        // After replay, ensure we have all indices from tip to next in pending or confirmed
+        // to handle the case where we restart and some indices have no acks yet
+        let next = self.next();
+        for index in self.tip..next {
+            // If we already have the index in pending or confirmed, skip
+            if self.pending.contains_key(&index) || self.confirmed.contains_key(&index) {
+                continue;
+            }
+
+            // Add missing index to pending
+            self.pending
+                .insert(index, Pending::Unverified(BTreeMap::new()));
+            unverified.push(index);
+        }
+        info!(self.tip, next, ?unverified, "replayed journal");
+
+        unverified
     }
 
     /// Appends an activity to the journal.

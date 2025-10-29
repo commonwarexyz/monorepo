@@ -3,12 +3,9 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-use commonware_storage::journal::{
-    fixed::{
-        Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
-        Journal as VariableJournal,
-    },
-    Error,
+use commonware_storage::journal::fixed::{
+    Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
+    Journal as VariableJournal,
 };
 use commonware_utils::{NZUsize, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -138,7 +135,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    match journal.replay(NZUsize!(*buffer), *start_pos).await {
+                    let start_pos = *start_pos % (journal_size + 1);
+                    match journal.replay(NZUsize!(*buffer), start_pos).await {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -149,11 +147,6 @@ fn fuzz(input: FuzzInput) {
                                     }
                                     None => break,
                                 }
-                            }
-                        }
-                        Err(Error::InvalidItem(pos)) => {
-                            if pos != *start_pos {
-                                panic!("invalid item error: expected {start_pos} found {pos}",);
                             }
                         }
                         Err(e) => panic!("unexpected replay error: {e:?}"),

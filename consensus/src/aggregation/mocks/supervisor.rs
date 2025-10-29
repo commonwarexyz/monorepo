@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
+use crate::{types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops::evaluate_all,
@@ -61,12 +61,8 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
     type Index = Epoch;
     type PublicKey = P;
 
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!()
-    }
-
-    fn participants(&self, epoch: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        self.validators.get(&epoch)
+    fn participants(&self, epoch: Self::Index) -> Option<&[Self::PublicKey]> {
+        self.validators.get(&epoch).map(|v| v.as_slice())
     }
 
     fn is_participant(&self, epoch: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
@@ -82,10 +78,6 @@ impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
 
     fn identity(&self) -> &Self::Identity {
         &self.identity
-    }
-
-    fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
-        unimplemented!()
     }
 
     fn polynomial(&self, epoch: Self::Index) -> Option<&Self::Polynomial> {

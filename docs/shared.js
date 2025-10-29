@@ -1,20 +1,3 @@
-function getRelativePathToIndex() {
-    const path = window.location.pathname;
-    const pathSegments = path.split('/').filter(segment => segment !== '');
-    let relativePath = '';
-
-    if (pathSegments.length <= 1) {
-        // At root directory or /index.html
-        relativePath = 'index.html';
-    } else if (pathSegments.length >= 2) {
-        // In a subdirectory
-        relativePath = '../'.repeat(pathSegments.length - 1) + 'index.html';
-    }
-
-    return relativePath;
-}
-
-
 function insertLogo() {
     const path = window.location.pathname;
     const isHomePage = path === '/' || path === '/index.html';
@@ -61,9 +44,8 @@ function insertLogo() {
 
     if (!isHomePage) {
         // Wrap the logo in an anchor tag linking back to the homepage
-        const hrefToIndex = getRelativePathToIndex();
         logoHTML = `
-        <a href="${hrefToIndex}" class="logo-link">
+        <a href="/index.html" class="logo-link">
             ${logoHTML}
         </a>
         `;
@@ -126,11 +108,11 @@ function insertFooter() {
     const footerHTML = `
     <div class="footer">
         <div class="socials">
-            <a href="/hiring.html">Hiring</a>
-            <a href="/benchmarks.html">Benchmarks</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+            <a href="/benchmarks.html">Benchmarks</a>
+            <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>
-            <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
+            <a href="/podcast.html">Podcast</a>
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>

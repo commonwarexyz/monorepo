@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::Index,
+    index::{Index as _, Unordered as Index},
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
@@ -113,7 +113,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let mut intervals = RMap::new();
         {
             debug!("initializing archive");
-            let stream = journal.replay(cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
@@ -191,8 +191,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let record = self
             .journal
             .get_exact(section, location.offset, location.len)
-            .await?
-            .ok_or(Error::RecordCorrupted)?;
+            .await?;
         Ok(Some(record.value))
     }
 
@@ -215,8 +214,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             let record = self
                 .journal
                 .get_exact(section, location.offset, location.len)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
+                .await?;
 
             // Get key from item
             if record.key.as_ref() == key.as_ref() {
@@ -356,6 +354,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
     }
 
     async fn close(self) -> Result<(), Error> {

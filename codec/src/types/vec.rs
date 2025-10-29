@@ -40,7 +40,7 @@ impl<T: EncodeSize> EncodeSize for &[T] {
 }
 
 impl<T: Read> Read for Vec<T> {
-    type Cfg = (RangeCfg, T::Cfg);
+    type Cfg = (RangeCfg<usize>, T::Cfg);
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {

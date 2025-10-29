@@ -49,7 +49,7 @@ mod tests {
         },
         Config, Engine, Mailbox,
     };
-    use crate::{Handler, Monitor, Originator};
+    use crate::{Error, Handler, Monitor, Originator};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -92,6 +92,7 @@ mod tests {
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                disconnect_on_block: true,
             },
         );
         network.start();
@@ -208,7 +209,8 @@ mod tests {
             let request = Request { id: 1, data: 1 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
@@ -275,7 +277,8 @@ mod tests {
             let commitment = request.commitment();
             let recipients = mailbox
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Cancel immediately
@@ -356,7 +359,10 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            let recipients = mailbox1.send(Recipients::All, request.clone()).await;
+            let recipients = mailbox1
+                .send(Recipients::All, request.clone())
+                .await
+                .expect("send failed");
             assert_eq!(recipients.len(), 2);
             assert!(recipients.contains(&peers[1]));
             assert!(recipients.contains(&peers[2]));
@@ -434,7 +440,8 @@ mod tests {
             for _ in 0..3 {
                 let recipients = mailbox1
                     .send(Recipients::One(peers[1].clone()), request.clone())
-                    .await;
+                    .await
+                    .expect("send failed");
                 assert_eq!(recipients, vec![peers[1].clone()]);
             }
 
@@ -507,10 +514,12 @@ mod tests {
             let request2 = Request { id: 20, data: 20 };
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request1)
-                .await;
+                .await
+                .expect("send failed");
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request2)
-                .await;
+                .await
+                .expect("send failed");
 
             // Collect both responses
             let mut response10_received = false;
@@ -585,7 +594,8 @@ mod tests {
             let request = Request { id: 100, data: 100 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
@@ -632,7 +642,10 @@ mod tests {
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
-            let recipients = mailbox.send(Recipients::All, request.clone()).await;
+            let recipients = mailbox
+                .send(Recipients::All, request.clone())
+                .await
+                .expect("send failed");
             assert_eq!(recipients, Vec::<PublicKey>::new());
 
             // Verify no responses collected
@@ -644,6 +657,92 @@ mod tests {
                     // Expected: no events
                 }
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_send_fails_with_network_error() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Setup peer 1 with a failing sender
+            let scheme = schemes.next().unwrap();
+            let conn = connections.next().unwrap();
+            let (_, receiver1) = conn.0; // Request channel
+            let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
+            let (sender2, receiver2) = conn.1; // Response channel
+            let (engine, mut mailbox) = Engine::new(
+                context.with_label(&format!("engine_{}", scheme.public_key())),
+                Config {
+                    blocker: oracle.control(scheme.public_key()),
+                    monitor: MockMonitor::dummy(),
+                    handler: MockHandler::dummy(),
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+
+            // Start engine
+            engine.start((sender1, receiver1), (sender2, receiver2));
+
+            // Send request
+            let request = Request { id: 1, data: 1 };
+            let err = mailbox
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::SendFailed(_)));
+        });
+    }
+
+    #[test_traced]
+    fn test_send_fails_with_canceled() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Setup peer 1 with a failing sender
+            let scheme = schemes.next().unwrap();
+            let conn = connections.next().unwrap();
+            let (sender1, receiver1) = conn.0; // Request channel
+            let (sender2, receiver2) = conn.1; // Response channel
+            let (engine, mut mailbox) = Engine::new(
+                context.with_label(&format!("engine_{}", scheme.public_key())),
+                Config {
+                    blocker: oracle.control(scheme.public_key()),
+                    monitor: MockMonitor::dummy(),
+                    handler: MockHandler::dummy(),
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+
+            // Start engine
+            let handle = engine.start((sender1, receiver1), (sender2, receiver2));
+
+            // Stop the engine (which will result in all further requests being canceled)
+            handle.abort();
+
+            // Send request (will return Error::Canceled instead of Error::SendFailed)
+            let request = Request { id: 1, data: 1 };
+            let err = mailbox
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Canceled));
         });
     }
 
@@ -701,7 +800,8 @@ mod tests {
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Send a response from peer 3 to peer 1

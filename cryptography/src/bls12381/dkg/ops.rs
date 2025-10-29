@@ -9,12 +9,12 @@ use crate::bls12381::{
         variant::Variant,
     },
 };
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
-pub fn generate_shares<R: RngCore, V: Variant>(
+pub fn generate_shares<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     share: Option<Share>,
     n: u32,
@@ -55,8 +55,8 @@ pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::
 /// polynomial is provided, verify that the commitment is on that polynomial.
 pub fn verify_commitment<V: Variant>(
     previous: Option<&poly::Public<V>>,
-    dealer: u32,
     commitment: &poly::Public<V>,
+    dealer: u32,
     t: u32,
 ) -> Result<(), Error> {
     if let Some(previous) = previous {
@@ -72,17 +72,15 @@ pub fn verify_commitment<V: Variant>(
 }
 
 /// Verify that a given share is valid for a specified recipient.
+///
+/// # Warning
+///
+/// This function assumes the provided commitment has already been verified.
 pub fn verify_share<V: Variant>(
-    previous: Option<&poly::Public<V>>,
-    dealer: u32,
     commitment: &poly::Public<V>,
-    t: u32,
     recipient: u32,
     share: &Share,
 ) -> Result<(), Error> {
-    // Verify that commitment is on previous public polynomial (if provided)
-    verify_commitment::<V>(previous, dealer, commitment, t)?;
-
     // Check if share is valid
     if share.index != recipient {
         return Err(Error::MisdirectedShare);
@@ -95,17 +93,22 @@ pub fn verify_share<V: Variant>(
     Ok(())
 }
 
-/// Construct a new public polynomial by summing all commitments.
-pub fn construct_public<V: Variant>(
-    commitments: Vec<poly::Public<V>>,
+/// Construct a public polynomial by summing a vector of commitments.
+pub fn construct_public<'a, V: Variant>(
+    commitments: impl IntoIterator<Item = &'a poly::Public<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
-    if commitments.len() < required as usize {
-        return Err(Error::InsufficientDealings);
-    }
+    // Compute new public polynomial by summing all commitments
+    let mut count = 0;
     let mut public = poly::Public::<V>::zero();
-    for commitment in commitments {
-        public.add(&commitment);
+    for commitment in commitments.into_iter() {
+        public.add(commitment);
+        count += 1;
+    }
+
+    // Ensure we have enough commitments
+    if count < required {
+        return Err(Error::InsufficientDealings);
     }
     Ok(public)
 }
@@ -116,7 +119,7 @@ pub fn construct_public<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
@@ -169,7 +172,7 @@ pub fn recover_public_with_weights<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {

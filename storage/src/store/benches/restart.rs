@@ -30,6 +30,16 @@ const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
+cfg_if::cfg_if! {
+    if #[cfg(not(full_bench))] {
+        const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
+        const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
+    } else {
+        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 2];
+        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 2];
+    }
+}
+
 fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_journal_partition: format!("log_{PARTITION_SUFFIX}"),
@@ -80,6 +90,7 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
             }
         }
         db.commit(Some(metadata)).await.unwrap();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
 }
@@ -90,8 +101,8 @@ type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Di
 fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
+    for elements in ELEMENTS {
+        for operations in OPERATIONS {
             // Create a large store db.
             gen_random_store(cfg.clone(), elements, operations);
 

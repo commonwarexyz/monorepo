@@ -4,8 +4,8 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    hasher::Standard,
     mem::{Config as MemConfig, Mmr},
+    Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -23,12 +23,17 @@ enum Strategy {
 /// returns start diminishing.
 const THREADS: usize = 8;
 
+#[cfg(not(full_bench))]
+const N_LEAVES: [usize; 1] = [100_000];
+#[cfg(full_bench)]
+const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
+
 /// Benchmark the performance of randomly updating leaves in an MMR.
 fn bench_update(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg);
     for updates in [1_000_000, 100_000] {
-        for leaves in [100_000, 1_000_000, 5_000_000, 10_000_000] {
+        for leaves in N_LEAVES {
             for strategy in [
                 Strategy::NoBatching,
                 Strategy::BatchedSerial,
@@ -52,17 +57,18 @@ fn bench_update(c: &mut Criterion) {
                                             .unwrap();
                                     Mmr::<Sha256>::init(MemConfig {
                                         nodes: vec![],
-                                        pruned_to_pos: 0,
+                                        pruned_to_pos: Position::new(0),
                                         pinned_nodes: vec![],
                                         pool: Some(pool),
                                     })
+                                    .unwrap()
                                 }
                                 _ => Mmr::<Sha256>::new(),
                             };
-                            let mut elements = Vec::with_capacity(leaves as usize);
+                            let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
-                            let mut leaf_positions = Vec::with_capacity(leaves as usize);
-                            let mut h = Standard::new();
+                            let mut leaf_positions = Vec::with_capacity(leaves);
+                            let mut h = StandardHasher::new();
 
                             // Append random elements to MMR
                             for _ in 0..leaves {
@@ -79,7 +85,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut leaf_map = HashMap::new();
                             for _ in 0..updates {
                                 let rand_leaf_num = sampler.gen_range(0..leaves);
-                                let rand_leaf_pos = leaf_positions[rand_leaf_num as usize];
+                                let rand_leaf_pos = leaf_positions[rand_leaf_num];
                                 let rand_leaf_swap = sampler.gen_range(0..elements.len());
                                 let new_element = &elements[rand_leaf_swap];
                                 leaf_map.insert(rand_leaf_pos, *new_element);
@@ -88,16 +94,16 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (pos, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, pos, &element);
+                                        mmr.update_leaf(&mut h, pos, &element).unwrap();
                                     }
                                 }
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates
                                     let updates: Vec<(
-                                        u64,
+                                        Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    mmr.update_leaf_batched(&mut h, &updates);
+                                    mmr.update_leaf_batched(&mut h, &updates).unwrap();
                                 }
                             }
                             mmr.sync(&mut h);

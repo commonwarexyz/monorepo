@@ -30,61 +30,65 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let clock = Arc::new(context.clone());
-        let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
-        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
-        let metrics = Self {
-            fetch_pending: Gauge::default(),
-            fetch_active: Gauge::default(),
-            serve_processing: Gauge::default(),
-            peers_blocked: Gauge::default(),
-            fetch: status::Counter::default(),
-            cancel: status::Counter::default(),
-            serve: status::Counter::default(),
-            fetch_duration: histogram::Timed::new(fetch_duration.clone(), clock.clone()),
-            serve_duration: histogram::Timed::new(serve_duration.clone(), clock),
-        };
+        let fetch_pending = Gauge::default();
         context.register(
             "fetch_pending",
             "Current number of pending fetch requests",
-            metrics.fetch_pending.clone(),
+            fetch_pending.clone(),
         );
+        let fetch_active = Gauge::default();
         context.register(
             "fetch_active",
             "Current number of active fetch requests",
-            metrics.fetch_active.clone(),
+            fetch_active.clone(),
         );
+        let serve_processing = Gauge::default();
         context.register(
             "serve_processing",
             "Current number of serves currently processing",
-            metrics.serve_processing.clone(),
+            serve_processing.clone(),
         );
+        let peers_blocked = Gauge::default();
         context.register(
             "peers_blocked",
             "Current number of blocked peers",
-            metrics.peers_blocked.clone(),
+            peers_blocked.clone(),
         );
-        context.register(
-            "fetch",
-            "Number of fetches by status",
-            metrics.fetch.clone(),
-        );
+        let fetch = status::Counter::default();
+        context.register("fetch", "Number of fetches by status", fetch.clone());
+        let cancel = status::Counter::default();
         context.register(
             "cancel",
             "Number of canceled fetches by status",
-            metrics.cancel.clone(),
+            cancel.clone(),
         );
-        context.register("serve", "Number of serves by status", metrics.serve.clone());
+        let serve = status::Counter::default();
+        context.register("serve", "Number of serves by status", serve.clone());
+        let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
         context.register(
             "serve_duration",
             "Histogram of successful serves",
-            serve_duration,
+            serve_duration.clone(),
         );
+        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
         context.register(
             "fetch_duration",
             "Histogram of successful fetches",
-            fetch_duration,
+            fetch_duration.clone(),
         );
-        metrics
+        // TODO(#1833): Shouldn't require another clone
+        let clock = Arc::new(context.clone());
+
+        Self {
+            fetch_pending,
+            fetch_active,
+            serve_processing,
+            peers_blocked,
+            fetch,
+            cancel,
+            serve,
+            fetch_duration: histogram::Timed::new(fetch_duration, clock.clone()),
+            serve_duration: histogram::Timed::new(serve_duration, clock),
+        }
     }
 }

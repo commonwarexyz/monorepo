@@ -1,0 +1,14 @@
+# Minimmit
+
+## Propose a block (1MB proposal)
+propose{0, size=1048576}
+
+## Multicast notarize (32B digest + 8B view)
+wait{0, threshold=1}
+broadcast{1, size=40}
+
+## Wait for 2f+1 to notarize
+wait{1, threshold=41%}
+
+## Wait for n-f to finalize
+wait{1, threshold=81%}

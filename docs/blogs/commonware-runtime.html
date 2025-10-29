@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > commonware-runtime: The Foundation for Reliable and Performant Consensus</title>
     <meta name="description" content="In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery).">
@@ -30,7 +30,7 @@
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@_patrickogrady" />
 
-    <link rel="stylesheet" type="text/css" href="../style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -82,7 +82,7 @@
         <p>In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery).</p>
         <p>While Twitter fame invariably awaits the successful, failure too often means nights and weekends parsing thousands of log lines (on top of whatever is required to unhalt a borked network). The sting of wayward improvements has deterred many engineers, reasonably so, from modifying well-behaved code with emergent (and difficult to test) stability.</p>
         <div class="image-container">
-            <img src="../imgs/consensus-fault.jpeg" alt="Working through a consensus fault">
+            <img src="/imgs/consensus-fault.jpeg" alt="Working through a consensus fault">
         </div>
         <p>At <a href="https://x.com/commonwarexyz">@commonwarexyz</a>, we believe the relationship between engineers and mechanism iteration must be (substantially) advanced for onchain applications to achieve widespread adoption. If developers are forced to shy away from frequent and aggressive iteration, the onchain future we all hope for will remain just that ... an onchain future.</p>
         <h2>commonware-runtime: 1 Trait, 2 Dialects</h2>
@@ -91,7 +91,7 @@
         <h2>What is Deterministic Simulation and Why Does it Help?</h2>
         <p>Consider a not so uncommon test where 100 different agents send unique messages to each other. The way those messages are constructed (from external randomness, clocks, and storage) and the order that messages are sent has a significant impact on outcome. Sending a message before an agent is initialized means it is dropped. Delaying the delivery of a message until after some timeout leads to the sender being penalized.</p>
         <div class="image-container">
-            <img src="../imgs/neo-deterministic.jpeg" alt="Controlling time and space with deterministic simulation">
+            <img src="/imgs/neo-deterministic.jpeg" alt="Controlling time and space with deterministic simulation">
         </div>
         <p>What if you could control the order in which these agents interact and the external sources they depend on? With integrated deterministic simulation, you can run the same test with different sources of entropy to shuffle the order of agent execution (broadening exploration of the state space) and, critically, can reproduce any failing result (no more waiting for that random flake to occur again).</p>
         <h2>Introducing Deterministic Simulation to <i>commonware-p2p</i></h2>
@@ -104,8 +104,7 @@
     </div>
 
     <div id="footer-placeholder"></div>
-    <script src="../shared.js"></script>
-    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>

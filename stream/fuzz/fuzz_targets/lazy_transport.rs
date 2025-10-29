@@ -2,10 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{
-    public_key::{Config, Connection, IncomingConnection, Receiver, Sender},
-    Receiver as _, Sender as _,
-};
+use commonware_stream::{dial, listen, Config, Receiver, Sender};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
@@ -30,7 +27,7 @@ thread_local! {
             let (listener_sink, dialer_stream) = mocks::Channel::init();
 
             let dialer_config = Config {
-                crypto: dialer_crypto.clone(),
+                signing_key: dialer_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
                 max_message_size: MAX_MESSAGE_SIZE,
                 synchrony_bound: Duration::from_secs(3),
@@ -39,7 +36,7 @@ thread_local! {
             };
 
             let listener_config = Config {
-                crypto: listener_crypto.clone(),
+                signing_key: listener_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
                 max_message_size: MAX_MESSAGE_SIZE,
                 synchrony_bound: Duration::from_secs(3),
@@ -47,30 +44,30 @@ thread_local! {
                 handshake_timeout: Duration::from_secs(2),
             };
 
-            let listener_handle = context.clone().spawn(move |context| async move {
-                let incoming = IncomingConnection::verify(
-                    &context,
-                    listener_config,
-                    listener_sink,
-                    listener_stream,
-                ).await?;
-                Connection::upgrade_listener(context, incoming).await
-            });
 
-            let dialer_connection = Connection::upgrade_dialer(
-                context.clone(),
-                dialer_config,
-                dialer_sink,
-                dialer_stream,
-                listener_crypto.public_key(),
-            ).await.expect("Dialer connection should succeed");
+        let listener_handle = context.clone().spawn(move |context| async move {
+            listen(
+                context,
+                |_| async { true },
+                listener_config,
+                listener_stream,
+                listener_sink,
+            ).await
+        });
 
-            let listener_connection = listener_handle.await
-                .expect("Listener handle should succeed")
-                .expect("Listener connection should succeed");
+        let (dialer_sender, _) = dial(
+            context.clone(),
+            dialer_config,
+            listener_crypto.public_key(),
+            dialer_stream,
+            dialer_sink,
+        )
+        .await
+        .unwrap();
 
-            let (dialer_sender, _) = dialer_connection.split();
-            let (_, listener_receiver) = listener_connection.split();
+        let (listener_peer, _, listener_receiver) =
+            listener_handle.await.unwrap().unwrap();
+        assert_eq!(listener_peer, dialer_crypto.public_key());
 
             TransportPair {
                 dialer_sender,
@@ -97,7 +94,7 @@ fn fuzz(data: &[u8]) {
         for chunk in data.chunks(1024) {
             block_on(transport.dialer_sender.send(chunk)).unwrap();
 
-            let received = block_on(transport.listener_receiver.receive()).unwrap();
+            let received = block_on(transport.listener_receiver.recv()).unwrap();
             assert_eq!(&received[..], chunk, "Data corruption detected");
         }
     });

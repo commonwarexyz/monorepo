@@ -1,12 +1,12 @@
 [package]
 name = "commonware-runtime"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.60"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Execute asynchronous tasks with a configurable scheduler."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
 documentation = "https://docs.rs/commonware-runtime"
 
@@ -22,6 +22,7 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+pin-project = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -33,6 +34,7 @@ sysinfo = { workspace = true }
 
 [features]
 default = []
+external = ["pin-project"]
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 

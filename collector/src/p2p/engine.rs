@@ -2,12 +2,15 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::p2p::{Handler, Monitor};
+use crate::{
+    p2p::{Handler, Monitor},
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
@@ -29,7 +32,7 @@ where
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     // Configuration
-    context: E,
+    context: ContextCell<E>,
     blocker: B,
     priority_request: bool,
     request_codec: Rq::Cfg,
@@ -82,7 +85,7 @@ where
 
         (
             Self {
-                context,
+                context: ContextCell::new(context),
                 blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
                 request_codec: cfg.request_codec,
@@ -108,7 +111,7 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(requests, responses))
+        spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
@@ -143,13 +146,12 @@ where
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
-                                        for peer in &recipients {
-                                            entry.0.insert(peer.clone());
-                                        }
-                                        let _ = responder.send(recipients);
+                                        entry.0.extend(recipients.iter().cloned());
+                                        let _ = responder.send(Ok(recipients));
                                     }
                                     Err(err) => {
                                         error!(?err, ?commitment, "failed to send message");
+                                        let _ = responder.send(Err(Error::SendFailed(err.into())));
                                     }
                                 }
                             },

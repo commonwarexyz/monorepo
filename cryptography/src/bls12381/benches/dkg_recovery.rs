@@ -5,26 +5,31 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, set::Set};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use std::{collections::HashMap, hint::black_box};
+use std::{collections::BTreeMap, hint::black_box};
 
 /// Concurrency isn't used in DKG recovery, so we set it to 1.
 const CONCURRENCY: usize = 1;
 
+// Configure contributors based on context
+#[cfg(not(full_bench))]
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
+#[cfg(full_bench)]
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
+
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500] {
+    for &n in CONTRIBUTORS {
         let t = quorum(n);
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
                     // Create contributors
-                    let mut contributors = (0..n)
+                    let contributors = (0..n)
                         .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
-                        .collect::<Vec<_>>();
-                    contributors.sort();
+                        .collect::<Set<_>>();
 
                     // Create player
                     let me = contributors[0].clone();
@@ -37,7 +42,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     );
 
                     // Create commitments and send shares to player
-                    let mut commitments = HashMap::new();
+                    let mut commitments = BTreeMap::new();
                     for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
                         let (_, commitment, shares) =
                             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -49,7 +54,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     (player, commitments)
                 },
                 |(player, commitments)| {
-                    black_box(player.finalize(commitments, HashMap::new()).unwrap());
+                    black_box(player.finalize(commitments, BTreeMap::new()).unwrap());
                 },
                 BatchSize::SmallInput,
             );

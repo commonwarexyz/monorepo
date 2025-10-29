@@ -35,8 +35,8 @@ pub type Region = String;
 #[derive(Debug, Clone)]
 pub struct RegionConfig {
     pub count: usize,
-    pub egress_bps: Option<usize>,
-    pub ingress_bps: Option<usize>,
+    pub egress_cap: Option<usize>,
+    pub ingress_cap: Option<usize>,
 }
 
 pub type Distribution = BTreeMap<Region, RegionConfig>;
@@ -500,7 +500,7 @@ pub fn median(data: &mut [f64]) -> f64 {
     }
     data.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mid = data.len() / 2;
-    if data.len() % 2 == 0 {
+    if data.len().is_multiple_of(2) {
         (data[mid - 1] + data[mid]) / 2.0
     } else {
         data[mid]
@@ -1037,11 +1037,61 @@ broadcast{1}
             ("echo.lazy", include_str!("../echo.lazy"), true),
             ("simplex.lazy", include_str!("../simplex.lazy"), true),
             (
+                "simplex_with_delay.lazy",
+                include_str!("../simplex_with_delay.lazy"),
+                true,
+            ),
+            (
                 "simplex_with_certificates.lazy",
                 include_str!("../simplex_with_certificates.lazy"),
                 true,
             ),
+            (
+                "simplex_small_block.lazy",
+                include_str!("../simplex_small_block.lazy"),
+                true,
+            ),
+            (
+                "simplex_large_block.lazy",
+                include_str!("../simplex_large_block.lazy"),
+                true,
+            ),
+            (
+                "simplex_large_block_coding_50.lazy",
+                include_str!("../simplex_large_block_coding_50.lazy"),
+                true,
+            ),
             ("minimmit.lazy", include_str!("../minimmit.lazy"), true),
+            (
+                "minimmit_small_block.lazy",
+                include_str!("../minimmit_small_block.lazy"),
+                true,
+            ),
+            (
+                "minimmit_large_block.lazy",
+                include_str!("../minimmit_large_block.lazy"),
+                true,
+            ),
+            (
+                "minimmit_large_block_coding_50.lazy",
+                include_str!("../minimmit_large_block_coding_50.lazy"),
+                true,
+            ),
+            (
+                "alpenglow_votor_small_block.lazy",
+                include_str!("../alpenglow_votor_small_block.lazy"),
+                true,
+            ),
+            (
+                "alpenglow_votor_large_block.lazy",
+                include_str!("../alpenglow_votor_large_block.lazy"),
+                true,
+            ),
+            (
+                "alpenglow_votor_large_block_coding_50.lazy",
+                include_str!("../alpenglow_votor_large_block_coding_50.lazy"),
+                true,
+            ),
             ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),
         ];
 

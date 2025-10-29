@@ -3,7 +3,7 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::threshold_simplex::{self, Engine};
+use commonware_consensus::simplex::{self, Engine};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
-use commonware_stream::public_key::{self, Connection};
+use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, quorum, union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
@@ -145,8 +145,8 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure indexer
-    let indexer_cfg = public_key::Config {
-        crypto: signer.clone(),
+    let indexer_cfg = StreamConfig {
+        signing_key: signer.clone(),
         namespace: INDEXER_NAMESPACE.to_vec(),
         max_message_size: 1024 * 1024,
         synchrony_bound: Duration::from_secs(1),
@@ -155,7 +155,7 @@ fn main() {
     };
 
     // Configure network
-    let p2p_cfg = authenticated::discovery::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -171,10 +171,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer =
-            Connection::upgrade_dialer(context.clone(), indexer_cfg, sink, stream, indexer)
-                .await
-                .expect("Failed to upgrade connection with indexer");
+        let indexer = dial(
+            context.with_label("dialer"),
+            indexer_cfg,
+            indexer,
+            stream,
+            sink,
+        )
+        .await
+        .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =
@@ -208,7 +213,7 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let (application, supervisor, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
@@ -217,7 +222,7 @@ fn main() {
                 other_public,
                 hasher: Sha256::default(),
                 mailbox_size: 1024,
-                participants: validators.clone(),
+                participants: validators.clone().into(),
                 share,
             },
         );
@@ -225,16 +230,18 @@ fn main() {
         // Initialize consensus
         let engine = Engine::new(
             context.with_label("engine"),
-            threshold_simplex::Config {
-                crypto: signer.clone(),
+            simplex::Config {
+                me: signer.public_key(),
+                participants: validators.clone().into(),
+                scheme,
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
-                supervisor,
                 partition: String::from("log"),
-                namespace: consensus_namespace,
                 mailbox_size: 1024,
+                epoch: 0,
+                namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

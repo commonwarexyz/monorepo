@@ -1,12 +1,12 @@
 [package]
 name = "commonware-p2p"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.60"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
 documentation = "https://docs.rs/commonware-p2p"
 
@@ -26,6 +26,10 @@ tracing = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 either = { workspace = true }
+num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-rational = { workspace = true }
+num-traits = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

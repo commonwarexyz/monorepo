@@ -20,7 +20,7 @@ impl Peer {
 pub enum MessageType {
     BitVec,
     Peers,
-    Data(u32),
+    Data(u64),
     Invalid,
 }
 

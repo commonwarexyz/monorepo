@@ -28,7 +28,7 @@ use std::{
 use tracing::debug;
 
 /// The channel to use for all messages
-const DEFAULT_CHANNEL: u32 = 0;
+const DEFAULT_CHANNEL: u64 = 0;
 
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
@@ -184,7 +184,7 @@ fn parse_arguments() -> Arguments {
                 .parse::<usize>()
                 .expect("invalid count");
 
-            let (egress_bps, ingress_bps) = match parts.next() {
+            let (egress_cap, ingress_cap) = match parts.next() {
                 Some(bandwidth) => {
                     if bandwidth.contains('/') {
                         let mut bw = bandwidth.split('/');
@@ -207,8 +207,8 @@ fn parse_arguments() -> Arguments {
                 region,
                 RegionConfig {
                     count,
-                    egress_bps,
-                    ingress_bps,
+                    egress_cap,
+                    ingress_cap,
                 },
             )
         })
@@ -296,6 +296,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
         context.with_label("network"),
         Config {
             max_size: usize::MAX,
+            disconnect_on_block: true,
         },
     );
     network.start();
@@ -352,11 +353,7 @@ async fn setup_network_identities(
     for (identity, region, _, _) in &identities {
         let config = &distribution[region];
         oracle
-            .set_bandwidth(
-                identity.clone(),
-                config.egress_bps.unwrap_or(usize::MAX),
-                config.ingress_bps.unwrap_or(usize::MAX),
-            )
+            .limit_bandwidth(identity.clone(), config.egress_cap, config.ingress_cap)
             .await
             .unwrap();
     }

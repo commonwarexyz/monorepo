@@ -1,29 +1,29 @@
-use crate::Block;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
-use commonware_resolver::p2p::Coordinator;
+use super::SchemeProvider;
+use crate::{simplex::signing_scheme::Scheme, Block};
 use commonware_runtime::buffer::PoolRef;
-use governor::Quota;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 /// Marshal configuration.
-pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
-    /// The public key of the validator.
-    pub public_key: P,
+pub struct Config<B, P, S>
+where
+    B: Block,
+    P: SchemeProvider<Scheme = S>,
+    S: Scheme,
+{
+    /// Provider for epoch-specific signing schemes.
+    pub scheme_provider: P,
 
-    /// The identity of the network.
-    pub identity: V::Public,
-
-    /// The coordinator for the resolvers.
-    pub coordinator: Z,
+    /// The length of an epoch in number of blocks.
+    pub epoch_length: u64,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 
     /// Size of backfill request/response mailbox.
     pub mailbox_size: usize,
-
-    /// Backfill rate limit.
-    pub backfill_quota: Quota,
 
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
@@ -65,8 +65,10 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     pub write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    pub codec_config: B::Cfg,
+    pub block_codec_config: B::Cfg,
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
+
+    pub _marker: PhantomData<S>,
 }

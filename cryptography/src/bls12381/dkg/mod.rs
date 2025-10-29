@@ -75,7 +75,9 @@
 //! commitments they did not acknowledge (or that the dealer said they didn't acknowledge). With this, they can recover
 //! the new group polynomial and derive their share of the secret. If this distribution is not received by time `5t`, exit.
 //!
-//! # Synchrony Assumption
+//! # Caveats
+//!
+//! ## Synchrony Assumption
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
 //! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
@@ -101,7 +103,7 @@
 //! that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
-//! ## Future Work: Dropping the Synchrony Assumption?
+//! ### Future Work: Dropping the Synchrony Assumption?
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
@@ -113,12 +115,39 @@
 //! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
 //! observers the opportunity to brute force decrypt shares (even if honest players are online).
 //!
-//! # Tracking Complaints
+//! ## Tracking Complaints
 //!
 //! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
 //! possible to implement your own mechanism and to manually disqualify dealers from a given round in the arbiter. This decision was made
 //! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this
 //! construction is used.
+//!
+//! ## Non-Uniform Distribution
+//!
+//! The Joint-Feldman DKG protocol does not guarantee a uniformly random secret key is generated. An adversary
+//! can introduce `O(lg N)` bits of bias into the key with `O(poly(N))` amount of computation. For uses
+//! like signing, threshold encryption, where the security of the scheme reduces to that of
+//! the underlying assumption that cryptographic constructions using the curve are secure (i.e.
+//! that the Discrete Logarithm Problem, or stronger variants, are hard), then this caveat does
+//! not affect the security of the scheme. This must be taken into account when integrating this
+//! component into more esoteric schemes.
+//!
+//! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
+//! require an extra round of broadcast ([GJKR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
+//! [BK25](https://eprint.iacr.org/2025/819)).
+//!
+//! ## Share Reveals
+//!
+//! In order to prevent malicious dealers from withholding shares from players, we
+//! require the dealers reveal the shares for which they did not receive acks.
+//! Because of the synchrony assumption above, this will only happen if either:
+//! - the dealer is malicious, not sending a share, but honestly revealing,
+//! - or, the player is malicious, not sending an ack when they should.
+//!
+//! Thus, for honest players, in the worst case, `f` reveals get created, because
+//! they correctly did not ack the `f` malicious dealers who failed to send them
+//! a share. In that case, their final share remains secret, because it is the linear
+//! combination of at least `f + 1` shares received from dealers.
 //!
 //! # Example
 //!
@@ -131,9 +160,9 @@ pub use dealer::Dealer;
 pub mod ops;
 pub mod player;
 pub use player::Player;
-use thiserror::Error;
+pub mod types;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("unexpected polynomial")]
     UnexpectedPolynomial,
@@ -192,16 +221,16 @@ mod tests {
                 partial_sign_proof_of_possession, threshold_signature_recover,
                 verify_proof_of_possession,
             },
-            poly::public,
+            poly::{self, public},
             variant::{MinPk, MinSig, Variant},
         },
         ed25519::PrivateKey,
         PrivateKeyExt as _, Signer as _,
     };
     use arbiter::Output;
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, set::Set};
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn run_dkg_and_reshare<V: Variant>(
         n_0: u32,
@@ -214,12 +243,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n_0 {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n_0)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealers
         let mut dealer_shares = HashMap::new();
@@ -281,7 +307,7 @@ mod tests {
             assert!(output.inactive.is_empty());
 
             // Send commitment and acks to arbiter
-            arb.commitment(dealer, commitment, output.active, Vec::new())
+            arb.commitment(dealer, commitment, output.active.into(), Vec::new())
                 .unwrap();
         }
 
@@ -310,7 +336,7 @@ mod tests {
             let result = players
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), HashMap::new())
+                .finalize(output.commitments.clone(), BTreeMap::new())
                 .unwrap();
             outputs.insert(player.clone(), result);
         }
@@ -328,12 +354,9 @@ mod tests {
             .expect("invalid proof of possession");
 
         // Create reshare players (assume no overlap)
-        let mut reshare_players = Vec::new();
-        for i in 0..n_1 {
-            let player = PrivateKey::from_seed((i + n_0) as u64).public_key();
-            reshare_players.push(player);
-        }
-        reshare_players.sort();
+        let reshare_players = (0..n_1)
+            .map(|i| PrivateKey::from_seed((i + n_0) as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create reshare dealers
         let mut reshare_shares = HashMap::new();
@@ -399,7 +422,7 @@ mod tests {
             assert!(output.inactive.is_empty());
 
             // Send commitment and acks to arbiter
-            arb.commitment(dealer, commitment, output.active, Vec::new())
+            arb.commitment(dealer, commitment, output.active.into(), Vec::new())
                 .unwrap();
         }
 
@@ -428,7 +451,7 @@ mod tests {
             let result = reshare_player_objs
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), HashMap::new())
+                .finalize(output.commitments.clone(), BTreeMap::new())
                 .unwrap();
             assert_eq!(result.public, output.public);
             outputs.push(result);
@@ -485,12 +508,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, _, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -520,12 +540,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -561,12 +578,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -606,12 +620,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -647,12 +658,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -683,12 +691,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -721,47 +726,47 @@ mod tests {
     fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;
+        let t = quorum(n);
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
+
+        // Create invalid commitments
+        let mut commitments = Vec::new();
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t - 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t + 1);
+        commitments.push((public, shares));
+
+        // Check invalid commitments
+        for (public, shares) in commitments {
+            // Send invalid commitment to player
+            let mut player = Player::<_, MinSig>::new(
+                contributors[0].clone(),
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                1,
+            );
+            let result = player.share(contributors[0].clone(), public.clone(), shares[0].clone());
+            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+
+            // Create arbiter
+            let mut arb =
+                Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+            let result = arb.commitment(
+                contributors[0].clone(),
+                public,
+                vec![0, 1, 2, 3, 4],
+                Vec::new(),
+            );
+            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
         }
-        contributors.sort();
-
-        // Create dealer
-        let (_, _, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
-
-        // Create invalid commitment
-        let (public, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n * 2, 1);
-
-        // Create player
-        let mut player = Player::<_, MinSig>::new(
-            contributors[0].clone(),
-            None,
-            contributors.clone(),
-            contributors.clone(),
-            1,
-        );
-
-        // Send invalid commitment to player
-        let result = player.share(contributors[0].clone(), public.clone(), shares[0].clone());
-        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
-
-        // Create arbiter
-        let mut arb =
-            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
-
-        // Send invalid commitment to arbiter
-        let result = arb.commitment(
-            contributors[0].clone(),
-            public,
-            vec![0, 1, 2, 3, 4],
-            Vec::new(),
-        );
-        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
     }
 
     #[test]
@@ -771,12 +776,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -804,12 +806,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create arbiter
         let mut arb =
@@ -849,21 +848,15 @@ mod tests {
     }
 
     #[test]
-    fn test_arbiter_best() {}
-
-    #[test]
     fn test_duplicate_commitment() {
         // Initialize test
         let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -899,12 +892,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -931,12 +921,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -971,12 +958,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1005,12 +989,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -1037,12 +1018,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1072,12 +1050,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -1108,12 +1083,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1139,12 +1111,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1170,12 +1139,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (_, commitment, shares) =
@@ -1206,12 +1172,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1223,7 +1186,7 @@ mod tests {
 
         // Finalize dealer
         let output = dealer.finalize().unwrap();
-        assert_eq!(output.active, vec![0, 1, 2, 3, 4]);
+        assert_eq!(Vec::from(output.active), vec![0, 1, 2, 3, 4]);
         assert!(output.inactive.is_empty());
     }
 
@@ -1234,12 +1197,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1251,8 +1211,8 @@ mod tests {
 
         // Finalize dealer
         let output = dealer.finalize().unwrap();
-        assert_eq!(output.active, vec![0, 1, 2, 3]);
-        assert_eq!(output.inactive, vec![4]);
+        assert_eq!(Vec::from(output.active), vec![0, 1, 2, 3]);
+        assert_eq!(Vec::from(output.inactive), vec![4]);
     }
 
     #[test]
@@ -1262,12 +1222,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1288,12 +1245,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1314,12 +1268,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create dealer
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1338,12 +1289,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1355,7 +1303,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1370,7 +1318,7 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
         player.finalize(commitments, reveals).unwrap();
     }
@@ -1383,12 +1331,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1400,7 +1345,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1414,7 +1359,7 @@ mod tests {
         let last = (q - 1) as u32;
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let result = player.finalize(commitments, HashMap::new());
+        let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::MissingShare)));
     }
 
@@ -1425,12 +1370,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1442,7 +1384,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(2) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1453,7 +1395,7 @@ mod tests {
         }
 
         // Finalize player with reveal
-        let result = player.finalize(commitments, HashMap::new());
+        let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::InvalidCommitments)));
     }
 
@@ -1465,12 +1407,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1482,7 +1421,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1497,7 +1436,7 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[1].clone());
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::MisdirectedShare)));
@@ -1511,12 +1450,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1528,7 +1464,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1542,7 +1478,7 @@ mod tests {
         let last = (q - 1) as u32;
         let (commitment, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n as u32, 1);
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
@@ -1556,12 +1492,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = PrivateKey::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
 
         // Create player
         let mut player = Player::<_, MinSig>::new(
@@ -1573,7 +1506,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1588,11 +1521,104 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         let mut share = shares[1].clone();
         share.index = 0;
         reveals.insert(last, share);
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::ShareWrongCommitment)));
+    }
+
+    #[test]
+    fn test_player_dealer_equivocation() {
+        // Initialize test
+        let n = 11;
+        let q = quorum(n as u32) as usize;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create contributors (must be in sorted order)
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
+
+        // Create player
+        let mut player = Player::<_, MinSig>::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = BTreeMap::new();
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
+            let (_, commitment, shares) =
+                Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0].clone())
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with equivocating reveal
+        let last = (q - 1) as u32;
+        let (_, commitment, shares) =
+            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        commitments.insert(last, commitment);
+
+        // Add commitments
+        let mut public = poly::Public::<MinSig>::zero();
+        for commitment in commitments.values() {
+            public.add(commitment);
+        }
+
+        // Finalize player with equivocating reveal
+        let mut reveals = BTreeMap::new();
+        reveals.insert(last, shares[0].clone());
+        let result = player.finalize(commitments, reveals).unwrap();
+        assert_eq!(result.public, public);
+    }
+
+    #[test]
+    fn test_player_dealer_equivocation_missing_reveal() {
+        // Initialize test
+        let n = 11;
+        let q = quorum(n as u32) as usize;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create contributors (must be in sorted order)
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Set<_>>();
+
+        // Create player
+        let mut player = Player::<_, MinSig>::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = BTreeMap::new();
+        for (i, con) in contributors.iter().enumerate().take(q - 1) {
+            let (_, commitment, shares) =
+                Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0].clone())
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with equivocating reveal
+        let last = (q - 1) as u32;
+        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        commitments.insert(last, commitment);
+
+        // Finalize player with equivocating reveal
+        let result = player.finalize(commitments, BTreeMap::new());
+        assert!(matches!(result, Err(Error::MissingShare)));
     }
 }

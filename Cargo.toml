@@ -21,10 +21,14 @@ members = [
     "examples/log",
     "examples/sync",
     "examples/vrf",
+    "examples/reshare",
 
     # Fuzz builds
+    "broadcast/fuzz",
     "codec/fuzz",
     "coding/fuzz",
+    "consensus/fuzz",
+    "collector/fuzz",
     "cryptography/fuzz",
     "runtime/fuzz",
     "stream/fuzz",
@@ -33,26 +37,35 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.0.62"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://commonware.xyz"
+
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.60", path = "broadcast" }
-commonware-codec = { version = "0.0.60", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.60", path = "coding" }
-commonware-collector = { version = "0.0.60", path = "collector" }
-commonware-consensus = { version = "0.0.60", path = "consensus" }
-commonware-cryptography = { version = "0.0.60", path = "cryptography" }
-commonware-deployer = { version = "0.0.60", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.60", path = "macros" }
-commonware-p2p = { version = "0.0.60", path = "p2p" }
-commonware-resolver = { version = "0.0.60", path = "resolver" }
-commonware-runtime = { version = "0.0.60", path = "runtime" }
-commonware-storage = { version = "0.0.60", path = "storage" }
-commonware-stream = { version = "0.0.60", path = "stream" }
-commonware-utils = { version = "0.0.60", path = "utils", default-features = false }
+commonware-broadcast = { version = "0.0.62", path = "broadcast" }
+commonware-codec = { version = "0.0.62", path = "codec", default-features = false }
+commonware-coding = { version = "0.0.62", path = "coding" }
+commonware-collector = { version = "0.0.62", path = "collector" }
+commonware-consensus = { version = "0.0.62", path = "consensus" }
+commonware-cryptography = { version = "0.0.62", path = "cryptography", default-features = false }
+commonware-deployer = { version = "0.0.62", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.62", path = "macros" }
+commonware-p2p = { version = "0.0.62", path = "p2p" }
+commonware-resolver = { version = "0.0.62", path = "resolver" }
+commonware-runtime = { version = "0.0.62", path = "runtime" }
+commonware-storage = { version = "0.0.62", path = "storage", default-features = false }
+commonware-stream = { version = "0.0.62", path = "stream" }
+commonware-utils = { version = "0.0.62", path = "utils", default-features = false }
+anyhow = { version = "1.0.99", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 blake3 = { version = "1.8.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+rand_core = "0.6.4"
 rand_distr = "0.4.3"
 futures = "0.3.31"
 futures-util = "0.3.31"
@@ -60,6 +73,7 @@ tokio = "1.43.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 paste = "1.0.15"
+pin-project = "1.1.10"
 prost = "0.13.5"
 prost-build = "0.13.5"
 governor = "0.6.3"
@@ -92,7 +106,12 @@ zeroize = "1.5.7"
 blst = { version = "0.3.13", default-features = false }
 p256 = { version = "0.13.2", default-features = false }
 test-case = "3.3.1"
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = { version = "0.10.1", default-features = false }
+x25519-dalek = "2.0.1"
+num-bigint = "0.4.6"
+num-rational = { version = "0.4.2", features = ["num-bigint"] }
+num-traits = "0.2.19"
+num-integer = "0.1.46"
 
 # Fuzz deps
 libfuzzer-sys = "0.4.9"

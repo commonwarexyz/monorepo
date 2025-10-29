@@ -1,16 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::current::{Config, Current},
-    mmr::hasher::{Hasher, Standard},
+    mmr::{hasher::Hasher as MmrHasher, Location, Position, Proof, StandardHasher as Standard},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU64};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
@@ -19,20 +19,51 @@ type RawValue = [u8; 32];
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
-    Update { key: RawKey, value: RawValue },
-    Delete { key: RawKey },
-    Get { key: RawKey },
+    Update {
+        key: RawKey,
+        value: RawValue,
+    },
+    Delete {
+        key: RawKey,
+    },
+    Get {
+        key: RawKey,
+    },
     Commit,
+    Prune,
     OpCount,
-    OldestRetainedLoc,
     Root,
-    RangeProof { start_loc: u64, max_ops: u64 },
-    KeyValueProof { key: RawKey },
+    RangeProof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
+    KeyValueProof {
+        key: RawKey,
+    },
+    ArbitraryProof {
+        proof_size: u64,
+        start_loc: u64,
+        digests: Vec<[u8; 32]>,
+        max_ops: NonZeroU64,
+        chunks: Vec<[u8; 32]>,
+    },
 }
 
-#[derive(Arbitrary, Debug)]
+const MAX_OPERATIONS: usize = 100;
+
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<CurrentOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CurrentOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { operations })
+    }
 }
 
 const PAGE_SIZE: usize = 88;
@@ -55,7 +86,6 @@ fn fuzz(data: FuzzInput) {
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
-            pruning_delay: 10,
         };
 
         let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
@@ -65,9 +95,9 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = 0;
+        let mut last_committed_op_count = Location::new(0).unwrap();
 
-        for op in data.operations.iter().take(100) {
+        for op in &data.operations {
             match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
@@ -121,25 +151,14 @@ fn fuzz(data: FuzzInput) {
                         "Operation count mismatch: expected {expected_count}, got {actual_count}");
                 }
 
-                CurrentOperation::OldestRetainedLoc => {
-                    let oldest_loc = db.oldest_retained_loc();
-                    let current_op_count = db.op_count();
-
-                    if current_op_count == 0 {
-                        assert_eq!(oldest_loc, None, "Expected no oldest location when no operations exist");
-                    } else {
-                        assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
-                        if let Some(loc) = oldest_loc {
-                            assert!(loc <= current_op_count,
-                                "Oldest retained location {loc} should be <= op count {current_op_count}");
-                        }
-                    }
-                }
-
                 CurrentOperation::Commit => {
                     db.commit().await.expect("Commit should not fail");
                     last_committed_op_count = db.op_count();
                     uncommitted_ops = 0;
+                }
+
+                CurrentOperation::Prune => {
+                    db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
@@ -155,7 +174,7 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
                     let current_op_count = db.op_count();
 
-                    if current_op_count > 0 && *max_ops > 0 {
+                    if current_op_count > 0 {
                         if uncommitted_ops > 0 {
                             db.commit().await.expect("Commit before proof should not fail");
                             last_committed_op_count = db.op_count();
@@ -163,30 +182,62 @@ fn fuzz(data: FuzzInput) {
                         }
 
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
-                        let adjusted_start = *start_loc % current_op_count;
-                        let adjusted_max_ops = (*max_ops % 50).max(1);
 
-                        if let Some(oldest_loc) = db.oldest_retained_loc() {
-                            if adjusted_start >= oldest_loc {
-                                let (proof, ops, chunks) = db
-                                    .range_proof(hasher.inner(), adjusted_start, adjusted_max_ops)
-                                    .await
-                                    .expect("Range proof should not fail");
+                        // Adjust start_loc and max_ops to be within the valid range
+                        let start_loc = Location::new(start_loc % *current_op_count).unwrap();
 
-                                assert!(
-                                    Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                        &mut hasher,
-                                        &proof,
-                                        adjusted_start,
-                                        &ops,
-                                        &chunks,
-                                        &current_root
-                                    ),
-                                    "Range proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}"
-                                );
-                            }
+                        let oldest_loc = db.inactivity_floor_loc();
+                        if start_loc >= oldest_loc {
+                            let (proof, ops, chunks) = db
+                                .range_proof(hasher.inner(), start_loc, *max_ops)
+                                .await
+                                .expect("Range proof should not fail");
+
+                            assert!(
+                                Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                    &mut hasher,
+                                    &proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &current_root
+                                ),
+                                "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
+                            );
                         }
                     }
+                }
+
+                CurrentOperation::ArbitraryProof {proof_size, start_loc, digests, max_ops, chunks} => {
+                    let mut hasher = Standard::<Sha256>::new();
+                    let current_op_count = db.op_count();
+                    if current_op_count == 0 {
+                        continue;
+                    }
+
+                    let proof = Proof {
+                        size: Position::new(*proof_size),
+                        digests: digests.iter().map(|d| Digest::from(*d)).collect(),
+                    };
+
+                    let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
+                    let root = db.root(&mut hasher).await.expect("Root computation should not fail");
+
+                    if let Ok(res) = db
+                        .range_proof(hasher.inner(), start_loc, *max_ops)
+                        .await {
+
+                        let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                            &mut hasher,
+                            &proof,
+                            start_loc,
+                            &res.1,
+                            chunks,
+                            &root
+                        );
+
+                    }
+
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
@@ -205,7 +256,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
                                 hasher.inner(),
                                 &proof,
-                                &info,
+                                info.clone(),
                                 &current_root,
                             );
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");

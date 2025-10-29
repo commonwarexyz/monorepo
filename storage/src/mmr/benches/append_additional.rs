@@ -1,11 +1,16 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
+use commonware_storage::mmr::{mem::Mmr, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
 
+#[cfg(not(full_bench))]
+const N_LEAVES: [usize; 2] = [10_000, 100_000];
+#[cfg(full_bench)]
+const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+
 fn bench_append_additional(c: &mut Criterion) {
-    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for n in N_LEAVES {
         // Generate random elements
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
@@ -24,7 +29,7 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
-                        let mut h = Standard::new();
+                        let mut h = StandardHasher::new();
                         let mut mmr = Mmr::<Sha256>::new();
                         block_on(async {
                             for digest in &elements {
@@ -34,7 +39,7 @@ fn bench_append_additional(c: &mut Criterion) {
                         mmr
                     },
                     |mut mmr| {
-                        let mut h = Standard::new();
+                        let mut h = StandardHasher::new();
                         block_on(async {
                             for digest in &additional {
                                 mmr.add(&mut h, digest);

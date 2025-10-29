@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Index, Automaton as A};
+use crate::{aggregation::types::Index, Automaton as A, Epochable};
 use commonware_cryptography::{Hasher, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;
@@ -7,6 +7,7 @@ use tracing::trace;
 pub enum Strategy {
     Correct,
     Incorrect,
+    Skip { index: u64 },
 }
 
 #[derive(Clone)]
@@ -18,13 +19,18 @@ impl Application {
     pub fn new(strategy: Strategy) -> Self {
         Self { strategy }
     }
+
+    fn correct_message(context: Index) -> <Sha256 as Hasher>::Digest {
+        let payload = format!("data for index {context}");
+        Sha256::hash(payload.as_bytes())
+    }
 }
 
 impl A for Application {
     type Context = Index;
     type Digest = <Sha256 as Hasher>::Digest;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let mut hasher = Sha256::default();
         hasher.update(b"genesis");
         hasher.finalize()
@@ -33,14 +39,18 @@ impl A for Application {
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
-        let digest = match self.strategy {
-            Strategy::Correct => {
-                let payload = format!("data for index {context}");
-                Sha256::hash(payload.as_bytes())
-            }
+        let digest = match &self.strategy {
+            Strategy::Correct => Self::correct_message(context),
             Strategy::Incorrect => {
                 let conflicting_payload = format!("conflicting_data for index {context}");
                 Sha256::hash(conflicting_payload.as_bytes())
+            }
+            Strategy::Skip { index } => {
+                if context == *index {
+                    // Receiver will be canceled (sender dropped)
+                    return receiver;
+                }
+                Self::correct_message(context)
             }
         };
 
@@ -56,14 +66,9 @@ impl A for Application {
         trace!(?context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();
 
-        // Compute the expected valid digest
-        let expected_payload = format!("data for index {context}");
-        let mut hasher = Sha256::default();
-        hasher.update(expected_payload.as_bytes());
-        let expected_digest = hasher.finalize();
-
         // Return true only if the payload matches the expected digest
-        sender.send(payload == expected_digest).unwrap();
+        let expected_payload = Self::correct_message(context);
+        sender.send(payload == expected_payload).unwrap();
         receiver
     }
 }

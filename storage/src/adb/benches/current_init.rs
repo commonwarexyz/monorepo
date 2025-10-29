@@ -17,7 +17,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Instant,
 };
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -42,6 +41,16 @@ const MULTI_THREADED: usize = 8;
 /// current::grafting_height()) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
+cfg_if::cfg_if! {
+    if #[cfg(not(full_bench))] {
+        const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
+        const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
+    } else {
+        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 2];
+        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 2];
+    }
+}
+
 fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -55,7 +64,6 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
         translator: EightCap,
         thread_pool: pool,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        pruning_delay: 10,
     }
 }
 
@@ -67,7 +75,6 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
 fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threads: usize) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("starting DB generation...");
         let pool = if threads == 1 {
             None
         } else {
@@ -100,11 +107,7 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threa
             }
         }
         db.commit().await.unwrap();
-        info!(
-            op_count = db.op_count(),
-            oldest_retained_loc = db.oldest_retained_loc().unwrap(),
-            "DB generated.",
-        );
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
 }
@@ -120,15 +123,12 @@ type CurrentDb = Current<
 
 /// Benchmark the initialization of a large randomly generated current db.
 fn bench_current_init(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
-
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
+    for elements in ELEMENTS {
+        for operations in OPERATIONS {
             for (multithreaded_name, threads) in [("off", SINGLE_THREADED), ("on", MULTI_THREADED)]
             {
-                info!(elements, operations, threads, "benchmarking current init");
                 gen_random_current(cfg.clone(), elements, operations, threads);
 
                 c.bench_function(
@@ -164,7 +164,6 @@ fn bench_current_init(c: &mut Criterion) {
 
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    info!("cleaning up db...");
                     let pool = if threads == 1 {
                         None
                     } else {

@@ -1,8 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{
+    varint::UInt, Decode, DecodeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashMap, hash::Hash, net::SocketAddr};
 
@@ -12,7 +14,8 @@ fn roundtrip_socket(socket: SocketAddr) {
         .expect("Failed to decode a successfully encoded input!");
 
     // Check encoding length was correct
-    // NOTE: We add 1 to the length here since this is a full `SocketAddr`, the first byte represents the address type (e.g. IPv4 or IPv6)
+    // NOTE: We add 1 to the length here since this is a full `SocketAddr`,
+    // the first byte represents the address type (e.g., IPv4 or IPv6)
     match socket {
         SocketAddr::V4(_) => {
             assert_eq!(encoded.len(), 6 + 1);
@@ -30,13 +33,13 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
     let input_len = input_data_bytes.len();
     let encoded_bytes = input_data_bytes.encode();
 
-    // Decode with too long length
+    // Decode with too long a length
     assert!(matches!(
         Bytes::decode_cfg(encoded_bytes.clone(), &(0..input_len).into()),
         Err(Error::InvalidLength(_))
     ));
 
-    // Decode with too short length
+    // Decode with too short a length
     assert!(matches!(
         Bytes::decode_cfg(encoded_bytes.clone(), &(input_len + 1..).into()),
         Err(Error::InvalidLength(_))
@@ -52,7 +55,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
 fn roundtrip_primitive<T, X>(v: T)
 where
-    X: std::default::Default,
+    X: Default,
     T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
@@ -83,12 +86,19 @@ fn roundtrip_primitive_f64(v: f64) {
     assert_eq!(v, decoded);
 }
 
-fn roundtrip_map<K, V>(map: &HashMap<K, V>, range_cfg: RangeCfg, k_cfg: K::Cfg, v_cfg: V::Cfg)
-where
+fn roundtrip_map<K, V>(
+    map: &HashMap<K, V>,
+    range_cfg: RangeCfg<usize>,
+    k_cfg: K::Cfg,
+    v_cfg: V::Cfg,
+) where
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
-    HashMap<K, V>:
-        Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+    HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+        + std::fmt::Debug
+        + PartialEq
+        + Write
+        + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
@@ -107,13 +117,13 @@ where
     let encoded_vec = vec.encode();
     assert_eq!(encoded_vec.len(), vec.encode_size());
 
-    // Decode with too long length
+    // Decode with too long a length
     assert!(matches!(
         Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
         Err(Error::InvalidLength(_))
     ));
 
-    // Decode with too short length
+    // Decode with too short a length
     assert!(matches!(
         Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
         Err(Error::InvalidLength(_))
@@ -123,6 +133,18 @@ where
         .expect("Failed to decode Vec<T>!");
 
     assert_eq!(vec, decoded);
+}
+
+fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
+    let mut buf = Vec::new();
+    for _ in 0..continuation_bytes.min(20) {
+        buf.put_u8(0xFF);
+    }
+    buf.put_u8(last_byte);
+    let _ = UInt::<u16>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u32>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u64>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u128>::decode(Bytes::from(buf));
 }
 
 // Wrapped socket for arbitrary
@@ -138,7 +160,12 @@ enum FuzzInput<'a> {
     Map(HashMap<u64, u64>), // TODO use arbitrary types as well
     Vec(Vec<u8>),           // TODO use arbitrary types as well
 
-    // TODO need to add Var[U]Int types, also need to add support for arbitrary generics
+    VarIntOverflow {
+        // Number of continuation bytes before the last byte
+        continuation_bytes: u8,
+        // Value for the last byte (will test if it has too many bits)
+        last_byte: u8,
+    },
 
     // Primitive inputs!
     U8(u8),
@@ -161,8 +188,10 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
         FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
         FuzzInput::Vec(it) => roundtrip_vec(it),
-
-        // Primitive roundtrips
+        FuzzInput::VarIntOverflow {
+            continuation_bytes,
+            last_byte,
+        } => roundtrip_overflow(continuation_bytes, last_byte),
         FuzzInput::U8(v) => roundtrip_primitive(v),
         FuzzInput::U16(v) => roundtrip_primitive(v),
         FuzzInput::U32(v) => roundtrip_primitive(v),
@@ -173,8 +202,6 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::I32(v) => roundtrip_primitive(v),
         FuzzInput::I64(v) => roundtrip_primitive(v),
         FuzzInput::I128(v) => roundtrip_primitive(v),
-
-        // Float primitive roundtrips
         FuzzInput::F32(v) => roundtrip_primitive_f32(v),
         FuzzInput::F64(v) => roundtrip_primitive_f64(v),
     };

@@ -1,48 +1,28 @@
-use crate::{
-    simplex::types::{Notarization, Nullification, View},
-    Viewable,
-};
-use commonware_cryptography::{Digest, Signature};
-use futures::{channel::mpsc, SinkExt};
+use crate::simplex::{signing_scheme::Scheme, types::Voter};
+use commonware_cryptography::Digest;
+use futures::{channel::mpsc, stream, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<S: Signature, D: Digest> {
-    Notarization(Notarization<S, D>),
-    Nullification(Nullification<S>),
-}
-
-impl<S: Signature, D: Digest> Viewable for Message<S, D> {
-    type View = View;
-
-    fn view(&self) -> View {
-        match self {
-            Message::Notarization(notarization) => notarization.view(),
-            Message::Nullification(nullification) => nullification.view(),
-        }
-    }
+pub enum Message<S: Scheme, D: Digest> {
+    Verified(Voter<S, D>),
 }
 
 #[derive(Clone)]
-pub struct Mailbox<S: Signature, D: Digest> {
+pub struct Mailbox<S: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<S: Signature, D: Digest> Mailbox<S, D> {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn notarization(&mut self, notarization: Notarization<S, D>) {
+    pub async fn verified(&mut self, voters: Vec<Voter<S, D>>) {
         self.sender
-            .send(Message::Notarization(notarization))
+            .send_all(&mut stream::iter(
+                voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
+            ))
             .await
-            .expect("Failed to send notarization");
-    }
-
-    pub async fn nullification(&mut self, nullification: Nullification<S>) {
-        self.sender
-            .send(Message::Nullification(nullification))
-            .await
-            .expect("Failed to send nullification");
+            .expect("Failed to send batch of voters");
     }
 }
