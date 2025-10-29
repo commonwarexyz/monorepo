@@ -79,7 +79,7 @@ pub struct Config<T: Translator> {
 /// db will be as of the last committed operation.
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
-    O: FixedSize,
+    O: Keyed + FixedSize,
     H: CHasher,
     T: Translator,
 >(
@@ -180,7 +180,7 @@ pub(crate) async fn build_snapshot_from_log<E, O, I, F>(
 ) -> Result<(), Error>
 where
     E: Storage + Clock + Metrics,
-    O: FixedSize,
+    O: Keyed + FixedSize,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
@@ -188,7 +188,7 @@ where
         .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
         .await?;
     pin_mut!(stream);
-    let last_commit_loc = log.size().await?.saturating_sub(1);
+    let last_commit_loc = log.size().await.saturating_sub(1);
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
@@ -318,7 +318,7 @@ async fn update_loc<E, I: Index<Value = Location>, O>(
 ) -> Result<Option<Location>, Error>
 where
     E: Storage + Clock + Metrics,
-    O: FixedSize,
+    O: Keyed + FixedSize,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -349,7 +349,7 @@ async fn delete_key<E, I, O>(
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
-    O: FixedSize,
+    O: Keyed + FixedSize,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -375,7 +375,7 @@ async fn find_update_op<E, C, O>(
 where
     E: Storage + Clock + Metrics,
     C: Cursor<Value = Location>,
-    O: FixedSize,
+    O: Keyed + FixedSize,
 {
     while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
@@ -406,7 +406,7 @@ impl<E, I, O, H> Shared<'_, E, I, O, H>
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
-    O: FixedSize,
+    O: Keyed + FixedSize,
     H: CHasher,
 {
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
