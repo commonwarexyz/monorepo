@@ -2,7 +2,7 @@
 //!
 //! This module provides position-based journal implementations where items are stored
 //! contiguously and can be accessed by their position (0-indexed). Both [fixed]-size and
-//! [variable]-size item journals are supoprted.
+//! [variable]-size item journals are supported.
 
 use super::Error;
 use futures::Stream;
