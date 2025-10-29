@@ -31,7 +31,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::segmented;
+use commonware_storage::journal::segmented::variable as segmented;
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::oneshot,

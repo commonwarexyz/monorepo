@@ -90,7 +90,7 @@ use crate::{
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
         contiguous::fixed::{Config as FConfig, Journal as FJournal},
-        segmented::{Config as VConfig, Journal as VJournal},
+        segmented::variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::Location,
     translator::Translator,

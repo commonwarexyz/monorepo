@@ -78,7 +78,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_storage::journal::segmented::{Journal, Config};
+//! use commonware_storage::journal::segmented::variable::{Journal, Config};
 //! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();

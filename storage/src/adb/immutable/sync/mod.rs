@@ -6,7 +6,7 @@ use crate::{
         sync::{self, Journal as _},
         Error,
     },
-    journal::segmented,
+    journal::segmented::variable as segmented,
     mmr::{Location, StandardHasher as Standard},
     translator::Translator,
 };

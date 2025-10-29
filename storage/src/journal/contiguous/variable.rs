@@ -4,7 +4,7 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::{super::Journal as JournalTrait, fixed};
-use crate::journal::{segmented, Error};
+use crate::journal::{segmented::variable as segmented, Error};
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;

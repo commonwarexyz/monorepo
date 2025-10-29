@@ -4,7 +4,7 @@
 use crate::{
     adb::{any::fixed::sync::init_journal, operation::variable::Operation, Error},
     index::{Index as _, Unordered as Index},
-    journal::{contiguous::fixed, segmented},
+    journal::{contiguous::fixed, segmented::variable as segmented},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,

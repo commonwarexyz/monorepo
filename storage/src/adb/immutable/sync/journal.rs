@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{operation::variable::Operation, sync},
-    journal::segmented,
+    journal::segmented::variable as segmented,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
