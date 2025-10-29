@@ -90,7 +90,7 @@ impl<T: Attributable> AttributableVec<T> {
         self.added == 0
     }
 
-    /// Returns an iterator over the items in the [AttributableVec].
+    /// Returns an ordered iterator over [Attributable::signer()]s in the [AttributableVec].
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.data.iter().filter_map(|o| o.as_ref())
     }
@@ -3716,5 +3716,46 @@ mod tests {
         batch_verifier_ready_finalizes_quorum_already_met_by_verified(generate_ed25519_schemes(
             5, 214,
         ));
+    }
+
+    struct MockAttributable(u32);
+
+    impl Attributable for MockAttributable {
+        fn signer(&self) -> u32 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_attributable_vec() {
+        let mut vec = AttributableVec::new(5);
+        assert_eq!(vec.len(), 0);
+        assert!(vec.is_empty());
+
+        assert!(vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 1);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(vec.push(MockAttributable(1)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(!vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
     }
 }
