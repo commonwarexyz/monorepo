@@ -7,7 +7,7 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableSet, Context, Finalization, Finalize, Notarization,
+            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
@@ -84,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: AttributableSet<Notarize<S, D>>,
+    notarizes: AttributableVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: AttributableSet<Nullify<S>>,
+    nullifies: AttributableVec<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: AttributableSet<Finalize<S, D>>,
+    finalizes: AttributableVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -113,9 +113,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         round: Rnd,
     ) -> Self {
         let participants = scheme.participants().len();
-        let notarizes = AttributableSet::new(participants);
-        let nullifies = AttributableSet::new(participants);
-        let finalizes = AttributableSet::new(participants);
+        let notarizes = AttributableVec::new(participants);
+        let nullifies = AttributableVec::new(participants);
+        let finalizes = AttributableVec::new(participants);
 
         Self {
             start: context.current(),

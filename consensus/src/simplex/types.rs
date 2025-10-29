@@ -50,12 +50,12 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-pub struct AttributableSet<T: Attributable + Clone> {
+pub struct AttributableVec<T: Attributable + Clone> {
     data: Vec<Option<T>>,
     added: usize,
 }
 
-impl<T: Attributable + Clone> AttributableSet<T> {
+impl<T: Attributable + Clone> AttributableVec<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
             data: vec![None; capacity],
