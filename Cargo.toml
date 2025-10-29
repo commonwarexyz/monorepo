@@ -28,6 +28,7 @@ members = [
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",
+    "consensus/fuzz",
     "cryptography/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
