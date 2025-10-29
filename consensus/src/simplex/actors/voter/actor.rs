@@ -7,7 +7,7 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
+            Activity, Attributable, AttributableSet, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
@@ -84,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: AttributableVec<Notarize<S, D>>,
+    notarizes: AttributableSet<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: AttributableVec<Nullify<S>>,
+    nullifies: AttributableSet<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: AttributableVec<Finalize<S, D>>,
+    finalizes: AttributableSet<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -113,9 +113,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         round: Rnd,
     ) -> Self {
         let participants = scheme.participants().len();
-        let notarizes = AttributableVec::new(participants);
-        let nullifies = AttributableVec::new(participants);
-        let finalizes = AttributableVec::new(participants);
+        let notarizes = AttributableSet::new(participants);
+        let nullifies = AttributableSet::new(participants);
+        let finalizes = AttributableSet::new(participants);
 
         Self {
             start: context.current(),
@@ -265,7 +265,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.as_ref())
+        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.iter())
             .expect("failed to recover notarization certificate");
         timer.observe();
 
@@ -294,7 +294,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.as_ref())
+        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.iter())
             .expect("failed to recover nullification certificate");
         timer.observe();
 
@@ -338,7 +338,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.as_ref())
+        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.iter())
             .expect("failed to recover finalization certificate");
         timer.observe();
 

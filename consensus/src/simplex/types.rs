@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{bitmap::BitMap, max_faults, quorum, set::Ordered};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -50,36 +50,38 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-pub struct AttributableVec<T: Attributable> {
-    vec: Vec<T>,
-    added: BitMap,
+pub struct AttributableSet<T: Attributable + Clone> {
+    data: Vec<Option<T>>,
+    added: usize,
 }
 
-impl<T: Attributable> AttributableVec<T> {
+impl<T: Attributable + Clone> AttributableSet<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
-            vec: Vec::with_capacity(capacity),
-            added: BitMap::zeroes(capacity as u64),
+            data: vec![None; capacity],
+            added: 0,
         }
     }
 
     pub fn push(&mut self, item: T) {
-        let index = item.signer() as u64;
-        if self.added.get(index) {
+        let index = item.signer() as usize;
+        if self.data[index].is_some() {
             return;
         }
-        self.added.set(index, true);
-        self.vec.push(item);
+        self.data[index] = Some(item);
+        self.added += 1;
     }
 
     pub fn len(&self) -> usize {
-        self.vec.len()
+        self.added
     }
-}
 
-impl<T: Attributable> AsRef<[T]> for AttributableVec<T> {
-    fn as_ref(&self) -> &[T] {
-        &self.vec
+    pub fn is_empty(&self) -> bool {
+        self.added == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.data.iter().filter_map(|o| o.as_ref())
     }
 }
 
@@ -971,7 +973,11 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from matching notarize votes, if enough are present.
-    pub fn from_notarizes(scheme: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
+    pub fn from_notarizes<'a>(
+        scheme: &S,
+        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+    ) -> Option<Self> {
+        let notarizes: Vec<&'a Notarize<S, D>> = notarizes.into_iter().collect();
         if notarizes.is_empty() {
             return None;
         }
@@ -986,7 +992,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         let notarization_certificate =
             scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
 
-        Some(Notarization {
+        Some(Self {
             proposal,
             certificate: notarization_certificate,
         })
@@ -1175,7 +1181,11 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from matching nullify votes.
-    pub fn from_nullifies(scheme: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
+    pub fn from_nullifies<'a>(
+        scheme: &S,
+        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+    ) -> Option<Self> {
+        let nullifies: Vec<&'a Nullify<S>> = nullifies.into_iter().collect();
         if nullifies.is_empty() {
             return None;
         }
@@ -1190,7 +1200,7 @@ impl<S: Scheme> Nullification<S> {
         let nullification_certificate =
             scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
 
-        Some(Nullification {
+        Some(Self {
             round,
             certificate: nullification_certificate,
         })
@@ -1392,7 +1402,11 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from matching finalize votes, if enough are present.
-    pub fn from_finalizes(scheme: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
+    pub fn from_finalizes<'a>(
+        scheme: &S,
+        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
+    ) -> Option<Self> {
+        let finalizes: Vec<&'a Finalize<S, D>> = finalizes.into_iter().collect();
         if finalizes.is_empty() {
             return None;
         }
@@ -1405,9 +1419,9 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         }
 
         let finalization_certificate =
-            scheme.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
+            scheme.assemble_certificate(finalizes.iter().map(|f| f.vote.clone()))?;
 
-        Some(Finalization {
+        Some(Self {
             proposal,
             certificate: finalization_certificate,
         })
