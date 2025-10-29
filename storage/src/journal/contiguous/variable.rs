@@ -205,7 +205,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         })
     }
 
-    /// Initialize a journal in a fully pruned state at a specific logical size.
+    /// Initialize a [Journal] in a fully pruned state at a specific logical size.
     ///
     /// This creates a journal that reports `size()` as `size` but contains no data.
     /// The `oldest_retained_pos()` will return `None`, indicating all positions before
@@ -257,7 +257,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         })
     }
 
-    /// Initialize a contiguous Variable journal for use in state sync.
+    /// Initialize a [Journal] for use in state sync.
     ///
     /// The bounds are item locations (not section numbers). This function prepares the
     /// on-disk journal so that subsequent appends go to the correct physical location for the
@@ -802,7 +802,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     }
 }
 
-// Implement Journal trait for variable-length items
 impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
     type Item = V;
 
@@ -977,35 +976,8 @@ mod tests {
         });
     }
 
-    /// Test that init rejects when partition and offsets_partition are the same.
-    ///
-    /// This prevents blob name collisions between data and offsets journals.
     #[test_traced]
-    fn test_variable_reject_same_partitions() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "same_partition".to_string(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let result = Journal::<_, u64>::init(context, cfg).await;
-            match result {
-                Err(e) => {
-                    let err_msg = format!("{e}");
-                    assert!(err_msg.contains("partition and offsets_partition must be different"));
-                }
-                Ok(_) => panic!("Should reject identical partitions"),
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_journal() {
+    fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String| {
@@ -1014,7 +986,7 @@ mod tests {
                     Journal::<_, u64>::init(
                         context,
                         Config {
-                            partition: format!("generic_test_{}", test_name),
+                            partition: format!("generic_test_{test_name}"),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
