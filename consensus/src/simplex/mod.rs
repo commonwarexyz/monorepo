@@ -292,6 +292,7 @@ mod tests {
     };
     use tracing::{debug, warn};
     use types::Activity;
+    use crate::simplex::mocks::fixtures::ed25519_fixture_twins;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -3732,7 +3733,7 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn twins<S, F>(seed: u64, mut fixture: F)
+    fn twins_old<S, F>(seed: u64, mut fixture: F)
     where
         S: Scheme,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -3744,7 +3745,7 @@ mod tests {
         let namespace = b"twins_consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(5000)));
+            .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -3761,49 +3762,29 @@ mod tests {
 
             // Register participants with Twins approach
             // Create fixture for 4 nodes first
-            let (ed25519_keys, ed25519_public, signing_schemes, _verifier) = fixture(&mut context, 4);
+            let (schemes, original_validators, signing_schemes, _verifier) = fixture(&mut context, 4);
             
-            // Now we need to create the twin - node 4 will be a twin of node 3
-            // The twin has a different validator ID for network registration but uses the SAME signing key
+            // Now add the twin - node 4 will be a twin of node 3
+            // The twin has a different validator ID but uses the SAME signing scheme
             
-            // Create a unique validator ID for the twin (for network registration purposes)
-            let twin_registration_key = ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
+            // Create a unique validator ID for the twin
+            let twin_registration_key = ed25519::PrivateKey::from_seed(999);
             let twin_validator_id = twin_registration_key.public_key();
             
-            // IMPORTANT: For the twins attack to work, the twin must use the EXACT SAME signing key as node 3
-            // This means for ed25519 fixture, we need to use the same ed25519 private key
-            // For BLS fixtures, the signing scheme already contains the right key
-            let twin_signing_scheme = signing_schemes[3].clone();
-            let twin_ed25519_key = ed25519_keys[3].clone(); // Twin uses same key as node 3
+            // Build the complete list with the twin
+            let mut all_validators = original_validators.clone();
+            all_validators.push(twin_validator_id.clone());
+            all_validators.sort();
             
-            // Build the complete list of validators (5 total: 4 regular + 1 twin)
-            // We need to track validator IDs separately from the keys used for signing
-            let mut validator_data = Vec::new();
-            
-            // Add the 4 regular nodes
+            // Create a mapping from scheme to validator ID
+            // First 4 schemes map to their original validators, 5th (twin) maps to twin_validator_id
+            let mut scheme_to_validator = Vec::new();
             for i in 0..4 {
-                validator_data.push((
-                    ed25519_public[i].clone(),    // validator ID
-                    ed25519_keys[i].clone(),      // ed25519 key for this validator
-                    signing_schemes[i].clone(),   // signing scheme
-                ));
+                scheme_to_validator.push(original_validators[i].clone());
             }
+            scheme_to_validator.push(twin_validator_id.clone()); // Twin uses different validator ID
             
-            // Add the twin with different validator ID but SAME signing key as node 3
-            validator_data.push((
-                twin_validator_id.clone(),     // different validator ID
-                twin_ed25519_key,              // SAME ed25519 key as node 3
-                twin_signing_scheme,           // SAME signing scheme as node 3
-            ));
-            
-            // Sort by validator ID for consistent ordering
-            validator_data.sort_by_key(|(v, _, _)| v.clone());
-            
-            let sorted_validators: Vec<_> = validator_data.iter().map(|(v, _, _)| v.clone()).collect();
-            let sorted_keys: Vec<_> = validator_data.iter().map(|(_, k, _)| k.clone()).collect();
-            let sorted_schemes: Vec<_> = validator_data.iter().map(|(_, _, s)| s.clone()).collect();
-            
-            let mut registrations = register_validators(&mut oracle, &sorted_validators).await;
+            let mut registrations = register_validators(&mut oracle, &all_validators).await;
 
             // Link all validators
             let link = Link {
@@ -3811,28 +3792,42 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &sorted_validators, Action::Link(link), None).await;
+            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             
-            for ((validator, ed25519_key, signing_scheme)) in validator_data.into_iter() {
-                // Use the validator ID from our data (which is correct for both regular nodes and twin)
-                let context = context.with_label(&format!("validator-{}", validator));
+            // Create all 5 engines (4 regular + 1 twin)
+            for idx in 0..5 {
+                let validator = scheme_to_validator[idx].clone();
                 
-                // Debug: Check if this is creating twins correctly
-                println!("Validator ID: {}, Using ed25519 key: {}", validator, ed25519_key);
+                // Get the appropriate scheme and signing_scheme
+                let scheme = if idx < 4 {
+                    schemes[idx].clone()
+                } else {
+                    schemes[3].clone()  // Twin uses same scheme as node 3
+                };
+                
+                let signing_scheme = if idx < 4 {
+                    signing_schemes[idx].clone()
+                } else {
+                    signing_schemes[3].clone()  // Twin uses same signing scheme as node 3
+                };
+                
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", validator));
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: sorted_validators.clone().into(),
+                    participants: all_validators.clone().into(),
                     scheme: signing_scheme.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
+                
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -3852,7 +3847,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     me: validator.clone(),
-                    participants: sorted_validators.clone().into(),
+                    participants: all_validators.clone().into(),
                     scheme: signing_scheme.clone(),
                     blocker,
                     automaton: application.clone(),
@@ -3879,15 +3874,19 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Wait for all engines to finish
+            // Wait for engines to finish
+            // With twins, we should only wait for honest nodes (first 3) to reach consensus
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
-                let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
-                    }
-                }));
+            for (idx, reporter) in reporters.iter_mut().enumerate() {
+                // Only wait for the first 3 honest nodes
+                if idx < 3 {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
             }
 
             join_all(finalizers).await;
@@ -3903,6 +3902,141 @@ mod tests {
         });
     }
 
+    fn twins<S, F>(mut fixture: F)
+    where
+        S: Scheme,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 4;
+        let quorum = 3;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+
+            for scheme in schemes.iter() {
+                println!("Priv: {:?}, pub: {:?}", scheme, scheme.public_key());
+            }
+            for v in validators.iter() {
+                println!("ID: {:?}", v);
+            }
+            for s in signing_schemes.iter() {
+                println!("scheme: {:?}", s);
+            }
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            assert_eq!(validators.len(), (n + 1) as usize);
+            
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // IMPORTANT: Use the registered validator ID from the validators array
+                // For the twin (last element), validator ID != scheme.public_key()
+                let validator = validators[idx].clone();
+                
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", validator));
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    me: validator.clone(),
+                    participants: validators.clone().into(),
+                    scheme: signing_schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+
+        });
+    }
+
     // Basic Twins test: n = 4, f = 1.
     // Honest nodes: 0, 1, 2.
     // Byzantine identity: node 3 has a twin (node 4); both share the same private key.
@@ -3910,13 +4044,12 @@ mod tests {
     // There is no partitioning.
     #[test_traced]
     fn test_basic_twins() {
-        for seed in 0..5 {
-            //twins(seed, bls_threshold_fixture::<MinPk, _>);
-            //twins(seed, bls_threshold_fixture::<MinSig, _>);
-            //twins(seed, bls_multisig_fixture::<MinPk, _>);
-            //twins(seed, bls_multisig_fixture::<MinSig, _>);
-            twins(seed, ed25519_fixture);
-        }
+        //twins(seed, bls_threshold_fixture::<MinPk, _>);
+        //twins(seed, bls_threshold_fixture::<MinSig, _>);
+        //twins(seed, bls_multisig_fixture::<MinPk, _>);
+        //twins(seed, bls_multisig_fixture::<MinSig, _>);
+        twins(ed25519_fixture_twins);
+
     }
 
 

@@ -110,3 +110,37 @@ where
 
     (ed25519_keys, ed25519_public, schemes, verifier)
 }
+
+pub fn ed25519_fixture_twins<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
+where
+    R: RngCore + CryptoRng,
+{
+    assert!(n > 0);
+
+    let mut ed25519_keys: Vec<_> = (0..n)
+        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+        .collect();
+    ed25519_keys.sort_by_key(|k| k.public_key());
+
+
+    let twin_key = ed25519::PrivateKey::from_seed((n - 1) as u64);
+    let twin_registration_key = ed25519::PrivateKey::from_seed((n as u64 - 1) + 0xffffffffffffffed);
+    let twin_validator_id = twin_registration_key.public_key();
+
+    let mut ed25519_public = ed25519_keys
+        .iter()
+        .map(|k| k.public_key())
+        .collect::<Vec<_>>();
+
+    ed25519_keys.push(twin_key);
+    ed25519_public.push(twin_validator_id);
+
+    let schemes = ed25519_keys
+        .iter()
+        .cloned()
+        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
+        .collect();
+    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
+
+    (ed25519_keys, ed25519_public, schemes, verifier)
+}

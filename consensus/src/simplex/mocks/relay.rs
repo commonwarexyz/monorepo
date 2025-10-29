@@ -19,15 +19,16 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     }
 
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
+        println!("Registering {:?}", public_key.clone());
         let (sender, receiver) = mpsc::unbounded();
         if self
             .recipients
             .lock()
             .unwrap()
-            .insert(public_key, sender)
+            .insert(public_key.clone(), sender)
             .is_some()
         {
-            panic!("duplicate registrant");
+            panic!("duplicate registrant {:?}", public_key);
         }
         receiver
     }
