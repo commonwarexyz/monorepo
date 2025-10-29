@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_journal() {
+    fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String| {
