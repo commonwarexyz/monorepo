@@ -9,9 +9,8 @@ use futures::Stream;
 use std::num::NonZeroUsize;
 use thiserror::Error;
 
-pub mod fixed;
+pub mod contiguous;
 pub mod segmented;
-pub mod variable;
 
 #[cfg(test)]
 mod tests;
@@ -143,7 +142,7 @@ pub trait Journal {
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }
 
-impl<E, Op> crate::adb::sync::Journal for fixed::Journal<E, Op>
+impl<E, Op> crate::adb::sync::Journal for contiguous::fixed::Journal<E, Op>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
@@ -152,11 +151,13 @@ where
     type Error = Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
-        fixed::Journal::size(self).await
+        contiguous::fixed::Journal::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        fixed::Journal::append(self, op).await.map(|_| ())
+        contiguous::fixed::Journal::append(self, op)
+            .await
+            .map(|_| ())
     }
 }
 

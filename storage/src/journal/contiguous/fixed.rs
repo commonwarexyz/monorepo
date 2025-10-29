@@ -55,7 +55,7 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use super::Error;
+use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
@@ -620,7 +620,9 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 }
 
 // Implement Journal trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> super::Journal for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> crate::journal::Journal
+    for Journal<E, A>
+{
     type Item = A;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {

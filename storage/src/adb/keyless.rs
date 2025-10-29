@@ -12,7 +12,7 @@
 use crate::{
     adb::{align_mmr_and_locations, operation::keyless::Operation, Error},
     journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
+        contiguous::fixed::{Config as FConfig, Journal as FJournal},
         segmented::{Config as VConfig, Journal as VJournal},
     },
     mmr::{

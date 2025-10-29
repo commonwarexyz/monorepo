@@ -11,7 +11,7 @@
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use crate::{
-    journal::fixed::Journal,
+    journal::contiguous::fixed::Journal,
     mmr::{journaled, Location},
 };
 use commonware_cryptography::Hasher;

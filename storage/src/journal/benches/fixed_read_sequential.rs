@@ -3,7 +3,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
 };
-use commonware_storage::journal::fixed::Journal;
+use commonware_storage::journal::contiguous::fixed::Journal;
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{black_box, criterion_group, Criterion};
 use std::{

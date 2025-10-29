@@ -7,7 +7,7 @@
 use crate::{
     adb::any::fixed::sync::{init_journal, init_journal_at_size},
     journal::{
-        fixed::{Config as JConfig, Journal},
+        contiguous::fixed::{Config as JConfig, Journal},
         Error as JError,
     },
     metadata::{Config as MConfig, Metadata},

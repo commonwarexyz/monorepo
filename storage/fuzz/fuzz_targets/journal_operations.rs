@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-use commonware_storage::journal::fixed::{
+use commonware_storage::journal::contiguous::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
 };
