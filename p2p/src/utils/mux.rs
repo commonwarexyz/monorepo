@@ -497,7 +497,11 @@ mod tests {
         MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register_comms(0)
+            .await
+            .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
@@ -515,7 +519,11 @@ mod tests {
         GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
+        let (sender, receiver) = oracle
+            .control(pubkey.clone())
+            .register_comms(0)
+            .await
+            .unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()

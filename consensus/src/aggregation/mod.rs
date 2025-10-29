@@ -119,7 +119,11 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let (sender, receiver) = oracle.register(participant.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(participant.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
         }
         registrations

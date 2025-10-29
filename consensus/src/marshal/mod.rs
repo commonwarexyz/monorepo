@@ -109,6 +109,7 @@ mod tests {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::requester,
+        PeerSetManager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
@@ -194,10 +195,11 @@ mod tests {
         };
 
         // Create the resolver
-        let backfill = oracle.register(validator.clone(), 1).await.unwrap();
+        let mut control = oracle.control(validator.clone());
+        let backfill = control.register_comms(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            peer_provider: oracle.control(validator.clone()),
+            peer_provider: oracle.clone(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -220,7 +222,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(validator, 2).await.unwrap();
+        let network = control.register_comms(2).await.unwrap();
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
@@ -322,11 +324,8 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
-            // Register all participants ahead of time.
-            for validator in participants.iter() {
-                let _ = oracle.register(validator.clone(), 0).await;
-            }
-
+            // Register the initial peer set.
+            oracle.register(0, participants.clone().into()).await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),

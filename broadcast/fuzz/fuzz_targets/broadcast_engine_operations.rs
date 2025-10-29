@@ -171,7 +171,11 @@ fn fuzz(input: FuzzInput) {
             peers.push(public_key.clone());
 
             // Create channel
-            let (sender, receiver) = oracle.register(public_key.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(public_key.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
 
             // Create mailbox
             let config = Config {

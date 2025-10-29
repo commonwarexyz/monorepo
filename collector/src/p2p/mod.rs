@@ -88,7 +88,7 @@ mod tests {
             (Sender<PublicKey>, Receiver<PublicKey>),
         )>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -105,8 +105,9 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender1, receiver1) = oracle.register(peer.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(peer.clone(), 1).await.unwrap();
+            let mut control = oracle.control(peer.clone());
+            let (sender1, receiver1) = control.register_comms(0).await.unwrap();
+            let (sender2, receiver2) = control.register_comms(1).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 

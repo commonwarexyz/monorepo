@@ -85,7 +85,11 @@ mod tests {
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));
         }
 

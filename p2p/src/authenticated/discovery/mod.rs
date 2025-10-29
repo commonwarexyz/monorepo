@@ -122,7 +122,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::discovery::{self, Network}, Sender, Recipients};
+//! use commonware_p2p::{authenticated::discovery::{self, Network}, PeerSetManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;

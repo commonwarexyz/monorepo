@@ -11,15 +11,18 @@ use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
     Register {
-        public_key: P,
+        peer_set: u64,
+        peers: Ordered<P>,
+    },
+    RegisterComms {
         channel: Channel,
+        public_key: P,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
     PeerSet {
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
-    IncrementPeerSet,
     LatestPeerSet {
         response: oneshot::Sender<Option<u64>>,
     },
@@ -72,7 +75,7 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Oracle<P: PublicKey> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
@@ -99,35 +102,6 @@ impl<P: PublicKey> Oracle<P> {
             .await
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Register a new peer with the network that can interact over a given channel.
-    ///
-    /// By default, the peer will not be linked to any other peers. If a peer is already
-    /// registered on a given channel, it will return an error.
-    pub async fn register(
-        &mut self,
-        public_key: P,
-        channel: Channel,
-    ) -> Result<(Sender<P>, Receiver<P>), Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Register {
-                public_key,
-                channel,
-                result: sender,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Increment the peer set version, causing all peers to refresh their peer sets.
-    pub async fn increment_peer_set_id(&mut self) -> Result<(), Error> {
-        self.sender
-            .send(Message::IncrementPeerSet)
-            .await
-            .map_err(|_| Error::NetworkClosed)
     }
 
     /// Set bandwidth limits for a peer.
@@ -211,23 +185,16 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
-/// Individual control interface for a peer in the simulated network.
-#[derive(Debug, Clone)]
-pub struct Control<P: PublicKey> {
-    /// The public key of the peer this control interface is for.
-    me: P,
-
-    /// Sender for messages to the oracle.
-    sender: mpsc::UnboundedSender<Message<P>>,
-}
-
-impl<P: PublicKey> crate::PeerSetManager for Control<P> {
+impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 
-    /// No-op; [crate::PeerSetManager::register] is not supported in the simulated network, use
-    /// [Oracle::register] instead.
-    async fn register(&mut self, _id: u64, _peers: Self::Peers) {}
+    async fn register(&mut self, peer_set: u64, peers: Self::Peers) {
+        self.sender
+            .send(Message::Register { peer_set, peers })
+            .await
+            .unwrap();
+    }
 
     async fn peer_set(&mut self, _id: u64) -> Option<Ordered<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
@@ -245,6 +212,35 @@ impl<P: PublicKey> crate::PeerSetManager for Control<P> {
             .await
             .unwrap();
         receiver.await.unwrap()
+    }
+}
+
+/// Individual control interface for a peer in the simulated network.
+#[derive(Debug, Clone)]
+pub struct Control<P: PublicKey> {
+    /// The public key of the peer this control interface is for.
+    me: P,
+
+    /// Sender for messages to the oracle.
+    sender: mpsc::UnboundedSender<Message<P>>,
+}
+
+impl<P: PublicKey> Control<P> {
+    /// Register the communication interfaces for the peer over a given [Channel].
+    pub async fn register_comms(
+        &mut self,
+        channel: Channel,
+    ) -> Result<(Sender<P>, Receiver<P>), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(Message::RegisterComms {
+                channel,
+                public_key: self.me.clone(),
+                result: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
     }
 }
 

@@ -97,7 +97,7 @@ mod tests {
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -114,7 +114,11 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
             connections.push((sender, receiver));
         }
 
@@ -150,7 +154,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                peer_provider: oracle.control(public_key.clone()),
+                peer_provider: oracle.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,

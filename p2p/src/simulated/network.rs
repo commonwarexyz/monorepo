@@ -173,9 +173,24 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
-            ingress::Message::Register {
-                public_key,
+            ingress::Message::Register { peer_set, peers } => {
+                // If peer does not exist, then create it.
+                for public_key in peers {
+                    if !self.peers.contains_key(&public_key) {
+                        let peer = Peer::new(
+                            self.context.with_label("peer"),
+                            public_key.clone(),
+                            self.get_next_socket(),
+                            self.max_size,
+                        );
+                        self.peers.insert(public_key.clone(), peer);
+                    }
+                }
+                self.peer_set_id = peer_set;
+            }
+            ingress::Message::RegisterComms {
                 channel,
+                public_key,
                 result,
             } => {
                 // If peer does not exist, then create it.
@@ -208,9 +223,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::PeerSet { response, .. } => {
                 let _ = response.send(Some(self.peers.keys().cloned().collect()));
-            }
-            ingress::Message::IncrementPeerSet => {
-                self.peer_set_id += 1;
             }
             ingress::Message::LatestPeerSet { response } => {
                 // The peer set is constant in the simulated network.
@@ -767,7 +779,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Receiver as _, Recipients, Sender as _};
+    use crate::{PeerSetManager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
@@ -789,15 +801,18 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Register
-            oracle.register(pk1.clone(), 0).await.unwrap();
-            oracle.register(pk1.clone(), 1).await.unwrap();
-            oracle.register(pk2.clone(), 0).await.unwrap();
-            oracle.register(pk2.clone(), 1).await.unwrap();
+            // Register the peer set
+            oracle.register(0, [pk1.clone(), pk2.clone()].into()).await;
+            let mut control = oracle.control(pk1.clone());
+            control.register_comms(0).await.unwrap();
+            control.register_comms(1).await.unwrap();
+            let mut control = oracle.control(pk2.clone());
+            control.register_comms(0).await.unwrap();
+            control.register_comms(1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1.clone(), 1).await,
+                control.register_comms(1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
@@ -869,8 +884,19 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
-            let (mut sender, _sender_recv) = oracle.register(sender_pk.clone(), 0).await.unwrap();
-            let (_sender2, mut receiver) = oracle.register(recipient_pk.clone(), 0).await.unwrap();
+            oracle
+                .register(0, [sender_pk.clone(), recipient_pk.clone()].into())
+                .await;
+            let (mut sender, _sender_recv) = oracle
+                .control(sender_pk.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
+            let (_sender2, mut receiver) = oracle
+                .control(recipient_pk.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
 
             oracle
                 .limit_bandwidth(sender_pk.clone(), Some(5_000), None)
@@ -932,9 +958,27 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
-            let (mut sender, _recv_sender) = oracle.register(sender_pk.clone(), 0).await.unwrap();
-            let (_sender2, mut recv_a) = oracle.register(recipient_a.clone(), 0).await.unwrap();
-            let (_sender3, mut recv_b) = oracle.register(recipient_b.clone(), 0).await.unwrap();
+            oracle
+                .register(
+                    0,
+                    [sender_pk.clone(), recipient_a.clone(), recipient_b.clone()].into(),
+                )
+                .await;
+            let (mut sender, _recv_sender) = oracle
+                .control(sender_pk.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
+            let (_sender2, mut recv_a) = oracle
+                .control(recipient_a.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
+            let (_sender3, mut recv_b) = oracle
+                .control(recipient_b.clone())
+                .register_comms(0)
+                .await
+                .unwrap();
 
             oracle
                 .limit_bandwidth(sender_pk.clone(), Some(1_000), None)
