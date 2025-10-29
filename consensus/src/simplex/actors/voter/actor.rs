@@ -1034,7 +1034,6 @@ impl<
 
         // Handle notarize
         if let Some(journal) = self.journal.as_mut() {
-            info!(?notarize, "appending notarize to journal");
             let msg = Voter::Notarize(notarize.clone());
             journal
                 .append(view, msg)
@@ -1598,7 +1597,6 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                info!(?msg, "replaying journal");
                 let (_, _, _, msg) = msg.expect("unable to replay journal");
                 let view = msg.view();
                 match msg {

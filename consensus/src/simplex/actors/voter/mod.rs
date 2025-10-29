@@ -72,7 +72,6 @@ mod tests {
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
     use std::{sync::Arc, time::Duration};
-    use tracing::info;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -987,7 +986,6 @@ mod tests {
 
             // Restart voter
             handle.abort();
-            info!("restarted voter");
 
             // Initialize voter actor
             let voter_cfg = Config {
@@ -1060,8 +1058,6 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
-
-            info!("providing the final finalize vote");
 
             // Provide the final finalize vote
             mailbox
