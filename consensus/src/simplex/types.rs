@@ -983,7 +983,7 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from matching notarize votes, if enough are present.
+    /// Builds a notarization certificate from notarize votes for the same proposal.
     pub fn from_notarizes<'a>(
         scheme: &S,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
@@ -992,13 +992,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         if notarizes.is_empty() {
             return None;
         }
-
         let proposal = notarizes[0].proposal.clone();
-
-        // All votes must endorse the same proposal to be aggregated into a single certificate.
-        if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
-            return None;
-        }
 
         let notarization_certificate =
             scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
@@ -1191,7 +1185,7 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
-    /// Builds a nullification certificate from matching nullify votes.
+    /// Builds a nullification certificate from nullify votes from the same round.
     pub fn from_nullifies<'a>(
         scheme: &S,
         nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
@@ -1200,13 +1194,7 @@ impl<S: Scheme> Nullification<S> {
         if nullifies.is_empty() {
             return None;
         }
-
         let round = nullifies[0].round;
-
-        // Nullify votes must all target the same round.
-        if nullifies.iter().skip(1).any(|n| n.round != round) {
-            return None;
-        }
 
         let nullification_certificate =
             scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
@@ -1412,7 +1400,7 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from matching finalize votes, if enough are present.
+    /// Builds a finalization certificate from finalize votes for the same proposal.
     pub fn from_finalizes<'a>(
         scheme: &S,
         finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
@@ -1421,13 +1409,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         if finalizes.is_empty() {
             return None;
         }
-
         let proposal = finalizes[0].proposal.clone();
-
-        // Finalize votes must agree on the exact proposal that is being committed.
-        if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
-            return None;
-        }
 
         let finalization_certificate =
             scheme.assemble_certificate(finalizes.iter().map(|f| f.vote.clone()))?;
