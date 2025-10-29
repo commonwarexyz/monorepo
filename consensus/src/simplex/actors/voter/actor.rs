@@ -97,7 +97,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: Vec<Finalize<S, D>>,
+    finalizes: AttributableVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -119,7 +119,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         let participants = scheme.participants().len();
         let notarizes = AttributableVec::new(participants);
         let nullifies = AttributableVec::new(participants);
-        let finalizes = Vec::new();
+        let finalizes = AttributableVec::new(participants);
 
         Self {
             start: context.current(),
