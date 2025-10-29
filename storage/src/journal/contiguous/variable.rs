@@ -1,10 +1,13 @@
-//! Contiguous wrapper for variable-length journals.
+//! Position-based journal for variable-length items.
 //!
-//! This wrapper enforces section fullness: all non-final sections are full and synced.
+//! This journal enforces section fullness: all non-final sections are full and synced.
 //! On init, only the last section needs to be replayed to determine the exact size.
 
-use super::Contiguous;
-use crate::journal::{fixed, variable, Error};
+use crate::journal::{
+    contiguous::{fixed, Contiguous},
+    segmented::variable,
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
@@ -48,7 +51,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
     position / items_per_section
 }
 
-/// Configuration for a contiguous variable-length journal.
+/// Configuration for a [Journal].
 #[derive(Clone)]
 pub struct Config<C> {
     /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
@@ -63,7 +66,7 @@ pub struct Config<C> {
     /// Optional compression level for stored items.
     pub compression: Option<u8>,
 
-    /// Codec configuration for encoding/decoding items.
+    /// [Codec] configuration for encoding/decoding items.
     pub codec_config: C,
 
     /// Buffer pool for caching data.
@@ -85,9 +88,9 @@ impl<C> Config<C> {
     }
 }
 
-/// A contiguous wrapper around [variable::Journal] that implements an append-only log.
+/// A position-based journal for variable-length items.
 ///
-/// This wrapper manages section assignment automatically, allowing callers to append items
+/// This journal manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers.
 ///
 /// # Invariants
@@ -101,7 +104,7 @@ impl<C> Config<C> {
 ///
 /// The data journal is always the source of truth. The offsets journal is an index
 /// that may temporarily diverge during crashes. Divergences are automatically
-/// repaired during init():
+/// aligned during init():
 /// * If offsets.size() < data.size(): Rebuild missing offsets by replaying data.
 ///   (This can happen if we crash after writing data journal but before writing offsets journal)
 /// * If offsets.size() > data.size(): Rewind offsets to match data size.
@@ -112,7 +115,7 @@ impl<C> Config<C> {
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
-pub struct Variable<E: Storage + Metrics, V: Codec> {
+pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -144,7 +147,7 @@ pub struct Variable<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -181,9 +184,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         )
         .await?;
 
-        // Validate and repair offsets journal to match data journal
+        // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
-            Self::repair_journals(&mut data, &mut offsets, items_per_section).await?;
+            Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
         assert!(
             oldest_retained_pos.is_multiple_of(items_per_section),
             "oldest_retained_pos is not section-aligned"
@@ -206,10 +209,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
-    /// Returns an error if the underlying storage operation fails.
     ///
-    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Variable::init].
+    /// Underlying storage operations may leave the journal in an inconsistent state.
+    /// The journal should be closed and reopened to trigger alignment in [Journal::init].
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {
@@ -220,7 +222,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
 
         // Rewind never updates oldest_retained_pos.
         if size < self.oldest_retained_pos {
-            return Err(Error::InvalidRewind(size));
+            return Err(Error::ItemPruned(size));
         }
 
         // Read the offset of the first item to discard (at position 'size').
@@ -241,8 +243,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// Append a new item to the journal, returning its position.
     ///
     /// The position returned is a stable, consecutively increasing value starting from 0.
-    /// This position is independent of section boundaries and remains constant even after
-    /// pruning.
+    /// This position remains constant after pruning.
     ///
     /// When a section becomes full, both the data journal and offsets journal are synced
     /// to maintain the invariant that all non-final sections are full and consistent.
@@ -253,7 +254,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// be encoded.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Variable::init].
+    /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         // Calculate which section this position belongs to
         let section = self.current_section();
@@ -301,14 +302,12 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
-    /// This prunes both the data journal and the offsets journal to maintain consistency.
-    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger repair in [Variable::init].
+    /// reopened to trigger alignment in [Journal::init].
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         if min_position <= self.oldest_retained_pos {
             return Ok(false);
@@ -450,7 +449,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         position_to_section(self.size, self.items_per_section)
     }
 
-    /// Repair the offsets journal and data journal to be consistent in case a crash occured
+    /// Align the offsets journal and data journal to be consistent in case a crash occured
     /// on a previous run and left the journals in an inconsistent state.
     ///
     /// The data journal is the source of truth. This function scans it to determine
@@ -459,7 +458,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// # Returns
     ///
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
-    async fn repair_journals(
+    async fn align_journals(
         data: &mut variable::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         items_per_section: u64,
@@ -507,7 +506,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
             // 2. The data journal was never opened.
             if let Some(oldest) = offsets.oldest_retained_pos().await? {
                 if oldest < size {
-                    // Offsets has unpruned entries but data is gone - repair by pruning
+                    // Offsets has unpruned entries but data is gone - align by pruning
                     info!("crash repair: pruning offsets to {size} (prune-all crash)");
                     offsets.prune(size).await?;
                     offsets.sync().await?;
@@ -595,10 +594,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     /// The data journal is the source of truth. This function brings the offsets
     /// journal up to date by replaying data items and indexing their positions.
     ///
-    /// # Invariants
+    /// # Warning
     ///
-    /// - `data.blobs` must not be empty (data journal has at least one section)
-    /// - `offsets_size < data.size()` (offsets is behind data)
+    /// - Panics if `data.blobs` is empty
+    /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &variable::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
@@ -656,24 +655,24 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
     }
 }
 
-// Implement Contiguous trait for Variable
-impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V> {
+// Implement Contiguous trait for variable-length items
+impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Variable::append(self, item).await
+        Journal::append(self, item).await
     }
 
     async fn size(&self) -> Result<u64, Error> {
-        Variable::size(self).await
+        Journal::size(self).await
     }
 
     async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        Variable::oldest_retained_pos(self).await
+        Journal::oldest_retained_pos(self).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Variable::prune(self, min_position).await
+        Journal::prune(self, min_position).await
     }
 
     async fn replay(
@@ -681,27 +680,27 @@ impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Variable<E, V>
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Variable::replay(self, start_pos, buffer).await
+        Journal::replay(self, start_pos, buffer).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Variable::read(self, position).await
+        Journal::read(self, position).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        Variable::sync(self).await
+        Journal::sync(self).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        Variable::close(self).await
+        Journal::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        Variable::destroy(self).await
+        Journal::destroy(self).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Variable::rewind(self, size).await
+        Journal::rewind(self, size).await
     }
 }
 
@@ -733,7 +732,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -756,20 +755,20 @@ mod tests {
                 .expect("Failed to remove offsets partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
-    /// Test that init repairs state when data is pruned/lost but offsets survives.
+    /// Test that init aligns state when data is pruned/lost but offsets survives.
     ///
     /// This handles both:
     /// 1. Crash during prune-all (data pruned, offsets not yet)
     /// 2. External data partition loss
     ///
-    /// In both cases, we repair by pruning offsets to match.
+    /// In both cases, we align by pruning offsets to match.
     #[test_traced]
-    fn test_variable_repair_data_offsets_mismatch() {
+    fn test_variable_align_data_offsets_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -782,7 +781,7 @@ mod tests {
             };
 
             // === Setup: Create journal with data ===
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -799,10 +798,10 @@ mod tests {
                 .await
                 .expect("Failed to remove data partition");
 
-            // === Verify init repairs the mismatch ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            // === Verify init aligns the mismatch ===
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Should repair offsets to match empty data");
+                .expect("Should align offsets to match empty data");
 
             // Size should be preserved
             assert_eq!(journal.size().await.unwrap(), 20);
@@ -834,7 +833,7 @@ mod tests {
             run_contiguous_tests(move |test_name: String| {
                 let context = context.clone();
                 async move {
-                    Variable::<_, u64>::init(
+                    Journal::<_, u64>::init(
                         context,
                         Config {
                             partition: format!("generic_test_{test_name}"),
@@ -867,7 +866,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Variable::<_, u64>::init(context, cfg).await.unwrap();
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
 
             // Append items across 4 sections: [0-9], [10-19], [20-29], [30-39]
             for i in 0..40u64 {
@@ -956,7 +955,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal and append data ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -986,7 +985,7 @@ mod tests {
             journal.close().await.unwrap();
 
             // === Phase 3: Re-init and verify position preserved ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1037,7 +1036,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1058,7 +1057,7 @@ mod tests {
             variable.close().await.unwrap();
 
             // === Verify recovery ===
-            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1098,7 +1097,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1114,7 +1113,7 @@ mod tests {
             variable.close().await.unwrap();
 
             // === Verify corruption detected ===
-            let result = Variable::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1134,7 +1133,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1154,7 +1153,7 @@ mod tests {
             variable.close().await.unwrap();
 
             // === Verify recovery ===
-            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1189,7 +1188,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1210,7 +1209,7 @@ mod tests {
             variable.close().await.unwrap();
 
             // === Verify recovery ===
-            let variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1256,7 +1255,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1275,7 +1274,7 @@ mod tests {
             variable.close().await.unwrap();
 
             // === Verify recovery ===
-            let mut variable = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1316,7 +1315,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with one full section ===
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1346,7 +1345,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
@@ -1382,7 +1381,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1397,7 +1396,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Variable::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 

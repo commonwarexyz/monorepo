@@ -2,7 +2,7 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{self, any::fixed::unordered::Any, operation::fixed::unordered::Operation},
     index::Unordered as Index,
-    journal::fixed,
+    journal::contiguous::fixed,
     mmr::{Location, Position, StandardHasher},
     translator::Translator,
 };
@@ -285,7 +285,7 @@ mod tests {
                 Engine, Target,
             },
         },
-        journal::{self, fixed},
+        journal,
         mmr::iterator::nodes_to_pin,
         translator::TwoCap,
     };
@@ -1318,9 +1318,9 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = journal::fixed::Journal::<Context, Operation<Digest, Digest>>::init(
+            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
-                journal::fixed::Config {
+                fixed::Config {
                     partition: "sync_basic_log".into(),
                     items_per_blob: NZU64!(1000),
                     write_buffer: NZUsize!(1024),

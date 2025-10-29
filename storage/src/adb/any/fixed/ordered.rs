@@ -14,7 +14,7 @@ use crate::{
         Error,
     },
     index::{Cursor as _, Index as _, Ordered as Index},
-    journal::fixed::Journal,
+    journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     translator::Translator,
 };

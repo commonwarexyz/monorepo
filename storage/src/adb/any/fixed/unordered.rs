@@ -10,7 +10,7 @@ use crate::{
         Error,
     },
     index::{Index as _, Unordered as Index},
-    journal::fixed::Journal,
+    journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
     translator::Translator,
 };

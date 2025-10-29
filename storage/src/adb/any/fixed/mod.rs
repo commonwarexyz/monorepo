@@ -10,7 +10,7 @@
 use crate::{
     adb::{operation::fixed::FixedOperation, Error},
     index::{Cursor, Index},
-    journal::fixed::{Config as JConfig, Journal},
+    journal::contiguous::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::BitMap,
         journaled::{Config as MmrConfig, Mmr},

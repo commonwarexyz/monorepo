@@ -1,23 +1,18 @@
-//! An interface for journaling with position-indexed reads.
+//! Contiguous journals with position-based access.
 //!
-//! This module includes:
-//!
-//! - [Contiguous]: Trait for append-only log
-//! - [Variable]: Wrapper for [super::variable::Journal] that implements [Contiguous]
-//! - Implementation of [Contiguous] for [super::fixed::Journal]
+//! This module provides position-based journal implementations where items are stored
+//! contiguously and can be accessed by their position (0-indexed). Both [fixed]-size and
+//! [variable]-size item journals are supported.
 
 use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
 
-mod fixed;
-mod variable;
-
-// Re-export public types
-pub use variable::{Config, Variable};
+pub mod fixed;
+pub mod variable;
 
 #[cfg(test)]
-pub(super) mod tests;
+mod tests;
 
 /// Core trait for contiguous journals supporting sequential append operations.
 ///

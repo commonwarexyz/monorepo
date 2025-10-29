@@ -2,7 +2,7 @@ use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
     index::{Index as _, Unordered as Index},
-    journal::variable::{Config as JConfig, Journal},
+    journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};

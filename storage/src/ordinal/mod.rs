@@ -2,7 +2,7 @@
 //!
 //! [Ordinal] is a collection of [commonware_runtime::Blob]s containing ordered records of fixed size.
 //! Because records are fixed size, file position corresponds directly to index. Unlike
-//! [crate::journal::fixed::Journal], [Ordinal] supports out-of-order insertion.
+//! [crate::journal::contiguous::fixed::Journal], [Ordinal] supports out-of-order insertion.
 //!
 //! # Design
 //!

@@ -89,8 +89,8 @@ use crate::{
     adb::operation::variable::Operation,
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
+        contiguous::fixed::{Config as FConfig, Journal as FJournal},
+        segmented::variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::Location,
     translator::Translator,

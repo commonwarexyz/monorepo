@@ -1,5 +1,5 @@
 use super::{Config, Error, Identifier};
-use crate::journal::variable::{Config as JournalConfig, Journal};
+use crate::journal::segmented::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};

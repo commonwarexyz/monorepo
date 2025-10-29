@@ -1,6 +1,6 @@
 use crate::{
     adb,
-    journal::variable::{Config as VConfig, Journal as VJournal},
+    journal::segmented::variable::{Config as VConfig, Journal as VJournal},
     mmr::Location,
 };
 use commonware_codec::Codec;

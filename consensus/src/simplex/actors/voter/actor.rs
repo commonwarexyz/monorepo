@@ -26,7 +26,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::variable::{Config as JConfig, Journal};
+use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},

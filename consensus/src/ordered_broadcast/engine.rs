@@ -31,7 +31,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::{self, variable::Journal};
+use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::oneshot,
@@ -966,7 +966,7 @@ impl<
         }
 
         // Initialize journal
-        let cfg = journal::variable::Config {
+        let cfg = JournalConfig {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),

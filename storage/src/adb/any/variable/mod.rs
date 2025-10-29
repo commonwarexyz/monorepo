@@ -13,8 +13,8 @@ use crate::{
     },
     index::{Cursor, Index as _, Unordered as Index},
     journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
+        contiguous::fixed::{Config as FConfig, Journal as FJournal},
+        segmented::variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},

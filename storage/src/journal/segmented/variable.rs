@@ -1,6 +1,6 @@
 //! An append-only log for storing arbitrary variable length items.
 //!
-//! `variable::Journal` is an append-only log for storing arbitrary variable length data on disk. In
+//! `segmented::Journal` is an append-only log for storing arbitrary variable length data on disk. In
 //! addition to replay, stored items can be directly retrieved given their section number and offset
 //! within the section.
 //!
@@ -78,7 +78,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_storage::journal::variable::{Journal, Config};
+//! use commonware_storage::journal::segmented::variable::{Journal, Config};
 //! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
@@ -100,7 +100,7 @@
 //! });
 //! ```
 
-use super::Error;
+use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{
@@ -1339,7 +1339,7 @@ mod tests {
                 .expect("Failed to create blob");
 
             // Write incomplete size data (less than 4 bytes)
-            let incomplete_data = hex!("0x0001").to_vec(); // Less than 4 bytes
+            let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
