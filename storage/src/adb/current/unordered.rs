@@ -9,7 +9,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::Unordered as Index,
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
@@ -136,11 +136,11 @@ impl<
             }
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
-            // hasher so the new leaf digests can be computed during sync.
+            // hasher so the new leaf digests can be computed during merkleization.
             grafter
                 .load_grafted_digests(&status.dirty_chunks(), &mmr)
                 .await?;
-            status.sync(&mut grafter).await?;
+            status.merkleize(&mut grafter).await?;
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
@@ -161,7 +161,7 @@ impl<
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
-        status.sync(&mut grafter).await?;
+        status.merkleize(&mut grafter).await?;
 
         let any = Any {
             mmr,
@@ -256,56 +256,32 @@ impl<
         // Raise the inactivity floor by taking `self.steps` steps.
         let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
         for _ in 0..steps_to_take {
-            if self.any.snapshot.keys() == 0 {
+            if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
                 debug!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
-            self.raise_floor().await?;
+            let loc = self.any.inactivity_floor_loc;
+            let mut shared = self.any.as_shared();
+            self.any.inactivity_floor_loc = shared
+                .raise_floor_with_bitmap(&mut self.status, loc)
+                .await?;
         }
         self.any.steps = 0;
 
         // Apply the commit operation with the new inactivity floor.
-        self.any
-            .apply_op(Operation::CommitFloor(self.any.inactivity_floor_loc))
-            .await?;
+        let loc = self.any.inactivity_floor_loc;
+        let mut shared = self.any.as_shared();
+        shared.apply_op(Operation::CommitFloor(loc)).await?;
         self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
         self.status.push(true); // Always treat most recent commit op as active.
 
-        // Sync the log and process the updates to the MMR in parallel.
+        // Sync the log and merkleize the MMR updates in parallel.
         let mmr_fut = async {
-            self.any.mmr.process_updates(&mut self.any.hasher);
+            self.any.mmr.merkleize(&mut self.any.hasher);
             Ok::<(), Error>(())
         };
         try_join!(self.any.log.sync().map_err(Error::Journal), mmr_fut)?;
-
-        Ok(())
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one.
-    ///
-    /// # Panics if there is not at least one active operation above the inactivity floor.
-    async fn raise_floor(&mut self) -> Result<(), Error> {
-        // Use the status bitmap to find the first active operation above the inactivity floor.
-        while !self.status.get_bit(*self.any.inactivity_floor_loc) {
-            self.any.inactivity_floor_loc += 1;
-        }
-
-        // Move the active operation to tip.
-        let op = self.any.log.read(*self.any.inactivity_floor_loc).await?;
-        let loc = self
-            .any
-            .move_op_if_active(op, self.any.inactivity_floor_loc)
-            .await?
-            .expect("op should be active based on status bitmap");
-        self.status.set_bit(*loc, false);
-        self.status.push(true);
-
-        // Advance inactivity floor above the moved operation since we know it's inactive.
-        self.any.inactivity_floor_loc += 1;
 
         Ok(())
     }
@@ -314,43 +290,52 @@ impl<
     /// upon return from this function. Also raises the inactivity floor according to the schedule.
     /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
-        self.commit_ops().await?; // (1)
+        self.commit_ops().await?; // recovery is ensured after this returns
 
+        // Merkleize the new bitmap entries.
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
-        self.status.sync(&mut grafter).await?;
+        self.status.merkleize(&mut grafter).await?;
 
+        // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
-
-        // Write the pruned portion of the bitmap to disk, which is required for recovery. Active
-        // part is not persisted but restored by replay on restart.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/2019): optimize this.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?; // (2)
 
         Ok(())
     }
 
     /// Sync data to disk, ensuring clean recovery.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     /// Prune all operations prior to `target_prune_loc` from the db.
     ///
-    /// # Panic
+    /// # Errors
     ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    /// Returns error if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
         self.any.prune(target_prune_loc).await
     }
 
@@ -620,7 +605,7 @@ impl<
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
-        self.status.sync(&mut grafter).await?;
+        self.status.merkleize(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
         self.status.prune_to_bit(*target_prune_loc)?;
         self.status

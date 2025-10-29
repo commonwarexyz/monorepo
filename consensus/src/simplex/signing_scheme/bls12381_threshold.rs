@@ -64,8 +64,6 @@ pub enum Scheme<P: PublicKey, V: Variant> {
         identity: V::Public,
     },
     CertificateVerifier {
-        /// Participants in the committee.
-        participants: Ordered<P>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
     },
@@ -136,16 +134,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Creates a verifier that only checks recovered certificates.
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
-    /// verify individual votes or partial signatures. The participant identity keys are used
-    /// for committee ordering and indexing.
+    /// verify individual votes or partial signatures.
     ///
-    /// * `participants` - ordered set of participant identity keys
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(participants: Ordered<P>, identity: V::Public) -> Self {
-        Self::CertificateVerifier {
-            participants,
-            identity,
-        }
+    pub fn certificate_verifier(identity: V::Public) -> Self {
+        Self::CertificateVerifier { identity }
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
@@ -153,7 +146,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         match self {
             Scheme::Signer { participants, .. } => participants,
             Scheme::Verifier { participants, .. } => participants,
-            Scheme::CertificateVerifier { participants, .. } => participants,
+            _ => panic!("can only be called for signer and verifier"),
         }
     }
 
@@ -1168,10 +1161,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let certificate_verifier = Scheme::<V>::certificate_verifier(
-            schemes[0].participants().clone(),
-            *schemes[0].identity(),
-        );
+        let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
         assert!(
             certificate_verifier
                 .sign_vote(
@@ -1201,10 +1191,7 @@ mod tests {
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
-        let certificate_verifier = Scheme::<V>::certificate_verifier(
-            schemes[0].participants().clone(),
-            *schemes[0].identity(),
-        );
+        let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
         let proposal = sample_proposal(0, 15, 8);
         let vote = schemes[1]
             .sign_vote(

@@ -9,7 +9,7 @@ pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) {
         let element = hasher.inner().finalize();
         mmr.add_batched(hasher, &element);
     }
-    mmr.sync(hasher);
+    mmr.merkleize(hasher);
 }
 
 /// Sha256 roots for all MMRs with 0..200 elements for testing stability of root computation across

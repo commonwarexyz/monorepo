@@ -131,7 +131,7 @@ pub enum Error {
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]
     RangeOutOfBounds(Location),
-    #[error("bitmap has unprocessed updates")]
+    #[error("bitmap has unmerkleized updates")]
     DirtyState,
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
