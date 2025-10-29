@@ -332,4 +332,54 @@ mod tests {
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
     }
+
+    #[test]
+    fn test_add_set_update_address() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 3,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let addr_4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1238);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+        let pk_3 = ed25519::PrivateKey::from_seed(3).public_key();
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory =
+                Directory::init(context, (my_pk.clone(), my_addr), config, releaser);
+
+            directory.add_set(
+                0,
+                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+            );
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
+            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            assert!(!directory.peers.contains_key(&pk_3));
+
+            // Update address
+            directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4)]));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
+            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            assert!(!directory.peers.contains_key(&pk_3));
+
+            // Ignore update to me
+            directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
+            assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
+            assert!(!directory.peers.contains_key(&pk_3));
+        });
+    }
 }
