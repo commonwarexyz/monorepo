@@ -426,6 +426,7 @@ impl<const N: usize> BitMap<N> {
     /// Prepend a chunk to the beginning of the bitmap.
     pub(super) fn prepend_chunk(&mut self, chunk: &[u8; N]) {
         self.chunks.push_front(*chunk);
+        self.len += Self::CHUNK_SIZE_BITS;
     }
 
     /// Overwrite a chunk's data at the given index.
@@ -2101,5 +2102,19 @@ mod tests {
 
         let bv_partial: BitMap<4> = BitMap::zeroes(65);
         assert!(!bv_partial.is_chunk_aligned());
+    }
+
+    #[test]
+    fn test_unprune_restores_length() {
+        let mut prunable: Prunable<4> = Prunable::new_with_pruned_chunks(1).unwrap();
+        assert_eq!(prunable.len(), Prunable::<4>::CHUNK_SIZE_BITS);
+        assert_eq!(prunable.pruned_chunks(), 1);
+        let chunk = [0xDE, 0xAD, 0xBE, 0xEF];
+
+        prunable.unprune_chunks(&[chunk]);
+
+        assert_eq!(prunable.pruned_chunks(), 0);
+        assert_eq!(prunable.len(), Prunable::<4>::CHUNK_SIZE_BITS);
+        assert_eq!(prunable.get_chunk_containing(0), &chunk);
     }
 }
