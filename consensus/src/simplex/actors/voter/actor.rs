@@ -146,10 +146,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let participants = scheme.participants();
-        let notarizes = DedupedVec::new(participants.len());
-        let nullifies = DedupedVec::new(participants.len());
-        let finalizes = DedupedVec::new(participants.len());
+        let participants = scheme.participants().len();
+        let notarizes = DedupedVec::new(participants);
+        let nullifies = DedupedVec::new(participants);
+        let finalizes = DedupedVec::new(participants);
 
         Self {
             start: context.current(),
