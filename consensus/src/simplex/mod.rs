@@ -398,7 +398,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -470,8 +470,8 @@ mod tests {
                     epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(1),
-                    nullify_retry: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
@@ -898,7 +898,7 @@ mod tests {
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
@@ -931,7 +931,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(5_000));
+                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -966,7 +966,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(600))
+                deterministic::Runner::timed(Duration::from_secs(60))
             }
             .start_and_recover(f);
 
@@ -1111,7 +1111,6 @@ mod tests {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
-                    debug!("finalizer finished");
                 }));
             }
             join_all(finalizers).await;
@@ -1132,7 +1131,6 @@ mod tests {
 
             // Wait for nullifications to accrue
             context.sleep(Duration::from_secs(120)).await;
-            debug!("nullifications accrued");
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -1229,7 +1227,6 @@ mod tests {
             while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
-            debug!("engine finalizer finished");
 
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
@@ -1259,7 +1256,7 @@ mod tests {
         let skip_timeout = 5;
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(1_000));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
