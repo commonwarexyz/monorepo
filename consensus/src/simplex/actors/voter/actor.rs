@@ -27,6 +27,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
+use commonware_utils::bitmap::BitMap;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -55,6 +56,39 @@ enum Action {
     Block,
     /// Process the message.
     Process,
+}
+
+struct DedupedVec<T: Attributable> {
+    vec: Vec<T>,
+    added: BitMap,
+}
+
+impl<T: Attributable> DedupedVec<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            vec: Vec::with_capacity(capacity),
+            added: BitMap::zeroes(capacity as u64),
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        let index = item.signer() as u64;
+        if self.added.get(index) {
+            return;
+        }
+        self.added.set(index, true);
+        self.vec.push(item);
+    }
+
+    fn len(&self) -> usize {
+        self.vec.len()
+    }
+}
+
+impl<T: Attributable> AsRef<[T]> for DedupedVec<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.vec
+    }
 }
 
 struct Round<E: Clock, S: Scheme, D: Digest> {
