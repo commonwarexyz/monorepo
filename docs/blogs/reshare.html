@@ -89,6 +89,17 @@
             working on the next height as soon as the previous height is notarized (rather than finalized). This makes it quite challenging to actually decide
             when to apply a new permissioned set. If it isn't known when building a block who should vote on it, divergence can lead to a halt or a safety failure.
         </p>
+        <p>
+            This approach was derived from <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to
+                    Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
+            Roughgarden and Ertem Nusret Tas.
+        </p>
+        <div class="image-container">
+            <img src="/imgs/epoching.png" alt="Epoching" />
+            <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance,
+                if this hasn't happened yet we repropose the same block.
+            </div>
+        </div>
 
         Epoching (Motivated by Faster-than-Finality View) -> Resharing -> Bootstrapping -> Example
         <p>
