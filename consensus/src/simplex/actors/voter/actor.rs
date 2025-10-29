@@ -160,13 +160,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             leader: None,
 
-            requested_proposal_build: false,
             requested_proposal_verify: false,
             verified_proposal: false,
 
             certify_handle: None,
             certified_proposal: None,
 
+            requested_proposal_build: false,
             proposal: None,
 
             leader_deadline: None,
@@ -684,7 +684,6 @@ impl<
         missing
     }
 
-    #[allow(clippy::question_mark)]
     async fn propose(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> Option<Request<D, D>> {
         // Check if we are leader
         {
@@ -892,7 +891,6 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<Request<D, bool>> {
         // Get round
         let proposal = {
@@ -920,9 +918,7 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let Some(ref proposal) = round.proposal else {
-                return None;
-            };
+            let proposal = round.proposal.as_ref()?;
 
             // Sanity-check the epoch is correct. It should have already been checked.
             assert_eq!(proposal.epoch(), self.epoch, "proposal epoch mismatch");
