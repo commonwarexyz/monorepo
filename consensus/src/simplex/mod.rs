@@ -186,7 +186,7 @@
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::multijournal::Journal].
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::codex::Codex].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 

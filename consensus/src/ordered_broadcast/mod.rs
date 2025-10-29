@@ -14,7 +14,7 @@
 //! threshold signature, ensuring a quorum verifies each chunk. The threshold signature allows
 //! external parties to confirm that the chunk was reliably broadcast.
 //!
-//! Network participants persist any new nodes to a journal. This enables recovery from crashes and
+//! Network participants persist any new nodes to a codex. This enables recovery from crashes and
 //! ensures that sequencers do not broadcast conflicting chunks and that validators do not sign
 //! them. "Conflicting" chunks are chunks from the same sequencer at the same height with different
 //! payloads.
@@ -237,12 +237,12 @@ mod tests {
                     rebroadcast_timeout,
                     priority_acks: false,
                     priority_proposals: false,
-                    journal_heights_per_section: 10,
-                    journal_replay_buffer: NZUsize!(4096),
-                    journal_write_buffer: NZUsize!(4096),
-                    journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
-                    journal_compression: Some(3),
-                    journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    codex_heights_per_section: 10,
+                    codex_replay_buffer: NZUsize!(4096),
+                    codex_write_buffer: NZUsize!(4096),
+                    codex_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                    codex_compression: Some(3),
+                    codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             );
 
@@ -868,12 +868,12 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
-                        journal_replay_buffer: NZUsize!(4096),
-                        journal_write_buffer: NZUsize!(4096),
-                        journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
-                        journal_compression: Some(3),
-                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        codex_heights_per_section: 10,
+                        codex_replay_buffer: NZUsize!(4096),
+                        codex_write_buffer: NZUsize!(4096),
+                        codex_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                        codex_compression: Some(3),
+                        codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
                 );
 
@@ -919,15 +919,15 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
-                        journal_replay_buffer: NZUsize!(4096),
-                        journal_write_buffer: NZUsize!(4096),
-                        journal_name_prefix: format!(
+                        codex_heights_per_section: 10,
+                        codex_replay_buffer: NZUsize!(4096),
+                        codex_write_buffer: NZUsize!(4096),
+                        codex_name_prefix: format!(
                             "ordered-broadcast-seq/{}/",
                             sequencer.public_key()
                         ),
-                        journal_compression: Some(3),
-                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        codex_compression: Some(3),
+                        codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
                 );
 

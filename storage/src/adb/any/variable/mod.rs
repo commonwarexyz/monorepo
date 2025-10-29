@@ -11,13 +11,13 @@ use crate::{
         store::{self, Db},
         Error,
     },
+    codex::{Codex, Config as CodexConfig},
     index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    multijournal::{Config as VConfig, Journal as VJournal},
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};
@@ -103,7 +103,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     ///
     /// An operation's location is always equal to the number of the MMR leaf storing the digest of
     /// the operation.
-    log: VJournal<E, Operation<K, V>>,
+    log: Codex<E, Operation<K, V>>,
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
@@ -168,9 +168,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let log = VJournal::init(
+        let log = Codex::init(
             context.with_label("log"),
-            VConfig {
+            CodexConfig {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,

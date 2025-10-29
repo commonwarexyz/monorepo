@@ -48,11 +48,11 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            journal_partition: "fuzz_journal".into(),
-            journal_compression: None,
-            journal_write_buffer: NZUsize!(1024 * 1024),
-            journal_target_size: 10 * 1024 * 1024,
-            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            codex_partition: "fuzz_journal".into(),
+            codex_compression: None,
+            codex_write_buffer: NZUsize!(1024 * 1024),
+            codex_target_size: 10 * 1024 * 1024,
+            codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             table_partition: "fuzz_table".into(),
             table_initial_size: 256,
             table_resize_frequency: 4,

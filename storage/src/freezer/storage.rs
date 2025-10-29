@@ -1,5 +1,5 @@
 use super::{Config, Error, Identifier};
-use crate::multijournal::{Config as JournalConfig, Journal};
+use crate::codex::{Codex, Config as CodexConfig};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
@@ -18,7 +18,7 @@ const RESIZE_THRESHOLD: u64 = 50;
 /// Location of an item in the [Freezer].
 ///
 /// This can be used to directly access the data for a given
-/// key-value pair (rather than walking the journal chain).
+/// key-value pair (rather than walking the codex chain).
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
@@ -110,7 +110,7 @@ pub struct Checkpoint {
     epoch: u64,
     /// The section of the last committed operation.
     section: u64,
-    /// The size of the journal in the last committed section.
+    /// The size of the codex in the last committed section.
     size: u64,
     /// The size of the table.
     table_size: u32,
@@ -244,7 +244,7 @@ impl Read for Entry {
     }
 }
 
-/// A key-value pair stored in the [Journal].
+/// A key-value pair stored in the [Codex].
 struct Record<K: Array, V: Codec> {
     key: K,
     value: V,
@@ -295,12 +295,12 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
 
-    // Table blob that maps slots to journal chain heads
+    // Table blob that maps slots to codex chain heads
     table: E::Blob,
 
-    // Variable journal for storing entries
-    journal: Journal<E, Record<K, V>>,
-    journal_target_size: u64,
+    // Codex for storing entries
+    codex: Codex<E, Record<K, V>>,
+    codex_target_size: u64,
 
     // Current section for new writes
     current_section: u64,
@@ -535,15 +535,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Initialize variable journal with a separate partition
-        let journal_config = JournalConfig {
-            partition: config.journal_partition,
-            compression: config.journal_compression,
+        // Initialize codex with a separate partition
+        let codex_config = CodexConfig {
+            partition: config.codex_partition,
+            compression: config.codex_compression,
             codec_config: config.codec_config,
-            write_buffer: config.journal_write_buffer,
-            buffer_pool: config.journal_buffer_pool,
+            write_buffer: config.codex_write_buffer,
+            buffer_pool: config.codex_buffer_pool,
         };
-        let mut journal = Journal::init(context.with_label("journal"), journal_config).await?;
+        let mut codex = Codex::init(context.with_label("codex"), codex_config).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -576,9 +576,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind the journal to the committed section and offset
-                journal.rewind(checkpoint.section, checkpoint.size).await?;
-                journal.sync(checkpoint.section).await?;
+                // Rewind the codex to the committed section and offset
+                codex.rewind(checkpoint.section, checkpoint.size).await?;
+                codex.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -632,7 +632,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        size: journal.size(max_section).await?,
+                        size: codex.size(max_section).await?,
                         table_size,
                     },
                     resizable,
@@ -672,8 +672,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            journal,
-            journal_target_size: config.journal_target_size,
+            codex,
+            codex_target_size: config.codex_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
@@ -709,13 +709,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.resizable as u64 >= self.table_resize_threshold
     }
 
-    /// Determine which journal section to write to based on current journal size.
+    /// Determine which codex section to write to based on current codex size.
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current section size
-        let size = self.journal.size(self.current_section).await?;
+        let size = self.codex.size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if size >= self.journal_target_size {
+        if size >= self.codex_target_size {
             self.current_section += 1;
             debug!(size, section = self.current_section, "updated section");
         }
@@ -742,8 +742,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             head.map(|(section, offset, _)| (section, offset)),
         );
 
-        // Append entry to the variable journal
-        let (offset, _) = self.journal.append(self.current_section, entry).await?;
+        // Append entry to the variable codex
+        let (offset, _) = self.codex.append(self.current_section, entry).await?;
 
         // Update the number of items added to the entry.
         //
@@ -786,7 +786,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Get the value for a given [Cursor].
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
-        let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
+        let entry = self.codex.get(cursor.section(), cursor.offset()).await?;
 
         Ok(entry.value)
     }
@@ -804,8 +804,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Follow the linked list chain to find the first matching key
         loop {
-            // Get the entry from the variable journal
-            let entry = self.journal.get(section, offset).await?;
+            // Get the entry from the variable codex
+            let entry = self.codex.get(section, offset).await?;
 
             // Check if this key matches
             if entry.key.as_ref() == key.as_ref() {
@@ -943,10 +943,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified journal sections
+        // Sync all modified codex sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
         for section in &self.modified_sections {
-            updates.push(self.journal.sync(*section));
+            updates.push(self.codex.sync(*section));
         }
         try_join_all(updates).await?;
         self.modified_sections.clear();
@@ -969,7 +969,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            size: self.journal.size(self.current_section).await?,
+            size: self.codex.size(self.current_section).await?,
             table_size: self.table_size,
         })
     }
@@ -984,15 +984,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
 
-        self.journal.close().await?;
+        self.codex.close().await?;
         self.table.sync().await?;
         Ok(checkpoint)
     }
 
     /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy the journal (removes all journal sections)
-        self.journal.destroy().await?;
+        // Destroy the codex (removes all codex sections)
+        self.codex.destroy().await?;
 
         // Destroy the table
         drop(self.table);

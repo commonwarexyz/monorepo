@@ -1,7 +1,7 @@
 use crate::{
     adb,
+    codex::{Codex, Config as CodexConfig},
     mmr::Location,
-    multijournal::{Config as VConfig, Journal as VJournal},
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -48,10 +48,10 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 /// Returns [adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
-    cfg: VConfig<V::Cfg>,
+    cfg: CodexConfig<V::Cfg>,
     range: Range<u64>,
     items_per_section: NonZeroU64,
-) -> Result<(VJournal<E, V>, u64), adb::Error> {
+) -> Result<(Codex<E, V>, u64), adb::Error> {
     assert!(!range.is_empty(), "range must not be empty");
 
     // Calculate the section ranges based on item locations
@@ -69,14 +69,14 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     );
 
     // Initialize the base journal to see what existing data we have
-    let mut journal = VJournal::init(context.with_label("journal"), cfg.clone()).await?;
+    let mut codex = Codex::init(context.with_label("journal"), cfg.clone()).await?;
 
-    let last_section = journal.blobs.last_key_value().map(|(&s, _)| s);
+    let last_section = codex.blobs.last_key_value().map(|(&s, _)| s);
 
     // No existing data
     let Some(last_section) = last_section else {
         debug!("no existing journal data, creating fresh journal");
-        return Ok((journal, range.start));
+        return Ok((codex, range.start));
     };
 
     // If all existing data is before our sync range, destroy and recreate fresh
@@ -85,14 +85,14 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             last_section,
             lower_section, "existing journal data is stale, re-initializing"
         );
-        journal.destroy().await?;
-        let journal = VJournal::init(context, cfg).await?;
-        return Ok((journal, range.start));
+        codex.destroy().await?;
+        let codex = Codex::init(context, cfg).await?;
+        return Ok((codex, range.start));
     }
 
     // Prune sections below the lower bound.
     if lower_section > 0 {
-        journal.prune(lower_section).await?;
+        codex.prune(lower_section).await?;
     }
 
     // Check if data exceeds the sync range
@@ -101,24 +101,24 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         return Err(adb::Error::UnexpectedData(Location::new_unchecked(loc)));
     }
 
-    let size = get_size(&journal, items_per_section).await?;
+    let size = get_size(&codex, items_per_section).await?;
     if size > range.end {
         return Err(adb::Error::UnexpectedData(Location::new_unchecked(size)));
     }
 
-    Ok((journal, size))
+    Ok((codex, size))
 }
 
 /// Returns the number of items in the journal.
 pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
-    journal: &VJournal<E, V>,
+    codex: &Codex<E, V>,
     items_per_section: u64,
 ) -> Result<u64, adb::Error> {
-    let Some(last_section) = journal.blobs.last_key_value().map(|(&s, _)| s) else {
+    let Some(last_section) = codex.blobs.last_key_value().map(|(&s, _)| s) else {
         return Ok(0);
     };
     let last_section_start = last_section * items_per_section;
-    let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+    let stream = codex.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
     pin_mut!(stream);
     let mut size = last_section_start;
     while let Some(item) = stream.next().await {
@@ -146,7 +146,7 @@ mod tests {
     fn test_init_journal_no_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_fresh_start".into(),
                 compression: None,
                 codec_config: (),
@@ -196,7 +196,7 @@ mod tests {
     fn test_init_journal_existing_data_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_overlap".into(),
                 compression: None,
                 codec_config: (),
@@ -206,7 +206,7 @@ mod tests {
 
             // Create initial journal with data in multiple sections
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -282,7 +282,7 @@ mod tests {
     fn test_init_journal_invalid_parameters() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_invalid".into(),
                 compression: None,
                 codec_config: (),
@@ -306,7 +306,7 @@ mod tests {
     fn test_init_journal_existing_data_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_exact_match".into(),
                 compression: None,
                 codec_config: (),
@@ -316,7 +316,7 @@ mod tests {
 
             // Create initial journal with data exactly matching sync range
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -389,7 +389,7 @@ mod tests {
     fn test_init_journal_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_unexpected_data".into(),
                 compression: None,
                 codec_config: (),
@@ -399,7 +399,7 @@ mod tests {
 
             // Create initial journal with data beyond sync range
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -437,7 +437,7 @@ mod tests {
     fn test_init_journal_existing_data_stale() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_stale".into(),
                 compression: None,
                 codec_config: (),
@@ -447,7 +447,7 @@ mod tests {
 
             // Create initial journal with stale data
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -490,7 +490,7 @@ mod tests {
     fn test_init_journal_section_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_boundaries".into(),
                 compression: None,
                 codec_config: (),
@@ -500,7 +500,7 @@ mod tests {
 
             // Create journal with data at section boundaries
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
@@ -563,7 +563,7 @@ mod tests {
     fn test_init_journal_same_section_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = VConfig {
+            let cfg = CodexConfig {
                 partition: "test_same_section".into(),
                 compression: None,
                 codec_config: (),
@@ -573,7 +573,7 @@ mod tests {
 
             // Create journal with data in multiple sections
             let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                Codex::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 

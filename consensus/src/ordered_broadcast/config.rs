@@ -68,22 +68,22 @@ pub struct Config<
     /// and the height_bound is 10, then acks for heights 100-110 are accepted.
     pub height_bound: u64,
 
-    /// A prefix for the journal names.
+    /// A prefix for the codex names.
     /// The rest of the name is the hex-encoded public keys of the relevant sequencer.
-    pub journal_name_prefix: String,
+    pub codex_name_prefix: String,
 
-    /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    /// The number of entries to keep per codex section.
+    pub codex_heights_per_section: u64,
 
-    /// The number of bytes to buffer when replaying a journal.
-    pub journal_replay_buffer: NonZeroUsize,
+    /// The number of bytes to buffer when replaying a codex.
+    pub codex_replay_buffer: NonZeroUsize,
 
-    /// The size of the write buffer to use for each blob in the journal.
-    pub journal_write_buffer: NonZeroUsize,
+    /// The size of the write buffer to use for each blob in the codex.
+    pub codex_write_buffer: NonZeroUsize,
 
-    /// Compression level for the journal.
-    pub journal_compression: Option<u8>,
+    /// Compression level for the codex.
+    pub codex_compression: Option<u8>,
 
-    /// Buffer pool for the journal.
-    pub journal_buffer_pool: PoolRef,
+    /// Buffer pool for the codex.
+    pub codex_buffer_pool: PoolRef,
 }

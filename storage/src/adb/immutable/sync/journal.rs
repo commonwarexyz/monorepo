@@ -9,14 +9,14 @@
 
 use crate::{
     adb::{operation::variable::Operation, sync},
-    multijournal,
+    codex,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
 
-/// Wraps a [multijournal::Journal] to provide a sync-compatible interface.
+/// Wraps a [codex::Codex] to provide a sync-compatible interface.
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
@@ -27,7 +27,7 @@ where
     V: Codec,
 {
     /// Underlying variable journal storing the operations.
-    inner: multijournal::Journal<E, Operation<K, V>>,
+    inner: codex::Codex<E, Operation<K, V>>,
 
     /// Logical operations per storage section.
     items_per_section: NonZeroU64,
@@ -47,12 +47,12 @@ where
     /// Create a new sync-compatible [Journal].
     ///
     /// # Arguments
-    /// * `inner` - The wrapped [multijournal::Journal], whose logical last operation location is
+    /// * `inner` - The wrapped [codex::Codex], whose logical last operation location is
     ///   `size - 1`.
     /// * `items_per_section` - Operations per section.
     /// * `size` - Logical next append location to report.
     pub fn new(
-        inner: multijournal::Journal<E, Operation<K, V>>,
+        inner: codex::Codex<E, Operation<K, V>>,
         items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
@@ -63,8 +63,8 @@ where
         }
     }
 
-    /// Return the inner [multijournal::Journal].
-    pub fn into_inner(self) -> multijournal::Journal<E, Operation<K, V>> {
+    /// Return the inner [codex::Codex].
+    pub fn into_inner(self) -> codex::Codex<E, Operation<K, V>> {
         self.inner
     }
 }

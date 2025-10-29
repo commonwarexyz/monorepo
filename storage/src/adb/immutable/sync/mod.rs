@@ -6,8 +6,8 @@ use crate::{
         sync::{self, Journal as _},
         Error,
     },
+    codex,
     mmr::{Location, StandardHasher as Standard},
-    multijournal,
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -41,7 +41,7 @@ where
         // Open the journal and discard operations outside the sync range.
         let (journal, size) = init_journal(
             context.with_label("log"),
-            multijournal::Config {
+            codex::Config {
                 partition: config.log_journal_partition.clone(),
                 compression: config.log_compression,
                 codec_config: config.log_codec_config.clone(),
@@ -154,7 +154,7 @@ where
 
     /// The [immutable::Immutable]'s log of operations. It has elements within the range.
     /// Reports the range start as its pruning boundary (oldest retained operation index).
-    pub log: multijournal::Journal<E, Operation<K, V>>,
+    pub log: codex::Codex<E, Operation<K, V>>,
 
     /// Sync range - operations outside this range are pruned or not synced.
     pub range: Range<Location>,

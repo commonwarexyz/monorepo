@@ -87,10 +87,10 @@
 
 use crate::{
     adb::operation::variable::Operation,
+    codex::{Codex, Config as CodexConfig},
     index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::Location,
-    multijournal::{Config as VConfig, Journal as VJournal},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
@@ -128,7 +128,7 @@ pub struct Config<T: Translator, C> {
     /// The name of the [`RStorage`] partition used to persist the log of operations.
     pub log_journal_partition: String,
 
-    /// The size of the write buffer to use for each blob in the [`VJournal`].
+    /// The size of the write buffer to use for each blob in the [`Codex`].
     pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
@@ -137,7 +137,7 @@ pub struct Config<T: Translator, C> {
     /// The codec configuration to use for encoding and decoding log items.
     pub log_codec_config: C,
 
-    /// The number of operations to store in each section of the [`VJournal`].
+    /// The number of operations to store in each section of the [`Codex`].
     pub log_items_per_section: NonZeroU64,
 
     /// The name of the [`RStorage`] partition used for the location map.
@@ -199,7 +199,7 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
-/// An unauthenticated key-value database based off of an append-only [VJournal] of operations.
+/// An unauthenticated key-value database based off of an append-only [Codex] of operations.
 pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
@@ -208,7 +208,7 @@ where
     T: Translator,
 {
     /// A log of all [Operation]s that have been applied to the store.
-    log: VJournal<E, Operation<K, V>>,
+    log: Codex<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// section and offset within the section containing its most recent update.
@@ -262,9 +262,9 @@ where
     ) -> Result<Self, Error> {
         let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
 
-        let log = VJournal::init(
+        let log = Codex::init(
             context.with_label("log"),
-            VConfig {
+            CodexConfig {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,

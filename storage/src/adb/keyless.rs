@@ -11,12 +11,12 @@
 
 use crate::{
     adb::{align_mmr_and_locations, operation::keyless::Operation, Error},
+    codex::{Codex, Config as CodexConfig},
     journal::fixed::{Config as FConfig, Journal as FJournal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
-    multijournal::{Config as VConfig, Journal as VJournal},
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
@@ -85,8 +85,8 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     /// `locations` journal.
     mmr: Mmr<E, H>,
 
-    /// A journal of all operations ever applied to the db.
-    log: VJournal<E, Operation<V>>,
+    /// Contains all operations ever applied to the db.
+    log: Codex<E, Operation<V>>,
 
     /// The total number of operations appended (including those that have been pruned).  The next
     /// appended operation will have this value as its location.
@@ -116,7 +116,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Returns the index of the last operation and its offset in the section it belongs to.
     async fn find_last_operation(
         locations: &FJournal<E, u32>,
-        log: &VJournal<E, Operation<V>>,
+        log: &Codex<E, Operation<V>>,
         aligned_size: u64,
         log_items_per_section: u64,
     ) -> Result<(u64, Option<(u64, u32)>), Error> {
@@ -151,7 +151,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         mmr: &mut Mmr<E, H>,
         hasher: &mut Standard<H>,
         locations: &mut FJournal<E, u32>,
-        log: &VJournal<E, Operation<V>>,
+        log: &Codex<E, Operation<V>>,
         section_offset: Option<(u64, u32)>,
     ) -> Result<Option<(u32, Operation<V>)>, Error> {
         // Initialize stream from section_offset
@@ -213,7 +213,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     async fn rewind_to_last_commit(
         mmr: &mut Mmr<E, H>,
         locations: &mut FJournal<E, u32>,
-        log: &mut VJournal<E, Operation<V>>,
+        log: &mut Codex<E, Operation<V>>,
         last_log_op: Operation<V>,
         op_count: Location,
         last_offset: u32,
@@ -302,9 +302,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Align the sizes of locations and mmr.
         let aligned_size = align_mmr_and_locations(&mut mmr, &mut locations).await?;
 
-        let mut log = VJournal::<E, Operation<V>>::init(
+        let mut log = Codex::<E, Operation<V>>::init(
             context.with_label("log"),
-            VConfig {
+            CodexConfig {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,

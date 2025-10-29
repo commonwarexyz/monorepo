@@ -20,11 +20,11 @@ cfg_if::cfg_if! {
         pub mod archive;
         pub mod bmt;
         pub mod cache;
+        pub mod codex;
         pub mod freezer;
         pub mod index;
         pub mod journal;
         pub mod metadata;
-        pub mod multijournal;
         pub mod ordinal;
         pub mod rmap;
         pub mod translator;

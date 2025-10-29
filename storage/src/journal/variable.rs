@@ -5,8 +5,8 @@
 
 use super::Journal as JournalTrait;
 use crate::{
+    codex,
     journal::{fixed, Error},
-    multijournal,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
@@ -48,7 +48,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 /// Configuration for a [Journal].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The storage partition to use for the data journal.
+    /// The storage partition to use for the data.
     pub data_partition: String,
 
     /// The storage partition to use for the offsets journal.
@@ -85,26 +85,26 @@ pub struct Config<C> {
 /// All non-final sections are full (`items_per_section` items) and synced. This ensures
 /// that on `init()`, we only need to replay the last section to determine the exact size.
 ///
-/// ## 2. Data Journal is Source of Truth
+/// ## 2. Data is Source of Truth
 ///
-/// The data journal is always the source of truth. The offsets journal is an index
+/// The data is always the source of truth. The offsets journal is an index
 /// that may temporarily diverge during crashes. Divergences are automatically
 /// aligned during init():
 /// * If offsets.size() < data.size(): Rebuild missing offsets by replaying data.
-///   (This can happen if we crash after writing data journal but before writing offsets journal)
+///   (This can happen if we crash after writing data but before writing offsets journal)
 /// * If offsets.size() > data.size(): Rewind offsets to match data size.
-///   (This can happen if we crash after rewinding data journal but before rewinding offsets journal)
+///   (This can happen if we crash after rewinding data but before rewinding offsets journal)
 /// * If offsets.oldest_retained_pos() < data.oldest_retained_pos(): Prune offsets to match
-///   (This can happen if we crash after pruning data journal but before pruning offsets journal)
+///   (This can happen if we crash after pruning data but before pruning offsets journal)
 ///
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
-/// data.oldest_retained_pos(). This should never occur because we always prune the data journal
+/// data.oldest_retained_pos(). This should never occur because we always prune the data
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    /// The underlying variable-length data journal.
-    data: multijournal::Journal<E, V>,
+    /// The underlying variable-length data.
+    data: codex::Codex<E, V>,
 
-    /// Index mapping positions to byte offsets within the data journal.
+    /// Index mapping positions to byte offsets within the data.
     /// The section can be calculated from the position using items_per_section.
     offsets: fixed::Journal<E, u32>,
 
@@ -120,7 +120,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     ///
     /// # Invariant
     ///
-    /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
+    /// Always >= `oldest_retained_pos`. Equal when data is empty or fully pruned.
     size: u64,
 
     /// The position of the first item that remains after pruning.
@@ -137,8 +137,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     ///
     /// # Crash Recovery
     ///
-    /// The data journal is the source of truth. If the offsets journal is inconsistent
-    /// it will be updated to match the data journal.
+    /// The data is the source of truth. If the offsets journal is inconsistent
+    /// it will be updated to match the data.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate that partitions are different to prevent blob name collisions
         if cfg.data_partition == cfg.offsets_partition {
@@ -150,10 +150,10 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
         let items_per_section = cfg.items_per_section.get();
 
-        // Initialize underlying variable data journal
-        let mut data = multijournal::Journal::init(
+        // Initialize underlying variable data
+        let mut data = codex::Codex::init(
             context.clone(),
-            multijournal::Config {
+            codex::Config {
                 partition: cfg.data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -175,7 +175,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         )
         .await?;
 
-        // Validate and align offsets journal to match data journal
+        // Validate and align offsets journal to match data
         let (oldest_retained_pos, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
@@ -232,7 +232,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// The position returned is a stable, consecutively increasing value starting from 0.
     /// This position remains constant after pruning.
     ///
-    /// When a section becomes full, both the data journal and offsets journal are synced
+    /// When a section becomes full, both the data and offsets journal are synced
     /// to maintain the invariant that all non-final sections are full and consistent.
     ///
     /// # Errors
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         // Calculate which section this position belongs to
         let section = self.current_section();
 
-        // Append to data journal, get offset
+        // Append to data, get offset
         let (offset, _size) = self.data.append(section, item).await?;
 
         // Append offset to offsets journal
@@ -382,11 +382,11 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let offset = self.offsets.read(position).await?;
         let section = position_to_section(position, self.items_per_section);
 
-        // Read item from data journal
+        // Read item from data
         self.data.get(section, offset).await
     }
 
-    /// Sync only the data journal to storage, without syncing the offsets journal.
+    /// Sync only the data to storage, without syncing the offsets journal.
     ///
     /// This is faster than `sync()` and can be used to ensure data durability without
     /// the overhead of syncing the offsets journal.
@@ -402,9 +402,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
     /// Sync all pending writes to storage.
     ///
-    /// This syncs both the data journal and the offsets journal concurrently.
+    /// This syncs both the data and the offsets journal concurrently.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync only the current (final) section of the data journal.
+        // Sync only the current (final) section of the data.
         // All non-final sections are already synced per Invariant #1.
         let section = self.current_section();
 
@@ -416,7 +416,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
     /// Close the journal, syncing all pending writes.
     ///
-    /// This closes both the data journal and the offsets journal.
+    /// This closes both the data and the offsets journal.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
         self.data.close().await?;
@@ -425,7 +425,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
     /// Remove any underlying blobs created by the journal.
     ///
-    /// This destroys both the data journal and the offsets journal.
+    /// This destroys both the data and the offsets journal.
     pub async fn destroy(self) -> Result<(), Error> {
         self.data.destroy().await?;
         self.offsets.destroy().await
@@ -436,21 +436,21 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         position_to_section(self.size, self.items_per_section)
     }
 
-    /// Align the offsets journal and data journal to be consistent in case a crash occured
+    /// Align the offsets journal and data to be consistent in case a crash occured
     /// on a previous run and left the journals in an inconsistent state.
     ///
-    /// The data journal is the source of truth. This function scans it to determine
+    /// The data is the source of truth. This function scans it to determine
     /// what SHOULD be in the offsets journal, then fixes any mismatches.
     ///
     /// # Returns
     ///
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
-        data: &mut multijournal::Journal<E, V>,
+        data: &mut codex::Codex<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
-        // === Handle empty data journal case ===
+        // === Handle empty data case ===
         let items_in_last_section = match data.blobs.last_key_value() {
             Some((last_section, _)) => {
                 let stream = data.replay(*last_section, 0, REPLAY_BUFFER_SIZE).await?;
@@ -465,8 +465,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             None => 0,
         };
 
-        // Data journal is empty if there are no sections or if there is one section and it has no items.
-        // The latter should only occur if a crash occured after opening a data journal blob but
+        // Data is empty if there are no sections or if there is one section and it has no items.
+        // The latter should only occur if a crash occured after opening a data blob but
         // before writing to it.
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
@@ -475,7 +475,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 
             if !data.blobs.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
-                // 1. Rewind crash: we rewound the data journal but crashed before rewinding offsets
+                // 1. Rewind crash: we rewound the data but crashed before rewinding offsets
                 // 2. First append crash: we opened the first section blob but crashed before writing to it
                 // In both cases, calculate target position from the first remaining section
                 let first_section = *data.blobs.first_key_value().unwrap().0;
@@ -488,9 +488,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             }
 
             // data.blobs is empty. This can happen in two cases:
-            // 1. We completely pruned the data journal but crashed before pruning
+            // 1. We completely pruned the data but crashed before pruning
             //    the offsets journal.
-            // 2. The data journal was never opened.
+            // 2. The data was never opened.
             if let Some(oldest) = offsets.oldest_retained_pos().await? {
                 if oldest < size {
                     // Offsets has unpruned entries but data is gone - align by pruning
@@ -503,7 +503,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             return Ok((size, size));
         }
 
-        // === Handle non-empty data journal case ===
+        // === Handle non-empty data case ===
         let (data_oldest_pos, data_size) = {
             // Data exists -- count items
             let first_section = *data.blobs.first_key_value().unwrap().0;
@@ -517,12 +517,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             let size = (last_section * items_per_section) + items_in_last_section;
             (oldest_pos, size)
         };
-        assert_ne!(
-            data_oldest_pos, data_size,
-            "data journal expected to be non-empty"
-        );
+        assert_ne!(data_oldest_pos, data_size, "data expected to be non-empty");
 
-        // Align pruning state. We always prune the data journal before the offsets journal,
+        // Align pruning state. We always prune the data before the offsets journal,
         // so we validate that invariant and repair crash faults or detect corruption.
         match offsets.oldest_retained_pos().await? {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
@@ -541,7 +538,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             None if data_oldest_pos > 0 => {
                 // Offsets journal is empty (size == oldest_retained_pos).
                 // This can happen if we pruned all data, then appended new data, synced the
-                // data journal, but crashed before syncing the offsets journal.
+                // data, but crashed before syncing the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
                 let offsets_size = offsets.size().await?;
                 if offsets_size != data_oldest_pos {
@@ -562,23 +559,23 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
             offsets.rewind(data_size).await?;
         } else if offsets_size < data_size {
-            // We must have crashed after writing the data journal but before writing the offsets
+            // We must have crashed after writing the data but before writing the offsets
             // journal.
             Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
         }
 
         assert_eq!(offsets.size().await?, data_size);
-        // Oldest retained position is always Some because the data journal is non-empty.
+        // Oldest retained position is always Some because the data is non-empty.
         assert_eq!(offsets.oldest_retained_pos().await?, Some(data_oldest_pos));
 
         offsets.sync().await?;
         Ok((data_oldest_pos, data_size))
     }
 
-    /// Rebuild missing offset entries by replaying the data journal and
+    /// Rebuild missing offset entries by replaying the data and
     /// appending the missing entries to the offsets journal.
     ///
-    /// The data journal is the source of truth. This function brings the offsets
+    /// The data is the source of truth. This function brings the offsets
     /// journal up to date by replaying data items and indexing their positions.
     ///
     /// # Warning
@@ -586,14 +583,14 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// - Panics if `data.blobs` is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
-        data: &multijournal::Journal<E, V>,
+        data: &codex::Codex<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         offsets_size: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {
         assert!(
             !data.blobs.is_empty(),
-            "rebuild_offsets called with empty data journal"
+            "rebuild_offsets called with empty data"
         );
 
         // Find where to start replaying
@@ -617,8 +614,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
                 (first_section, 0, false)
             };
 
-        // Replay data journal from start position through the end and index all items.
-        // The data journal is the source of truth, so we consume the entire stream.
+        // Replay data from start position through the end and index all items.
+        // The data is the source of truth, so we consume the entire stream.
         // (replay streams from start_section onwards through all subsequent sections)
         let stream = data
             .replay(start_section, resume_offset, REPLAY_BUFFER_SIZE)
@@ -1041,7 +1038,7 @@ mod tests {
         });
     }
 
-    /// Test recovery from crash after data journal pruned but before offsets journal.
+    /// Test recovery from crash after data pruned but before offsets journal.
     #[test_traced]
     fn test_variable_recovery_prune_crash_offsets_behind() {
         let executor = deterministic::Runner::default();
@@ -1070,8 +1067,8 @@ mod tests {
             variable.prune(10).await.unwrap();
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
 
-            // === Simulate crash: Prune data journal but not offsets journal ===
-            // Manually prune data journal to section 2 (position 20)
+            // === Simulate crash: Prune data but not offsets journal ===
+            // Manually prune data to section 2 (position 20)
             variable.data.prune(2).await.unwrap();
             // Offsets journal still has data from position 10-19
 
@@ -1082,7 +1079,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Init should auto-repair: offsets journal pruned to match data journal
+            // Init should auto-repair: offsets journal pruned to match data
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(20));
             assert_eq!(variable.size().await.unwrap(), 40);
 
@@ -1100,9 +1097,9 @@ mod tests {
         });
     }
 
-    /// Test recovery detects corruption when offsets journal pruned ahead of data journal.
+    /// Test recovery detects corruption when offsets journal pruned ahead of data.
     ///
-    /// Simulates an impossible state (offsets journal pruned more than data journal) which
+    /// Simulates an impossible state (offsets journal pruned more than data) which
     /// should never happen due to write ordering. Verifies that init() returns corruption error.
     #[test_traced]
     fn test_variable_recovery_offsets_ahead_corruption() {
@@ -1128,9 +1125,9 @@ mod tests {
                 variable.append(i * 100).await.unwrap();
             }
 
-            // Prune offsets journal ahead of data journal (impossible state)
+            // Prune offsets journal ahead of data (impossible state)
             variable.offsets.prune(20).await.unwrap(); // Prune to position 20
-            variable.data.prune(1).await.unwrap(); // Only prune data journal to section 1 (position 10)
+            variable.data.prune(1).await.unwrap(); // Only prune data to section 1 (position 10)
 
             variable.close().await.unwrap();
 
@@ -1140,7 +1137,7 @@ mod tests {
         });
     }
 
-    /// Test recovery from crash after appending to data journal but before appending to offsets journal.
+    /// Test recovery from crash after appending to data but before appending to offsets journal.
     #[test_traced]
     fn test_variable_recovery_append_crash_offsets_behind() {
         let executor = deterministic::Runner::default();
@@ -1167,7 +1164,7 @@ mod tests {
 
             assert_eq!(variable.size().await.unwrap(), 15);
 
-            // Manually append 5 more items directly to data journal only
+            // Manually append 5 more items directly to data only
             for i in 15..20u64 {
                 variable.data.append(1, i * 100).await.unwrap();
             }
@@ -1180,7 +1177,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Init should rebuild offsets journal from data journal replay
+            // Init should rebuild offsets journal from data replay
             assert_eq!(variable.size().await.unwrap(), 20);
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
 
@@ -1189,7 +1186,7 @@ mod tests {
                 assert_eq!(variable.read(i).await.unwrap(), i * 100);
             }
 
-            // Offsets journal should be fully rebuilt to match data journal
+            // Offsets journal should be fully rebuilt to match data
             assert_eq!(variable.offsets.size().await.unwrap(), 20);
 
             variable.destroy().await.unwrap();
@@ -1225,8 +1222,8 @@ mod tests {
             variable.prune(10).await.unwrap();
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
 
-            // === Simulate crash: Multiple prunes on data journal, not on offsets journal ===
-            // Manually prune data journal to section 3 (position 30)
+            // === Simulate crash: Multiple prunes on data, not on offsets journal ===
+            // Manually prune data to section 3 (position 30)
             variable.data.prune(3).await.unwrap();
             // Offsets journal still thinks oldest is position 10
 
@@ -1237,7 +1234,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Init should auto-repair: offsets journal pruned to match data journal
+            // Init should auto-repair: offsets journal pruned to match data
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(30));
             assert_eq!(variable.size().await.unwrap(), 50);
 
@@ -1262,9 +1259,9 @@ mod tests {
     /// Test recovery from crash during rewind operation.
     ///
     /// Simulates a crash after offsets.rewind() completes but before data.rewind() completes.
-    /// This creates a situation where offsets journal has been rewound but data journal still
+    /// This creates a situation where offsets journal has been rewound but data still
     /// contains items across multiple sections. Verifies that init() correctly rebuilds the
-    /// offsets index across all sections to match the data journal.
+    /// offsets index across all sections to match the data.
     #[test_traced]
     fn test_variable_recovery_rewind_crash_multi_section() {
         let executor = deterministic::Runner::default();
@@ -1303,7 +1300,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Init should rebuild offsets[5-24] from data journal across all 3 sections
+            // Init should rebuild offsets[5-24] from data across all 3 sections
             assert_eq!(variable.size().await.unwrap(), 25);
             assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
 
@@ -1357,13 +1354,13 @@ mod tests {
             assert_eq!(journal.size().await.unwrap(), 10);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Empty!
 
-            // === Phase 3: Append directly to data journal to simulate crash ===
-            // Manually append to data journal only (bypassing Variable's append logic)
+            // === Phase 3: Append directly to data to simulate crash ===
+            // Manually append to data only (bypassing Variable's append logic)
             // This simulates the case where data was synced but offsets wasn't
             for i in 10..20u64 {
                 journal.data.append(1, i * 100).await.unwrap();
             }
-            // Sync the data journal (section 1)
+            // Sync the data (section 1)
             journal.data.sync(1).await.unwrap();
             // Do NOT sync offsets journal - simulates crash before offsets.sync()
 

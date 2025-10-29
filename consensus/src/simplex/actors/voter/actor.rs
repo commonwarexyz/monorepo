@@ -26,7 +26,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::multijournal::{Config as JConfig, Journal};
+use commonware_storage::codex::{Codex, Config as CodexConfig};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -377,7 +377,7 @@ pub struct Actor<
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
-    journal: Option<Journal<E, Voter<S, D>>>,
+    journal: Option<Codex<E, Voter<S, D>>>,
 
     genesis: Option<D>,
 
@@ -1571,9 +1571,9 @@ impl<
         self.enter_view(1, None);
 
         // Initialize journal
-        let journal = Journal::<_, Voter<S, D>>::init(
+        let codex = Codex::<_, Voter<S, D>>::init(
             self.context.with_label("journal").into(),
-            JConfig {
+            CodexConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
                 codec_config: self.scheme.certificate_codec_config(),
@@ -1582,12 +1582,12 @@ impl<
             },
         )
         .await
-        .expect("unable to open journal");
+        .expect("failed to initialize journal");
 
         // Rebuild from journal
         let start = self.context.current();
         {
-            let stream = journal
+            let stream = codex
                 .replay(0, 0, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
@@ -1675,7 +1675,7 @@ impl<
                 }
             }
         }
-        self.journal = Some(journal);
+        self.journal = Some(codex);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let end = self.context.current();

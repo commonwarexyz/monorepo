@@ -46,11 +46,11 @@ pub type FreezerType = Freezer<Context, Key, Val>;
 /// Open (or create) a freezer store.
 pub async fn init(ctx: Context) -> FreezerType {
     let cfg = Config {
-        journal_partition: JOURNAL_PARTITION.into(),
-        journal_compression: None,
-        journal_write_buffer: NZUsize!(JOURNAL_WRITE_BUFFER),
-        journal_target_size: JOURNAL_TARGET_SIZE,
-        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        codex_partition: JOURNAL_PARTITION.into(),
+        codex_compression: None,
+        codex_write_buffer: NZUsize!(JOURNAL_WRITE_BUFFER),
+        codex_target_size: JOURNAL_TARGET_SIZE,
+        codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,

@@ -11,7 +11,7 @@
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::multijournal::Journal] that stores key-value data.
+//! that maps keys to locations and a [crate::codex::Codex] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -50,7 +50,7 @@
 //! +-----------------+-------------------+
 //! ```
 //!
-//! The journal stores variable-sized records, each containing a key-value pair and an optional pointer
+//! The codex stores variable-sized records, each containing a key-value pair and an optional pointer
 //! to the next record in the collision chain (for keys that hash to the same table index).
 //!
 //! ```text
@@ -65,7 +65,7 @@
 //!
 //! # Traversing Conflicts
 //!
-//! When multiple keys hash to the same table index, they form a linked list within the journal:
+//! When multiple keys hash to the same table index, they form a linked list within the codex:
 //!
 //! ```text
 //! Hash Table:
@@ -146,11 +146,11 @@
 //! executor.start(|context| async move {
 //!     // Create a freezer
 //!     let cfg = Config {
-//!         journal_partition: "freezer_journal".into(),
-//!         journal_compression: Some(3),
-//!         journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         journal_target_size: 100 * 1024 * 1024, // 100MB
-//!         journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         codex_partition: "freezer_codex".into(),
+//!         codex_compression: Some(3),
+//!         codex_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         codex_target_size: 100 * 1024 * 1024, // 100MB
+//!         codex_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
@@ -203,20 +203,20 @@ pub enum Error {
 /// Configuration for [Freezer].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The [commonware_runtime::Storage] partition to use for storing the journal.
-    pub journal_partition: String,
+    /// The [commonware_runtime::Storage] partition to use for storing the codex.
+    pub codex_partition: String,
 
-    /// The compression level to use for the [crate::multijournal::Journal].
-    pub journal_compression: Option<u8>,
+    /// The compression level to use for the [crate::codex::Codex].
+    pub codex_compression: Option<u8>,
 
-    /// The size of the write buffer to use for the journal.
-    pub journal_write_buffer: NonZeroUsize,
+    /// The size of the write buffer to use for the codex.
+    pub codex_write_buffer: NonZeroUsize,
 
-    /// The target size of each journal before creating a new one.
-    pub journal_target_size: u64,
+    /// The target size of each codex before creating a new one.
+    pub codex_target_size: u64,
 
-    /// The buffer pool to use for the journal.
-    pub journal_buffer_pool: PoolRef,
+    /// The buffer pool to use for the codex.
+    pub codex_buffer_pool: PoolRef,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
@@ -247,8 +247,8 @@ mod tests {
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
     use rand::{Rng, RngCore};
 
-    const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
+    const DEFAULT_CODEX_WRITE_BUFFER: usize = 1024;
+    const DEFAULT_CODEX_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
@@ -270,11 +270,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: compression,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: compression,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -338,11 +338,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -389,11 +389,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -450,11 +450,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -520,11 +520,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -619,11 +619,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -678,11 +678,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -719,7 +719,7 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                // The key should still be retrievable from journal if table is corrupted
+                // The key should still be retrievable from codex if table is corrupted
                 // but the table entry is zeroed out
                 let result = freezer
                     .get(Identifier::Key(&test_key("key1")))
@@ -736,11 +736,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -800,11 +800,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -875,11 +875,11 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
@@ -944,11 +944,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1012,11 +1012,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: DEFAULT_CODEX_TARGET_SIZE,
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1074,11 +1074,11 @@ mod tests {
         executor.start(|mut context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: 128, // Force multiple journal sections
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                codex_partition: "test_codex".into(),
+                codex_compression: None,
+                codex_write_buffer: NZUsize!(DEFAULT_CODEX_WRITE_BUFFER),
+                codex_target_size: 128, // Force multiple codex sections
+                codex_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently

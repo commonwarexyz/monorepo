@@ -1,12 +1,12 @@
 //! An append-only log for storing arbitrary variable length items.
 //!
-//! `multijournal::Journal` is an append-only log for storing arbitrary variable length data on disk. In
+//! `codex::Codex` is an append-only log for storing arbitrary variable length data on disk. In
 //! addition to replay, stored items can be directly retrieved given their section number and offset
 //! within the section.
 //!
 //! # Format
 //!
-//! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
+//! Data stored in `Codex` is persisted in one of many Blobs within a caller-provided `partition`.
 //! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
@@ -20,22 +20,22 @@
 //! C = CRC32(Size | Data)
 //! ```
 //!
-//! _To ensure data returned by `Journal` is correct, a checksum (CRC32) is stored at the end of
+//! _To ensure data returned by `Codex` is correct, a checksum (CRC32) is stored at the end of
 //! each item. If the checksum of the read data does not match the stored checksum, an error is
 //! returned. This checksum is only verified when data is accessed and not at startup (which would
-//! require reading all data in `Journal`)._
+//! require reading all data in `Codex`)._
 //!
 //! # Open Blobs
 //!
-//! `Journal` uses 1 `commonware-storage::Blob` per `section` to store data. All `Blobs` in a given
-//! `partition` are kept open during the lifetime of `Journal`. If the caller wishes to bound the
+//! `Codex` uses 1 `commonware-storage::Blob` per `section` to store data. All `Blobs` in a given
+//! `partition` are kept open during the lifetime of `Codex`. If the caller wishes to bound the
 //! number of open `Blobs`, they can group data into fewer `sections` and/or prune unused
 //! `sections`.
 //!
 //! # Offset Alignment
 //!
-//! In practice, `Journal` users won't store `u64::MAX` bytes of data in a given `section` (the max
-//! `Offset` provided by `Blob`). To reduce the memory usage for tracking offsets within `Journal`,
+//! In practice, `Codex` users won't store `u64::MAX` bytes of data in a given `section` (the max
+//! `Offset` provided by `Blob`). To reduce the memory usage for tracking offsets within `Codex`,
 //! offsets are thus `u32` (4 bytes) and aligned to 16 bytes. This means that the maximum size of
 //! any `section` is `u32::MAX * 17 = ~70GB` bytes (the last offset item can store up to `u32::MAX`
 //! bytes). If more data is written to a `section` past this max, an `OffsetOverflow` error is
@@ -43,48 +43,48 @@
 //!
 //! # Sync
 //!
-//! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
+//! Data written to `Codex` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When
 //! calling `close`, all pending data is automatically synced and any open blobs are dropped.
 //!
 //! # Pruning
 //!
-//! All data appended to `Journal` must be assigned to some `section` (`u64`). This assignment
-//! allows the caller to prune data from `Journal` by specifying a minimum `section` number. This
+//! All data appended to `Codex` must be assigned to some `section` (`u64`). This assignment
+//! allows the caller to prune data from `Codex` by specifying a minimum `section` number. This
 //! could be used, for example, by some blockchain application to prune old blocks.
 //!
 //! # Replay
 //!
-//! During application initialization, it is very common to replay data from `Journal` to recover
-//! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay`
-//! method to produce a stream of all items in the `Journal` in order of their `section` and
+//! During application initialization, it is very common to replay data from `Codex` to recover
+//! some in-memory state. `Codex` is heavily optimized for this pattern and provides a `replay`
+//! method to produce a stream of all items in the `Codex` in order of their `section` and
 //! `offset`.
 //!
 //! # Exact Reads
 //!
-//! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
+//! To allow for items to be fetched in a single disk operation, `Codex` allows callers to specify
 //! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller
 //! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
 //! behavior.
 //!
 //! # Compression
 //!
-//! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
+//! `Codex` supports optional compression using `zstd`. This can be enabled by setting the
 //! `compression` field in the `Config` struct to a valid `zstd` compression level. This setting can
-//! be changed between initializations of `Journal`, however, it must remain populated if any data
+//! be changed between initializations of `Codex`, however, it must remain populated if any data
 //! was written with compression enabled.
 //!
 //! # Example
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_storage::multijournal::{Journal, Config};
+//! use commonware_storage::codex::{Codex, Config};
 //! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
-//!     // Create a journal
-//!     let mut journal = Journal::init(context, Config{
+//!     // Create a codex
+//!     let mut codex = Codex::init(context, Config{
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
@@ -92,11 +92,11 @@
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
-//!     // Append data to the journal
-//!     journal.append(1, 128).await.unwrap();
+//!     // Append data to the codex
+//!     codex.append(1, 128).await.unwrap();
 //!
-//!     // Close the journal
-//!     journal.close().await.unwrap();
+//!     // Close the codex
+//!     codex.close().await.unwrap();
 //! });
 //! ```
 
@@ -119,11 +119,11 @@ use std::{
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
 
-/// Configuration for `Journal` storage.
+/// Configuration for `Codex` storage.
 #[derive(Clone)]
 pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use
-    /// for storing journal blobs.
+    /// for storing codex blobs.
     pub partition: String,
 
     /// Optional compression level (using `zstd`) to apply to data before storing.
@@ -154,8 +154,8 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     Ok(aligned_offset)
 }
 
-/// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, V: Codec> {
+/// Implementation of `Codex` storage.
+pub struct Codex<E: Storage + Metrics, V: Codec> {
     pub(crate) context: E,
     pub(crate) cfg: Config<V::Cfg>,
 
@@ -173,12 +173,12 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     pub(crate) _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
-    /// Initialize a new `Journal` instance.
+impl<E: Storage + Metrics, V: Codec> Codex<E, V> {
+    /// Initialize a new `Codex` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
-    /// to iterate over all items in the `Journal`.
+    /// to iterate over all items in the `Codex`.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
@@ -208,7 +208,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
-        // Create journal instance
+        // Create codex instance
         Ok(Self {
             context,
             cfg,
@@ -383,7 +383,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Returns an ordered stream of all items in the journal starting with the item at the given
+    /// Returns an ordered stream of all items in the codex starting with the item at the given
     /// `start_section` and `offset` into that section. Each item is returned as a tuple of
     /// (section, offset, size, item).
     ///
@@ -393,7 +393,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
     /// and
     /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
+    /// the first invalid data read will be considered the new end of the codex (and the
     /// underlying [Blob] will be truncated to the last valid item).
     pub async fn replay(
         &self,
@@ -529,7 +529,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         ))
     }
 
-    /// Appends an item to `Journal` in a given `section`, returning the offset
+    /// Appends an item to `Codex` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may now be smaller
     /// than the encoded size from the codec, if compression is enabled).
     ///
@@ -608,7 +608,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((offset, item_len))
     }
 
-    /// Retrieves an item from `Journal` at a given `section` and `offset`.
+    /// Retrieves an item from `Codex` at a given `section` and `offset`.
     ///
     /// # Errors
     ///  - [Error::AlreadyPrunedToSection] if the requested `section` has been pruned during the
@@ -636,7 +636,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
+    /// Retrieves an item from `Codex` at a given `section` and `offset` with a given size.
     pub async fn get_exact(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
         self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
@@ -656,7 +656,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Gets the size of the journal for a specific section.
+    /// Gets the size of the codex for a specific section.
     ///
     /// Returns 0 if the section does not exist.
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
@@ -667,25 +667,25 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
     }
 
-    /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
+    /// Rewinds the codex to the given `section` and `offset`, removing any data beyond it.
     ///
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
+    /// * This operation is not atomic, but it will always leave the codex in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
         self.rewind(section, offset as u64 * ITEM_ALIGNMENT).await
     }
 
-    /// Rewinds the journal to the given `section` and `size`.
+    /// Rewinds the codex to the given `section` and `size`.
     ///
     /// This removes any data beyond the specified `section` and `size`.
     ///
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
+    /// * This operation is not atomic, but it will always leave the codex in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
@@ -727,7 +727,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             from = current,
             to = size,
             ?trailing,
-            "rewound journal"
+            "rewound codex"
         );
         Ok(())
     }
@@ -781,7 +781,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 break;
             }
 
-            // Remove blob from journal
+            // Remove blob from codex
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
             drop(blob);
@@ -814,12 +814,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(())
     }
 
-    /// Returns the number of the oldest section in the journal.
+    /// Returns the number of the oldest section in the codex.
     pub fn oldest_section(&self) -> Option<u64> {
         self.blobs.first_key_value().map(|(section, _)| *section)
     }
 
-    /// Removes any underlying blobs created by the journal.
+    /// Removes any underlying blobs created by the codex.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
@@ -855,13 +855,13 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
-    fn test_journal_append_and_read() {
+    fn test_codex_append_and_read() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Initialize the journal
+            // Initialize the codex
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -871,12 +871,12 @@ mod tests {
             };
             let index = 1u64;
             let data = 10;
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Append an item to the journal
-            journal
+            // Append an item to the codex
+            codex
                 .append(index, data)
                 .await
                 .expect("Failed to append data");
@@ -885,10 +885,10 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("tracked 1"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
-            // Re-initialize the journal to simulate a restart
+            // Re-initialize the codex to simulate a restart
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -896,13 +896,13 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            let codex = Codex::<_, i32>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Replay the journal and collect items
+            // Replay the codex and collect items
             let mut items = Vec::new();
-            let stream = journal
+            let stream = codex
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
@@ -926,13 +926,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_multiple_appends_and_reads() {
+    fn test_codex_multiple_appends_and_reads() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -941,19 +941,19 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append multiple items to different blobs
             let data_items = vec![(1u64, 1), (1u64, 2), (2u64, 3), (3u64, 4)];
             for (index, data) in &data_items {
-                journal
+                codex
                     .append(*index, *data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                codex.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Check metrics
@@ -961,18 +961,18 @@ mod tests {
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("synced_total 4"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context, cfg)
+            // Re-initialize the codex to simulate a restart
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Replay the journal and collect items
+            // Replay the codex and collect items
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -995,18 +995,18 @@ mod tests {
             }
 
             // Cleanup
-            journal.destroy().await.expect("Failed to destroy journal");
+            codex.destroy().await.expect("Failed to destroy codex");
         });
     }
 
     #[test_traced]
-    fn test_journal_prune_blobs() {
+    fn test_codex_prune_blobs() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1015,52 +1015,52 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append items to multiple blobs
             for index in 1u64..=5u64 {
-                journal
+                codex
                     .append(index, index)
                     .await
                     .expect("Failed to append data");
-                journal.sync(index).await.expect("Failed to sync blob");
+                codex.sync(index).await.expect("Failed to sync blob");
             }
 
             // Add one item out-of-order
             let data = 99;
-            journal
+            codex
                 .append(2u64, data)
                 .await
                 .expect("Failed to append data");
-            journal.sync(2u64).await.expect("Failed to sync blob");
+            codex.sync(2u64).await.expect("Failed to sync blob");
 
             // Prune blobs with indices less than 3
-            journal.prune(3).await.expect("Failed to prune blobs");
+            codex.prune(3).await.expect("Failed to prune blobs");
 
             // Check metrics
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
             // Prune again with a section less than the previous one, should be a no-op
-            journal.prune(2).await.expect("Failed to no-op prune");
+            codex.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
-            // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Re-initialize the codex to simulate a restart
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Replay the journal and collect items
+            // Replay the codex and collect items
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1081,10 +1081,10 @@ mod tests {
             }
 
             // Prune all blobs
-            journal.prune(6).await.expect("Failed to prune blobs");
+            codex.prune(6).await.expect("Failed to prune blobs");
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Ensure no remaining blobs exist
             //
@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_prune_guard() {
+    fn test_codex_prune_guard() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
@@ -1111,114 +1111,114 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append items to sections 1-5
             for section in 1u64..=5u64 {
-                journal
+                codex
                     .append(section, section as i32)
                     .await
                     .expect("Failed to append data");
-                journal.sync(section).await.expect("Failed to sync");
+                codex.sync(section).await.expect("Failed to sync");
             }
 
             // Verify initial oldest_retained_section is 0
-            assert_eq!(journal.oldest_retained_section, 0);
+            assert_eq!(codex.oldest_retained_section, 0);
 
             // Prune sections < 3
-            journal.prune(3).await.expect("Failed to prune");
+            codex.prune(3).await.expect("Failed to prune");
 
             // Verify oldest_retained_section is updated
-            assert_eq!(journal.oldest_retained_section, 3);
+            assert_eq!(codex.oldest_retained_section, 3);
 
             // Test that accessing pruned sections returns the correct error
 
             // Test append on pruned section
-            match journal.append(1, 100).await {
+            match codex.append(1, 100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
-            match journal.append(2, 100).await {
+            match codex.append(2, 100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test get on pruned section
-            match journal.get(1, 0).await {
+            match codex.get(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test get_exact on pruned section
-            match journal.get_exact(2, 0, 12).await {
+            match codex.get_exact(2, 0, 12).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test size on pruned section
-            match journal.size(1).await {
+            match codex.size(1).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test rewind on pruned section
-            match journal.rewind(2, 0).await {
+            match codex.rewind(2, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test rewind_section on pruned section
-            match journal.rewind_section(1, 0).await {
+            match codex.rewind_section(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test sync on pruned section
-            match journal.sync(2).await {
+            match codex.sync(2).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
             }
 
             // Test that accessing sections at or after the threshold works
-            assert!(journal.get(3, 0).await.is_ok());
-            assert!(journal.get(4, 0).await.is_ok());
-            assert!(journal.get(5, 0).await.is_ok());
-            assert!(journal.size(3).await.is_ok());
-            assert!(journal.sync(4).await.is_ok());
+            assert!(codex.get(3, 0).await.is_ok());
+            assert!(codex.get(4, 0).await.is_ok());
+            assert!(codex.get(5, 0).await.is_ok());
+            assert!(codex.size(3).await.is_ok());
+            assert!(codex.sync(4).await.is_ok());
 
             // Append to section at threshold should work
-            journal
+            codex
                 .append(3, 999)
                 .await
                 .expect("Should be able to append to section 3");
 
             // Prune more sections
-            journal.prune(5).await.expect("Failed to prune");
-            assert_eq!(journal.oldest_retained_section, 5);
+            codex.prune(5).await.expect("Failed to prune");
+            assert_eq!(codex.oldest_retained_section, 5);
 
             // Verify sections 3 and 4 are now pruned
-            match journal.get(3, 0).await {
+            match codex.get(3, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
             }
 
-            match journal.get(4, 0).await {
+            match codex.get(4, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
             }
 
             // Section 5 should still be accessible
-            assert!(journal.get(5, 0).await.is_ok());
+            assert!(codex.get(5, 0).await.is_ok());
 
-            journal.close().await.expect("Failed to close journal");
+            codex.close().await.expect("Failed to close codex");
         });
     }
 
     #[test_traced]
-    fn test_journal_prune_guard_across_restart() {
+    fn test_codex_prune_guard_across_restart() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
@@ -1232,64 +1232,64 @@ mod tests {
 
             // First session: create and prune
             {
-                let mut journal = Journal::init(context.clone(), cfg.clone())
+                let mut codex = Codex::init(context.clone(), cfg.clone())
                     .await
-                    .expect("Failed to initialize journal");
+                    .expect("Failed to initialize codex");
 
                 for section in 1u64..=5u64 {
-                    journal
+                    codex
                         .append(section, section as i32)
                         .await
                         .expect("Failed to append data");
-                    journal.sync(section).await.expect("Failed to sync");
+                    codex.sync(section).await.expect("Failed to sync");
                 }
 
-                journal.prune(3).await.expect("Failed to prune");
-                assert_eq!(journal.oldest_retained_section, 3);
+                codex.prune(3).await.expect("Failed to prune");
+                assert_eq!(codex.oldest_retained_section, 3);
 
-                journal.close().await.expect("Failed to close journal");
+                codex.close().await.expect("Failed to close codex");
             }
 
             // Second session: verify oldest_retained_section is reset
             {
-                let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                let codex = Codex::<_, i32>::init(context.clone(), cfg.clone())
                     .await
-                    .expect("Failed to re-initialize journal");
+                    .expect("Failed to re-initialize codex");
 
                 // After restart, oldest_retained_section should be back to 0
                 // since it's not persisted
-                assert_eq!(journal.oldest_retained_section, 0);
+                assert_eq!(codex.oldest_retained_section, 0);
 
                 // But the actual sections 1 and 2 should be gone from storage
                 // so get should return SectionOutOfRange, not AlreadyPrunedToSection
-                match journal.get(1, 0).await {
+                match codex.get(1, 0).await {
                     Err(Error::SectionOutOfRange(1)) => {}
                     other => panic!("Expected SectionOutOfRange(1), got {:?}", other),
                 }
 
-                match journal.get(2, 0).await {
+                match codex.get(2, 0).await {
                     Err(Error::SectionOutOfRange(2)) => {}
                     other => panic!("Expected SectionOutOfRange(2), got {:?}", other),
                 }
 
                 // Sections 3-5 should still be accessible
-                assert!(journal.get(3, 0).await.is_ok());
-                assert!(journal.get(4, 0).await.is_ok());
-                assert!(journal.get(5, 0).await.is_ok());
+                assert!(codex.get(3, 0).await.is_ok());
+                assert!(codex.get(4, 0).await.is_ok());
+                assert!(codex.get(5, 0).await.is_ok());
 
-                journal.close().await.expect("Failed to close journal");
+                codex.close().await.expect("Failed to close codex");
             }
         });
     }
 
     #[test_traced]
-    fn test_journal_with_invalid_blob_name() {
+    fn test_codex_with_invalid_blob_name() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1306,8 +1306,8 @@ mod tests {
                 .expect("Failed to create blob with invalid name");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Attempt to initialize the journal
-            let result = Journal::<_, u64>::init(context, cfg).await;
+            // Attempt to initialize the codex
+            let result = Codex::<_, u64>::init(context, cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -1315,13 +1315,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_size_missing() {
+    fn test_codex_read_size_missing() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1345,13 +1345,13 @@ mod tests {
                 .expect("Failed to write incomplete data");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            // Initialize the codex
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Attempt to replay the journal
-            let stream = journal
+            // Attempt to replay the codex
+            let stream = codex
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
@@ -1368,13 +1368,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_item_missing() {
+    fn test_codex_read_item_missing() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1402,13 +1402,13 @@ mod tests {
                 .expect("Failed to write item size");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            // Initialize the codex
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Attempt to replay the journal
-            let stream = journal
+            // Attempt to replay the codex
+            let stream = codex
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
@@ -1425,13 +1425,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_checksum_missing() {
+    fn test_codex_read_checksum_missing() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1467,15 +1467,15 @@ mod tests {
 
             blob.sync().await.expect("Failed to sync blob");
 
-            // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            // Initialize the codex
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             //
             // This will truncate the leftover bytes from our manual write.
-            let stream = journal
+            let stream = codex
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
@@ -1492,13 +1492,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_checksum_mismatch() {
+    fn test_codex_read_checksum_mismatch() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1540,14 +1540,14 @@ mod tests {
 
             blob.sync().await.expect("Failed to sync blob");
 
-            // Initialize the journal
-            let journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1561,7 +1561,7 @@ mod tests {
                 }
                 assert!(items.is_empty());
             }
-            journal.close().await.expect("Failed to close journal");
+            codex.close().await.expect("Failed to close codex");
 
             // Confirm blob is expected length
             let (_, blob_size) = context
@@ -1573,13 +1573,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_handling_unaligned_truncated_data() {
+    fn test_codex_handling_unaligned_truncated_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1588,26 +1588,26 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
+            codex.append(1, 1).await.expect("Failed to append data");
 
             // Append multiple items to the second index (with unaligned values)
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
-                journal
+                codex
                     .append(*index, *data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                codex.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size) = context
@@ -1619,15 +1619,15 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            // Re-initialize the codex to simulate a restart
+            let codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1639,7 +1639,7 @@ mod tests {
                     }
                 }
             }
-            journal.close().await.expect("Failed to close journal");
+            codex.close().await.expect("Failed to close codex");
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 3);
@@ -1657,15 +1657,15 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 28);
 
-            // Attempt to replay journal after truncation
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Attempt to replay codex after truncation
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1688,15 +1688,15 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Append a new item to truncated partition
-            journal.append(2, 5).await.expect("Failed to append data");
-            journal.sync(2).await.expect("Failed to sync blob");
+            codex.append(2, 5).await.expect("Failed to append data");
+            codex.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item
-            let item = journal.get(2, 2).await.expect("Failed to get item");
+            let item = codex.get(2, 2).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Confirm blob is expected length
             let (_, blob_size) = context
@@ -1705,15 +1705,15 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 44);
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            // Re-initialize the codex to simulate a restart
+            let codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1740,13 +1740,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_handling_aligned_truncated_data() {
+    fn test_codex_handling_aligned_truncated_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1755,26 +1755,26 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
+            codex.append(1, 1).await.expect("Failed to append data");
 
             // Append multiple items to the second index (with unaligned values)
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
-                journal
+                codex
                     .append(*index, *data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                codex.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size) = context
@@ -1786,15 +1786,15 @@ mod tests {
                 .expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Re-initialize the codex to simulate a restart
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1817,15 +1817,15 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Append a new item to the truncated partition
-            journal.append(2, 5).await.expect("Failed to append data");
-            journal.sync(2).await.expect("Failed to sync blob");
+            codex.append(2, 5).await.expect("Failed to append data");
+            codex.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item
-            let item = journal.get(2, 2).await.expect("Failed to get item");
+            let item = codex.get(2, 2).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Confirm blob is expected length
             let (_, blob_size) = context
@@ -1834,15 +1834,15 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 48);
 
-            // Attempt to replay journal after truncation
-            let journal = Journal::init(context, cfg)
+            // Attempt to replay codex after truncation
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
+                let stream = codex
                     .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
@@ -1854,7 +1854,7 @@ mod tests {
                     }
                 }
             }
-            journal.close().await.expect("Failed to close journal");
+            codex.close().await.expect("Failed to close codex");
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 4);
@@ -1870,13 +1870,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_handling_extra_data() {
+    fn test_codex_handling_extra_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -1885,26 +1885,26 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
             // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
+            codex.append(1, 1).await.expect("Failed to append data");
 
             // Append multiple items to the second index
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
-                journal
+                codex
                     .append(*index, *data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                codex.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Manually add extra data to the end of the second blob
             let (blob, blob_size) = context
@@ -1916,14 +1916,14 @@ mod tests {
                 .expect("Failed to add extra data");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context, cfg)
+            // Re-initialize the codex to simulate a restart
+            let codex = Codex::init(context, cfg)
                 .await
-                .expect("Failed to re-initialize journal");
+                .expect("Failed to re-initialize codex");
 
-            // Attempt to replay the journal
+            // Attempt to replay the codex
             let mut items = Vec::<(u64, i32)>::new();
-            let stream = journal
+            let stream = codex
                 .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
@@ -2010,11 +2010,11 @@ mod tests {
     const INDEX_ALIGNMENT: u64 = 16;
 
     #[test_traced]
-    fn test_journal_large_offset() {
+    fn test_codex_large_offset() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Create journal
+            // Create codex
             let cfg = Config {
                 partition: "partition".to_string(),
                 compression: None,
@@ -2025,24 +2025,21 @@ mod tests {
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut codex = Codex::init(context, cfg).await.unwrap();
 
             // Append data
             let data = 1;
-            let (result, _) = journal
-                .append(1, data)
-                .await
-                .expect("Failed to append data");
+            let (result, _) = codex.append(1, data).await.expect("Failed to append data");
             assert_eq!(result, u32::MAX);
         });
     }
 
     #[test_traced]
-    fn test_journal_offset_overflow() {
+    fn test_codex_offset_overflow() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Create journal
+            // Create codex
             let cfg = Config {
                 partition: "partition".to_string(),
                 compression: None,
@@ -2053,21 +2050,21 @@ mod tests {
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut codex = Codex::init(context, cfg).await.unwrap();
 
             // Append data
             let data = 1;
-            let result = journal.append(1, data).await;
+            let result = codex.append(1, data).await;
             assert!(matches!(result, Err(Error::OffsetOverflow)));
         });
     }
 
     #[test_traced]
-    fn test_journal_rewind() {
+    fn test_codex_rewind() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create journal
+            // Create codex
             let cfg = Config {
                 partition: "test_partition".to_string(),
                 compression: None,
@@ -2075,54 +2072,54 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut codex = Codex::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, 42i32).await.unwrap();
+            codex.append(1, 42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, 43i32).await.unwrap();
-            let new_size = journal.size(1).await.unwrap();
+            codex.append(1, 43i32).await.unwrap();
+            let new_size = codex.size(1).await.unwrap();
             assert!(new_size > size);
 
             // Check size of different section - should still be 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, 44i32).await.unwrap();
+            codex.append(2, 44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1 and 2
-            journal.rewind(1, 0).await.unwrap();
+            codex.rewind(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert_eq!(size, 0);
 
             // Check size of section 2 - should be 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert_eq!(size, 0);
         });
     }
 
     #[test_traced]
-    fn test_journal_rewind_section() {
+    fn test_codex_rewind_section() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create journal
+            // Create codex
             let cfg = Config {
                 partition: "test_partition".to_string(),
                 compression: None,
@@ -2130,57 +2127,57 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut codex = Codex::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, 42i32).await.unwrap();
+            codex.append(1, 42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, 43i32).await.unwrap();
-            let new_size = journal.size(1).await.unwrap();
+            codex.append(1, 43i32).await.unwrap();
+            let new_size = codex.size(1).await.unwrap();
             assert!(new_size > size);
 
             // Check size of different section - should still be 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, 44i32).await.unwrap();
+            codex.append(2, 44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1
-            journal.rewind_section(1, 0).await.unwrap();
+            codex.rewind_section(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
-            let size = journal.size(1).await.unwrap();
+            let size = codex.size(1).await.unwrap();
             assert_eq!(size, 0);
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.size(2).await.unwrap();
+            let size = codex.size(2).await.unwrap();
             assert!(size > 0);
         });
     }
 
-    /// Protect against accidental changes to the journal disk format.
+    /// Protect against accidental changes to the codex disk format.
     #[test_traced]
-    fn test_journal_conformance() {
+    fn test_codex_conformance() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Create a journal configuration
+            // Create a codex configuration
             let cfg = Config {
                 partition: "test_partition".into(),
                 compression: None,
@@ -2189,19 +2186,19 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            // Initialize the codex
+            let mut codex = Codex::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize journal");
+                .expect("Failed to initialize codex");
 
-            // Append 100 items to the journal
+            // Append 100 items to the codex
             for i in 0..100 {
-                journal.append(1, i).await.expect("Failed to append data");
+                codex.append(1, i).await.expect("Failed to append data");
             }
-            journal.sync(1).await.expect("Failed to sync blob");
+            codex.sync(1).await.expect("Failed to sync blob");
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Close the codex
+            codex.close().await.expect("Failed to close codex");
 
             // Hash blob contents
             let (blob, size) = context
