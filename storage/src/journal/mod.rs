@@ -10,9 +10,6 @@ use thiserror::Error;
 pub mod contiguous;
 pub mod segmented;
 
-#[cfg(test)]
-mod tests;
-
 impl<E, Op> crate::adb::sync::Journal for contiguous::fixed::Journal<E, Op>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,

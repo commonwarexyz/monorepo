@@ -1,14 +1,18 @@
 //! Contiguous journals with position-based access.
 //!
 //! This module provides position-based journal implementations where items are stored
-//! contiguously and can be accessed by their position (0-indexed). Both fixed-size and
-//! variable-size item journals are provided.
+//! contiguously and can be accessed by their position (0-indexed). Both [fixed]-size and
+//! [variable]-size item journals are supoprted.
 
+use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
 
 pub mod fixed;
 pub mod variable;
+
+#[cfg(test)]
+mod tests;
 
 /// Core trait for contiguous journals supporting sequential append operations.
 ///
@@ -31,13 +35,13 @@ pub trait Contiguous {
     fn append(
         &mut self,
         item: Self::Item,
-    ) -> impl std::future::Future<Output = Result<u64, super::Error>> + Send;
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
     /// Return the total number of items that have been appended to the journal.
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    fn size(&self) -> impl std::future::Future<Output = Result<u64, super::Error>> + Send;
+    fn size(&self) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
     /// Return the position of the oldest item still retained in the journal.
     ///
@@ -48,7 +52,7 @@ pub trait Contiguous {
     /// passed to `prune()`.
     fn oldest_retained_pos(
         &self,
-    ) -> impl std::future::Future<Output = Result<Option<u64>, super::Error>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<u64>, Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -68,7 +72,7 @@ pub trait Contiguous {
     fn prune(
         &mut self,
         min_position: u64,
-    ) -> impl std::future::Future<Output = Result<bool, super::Error>> + Send;
+    ) -> impl std::future::Future<Output = Result<bool, Error>> + Send;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
@@ -77,9 +81,9 @@ pub trait Contiguous {
     ///
     /// # Behavior
     ///
-    /// - If `size > current_size()`, returns [super::Error::InvalidRewind]
+    /// - If `size > current_size()`, returns [Error::InvalidRewind]
     /// - If `size == current_size()`, this is a no-op
-    /// - If `size < oldest_retained_pos()`, returns [super::Error::InvalidRewind] (can't rewind to pruned data)
+    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned data)
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during rewinding
     ///
@@ -89,12 +93,9 @@ pub trait Contiguous {
     ///
     /// # Errors
     ///
-    /// Returns [super::Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
-    fn rewind(
-        &mut self,
-        size: u64,
-    ) -> impl std::future::Future<Output = Result<(), super::Error>> + Send;
+    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Return a stream of all items in the journal starting from `start_pos`.
     ///
@@ -110,35 +111,32 @@ pub trait Contiguous {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> impl std::future::Future<
-        Output = Result<
-            impl Stream<Item = Result<(u64, Self::Item), super::Error>> + '_,
-            super::Error,
-        >,
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
     > + Send;
 
     /// Read the item at the given position.
     ///
     /// # Errors
     ///
-    /// - Returns [super::Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [super::Error::ItemOutOfRange] if the item at `position` does not exist.
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
     fn read(
         &self,
         position: u64,
-    ) -> impl std::future::Future<Output = Result<Self::Item, super::Error>> + Send;
+    ) -> impl std::future::Future<Output = Result<Self::Item, Error>> + Send;
 
     /// Sync all pending writes to storage.
     ///
     /// This ensures all previously appended items are durably persisted.
-    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), super::Error>> + Send;
+    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Close the journal, syncing all pending writes and releasing resources.
-    fn close(self) -> impl std::future::Future<Output = Result<(), super::Error>> + Send;
+    fn close(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Destroy the journal, removing all associated storage.
     ///
     /// This method consumes the journal and deletes all persisted data including blobs,
     /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
     /// permanently removing a journal.
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), super::Error>> + Send;
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }

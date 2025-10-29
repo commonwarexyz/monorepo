@@ -1138,48 +1138,48 @@ mod tests {
             // Test append on pruned section
             match journal.append(1, 100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             match journal.append(2, 100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test get on pruned section
             match journal.get(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test get_exact on pruned section
             match journal.get_exact(2, 0, 12).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test size on pruned section
             match journal.size(1).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test rewind on pruned section
             match journal.rewind(2, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test rewind_section on pruned section
             match journal.rewind_section(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test sync on pruned section
             match journal.sync(2).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test that accessing sections at or after the threshold works
@@ -1202,12 +1202,12 @@ mod tests {
             // Verify sections 3 and 4 are now pruned
             match journal.get(3, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
             }
 
             match journal.get(4, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(5), got {:?}", other),
+                other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
             }
 
             // Section 5 should still be accessible
@@ -1264,12 +1264,12 @@ mod tests {
                 // so get should return SectionOutOfRange, not AlreadyPrunedToSection
                 match journal.get(1, 0).await {
                     Err(Error::SectionOutOfRange(1)) => {}
-                    other => panic!("Expected SectionOutOfRange(1), got {:?}", other),
+                    other => panic!("Expected SectionOutOfRange(1), got {other:?}"),
                 }
 
                 match journal.get(2, 0).await {
                     Err(Error::SectionOutOfRange(2)) => {}
-                    other => panic!("Expected SectionOutOfRange(2), got {:?}", other),
+                    other => panic!("Expected SectionOutOfRange(2), got {other:?}"),
                 }
 
                 // Sections 3-5 should still be accessible

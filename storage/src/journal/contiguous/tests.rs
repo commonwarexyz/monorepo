@@ -1,10 +1,11 @@
-//! Generic test suite for Journal trait implementations.
+//! Generic test suite for [Contiguous] trait implementations.
 
-use super::{contiguous::Contiguous, Error};
+use super::Contiguous;
+use crate::journal::Error;
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 
-/// Run the full suite of generic tests on a Journal implementation.
+/// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
 /// The factory function receives a test identifier string that should be used
 /// to create unique partitions for each test to avoid conflicts.
@@ -14,7 +15,7 @@ use futures::{future::BoxFuture, StreamExt};
 /// These tests assume the journal is configured with **`items_per_section = 10`**
 /// (or `items_per_blob = 10` for fixed journals). Some tests rely on this value
 /// for section boundary calculations and pruning behavior.
-pub(super) async fn run_journal_tests<F, J>(factory: F)
+pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,
     J: Contiguous<Item = u64> + Send + 'static,
@@ -281,7 +282,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test using journal through Journal trait methods.
+/// Test using journal through [Contiguous] trait methods.
 async fn test_through_trait<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>> + Send + Sync,

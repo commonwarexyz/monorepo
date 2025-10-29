@@ -285,7 +285,7 @@ mod tests {
                 Engine, Target,
             },
         },
-        journal::{self, contiguous::fixed},
+        journal,
         mmr::iterator::nodes_to_pin,
         translator::TwoCap,
     };
@@ -1318,18 +1318,17 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log =
-                journal::contiguous::fixed::Journal::<Context, Operation<Digest, Digest>>::init(
-                    context.clone(),
-                    journal::contiguous::fixed::Config {
-                        partition: "sync_basic_log".into(),
-                        items_per_blob: NZU64!(1000),
-                        write_buffer: NZUsize!(1024),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                    },
-                )
-                .await
-                .unwrap();
+            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
+                context.clone(),
+                fixed::Config {
+                    partition: "sync_basic_log".into(),
+                    items_per_blob: NZU64!(1000),
+                    write_buffer: NZUsize!(1024),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                },
+            )
+            .await
+            .unwrap();
 
             let mut synced_db: AnyTest = <AnyTest as adb::sync::Database>::from_sync_result(
                 context.clone(),
