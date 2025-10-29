@@ -17,8 +17,8 @@ rand = { workspace = true }
 commonware-codec = { workspace = true }
 
 [[bin]]
-name = "select_leaders"
-path = "fuzz_targets/select_leaders.rs"
+name = "simplex_select_leader"
+path = "fuzz_targets/simplex_select_leader.rs"
 test = false
 doc = false
 bench = false

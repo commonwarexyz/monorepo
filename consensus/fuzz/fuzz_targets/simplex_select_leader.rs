@@ -39,21 +39,19 @@ type Bls12381MultisigMinPk =
     commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<PublicKey, MinPk>;
 type Bls12381MultisigMinSig =
     commonware_consensus::simplex::signing_scheme::bls12381_multisig::Scheme<PublicKey, MinSig>;
-
 type Bls12381ThresholdMinPk =
     commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<PublicKey, MinPk>;
 type Bls12381ThresholdMinSig =
     commonware_consensus::simplex::signing_scheme::bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
-    let participants: Vec<PublicKey> = (0..input.participants_count)
+    let participants: Vec<PublicKey> = (1..=input.participants_count)
         .map(|i| {
             let mut rng = StdRng::seed_from_u64(i as u64);
             let private_key = PrivateKey::from_rng(&mut rng);
             private_key.public_key()
         })
         .collect();
-
     if participants.is_empty() {
         return;
     }
