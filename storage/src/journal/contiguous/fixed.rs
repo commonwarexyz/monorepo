@@ -619,8 +619,8 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     }
 }
 
-// Implement Journal trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> crate::journal::Journal
+// Implement Contiguous trait for fixed-length journals
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> super::Contiguous
     for Journal<E, A>
 {
     type Item = A;

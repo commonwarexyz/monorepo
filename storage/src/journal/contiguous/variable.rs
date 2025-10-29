@@ -3,7 +3,7 @@
 //! This journal enforces section fullness: all non-final sections are full and synced.
 //! On init, only the last section needs to be replayed to determine the exact size.
 
-use super::{super::Journal as JournalTrait, fixed};
+use super::{fixed, Contiguous};
 use crate::journal::{segmented::variable as segmented, Error};
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
@@ -639,8 +639,8 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     }
 }
 
-// Implement Journal trait for variable-length items
-impl<E: Storage + Metrics, V: Codec + Send + Sync> JournalTrait for Journal<E, V> {
+// Implement Contiguous trait for variable-length items
+impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
