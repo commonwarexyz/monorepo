@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum, set::Ordered};
+use commonware_utils::{bitmap::BitMap, max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -48,6 +48,39 @@ impl<D: Digest> Viewable for Context<D> {
 pub trait Attributable {
     /// Returns the index of the signer (validator) who produced this message.
     fn signer(&self) -> u32;
+}
+
+pub struct AttributableVec<T: Attributable> {
+    vec: Vec<T>,
+    added: BitMap,
+}
+
+impl<T: Attributable> AttributableVec<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            vec: Vec::with_capacity(capacity),
+            added: BitMap::zeroes(capacity as u64),
+        }
+    }
+
+    pub fn push(&mut self, item: T) {
+        let index = item.signer() as u64;
+        if self.added.get(index) {
+            return;
+        }
+        self.added.set(index, true);
+        self.vec.push(item);
+    }
+
+    pub fn len(&self) -> usize {
+        self.vec.len()
+    }
+}
+
+impl<T: Attributable> AsRef<[T]> for AttributableVec<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.vec
+    }
 }
 
 /// Identifies the signing domain for a vote or certificate.

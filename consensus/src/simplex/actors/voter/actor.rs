@@ -7,8 +7,8 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
+            Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -27,7 +27,6 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::bitmap::BitMap;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -58,39 +57,6 @@ enum Action {
     Process,
 }
 
-struct DedupedVec<T: Attributable> {
-    vec: Vec<T>,
-    added: BitMap,
-}
-
-impl<T: Attributable> DedupedVec<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            vec: Vec::with_capacity(capacity),
-            added: BitMap::zeroes(capacity as u64),
-        }
-    }
-
-    fn push(&mut self, item: T) {
-        let index = item.signer() as u64;
-        if self.added.get(index) {
-            return;
-        }
-        self.added.set(index, true);
-        self.vec.push(item);
-    }
-
-    fn len(&self) -> usize {
-        self.vec.len()
-    }
-}
-
-impl<T: Attributable> AsRef<[T]> for DedupedVec<T> {
-    fn as_ref(&self) -> &[T] {
-        &self.vec
-    }
-}
-
 struct Round<E: Clock, S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
@@ -118,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: DedupedVec<Notarize<S, D>>,
+    notarizes: AttributableVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: DedupedVec<Nullify<S>>,
+    nullifies: AttributableVec<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: DedupedVec<Finalize<S, D>>,
+    finalizes: AttributableVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -147,9 +113,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         round: Rnd,
     ) -> Self {
         let participants = scheme.participants().len();
-        let notarizes = DedupedVec::new(participants);
-        let nullifies = DedupedVec::new(participants);
-        let finalizes = DedupedVec::new(participants);
+        let notarizes = AttributableVec::new(participants);
+        let nullifies = AttributableVec::new(participants);
+        let finalizes = AttributableVec::new(participants);
 
         Self {
             start: context.current(),
