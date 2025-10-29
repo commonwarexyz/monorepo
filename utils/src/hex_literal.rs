@@ -204,7 +204,7 @@ mod tests {
     fn fixed_bytes() {
         let bytes = fixed_bytes!("0x112233");
         assert_eq!(bytes.as_ref(), &[0x11, 0x22, 0x33]);
-        assert_eq!(format!("{}", bytes), "112233");
+        assert_eq!(format!("{bytes}"), "112233");
     }
 
     #[test]
