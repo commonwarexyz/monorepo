@@ -2059,4 +2059,47 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn test_shutdown() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+
+            let handle = network.start();
+
+            let pk_sender = PrivateKey::from_seed(1).public_key();
+            let pk_receiver = PrivateKey::from_seed(2).public_key();
+
+            // Register peers and establish link
+            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            oracle
+                .add_link(
+                    pk_sender.clone(),
+                    pk_receiver.clone(),
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Give network time to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Stop the network context to trigger shutdown
+            context.stop(0, Some(Duration::from_secs(2))).await.unwrap();
+
+            handle.await.unwrap();
+        });
+    }
 }

@@ -708,4 +708,44 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_shutdown() {
+        // Initialize context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create single peer
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let addresses = vec![(
+                signer.public_key(),
+                SocketAddr::V4("127.0.0.1:8080".parse().unwrap()),
+            )];
+
+            // Create network with separate labeled context
+            let config = Config::test(
+                signer.clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
+                1_024 * 1_024, // 1MB
+            );
+            let (mut network, mut oracle) = Network::new(context.clone(), config);
+
+            // Register peers
+            oracle.register(0, addresses.into()).await;
+
+            // Register channel
+            let (_sender, _receiver) =
+                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+
+            // Start network
+            let handle = network.start();
+
+            // Give network time to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Stop the network context to trigger shutdown
+            context.stop(0, Some(Duration::from_secs(2))).await.unwrap();
+
+            handle.await.unwrap();
+        });
+    }
 }
