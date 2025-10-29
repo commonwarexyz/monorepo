@@ -9,14 +9,14 @@
 
 use crate::{
     adb::{operation::variable::Operation, sync},
-    journal::segmented::variable as segmented,
+    journal::segmented::variable,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
 
-/// Wraps a [segmented::Journal] to provide a sync-compatible interface.
+/// Wraps a [variable::Journal] to provide a sync-compatible interface.
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
@@ -27,7 +27,7 @@ where
     V: Codec,
 {
     /// Underlying variable journal storing the operations.
-    inner: segmented::Journal<E, Operation<K, V>>,
+    inner: variable::Journal<E, Operation<K, V>>,
 
     /// Logical operations per storage section.
     items_per_section: NonZeroU64,
@@ -47,12 +47,12 @@ where
     /// Create a new sync-compatible [Journal].
     ///
     /// # Arguments
-    /// * `inner` - The wrapped [segmented::Journal], whose logical last operation location is
+    /// * `inner` - The wrapped [variable::Journal], whose logical last operation location is
     ///   `size - 1`.
     /// * `items_per_section` - Operations per section.
     /// * `size` - Logical next append location to report.
     pub fn new(
-        inner: segmented::Journal<E, Operation<K, V>>,
+        inner: variable::Journal<E, Operation<K, V>>,
         items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
@@ -63,8 +63,8 @@ where
         }
     }
 
-    /// Return the inner [segmented::Journal].
-    pub fn into_inner(self) -> segmented::Journal<E, Operation<K, V>> {
+    /// Return the inner [variable::Journal].
+    pub fn into_inner(self) -> variable::Journal<E, Operation<K, V>> {
         self.inner
     }
 }

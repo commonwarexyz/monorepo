@@ -4,7 +4,7 @@
 use crate::{
     adb::{any::fixed::sync::init_journal, operation::variable::Operation, Error},
     index::{Index as _, Unordered as Index},
-    journal::{contiguous::fixed, segmented::variable as segmented},
+    journal::{contiguous::fixed, segmented::variable},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
@@ -86,7 +86,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its order of occurrence with respect to this log, and corresponds to its leaf
     /// number in the MMR.
-    log: segmented::Journal<E, Operation<K, V>>,
+    log: variable::Journal<E, Operation<K, V>>,
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
@@ -141,9 +141,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut log = segmented::Journal::init(
+        let mut log = variable::Journal::init(
             context.with_label("log"),
-            segmented::Config {
+            variable::Config {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
@@ -277,7 +277,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         hasher: &mut Standard<H>,
         log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
-        log: &mut segmented::Journal<E, Operation<K, V>>,
+        log: &mut variable::Journal<E, Operation<K, V>>,
         locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, Location>,
     ) -> Result<(Location, Location), Error> {

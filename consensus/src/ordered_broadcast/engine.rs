@@ -31,7 +31,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::segmented::variable as segmented;
+use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::oneshot,
@@ -160,7 +160,7 @@ pub struct Engine<
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
-    journals: BTreeMap<C::PublicKey, segmented::Journal<E, Node<C::PublicKey, V, D>>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C::PublicKey, V, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -966,14 +966,14 @@ impl<
         }
 
         // Initialize journal
-        let cfg = segmented::Config {
+        let cfg = JournalConfig {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = segmented::Journal::<_, Node<C::PublicKey, V, D>>::init(
+        let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
             self.context.with_label("journal").into(),
             cfg,
         )
