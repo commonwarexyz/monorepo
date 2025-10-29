@@ -989,17 +989,13 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
     ) -> Option<Self> {
         let notarizes: Vec<&'a Notarize<S, D>> = notarizes.into_iter().collect();
-        if notarizes.is_empty() {
-            return None;
-        }
-        let proposal = notarizes[0].proposal.clone();
-
-        let notarization_certificate =
-            scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
+        let mut iter = notarizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
         Some(Self {
             proposal,
-            certificate: notarization_certificate,
+            certificate,
         })
     }
 
@@ -1190,19 +1186,11 @@ impl<S: Scheme> Nullification<S> {
         scheme: &S,
         nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
     ) -> Option<Self> {
-        let nullifies: Vec<&'a Nullify<S>> = nullifies.into_iter().collect();
-        if nullifies.is_empty() {
-            return None;
-        }
-        let round = nullifies[0].round;
+        let mut iter = nullifies.into_iter().peekable();
+        let round = iter.peek()?.round;
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
-        let nullification_certificate =
-            scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
-
-        Some(Self {
-            round,
-            certificate: nullification_certificate,
-        })
+        Some(Self { round, certificate })
     }
 }
 
@@ -1406,17 +1394,13 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
     ) -> Option<Self> {
         let finalizes: Vec<&'a Finalize<S, D>> = finalizes.into_iter().collect();
-        if finalizes.is_empty() {
-            return None;
-        }
-        let proposal = finalizes[0].proposal.clone();
-
-        let finalization_certificate =
-            scheme.assemble_certificate(finalizes.iter().map(|f| f.vote.clone()))?;
+        let mut iter = finalizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|f| f.vote.clone()))?;
 
         Some(Self {
             proposal,
-            certificate: finalization_certificate,
+            certificate,
         })
     }
 
