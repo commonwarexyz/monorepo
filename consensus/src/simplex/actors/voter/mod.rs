@@ -1050,12 +1050,10 @@ mod tests {
             }
 
             // Verify no finalization was recorded
-            for _ in 0..10 {
-                {
-                    let finalizations = reporter.finalizations.lock().unwrap();
-                    assert!(finalizations.is_empty());
-                }
-                context.sleep(Duration::from_millis(10)).await;
+            context.sleep(Duration::from_secs(1)).await;
+            {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(finalizations.is_empty());
             }
 
             // Provide the final finalize vote
@@ -1070,6 +1068,7 @@ mod tests {
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
                     if matches!(finalizations.get(&view), Some(expected) if expected == &expected_finalization) {
+                        // The reporter already checks the certificate for signature validity, so we don't need to do it here.
                         break;
                     }
                 }
