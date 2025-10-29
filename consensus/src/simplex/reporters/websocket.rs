@@ -91,14 +91,14 @@ impl<P: PublicKey> EncodeSize for Context<P> {
 
 /// Messages sent over the WebSocket connection.
 #[derive(Clone, Debug)]
-pub enum Message<P: PublicKey, S: Scheme, D: Digest> {
+pub enum Message<S: Scheme, D: Digest> {
     /// Initial context message with participant information.
-    Context(Context<P>),
+    Context(Context<S::PublicKey>),
     /// Consensus activity event.
     Activity(Activity<S, D>),
 }
 
-impl<P: PublicKey, S: Scheme, D: Digest> Write for Message<P, S, D> {
+impl<S: Scheme, D: Digest> Write for Message<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Message::Context(context) => {
@@ -113,8 +113,11 @@ impl<P: PublicKey, S: Scheme, D: Digest> Write for Message<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: Scheme, D: Digest> Read for Message<P, S, D> {
-    type Cfg = (<Context<P> as Read>::Cfg, <Activity<S, D> as Read>::Cfg);
+impl<S: Scheme, D: Digest> Read for Message<S, D> {
+    type Cfg = (
+        <Context<S::PublicKey> as Read>::Cfg,
+        <Activity<S, D> as Read>::Cfg,
+    );
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
@@ -129,7 +132,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Read for Message<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Message<P, S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Message<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Message::Context(context) => context.encode_size(),
@@ -150,27 +153,25 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Message<P, S, D> {
 /// Each client connection is handled in a separate spawned task. If a client
 /// lags behind the broadcast stream, they will skip messages but continue
 /// receiving new activities.
-pub struct WebSocketServer<E, P, S, D>
+pub struct WebSocketServer<E, S, D>
 where
     E: Spawner + Metrics,
-    P: PublicKey,
     S: Scheme,
     D: Digest,
 {
     /// Runtime context for spawning client handlers
     context: ContextCell<E>,
     /// Participants in the committee.
-    participants: Ordered<P>,
+    participants: Ordered<S::PublicKey>,
     /// The index of "self" in the participant set, if available (`None` if observer).
     me: Option<u32>,
     /// Receiver for activity broadcasts
     receiver: broadcast::Receiver<Activity<S, D>>,
 }
 
-impl<E, P, S, D> WebSocketServer<E, P, S, D>
+impl<E, S, D> WebSocketServer<E, S, D>
 where
     E: Spawner + Metrics,
-    P: PublicKey,
     S: Scheme,
     D: Digest,
 {
@@ -218,10 +219,10 @@ where
         peer: SocketAddr,
         mut ws: WebSocketStream<TcpStream>,
         mut activity: broadcast::Receiver<Activity<S, D>>,
-        context: Context<P>,
+        context: Context<S::PublicKey>,
     ) -> WsResult<()> {
         // Send initial context message
-        let msg = Message::<P, S, D>::Context(context);
+        let msg = Message::<S, D>::Context(context);
         ws.send(WsMessage::Binary(msg.encode().freeze())).await?;
 
         loop {
@@ -244,7 +245,7 @@ where
                     match result {
                         Ok(activity) => {
                             // Create activity message
-                            let msg = Message::<P, _, _>::Activity(activity);
+                            let msg = Message::Activity(activity);
 
                             // Send to client as binary message
                             ws.send(WsMessage::Binary(msg.encode().freeze())).await?;
@@ -300,15 +301,14 @@ where
     /// - `participants`: Participants in the committee
     /// - `me`: The index of "self" in the participant set, if available (`None` if observer)
     /// - `inner`: Inner reporter to forward activities to
-    pub fn new<E, P>(
+    pub fn new<E>(
         context: E,
-        participants: Ordered<P>,
+        participants: Ordered<S::PublicKey>,
         me: Option<u32>,
         inner: R,
-    ) -> (Self, WebSocketServer<E, P, S, D>)
+    ) -> (Self, WebSocketServer<E, S, D>)
     where
         E: Spawner + Metrics,
-        P: PublicKey,
     {
         let (broadcast, receiver) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
 
