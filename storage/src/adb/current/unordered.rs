@@ -136,11 +136,11 @@ impl<
             }
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
-            // hasher so the new leaf digests can be computed during sync.
+            // hasher so the new leaf digests can be computed during merkleization.
             grafter
                 .load_grafted_digests(&status.dirty_chunks(), &mmr)
                 .await?;
-            status.sync(&mut grafter).await?;
+            status.merkleize(&mut grafter).await?;
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
@@ -161,7 +161,7 @@ impl<
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
-        status.sync(&mut grafter).await?;
+        status.merkleize(&mut grafter).await?;
 
         let any = Any {
             mmr,
@@ -276,9 +276,9 @@ impl<
         self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
         self.status.push(true); // Always treat most recent commit op as active.
 
-        // Sync the log and process the updates to the MMR in parallel.
+        // Sync the log and merkleize the MMR updates in parallel.
         let mmr_fut = async {
-            self.any.mmr.process_updates(&mut self.any.hasher);
+            self.any.mmr.merkleize(&mut self.any.hasher);
             Ok::<(), Error>(())
         };
         try_join!(self.any.log.sync().map_err(Error::Journal), mmr_fut)?;
@@ -297,7 +297,7 @@ impl<
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
-        self.status.sync(&mut grafter).await?;
+        self.status.merkleize(&mut grafter).await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
@@ -595,7 +595,7 @@ impl<
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
-        self.status.sync(&mut grafter).await?;
+        self.status.merkleize(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
         self.status.prune_to_bit(*target_prune_loc)?;
         self.status

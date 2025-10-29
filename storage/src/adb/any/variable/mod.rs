@@ -715,10 +715,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .await?;
         self.last_commit = Some(self.op_count() - 1);
 
-        // Sync the log and process the updates to the MMR in parallel.
+        // Sync the log and merkleize the MMR updates in parallel.
         let section = self.current_section();
         let mmr_fut = async {
-            self.mmr.process_updates(&mut self.hasher);
+            self.mmr.merkleize(&mut self.hasher);
             Ok::<(), Error>(())
         };
         try_join!(self.log.sync(section).map_err(Error::Journal), mmr_fut)?;

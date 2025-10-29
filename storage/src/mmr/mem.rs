@@ -72,7 +72,7 @@ pub struct Mmr<H: CHasher> {
     dirty_nodes: BTreeSet<(Position, u32)>,
 
     /// Dummy digest used as a placeholder for nodes whose digests will be updated with the next
-    /// `sync`.
+    /// `merkleize`.
     dirty_digest: H::Digest,
 
     /// Thread pool to use for parallelizing updates.
@@ -263,7 +263,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
@@ -273,7 +273,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `sync` is called. The element can be an arbitrary byte slice, and need not be
+    /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
     pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
         let leaf_pos = self.size();
@@ -303,7 +303,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
         assert!(
             self.dirty_nodes.is_empty(),
@@ -328,7 +328,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn pop(&mut self) -> Result<Position, Error> {
         if self.size() == 0 {
             return Err(Empty);
@@ -443,7 +443,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
-    /// their digests are appropriately recomputed during the next `sync`.
+    /// their digests are appropriately recomputed during the next `merkleize`.
     fn mark_dirty(&mut self, pos: Position) {
         for (peak_pos, mut height) in self.peak_iterator() {
             if peak_pos < pos {
@@ -510,21 +510,21 @@ impl<H: CHasher> Mmr<H> {
         !self.dirty_nodes.is_empty()
     }
 
-    /// Process any pending batched updates.
-    pub fn sync(&mut self, hasher: &mut impl Hasher<H>) {
+    /// Merkleize any pending batched updates to have them reflected in the root.
+    pub fn merkleize(&mut self, hasher: &mut impl Hasher<H>) {
         if self.dirty_nodes.is_empty() {
             return;
         }
         #[cfg(feature = "std")]
         if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            self.sync_parallel(hasher, MIN_TO_PARALLELIZE);
+            self.merkleize_parallel(hasher, MIN_TO_PARALLELIZE);
             return;
         }
 
-        self.sync_serial(hasher);
+        self.merkleize_serial(hasher);
     }
 
-    fn sync_serial(&mut self, hasher: &mut impl Hasher<H>) {
+    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<H>) {
         let mut nodes: Vec<(Position, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
@@ -554,7 +554,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if `self.pool` is None.
     #[cfg(feature = "std")]
-    fn sync_parallel(&mut self, hasher: &mut impl Hasher<H>, min_to_parallelize: usize) {
+    fn merkleize_parallel(&mut self, hasher: &mut impl Hasher<H>, min_to_parallelize: usize) {
         let mut nodes: Vec<(Position, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
         // Sort by increasing height.
@@ -569,7 +569,7 @@ impl<H: CHasher> Mmr<H> {
             }
             if same_height.len() < min_to_parallelize {
                 self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
-                self.sync_serial(hasher);
+                self.merkleize_serial(hasher);
                 return;
             }
             self.update_node_digests(hasher, &same_height, current_height);
@@ -583,7 +583,7 @@ impl<H: CHasher> Mmr<H> {
                 .iter()
                 .copied()
                 .collect();
-            self.sync_serial(hasher);
+            self.merkleize_serial(hasher);
             return;
         }
 
@@ -638,7 +638,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
         assert!(
             self.dirty_nodes.is_empty(),
@@ -666,7 +666,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates, or if `loc` is out of bounds.
+    /// Panics if there are unmerkleized updates, or if `loc` is out of bounds.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
@@ -685,7 +685,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates, or if the element range is out of bounds.
+    /// Panics if there are unmerkleized updates, or if the element range is out of bounds.
     pub fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
         assert!(
             self.dirty_nodes.is_empty(),
@@ -720,7 +720,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
             self.prune_to_pos(self.index_to_pos(self.nodes.len()));
@@ -732,7 +732,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn prune_to_pos(&mut self, pos: Position) {
         assert!(
             self.dirty_nodes.is_empty(),
@@ -778,7 +778,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub fn clone_pruned(&self) -> Self {
         if self.size() == 0 {
             return Self::new();
@@ -835,7 +835,7 @@ mod tests {
         );
     }
 
-    /// Same as `build_and_check_test_roots` but uses `add_batched` + `sync` instead of `add`.
+    /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
     pub fn build_batched_and_check_test_roots(mmr: &mut Mmr<Sha256>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
@@ -843,7 +843,7 @@ mod tests {
             let element = hasher.inner().finalize();
             mmr.add_batched(&mut hasher, &element);
         }
-        mmr.sync(&mut hasher);
+        mmr.merkleize(&mut hasher);
         assert_eq!(
             hex(&mmr.root(&mut hasher)),
             ROOTS[199],
@@ -1139,7 +1139,7 @@ mod tests {
             let element = c_hasher.finalize();
             leaves.push(mmr.add(hasher, &element));
         }
-        mmr.sync(hasher);
+        mmr.merkleize(hasher);
 
         leaves
     }
@@ -1297,7 +1297,7 @@ mod tests {
         }
         mmr.update_leaf_batched(hasher, &updates).unwrap();
 
-        mmr.sync(hasher);
+        mmr.merkleize(hasher);
         let updated_root = mmr.root(hasher);
         assert_eq!(
             "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
@@ -1313,7 +1313,7 @@ mod tests {
         }
         mmr.update_leaf_batched(hasher, &updates).unwrap();
 
-        mmr.sync(hasher);
+        mmr.merkleize(hasher);
         let restored_root = mmr.root(hasher);
         assert_eq!(root, restored_root);
     }
