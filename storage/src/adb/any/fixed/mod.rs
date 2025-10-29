@@ -8,7 +8,10 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{operation::fixed::FixedOperation, Error},
+    adb::{
+        operation::{fixed::FixedSize, Keyed},
+        Error,
+    },
     index::{Cursor, Index},
     journal::contiguous::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -21,9 +24,10 @@ use crate::{
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_utils::NZUsize;
 use futures::{
     future::{try_join_all, TryFutureExt as _},
-    try_join,
+    pin_mut, try_join, StreamExt as _,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -75,7 +79,7 @@ pub struct Config<T: Translator> {
 /// db will be as of the last committed operation.
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
-    O: FixedOperation,
+    O: FixedSize,
     H: CHasher,
     T: Translator,
 >(
@@ -163,6 +167,47 @@ pub(crate) async fn init_mmr_and_log<
     Ok((inactivity_floor_loc, mmr, log))
 }
 
+/// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
+/// the log and mmr have the same number of operations and are not pruned beyond the inactivity
+/// floor. The callback is invoked for each replayed operation, indicating activity status updates.
+/// The first argument of the callback is the activity status of the operation, and the second
+/// argument is the location of the operation it inactivates (if any).
+pub(crate) async fn build_snapshot_from_log<E, O, I, F>(
+    inactivity_floor_loc: Location,
+    log: &Journal<E, O>,
+    snapshot: &mut I,
+    mut callback: F,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + Metrics,
+    O: FixedSize,
+    I: Index<Value = Location>,
+    F: FnMut(bool, Option<Location>),
+{
+    let stream = log
+        .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
+        .await?;
+    pin_mut!(stream);
+    let last_commit_loc = log.size().await?.saturating_sub(1);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        if let Some(key) = op.key() {
+            if op.is_delete() {
+                let old_loc = delete_key(snapshot, log, key).await?;
+                callback(false, old_loc);
+            } else if op.is_update() {
+                let new_loc = Location::new_unchecked(loc);
+                let old_loc = update_loc(snapshot, log, key, new_loc).await?;
+                callback(true, old_loc);
+            }
+        } else if op.commit_floor().is_some() {
+            callback(loc == last_commit_loc, None);
+        }
+    }
+
+    Ok(())
+}
+
 /// Common implementation for pruning an Any database.
 ///
 /// # Errors
@@ -181,7 +226,7 @@ async fn prune_db<E, O, H>(
 ) -> Result<(), Error>
 where
     E: Storage + Clock + Metrics,
-    O: FixedOperation,
+    O: FixedSize,
     H: CHasher,
 {
     if target_prune_loc > inactivity_floor_loc {
@@ -234,7 +279,7 @@ async fn historical_proof<E, O, H>(
 ) -> Result<(Proof<H::Digest>, Vec<O>), Error>
 where
     E: Storage + Clock + Metrics,
-    O: FixedOperation,
+    O: FixedSize,
     H: CHasher,
 {
     let size = Location::new_unchecked(log.size().await);
@@ -268,12 +313,12 @@ where
 async fn update_loc<E, I: Index<Value = Location>, O>(
     snapshot: &mut I,
     log: &Journal<E, O>,
-    key: &<O as FixedOperation>::Key,
+    key: &<O as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
     E: Storage + Clock + Metrics,
-    O: FixedOperation,
+    O: FixedSize,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -304,7 +349,7 @@ async fn delete_key<E, I, O>(
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
-    O: FixedOperation,
+    O: FixedSize,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -325,12 +370,12 @@ where
 async fn find_update_op<E, C, O>(
     log: &Journal<E, O>,
     cursor: &mut C,
-    key: &<O as FixedOperation>::Key,
+    key: &<O as Keyed>::Key,
 ) -> Result<Option<Location>, Error>
 where
     E: Storage + Clock + Metrics,
     C: Cursor<Value = Location>,
-    O: FixedOperation,
+    O: FixedSize,
 {
     while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
@@ -348,7 +393,7 @@ pub(crate) struct Shared<
     'a,
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
-    O: FixedOperation,
+    O: FixedSize,
     H: CHasher,
 > {
     pub snapshot: &'a mut I,
@@ -361,7 +406,7 @@ impl<E, I, O, H> Shared<'_, E, I, O, H>
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
-    O: FixedOperation,
+    O: FixedSize,
     H: CHasher,
 {
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
@@ -425,7 +470,7 @@ where
         E: Storage + Clock + Metrics,
         I: Index<Value = Location>,
         H: CHasher,
-        O: FixedOperation,
+        O: FixedSize,
     {
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
@@ -459,7 +504,7 @@ where
     where
         E: Storage + Clock + Metrics,
         I: Index<Value = Location>,
-        O: FixedOperation,
+        O: FixedSize,
         H: CHasher,
     {
         // Use the status bitmap to find the first active operation above the inactivity floor.

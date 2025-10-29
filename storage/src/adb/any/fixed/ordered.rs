@@ -6,9 +6,7 @@
 
 use crate::{
     adb::{
-        any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
-        },
+        any::fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
         operation::fixed::ordered::{KeyData, Operation},
         store::{self, Db},
         Error,
@@ -21,8 +19,8 @@ use crate::{
 use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use commonware_utils::Array;
+use futures::{future::TryFutureExt, try_join};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -101,7 +99,8 @@ impl<
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        Self::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
+            .await?;
 
         let db = Any {
             mmr,
@@ -113,44 +112,6 @@ impl<
         };
 
         Ok(db)
-    }
-
-    /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
-    /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
-    /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
-    /// status updates. The first argument of the callback is the activity status of the operation,
-    /// and the second argument is the location of the operation it inactivates (if any).
-    pub(crate) async fn build_snapshot_from_log<F>(
-        inactivity_floor_loc: Location,
-        log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, Location>,
-        mut callback: F,
-    ) -> Result<(), Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        let stream = log
-            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
-            .await?;
-        pin_mut!(stream);
-        let last_commit_loc = log.size().await.saturating_sub(1);
-        while let Some(result) = stream.next().await {
-            let (i, op) = result?;
-            match op {
-                Operation::Delete(key) => {
-                    let old_loc = super::delete_key(snapshot, log, &key).await?;
-                    callback(false, old_loc);
-                }
-                Operation::Update(data) => {
-                    let new_loc = Location::new_unchecked(i);
-                    let old_loc = super::update_loc(snapshot, log, &data.key, new_loc).await?;
-                    callback(true, old_loc);
-                }
-                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-            }
-        }
-
-        Ok(())
     }
 
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
@@ -821,7 +782,7 @@ mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
