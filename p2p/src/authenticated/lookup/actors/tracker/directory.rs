@@ -9,7 +9,7 @@ use governor::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
 use tracing::debug;
@@ -122,10 +122,17 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         // Create and store new peer set
         for (peer, addr) in &peers {
-            let record = self.peers.entry(peer.clone()).or_insert_with(|| {
-                self.metrics.tracked.inc();
-                Record::known(*addr)
-            });
+            let record = match self.peers.entry(peer.clone()) {
+                Entry::Occupied(entry) => {
+                    let entry = entry.into_mut();
+                    entry.update(*addr);
+                    entry
+                }
+                Entry::Vacant(entry) => {
+                    self.metrics.tracked.inc();
+                    entry.insert(Record::known(*addr))
+                }
+            };
             record.increment();
         }
         let peers: Vec<_> = peers.into_iter().map(|(peer, _)| peer).collect();
