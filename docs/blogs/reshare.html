@@ -80,8 +80,14 @@
             <div class="date">October 15, 2025</div>
         </div>
         <p>
-            Most modern consensus protocols are described under the permissioned setting (where all participants are fixed and known ahead of time).
-            Transitioning from one permissioned set to another, where participants are added and removed, is left as an exercise for the reader.
+            Most consensus protocols are described under the permissioned setting (where all participants are fixed and known ahead of time).
+            Safely transitioning from one permissioned set to another, as participants are added and removed, is left as an exercise for the reader.
+        </p>
+        <p>
+            Sometimes this transition is obvious, as in Tendermint. Participants only start working on another height once the previous height is finalized.
+            This makes it safe to transition as soon as finalization is observed. Newer protocols, like Simplex, that offer faster-than-finality views, begin
+            working on the next height as soon as the previous height is notarized (rather than finalized). This makes it quite challenging to actually decide
+            when to apply a new permissioned set. If it isn't known when building a block who should vote on it, divergence can lead to a halt or a safety failure.
         </p>
 
         Epoching (Motivated by Faster-than-Finality View) -> Resharing -> Bootstrapping -> Example
