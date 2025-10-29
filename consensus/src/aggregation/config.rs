@@ -61,21 +61,21 @@ pub struct Config<
     /// Number of indices to track below the tip when collecting acks and/or pruning.
     pub activity_timeout: u64,
 
-    /// Partition for the [commonware_storage::codex::Codex].
-    pub codex_partition: String,
+    /// Partition for the [commonware_storage::multijournal::Journal].
+    pub journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.
-    pub codex_write_buffer: NonZeroUsize,
+    pub journal_write_buffer: NonZeroUsize,
 
     /// Number of bytes to buffer when replaying a journal.
-    pub codex_replay_buffer: NonZeroUsize,
+    pub journal_replay_buffer: NonZeroUsize,
 
     /// The number of entries to keep per journal section.
-    pub codex_heights_per_section: NonZeroU64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// Compression level for the journal.
-    pub codex_compression: Option<u8>,
+    pub journal_compression: Option<u8>,
 
     /// Buffer pool for the journal.
-    pub codex_buffer_pool: PoolRef,
+    pub journal_buffer_pool: PoolRef,
 }

@@ -1,8 +1,8 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    codex::{Codex, Config as CodexConfig},
     index::{Index as _, Unordered as Index},
+    multijournal::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
@@ -14,7 +14,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Location of a record in [Codex].
+/// Location of a record in `Journal`.
 struct Location {
     offset: u32,
     len: u32,
@@ -62,7 +62,7 @@ impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
-    codex: Codex<E, Record<K, V>>,
+    journal: Journal<E, Record<K, V>>,
     pending: BTreeSet<u64>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -70,7 +70,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
 
     // To efficiently serve `get` and `has` requests, we map a translated representation of each key
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
-    // indexes to their locations in the codex.
+    // indexes to their locations in the journal.
     keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
     intervals: RMap,
@@ -92,12 +92,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
-    /// by replaying the codex.
+    /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize codex
-        let codex = Codex::<E, Record<K, V>>::init(
-            context.with_label("codex"),
-            CodexConfig {
+        // Initialize journal
+        let journal = Journal::<E, Record<K, V>>::init(
+            context.with_label("journal"),
+            JConfig {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -113,7 +113,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let mut intervals = RMap::new();
         {
             debug!("initializing archive");
-            let stream = codex.replay(0, 0, cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
@@ -161,7 +161,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Return populated archive
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
-            codex,
+            journal,
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
@@ -189,7 +189,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Fetch item from disk
         let section = self.section(index);
         let record = self
-            .codex
+            .journal
             .get_exact(section, location.offset, location.len)
             .await?;
         Ok(Some(record.value))
@@ -212,7 +212,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section(*index);
             let record = self
-                .codex
+                .journal
                 .get_exact(section, location.offset, location.len)
                 .await?;
 
@@ -250,8 +250,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         }
         debug!(min, "pruning archive");
 
-        // Prune codex
-        self.codex.prune(min).await.map_err(Error::Journal)?;
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -303,10 +303,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
             return Ok(());
         }
 
-        // Store item in codex
+        // Store item in journal
         let record = Record::new(index, key.clone(), data);
         let section = self.section(index);
-        let (offset, len) = self.codex.append(section, record).await?;
+        let (offset, len) = self.journal.append(section, record).await?;
 
         // Store index
         self.indices.insert(index, Location { offset, len });
@@ -344,7 +344,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     async fn sync(&mut self) -> Result<(), Error> {
         let mut syncs = Vec::with_capacity(self.pending.len());
         for section in self.pending.iter() {
-            syncs.push(self.codex.sync(*section));
+            syncs.push(self.journal.sync(*section));
             self.syncs.inc();
         }
         try_join_all(syncs).await?;
@@ -365,10 +365,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn close(self) -> Result<(), Error> {
-        self.codex.close().await.map_err(Error::Journal)
+        self.journal.close().await.map_err(Error::Journal)
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.codex.destroy().await.map_err(Error::Journal)
+        self.journal.destroy().await.map_err(Error::Journal)
     }
 }

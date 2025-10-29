@@ -31,7 +31,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::codex;
+use commonware_storage::multijournal;
 use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
     channel::oneshot,
@@ -139,28 +139,28 @@ pub struct Engine<
     // Storage
     ////////////////////////////////////////
 
-    // The number of heights per each codex section.
-    codex_heights_per_section: u64,
+    // The number of heights per each journal section.
+    journal_heights_per_section: u64,
 
-    // The number of bytes to buffer when replaying a codex.
-    codex_replay_buffer: NonZeroUsize,
+    // The number of bytes to buffer when replaying a journal.
+    journal_replay_buffer: NonZeroUsize,
 
-    // The size of the write buffer to use for each blob in the codex.
-    codex_write_buffer: NonZeroUsize,
+    // The size of the write buffer to use for each blob in the journal.
+    journal_write_buffer: NonZeroUsize,
 
-    // A prefix for the codex names.
+    // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
-    codex_name_prefix: String,
+    journal_name_prefix: String,
 
-    // Compression level for the codex.
-    codex_compression: Option<u8>,
+    // Compression level for the journal.
+    journal_compression: Option<u8>,
 
-    // Buffer pool for the codex.
-    codex_buffer_pool: PoolRef,
+    // Buffer pool for the journal.
+    journal_buffer_pool: PoolRef,
 
-    // A map of sequencer public keys to their codexes.
+    // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
-    codexes: BTreeMap<C::PublicKey, codex::Codex<E, Node<C::PublicKey, V, D>>>,
+    journals: BTreeMap<C::PublicKey, multijournal::Journal<E, Node<C::PublicKey, V, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -244,13 +244,13 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             height_bound: cfg.height_bound,
             pending_verifies: FuturesPool::default(),
-            codex_heights_per_section: cfg.codex_heights_per_section,
-            codex_replay_buffer: cfg.codex_replay_buffer,
-            codex_write_buffer: cfg.codex_write_buffer,
-            codex_name_prefix: cfg.codex_name_prefix,
-            codex_compression: cfg.codex_compression,
-            codex_buffer_pool: cfg.codex_buffer_pool,
-            codexes: BTreeMap::new(),
+            journal_heights_per_section: cfg.journal_heights_per_section,
+            journal_replay_buffer: cfg.journal_replay_buffer,
+            journal_write_buffer: cfg.journal_write_buffer,
+            journal_name_prefix: cfg.journal_name_prefix,
+            journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
+            journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
             epoch: 0,
@@ -289,9 +289,9 @@ impl<
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
         self.epoch = latest;
 
-        // Before starting on the main loop, initialize my own sequencer codex
+        // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        self.codex_prepare(&self.crypto.public_key()).await;
+        self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
             // Rebroadcasting may return a non-critical error, so log the error and continue.
             info!(?err, "initial rebroadcast failed");
@@ -395,8 +395,8 @@ impl<
                         }
                     };
 
-                    // Initialize codex for sequencer if it does not exist
-                    self.codex_prepare(&sender).await;
+                    // Initialize journal for sequencer if it does not exist
+                    self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
                     if let Some(parent_chunk) = result {
@@ -469,10 +469,10 @@ impl<
             }
         }
 
-        // Close all codexes, regardless of how we exit the loop
+        // Close all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
-        while let Some((_, codex)) = self.codexes.pop_first() {
-            codex.close().await.expect("unable to close codex");
+        while let Some((_, journal)) = self.journals.pop_first() {
+            journal.close().await.expect("unable to close journal");
         }
     }
 
@@ -519,9 +519,9 @@ impl<
         };
         let ack = Ack::sign(&self.namespace, share, tip.chunk.clone(), self.epoch);
 
-        // Sync the codex to prevent ever acking two conflicting chunks at
+        // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
-        self.codex_sync(&context.sequencer, context.height).await;
+        self.journal_sync(&context.sequencer, context.height).await;
 
         // The recipients are all the validators in the epoch and the sequencer.
         // The sequencer may or may not be a validator.
@@ -606,7 +606,7 @@ impl<
 
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
-    /// Also appends the `Node` to the codex if it's new.
+    /// Also appends the `Node` to the journal if it's new.
     async fn handle_node(&mut self, node: &Node<C::PublicKey, V, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
@@ -619,11 +619,11 @@ impl<
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
                 .set(node.chunk.height as i64);
 
-            // Append to codex if the `Node` is new, making sure to sync the codex
+            // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
             // the node crashes and restarts.
-            self.codex_append(node.clone()).await;
-            self.codex_sync(&node.chunk.sequencer, node.chunk.height)
+            self.journal_append(node.clone()).await;
+            self.journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
         }
 
@@ -725,9 +725,9 @@ impl<
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
 
-        // Sync the codex to prevent ever proposing two conflicting chunks
+        // Sync the journal to prevent ever proposing two conflicting chunks
         // at the same height, even if the node crashes and restarts
-        self.codex_sync(&me, height).await;
+        self.journal_sync(&me, height).await;
 
         // Record the start time of the proposal
         self.propose_timer = Some(self.metrics.e2e_duration.timer());
@@ -951,44 +951,44 @@ impl<
     // Journal
     ////////////////////////////////////////
 
-    /// Returns the section of the codex for the given height.
-    fn get_codex_section(&self, height: u64) -> u64 {
-        height / self.codex_heights_per_section
+    /// Returns the section of the journal for the given height.
+    fn get_journal_section(&self, height: u64) -> u64 {
+        height / self.journal_heights_per_section
     }
 
-    /// Ensures the codex exists and is initialized for the given sequencer.
-    /// If the codex does not exist, it is created and replayed.
+    /// Ensures the journal exists and is initialized for the given sequencer.
+    /// If the journal does not exist, it is created and replayed.
     /// Else, no action is taken.
-    async fn codex_prepare(&mut self, sequencer: &C::PublicKey) {
-        // Return early if the codex already exists
-        if self.codexes.contains_key(sequencer) {
+    async fn journal_prepare(&mut self, sequencer: &C::PublicKey) {
+        // Return early if the journal already exists
+        if self.journals.contains_key(sequencer) {
             return;
         }
 
-        // Initialize codex
-        let cfg = codex::Config {
-            partition: format!("{}{}", &self.codex_name_prefix, sequencer),
-            compression: self.codex_compression,
+        // Initialize journal
+        let cfg = multijournal::Config {
+            partition: format!("{}{}", &self.journal_name_prefix, sequencer),
+            compression: self.journal_compression,
             codec_config: (),
-            buffer_pool: self.codex_buffer_pool.clone(),
-            write_buffer: self.codex_write_buffer,
+            buffer_pool: self.journal_buffer_pool.clone(),
+            write_buffer: self.journal_write_buffer,
         };
-        let codex = codex::Codex::<_, Node<C::PublicKey, V, D>>::init(
-            self.context.with_label("codex").into(),
+        let journal = multijournal::Journal::<_, Node<C::PublicKey, V, D>>::init(
+            self.context.with_label("journal").into(),
             cfg,
         )
         .await
-        .expect("unable to init codex");
+        .expect("unable to init journal");
 
-        // Replay codex
+        // Replay journal
         {
-            debug!(?sequencer, "codex replay begin");
+            debug!(?sequencer, "journal replay begin");
 
             // Prepare the stream
-            let stream = codex
-                .replay(0, 0, self.codex_replay_buffer)
+            let stream = journal
+                .replay(0, 0, self.journal_replay_buffer)
                 .await
-                .expect("unable to replay codex");
+                .expect("unable to replay journal");
             pin_mut!(stream);
 
             // Read from the stream, which may be in arbitrary order.
@@ -996,7 +996,7 @@ impl<
             let mut tip: Option<Node<C::PublicKey, V, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
-                let (_, _, _, node) = msg.expect("unable to read from codex");
+                let (_, _, _, node) = msg.expect("unable to read from journal");
                 num_items += 1;
                 let height = node.chunk.height;
                 match tip {
@@ -1011,48 +1011,48 @@ impl<
                 }
             }
 
-            // Set the tip only once. The items from the codex may be in arbitrary order,
+            // Set the tip only once. The items from the journal may be in arbitrary order,
             // and the tip manager will panic if inserting tips out-of-order.
             if let Some(node) = tip.take() {
                 let is_new = self.tip_manager.put(&node);
                 assert!(is_new);
             }
 
-            debug!(?sequencer, ?num_items, "codex replay end");
+            debug!(?sequencer, ?num_items, "journal replay end");
         }
 
-        // Store codex
-        self.codexes.insert(sequencer.clone(), codex);
+        // Store journal
+        self.journals.insert(sequencer.clone(), journal);
     }
 
-    /// Write a `Node` to the appropriate codex, which contains the tip `Chunk` for the sequencer.
+    /// Write a `Node` to the appropriate journal, which contains the tip `Chunk` for the sequencer.
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
-    /// the codex must already be open and replayed.
-    async fn codex_append(&mut self, node: Node<C::PublicKey, V, D>) {
-        let section = self.get_codex_section(node.chunk.height);
-        self.codexes
+    /// the journal must already be open and replayed.
+    async fn journal_append(&mut self, node: Node<C::PublicKey, V, D>) {
+        let section = self.get_journal_section(node.chunk.height);
+        self.journals
             .get_mut(&node.chunk.sequencer)
-            .expect("codex does not exist")
+            .expect("journal does not exist")
             .append(section, node)
             .await
-            .expect("unable to append to codex");
+            .expect("unable to append to journal");
     }
 
-    /// Syncs (ensures all data is written to disk) and prunes the codex for the given sequencer and height.
-    async fn codex_sync(&mut self, sequencer: &C::PublicKey, height: u64) {
-        let section = self.get_codex_section(height);
+    /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
+    async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: u64) {
+        let section = self.get_journal_section(height);
 
-        // Get codex
-        let codex = self
-            .codexes
+        // Get journal
+        let journal = self
+            .journals
             .get_mut(sequencer)
-            .expect("codex does not exist");
+            .expect("journal does not exist");
 
-        // Sync codex
-        codex.sync(section).await.expect("unable to sync codex");
+        // Sync journal
+        journal.sync(section).await.expect("unable to sync journal");
 
-        // Prune codex, ignoring errors
-        let _ = codex.prune(section).await;
+        // Prune journal, ignoring errors
+        let _ = journal.prune(section).await;
     }
 }

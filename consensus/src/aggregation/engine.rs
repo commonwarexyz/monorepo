@@ -28,7 +28,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::codex::{Codex, Config as CodexConfig};
+use commonware_storage::multijournal::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
 use futures::{
     future::{self, Either},
@@ -139,15 +139,15 @@ pub struct Engine<
     /// A set of deadlines for rebroadcasting `Index` values that do not have a threshold signature.
     rebroadcast_deadlines: PrioritySet<Index, SystemTime>,
 
-    // ---------- Codex ----------
-    /// Codex for storing acks signed by this node.
-    codex: Option<Codex<E, Activity<V, D>>>,
-    codex_partition: String,
-    codex_write_buffer: NonZeroUsize,
-    codex_replay_buffer: NonZeroUsize,
-    codex_heights_per_section: u64,
-    codex_compression: Option<u8>,
-    codex_buffer_pool: PoolRef,
+    // ---------- Journal ----------
+    /// Journal for storing acks signed by this node.
+    journal: Option<Journal<E, Activity<V, D>>>,
+    journal_partition: String,
+    journal_write_buffer: NonZeroUsize,
+    journal_replay_buffer: NonZeroUsize,
+    journal_heights_per_section: u64,
+    journal_compression: Option<u8>,
+    journal_buffer_pool: PoolRef,
 
     // ---------- Network ----------
     /// Whether to send acks as priority messages.
@@ -199,13 +199,13 @@ impl<
             confirmed: BTreeMap::new(),
             rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
             rebroadcast_deadlines: PrioritySet::new(),
-            codex: None,
-            codex_partition: cfg.codex_partition,
-            codex_write_buffer: cfg.codex_write_buffer,
-            codex_replay_buffer: cfg.codex_replay_buffer,
-            codex_heights_per_section: cfg.codex_heights_per_section.into(),
-            codex_compression: cfg.codex_compression,
-            codex_buffer_pool: cfg.codex_buffer_pool,
+            journal: None,
+            journal_partition: cfg.journal_partition,
+            journal_write_buffer: cfg.journal_write_buffer,
+            journal_replay_buffer: cfg.journal_replay_buffer,
+            journal_heights_per_section: cfg.journal_heights_per_section.into(),
+            journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
             priority_acks: cfg.priority_acks,
             metrics,
         }
@@ -236,19 +236,19 @@ impl<
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
         self.epoch = latest;
 
-        // Initialize Codex
-        let codex_cfg = CodexConfig {
-            partition: self.codex_partition.clone(),
-            compression: self.codex_compression,
+        // Initialize Journal
+        let journal_cfg = JConfig {
+            partition: self.journal_partition.clone(),
+            compression: self.journal_compression,
             codec_config: (),
-            buffer_pool: self.codex_buffer_pool.clone(),
-            write_buffer: self.codex_write_buffer,
+            buffer_pool: self.journal_buffer_pool.clone(),
+            write_buffer: self.journal_write_buffer,
         };
-        let codex = Codex::init(self.context.with_label("codex").into(), codex_cfg)
+        let journal = Journal::init(self.context.with_label("journal").into(), journal_cfg)
             .await
             .expect("init failed");
-        let unverified_indices = self.replay(&codex).await;
-        self.codex = Some(codex);
+        let unverified_indices = self.replay(&journal).await;
+        self.journal = Some(journal);
 
         // Request digests for unverified indices
         for index in unverified_indices {
@@ -406,12 +406,12 @@ impl<
             }
         }
 
-        // Close codex on shutdown
-        if let Some(codex) = self.codex.take() {
-            codex
+        // Close journal on shutdown
+        if let Some(journal) = self.journal.take() {
+            journal
                 .close()
                 .await
-                .expect("unable to close aggregation codex");
+                .expect("unable to close aggregation journal");
         }
     }
 
@@ -681,7 +681,7 @@ impl<
         });
     }
 
-    /// Signs an ack for the given index, and digest. Stores the ack in the codex and returns it.
+    /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
     /// Returns an error if the share is unknown at the current epoch.
     async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<V, D>, Error> {
         let Some(share) = self.validators.share(self.epoch) else {
@@ -751,35 +751,35 @@ impl<
         self.confirmed
             .retain(|index, _| *index >= activity_threshold);
 
-        // Add tip to codex
+        // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
         self.reporter.report(Activity::Tip(tip)).await;
 
-        // Prune codex with buffer, ignoring errors
-        let section = self.get_codex_section(activity_threshold);
-        let codex = self.codex.as_mut().expect("codex must be initialized");
-        let _ = codex.prune(section).await;
+        // Prune journal with buffer, ignoring errors
+        let section = self.get_journal_section(activity_threshold);
+        let journal = self.journal.as_mut().expect("journal must be initialized");
+        let _ = journal.prune(section).await;
 
         // Update the tip
         self.tip = tip;
     }
 
-    // ---------- Codex ----------
+    // ---------- Journal ----------
 
-    /// Returns the section of the codex for the given `index`.
-    fn get_codex_section(&self, index: Index) -> u64 {
-        index / self.codex_heights_per_section
+    /// Returns the section of the journal for the given `index`.
+    fn get_journal_section(&self, index: Index) -> u64 {
+        index / self.journal_heights_per_section
     }
 
-    /// Replays the codex, updating the state of the engine.
+    /// Replays the journal, updating the state of the engine.
     /// Returns a list of unverified pending indices that need digest requests.
-    async fn replay(&mut self, codex: &Codex<E, Activity<V, D>>) -> Vec<Index> {
+    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
         let mut tip = Index::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
-        let stream = codex
-            .replay(0, 0, self.codex_replay_buffer)
+        let stream = journal
+            .replay(0, 0, self.journal_replay_buffer)
             .await
             .expect("replay failed");
         pin_mut!(stream);
@@ -801,7 +801,7 @@ impl<
             }
         }
 
-        // Update the tip to the highest index in the codex
+        // Update the tip to the highest index in the journal
         self.tip = tip;
         let activity_threshold = tip.saturating_sub(self.activity_timeout);
 
@@ -885,31 +885,31 @@ impl<
                 .insert(index, Pending::Unverified(BTreeMap::new()));
             unverified.push(index);
         }
-        info!(self.tip, next, ?unverified, "replayed codex");
+        info!(self.tip, next, ?unverified, "replayed journal");
 
         unverified
     }
 
-    /// Appends an activity to the codex.
+    /// Appends an activity to the journal.
     async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
             Activity::Certified(ref certificate) => certificate.item.index,
             Activity::Tip(index) => index,
         };
-        let section = self.get_codex_section(index);
-        self.codex
+        let section = self.get_journal_section(index);
+        self.journal
             .as_mut()
-            .expect("codex must be initialized")
+            .expect("journal must be initialized")
             .append(section, activity)
             .await
-            .expect("unable to append to codex");
+            .expect("unable to append to journal");
     }
 
     /// Syncs (ensures all data is written to disk).
     async fn sync(&mut self, index: Index) {
-        let section = self.get_codex_section(index);
-        let codex = self.codex.as_mut().expect("codex must be initialized");
-        codex.sync(section).await.expect("unable to sync codex");
+        let section = self.get_journal_section(index);
+        let journal = self.journal.as_mut().expect("journal must be initialized");
+        journal.sync(section).await.expect("unable to sync journal");
     }
 }

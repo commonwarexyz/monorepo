@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use crate::{
-    codex::{Codex, Config as CodexConfig},
+    multijournal::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
@@ -56,7 +56,7 @@ impl<V: Codec> EncodeSize for Record<V> {
 /// Implementation of `Cache` storage.
 pub struct Cache<E: Storage + Metrics, V: Codec> {
     items_per_blob: u64,
-    codex: Codex<E, Record<V>>,
+    journal: Journal<E, Record<V>>,
     pending: BTreeSet<u64>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
@@ -79,12 +79,12 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     /// Initialize a new `Cache` instance.
     ///
     /// The in-memory index for `Cache` is populated during this call
-    /// by replaying the codex.
+    /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Initialize codex
-        let codex = Codex::<E, Record<V>>::init(
-            context.with_label("codex"),
-            CodexConfig {
+        // Initialize journal
+        let journal = Journal::<E, Record<V>>::init(
+            context.with_label("journal"),
+            JConfig {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -99,7 +99,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let mut intervals = RMap::new();
         {
             debug!("initializing cache");
-            let stream = codex.replay(0, 0, cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
@@ -132,7 +132,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         // Return populated cache
         Ok(Self {
             items_per_blob: cfg.items_per_blob.get(),
-            codex,
+            journal,
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
@@ -158,7 +158,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         // Fetch item from disk
         let section = self.section(index);
         let record = self
-            .codex
+            .journal
             .get_exact(section, location.offset, location.len)
             .await?;
         Ok(Some(record.value))
@@ -206,8 +206,8 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         }
         debug!(min, "pruning cache");
 
-        // Prune codex
-        self.codex.prune(min).await.map_err(Error::Journal)?;
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -254,10 +254,10 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
             return Ok(());
         }
 
-        // Store item in codex
+        // Store item in journal
         let record = Record::new(index, value);
         let section = self.section(index);
-        let (offset, len) = self.codex.append(section, record).await?;
+        let (offset, len) = self.journal.append(section, record).await?;
 
         // Store index
         self.indices.insert(index, Location { offset, len });
@@ -277,7 +277,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         let mut syncs = Vec::with_capacity(self.pending.len());
         for section in self.pending.iter() {
-            syncs.push(self.codex.sync(*section));
+            syncs.push(self.journal.sync(*section));
             self.syncs.inc();
         }
         try_join_all(syncs).await?;
@@ -297,11 +297,11 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     ///
     /// Any pending writes will be synced prior to closing.
     pub async fn close(self) -> Result<(), Error> {
-        self.codex.close().await.map_err(Error::Journal)
+        self.journal.close().await.map_err(Error::Journal)
     }
 
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
-        self.codex.destroy().await.map_err(Error::Journal)
+        self.journal.destroy().await.map_err(Error::Journal)
     }
 }
