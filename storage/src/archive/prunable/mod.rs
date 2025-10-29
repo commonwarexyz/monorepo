@@ -1,6 +1,6 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored in [crate::multijournal::Journal] (an append-only log) and the location of
+//! Data is stored in [crate::journal::segmented::Journal] (an append-only log) and the location of
 //! written data is stored in-memory by both index and key (via [crate::index::Index]) to enable
 //! **single-read lookups** for both query patterns over archived data.
 //!
@@ -46,7 +46,7 @@
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data
 //! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::multijournal::Journal]s):
+//! [crate::journal::segmented::Journal]s):
 //!
 //! ```rust
 //! struct Location {
@@ -76,7 +76,7 @@
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of [crate::multijournal::Journal], [Archive]
+//! index per `section`, or replaying a `section` of [crate::journal::segmented::Journal], [Archive]
 //! lazily cleans up the [crate::index::Index] after pruning. When a new key is stored that overlaps
 //! (same translated value) with a pruned key, the pruned key is removed from the in-memory index.
 //!

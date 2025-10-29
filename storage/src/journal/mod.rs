@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use thiserror::Error;
 
 pub mod fixed;
+pub mod segmented;
 pub mod variable;
 
 #[cfg(test)]

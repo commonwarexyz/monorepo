@@ -1,6 +1,6 @@
 //! An append-only log for storing arbitrary variable length items.
 //!
-//! `multijournal::Journal` is an append-only log for storing arbitrary variable length data on disk. In
+//! `segmented::Journal` is an append-only log for storing arbitrary variable length data on disk. In
 //! addition to replay, stored items can be directly retrieved given their section number and offset
 //! within the section.
 //!
@@ -78,7 +78,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_storage::multijournal::{Journal, Config};
+//! use commonware_storage::journal::segmented::{Journal, Config};
 //! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();

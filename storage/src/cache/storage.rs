@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use crate::{
-    multijournal::{Config as JConfig, Journal},
+    journal::segmented::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};

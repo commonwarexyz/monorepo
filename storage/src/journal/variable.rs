@@ -4,10 +4,7 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Journal as JournalTrait;
-use crate::{
-    journal::{fixed, Error},
-    multijournal,
-};
+use crate::journal::{fixed, segmented, Error};
 use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
@@ -102,7 +99,7 @@ pub struct Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    data: multijournal::Journal<E, V>,
+    data: segmented::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
@@ -151,9 +148,9 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let items_per_section = cfg.items_per_section.get();
 
         // Initialize underlying variable data journal
-        let mut data = multijournal::Journal::init(
+        let mut data = segmented::Journal::init(
             context.clone(),
-            multijournal::Config {
+            segmented::Config {
                 partition: cfg.data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -446,7 +443,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     ///
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
-        data: &mut multijournal::Journal<E, V>,
+        data: &mut segmented::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
@@ -586,7 +583,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// - Panics if `data.blobs` is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
-        data: &multijournal::Journal<E, V>,
+        data: &segmented::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u32>,
         offsets_size: u64,
         items_per_section: u64,

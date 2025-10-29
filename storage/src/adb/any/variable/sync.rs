@@ -1,7 +1,7 @@
 use crate::{
     adb,
+    journal::segmented::{Config as VConfig, Journal as VJournal},
     mmr::Location,
-    multijournal::{Config as VConfig, Journal as VJournal},
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
