@@ -485,7 +485,7 @@ where
     /// Sync the log and process the updates to the MMR in parallel.
     async fn sync_and_process_updates(&mut self) -> Result<(), Error> {
         let mmr_fut = async {
-            self.mmr.process_updates(self.hasher);
+            self.mmr.merkleize(self.hasher);
             Ok::<(), Error>(())
         };
         try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;

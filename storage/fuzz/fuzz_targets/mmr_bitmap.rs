@@ -19,7 +19,7 @@ enum BitmapOperation {
     Len,
     PrunedBits,
     PruneToBit { bit_offset: u64 },
-    Sync,
+    Merkleize,
     IsDirty,
     DirtyChunks,
     GetNode { position: u64 },
@@ -129,8 +129,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                BitmapOperation::Sync => {
-                    bitmap.sync(&mut hasher).await.unwrap();
+                BitmapOperation::Merkleize => {
+                    bitmap.merkleize(&mut hasher).await.unwrap();
                     assert!(!bitmap.is_dirty());
                 }
 

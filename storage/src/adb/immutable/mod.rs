@@ -654,7 +654,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Create a future that updates the MMR.
         let mmr_fut = async {
             self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
-            self.mmr.process_updates(&mut self.hasher);
+            self.mmr.merkleize(&mut self.hasher);
             Ok::<(), Error>(())
         };
 

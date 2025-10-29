@@ -1095,7 +1095,7 @@ pub(super) mod test {
             for _ in 0..*inactivity_floor_loc {
                 bitmap.push(false);
             }
-            bitmap.sync(&mut hasher).await.unwrap();
+            bitmap.merkleize(&mut hasher).await.unwrap();
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");

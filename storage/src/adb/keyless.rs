@@ -528,12 +528,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             Ok::<(), Error>(())
         };
 
-        // Create a future that adds the commit operation to the MMR and processes all updates.
+        // Create a future that adds the commit operation to the MMR and merkleizes all updates.
         let mmr_fut = async {
             self.mmr
                 .add_batched(&mut self.hasher, &encoded_operation)
                 .await?;
-            self.mmr.process_updates(&mut self.hasher);
+            self.mmr.merkleize(&mut self.hasher);
 
             Ok::<(), Error>(())
         };
