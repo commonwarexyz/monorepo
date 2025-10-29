@@ -1,11 +1,10 @@
-use crate::adb::operation::Keyed;
-use commonware_codec::{CodecFixed, FixedSize as CodecFixedSize};
+use commonware_codec::{CodecFixed, FixedSize as CodecFixedSize, Read, Write};
 
 pub mod ordered;
 pub mod unordered;
 
 /// Methods common to operation types with fixed-sized values.
-pub trait FixedSize: Keyed + CodecFixedSize + Sized {
+pub trait FixedSize: CodecFixedSize + Sized + Read<Cfg = ()> + Write {
     /// The value type for this operation.
     type Value: CodecFixed;
 
