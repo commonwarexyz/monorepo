@@ -84,7 +84,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: AttributableVec<Notarize<S, D>>,
+    notarizes: Vec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -117,7 +117,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
         // to ensure we only count a message from a given signer once.
         let participants = scheme.participants().len();
-        let notarizes = AttributableVec::new(participants);
+        let notarizes = Vec::new();
         let nullifies = AttributableVec::new(participants);
         let finalizes = AttributableVec::new(participants);
 
@@ -1034,11 +1034,15 @@ impl<
 
         // Handle notarize
         if let Some(journal) = self.journal.as_mut() {
+            info!(?notarize, "appending notarize to journal");
             let msg = Voter::Notarize(notarize.clone());
             journal
                 .append(view, msg)
                 .await
                 .expect("unable to append to journal");
+            journal.sync(view).await.expect("unable to sync journal");
+        } else {
+            info!(?notarize, "no journal found");
         }
 
         // Create round (if it doesn't exist) and add verified notarize
@@ -1597,6 +1601,7 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
+                info!(?msg, "replaying journal");
                 let (_, _, _, msg) = msg.expect("unable to replay journal");
                 let view = msg.view();
                 match msg {
