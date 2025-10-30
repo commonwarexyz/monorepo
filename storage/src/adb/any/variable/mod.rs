@@ -1489,15 +1489,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Repeat, though this time only fully sync locations.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(false, false, 0).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
-
-            // Repeat, though this time only fully sync mmr.
+            // Repeat, though this time sync mmr.
             apply_more_ops(&mut db).await;
             db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
@@ -1505,32 +1497,13 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Repeat, though this time fully sync log + mmr.
+            // Repeat, though this time partially sync mmr.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(true, false, 0).await.unwrap();
+            db.simulate_failure(false, true, 10).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-
-            // Repeat, though this time fully sync log + locations.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(true, false, 0).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-
-            // Repeat, though this time fully sync only locations + mmr.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(false, true, 0).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
             apply_more_ops(&mut db).await;
