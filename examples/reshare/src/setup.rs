@@ -8,10 +8,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{
-    from_hex, hex, quorum,
-    set::{Ordered, OrderedAssociated},
-};
+use commonware_utils::{from_hex, hex, quorum, set::OrderedAssociated};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
