@@ -64,7 +64,11 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch};
+use crate::{
+    simplex::{signing_scheme::Scheme, types::Finalization},
+    types::Epoch,
+    Block,
+};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -74,6 +78,18 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 
     /// Return the signing scheme that corresponds to `epoch`.
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
+}
+
+/// An update reported to the application, which can be either a block or a certificate.
+///
+/// Certificates are only sent for "tip" updates (the latest finalized block). All other
+/// finalized blocks are reported as blocks.
+#[derive(Clone, Debug)]
+pub enum Update<B: Block, S: Scheme> {
+    /// A finalized block (non-tip).
+    Block(B),
+    /// A finalization certificate for the tip block.
+    Certificate(Finalization<S, B::Commitment>),
 }
 
 #[cfg(test)]
