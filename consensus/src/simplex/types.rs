@@ -1198,6 +1198,11 @@ impl<S: Scheme> Nullification<S> {
 
         Some(Self { round, certificate })
     }
+
+    /// Returns the round associated with this nullification.
+    pub fn round(&self) -> Round {
+        self.round
+    }
 }
 
 impl<S: Scheme> PartialEq for Nullification<S> {

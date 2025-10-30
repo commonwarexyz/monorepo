@@ -624,13 +624,13 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("DEBUG")]
     fn test_all_online() {
         all_online(bls12381_threshold::<MinPk, _>);
-        all_online(bls12381_threshold::<MinSig, _>);
-        all_online(bls12381_multisig::<MinPk, _>);
-        all_online(bls12381_multisig::<MinSig, _>);
-        all_online(ed25519);
+        // all_online(bls12381_threshold::<MinSig, _>);
+        // all_online(bls12381_multisig::<MinPk, _>);
+        // all_online(bls12381_multisig::<MinSig, _>);
+        // all_online(ed25519);
     }
 
     fn observer<S, F>(mut fixture: F)

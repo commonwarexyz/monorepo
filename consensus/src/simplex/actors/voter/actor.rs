@@ -302,7 +302,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.nullifies.len() < quorum {
             return None;
         }
-        debug!(round = ?self.round, "broadcasting nullification");
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
@@ -332,18 +331,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.finalizes.len() < quorum {
             return None;
         }
-        let proposal = self.proposal.as_ref().unwrap().clone();
-        debug!(
-            ?proposal,
-            verified = self.verified_proposal,
-            "broadcasting finalization"
-        );
 
         // It is not possible to have a finalization that does not match the notarization proposal. If this
         // is detected, there is a critical bug or there has been a safety violation.
         if let Some(notarization) = &self.notarization {
+            let proposal = self.proposal.as_ref().unwrap();
             assert_eq!(
-                notarization.proposal, proposal,
+                notarization.proposal, *proposal,
                 "finalization proposal does not match notarization"
             );
         }
@@ -1393,6 +1387,7 @@ impl<
                 .await;
 
             // Broadcast the notarization
+            debug!(proposal=?notarization.proposal, "broadcasting notarization");
             let msg = Voter::Notarization(notarization.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
@@ -1427,6 +1422,7 @@ impl<
                 .await;
 
             // Broadcast the nullification
+            debug!(round=?nullification.round(), "broadcasting nullification");
             let msg = Voter::Nullification(nullification.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
@@ -1541,6 +1537,7 @@ impl<
                 .await;
 
             // Broadcast the finalization
+            debug!(proposal=?finalization.proposal, "broadcasting finalization");
             let msg = Voter::Finalization(finalization.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
