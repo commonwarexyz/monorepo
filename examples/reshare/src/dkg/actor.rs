@@ -1,6 +1,7 @@
 use super::{Mailbox, Message};
 use crate::{
     orchestrator::{self, EpochTransition},
+    self_channel::self_channel,
     setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
 };
@@ -278,7 +279,9 @@ where
     ) {
         let is_dkg = initial.is_none();
 
-        // Start a muxer for the physical channel used by DKG/reshare
+        // Start a muxer for the physical channel used by DKG/reshare.
+        // Make sure to use a channel allowing sending messages to ourselves.
+        let (sender, receiver) = self_channel(self.signer.public_key(), 0, sender, receiver);
         let (mux, mut dkg_mux) =
             Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
         mux.start();
