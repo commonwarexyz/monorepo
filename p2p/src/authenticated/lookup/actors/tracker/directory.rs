@@ -135,8 +135,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             };
             record.increment();
         }
-        let peers: Ordered<_> = peers.into_iter().map(|(peer, _)| peer).collect();
-        self.sets.insert(index, peers);
+        self.sets.insert(index, peers.into_keys());
 
         // Remove oldest entries if necessary
         let mut deleted_peers = Vec::new();
