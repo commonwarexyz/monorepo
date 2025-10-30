@@ -40,7 +40,8 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+        + Relay<Digest = H::Digest>,
     S: Scheme,
 {
     pub oracle: B,
@@ -64,7 +65,8 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+        + Relay<Digest = H::Digest>,
     S: Scheme,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -90,7 +92,8 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest>, Digest = H::Digest> + Relay<Digest = H::Digest>,
+    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+        + Relay<Digest = H::Digest>,
     S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {

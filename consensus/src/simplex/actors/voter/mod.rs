@@ -2,10 +2,7 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Context},
-    },
+    simplex::{signing_scheme::Scheme, types::Activity},
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };
@@ -20,7 +17,7 @@ pub struct Config<
     S: Scheme,
     B: Blocker,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {

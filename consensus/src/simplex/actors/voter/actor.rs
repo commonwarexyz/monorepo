@@ -362,7 +362,7 @@ pub struct Actor<
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D>>,
+    A: Automaton<Digest = D, Context = Context<D, P>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -411,7 +411,7 @@ impl<
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D>>,
+        A: Automaton<Digest = D, Context = Context<D, P>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, P, S, B, D, A, R, F>
@@ -606,7 +606,7 @@ impl<
     async fn propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
+    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -647,6 +647,7 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
+            leader: self.scheme.participants()[self.scheme.me().unwrap() as usize].clone(),
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -813,9 +814,9 @@ impl<
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Get round
-        let proposal = {
+        let (proposal, leader) = {
             // Get view or exit
             let round = self.views.get(&self.view)?;
 
@@ -865,7 +866,7 @@ impl<
                 );
                 return None;
             }
-            proposal
+            (proposal, leader)
         };
 
         // Ensure we have required notarizations
@@ -910,6 +911,7 @@ impl<
         debug!(?proposal, "requested proposal verification",);
         let context = Context {
             round: proposal.round,
+            leader: self.scheme.participants()[leader as usize].clone(),
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
