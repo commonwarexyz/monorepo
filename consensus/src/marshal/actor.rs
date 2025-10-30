@@ -10,7 +10,7 @@ use super::{
     SchemeProvider,
 };
 use crate::{
-    marshal::ingress::mailbox::Identifier as BlockID,
+    marshal::{ingress::mailbox::Identifier as BlockID, Update},
     simplex::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
@@ -252,7 +252,7 @@ impl<
     /// Start the actor.
     pub fn start<R, K>(
         mut self,
-        application: impl Reporter<Activity = B>,
+        application: impl Reporter<Activity = Update<B, S>>,
         buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
@@ -266,7 +266,7 @@ impl<
     /// Run the application actor.
     async fn run<R, K>(
         mut self,
-        application: impl Reporter<Activity = B>,
+        application: impl Reporter<Activity = Update<B, S>>,
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
@@ -280,7 +280,7 @@ impl<
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
-            application,
+            application.clone(),
             orchestrator,
             notifier_rx,
         )

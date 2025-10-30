@@ -1,4 +1,8 @@
-use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
+use crate::{
+    marshal::{ingress::orchestrator::Orchestrator, Update},
+    simplex::signing_scheme::Scheme,
+    Block, Reporter,
+};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
@@ -13,7 +17,12 @@ const LATEST_KEY: FixedBytes<1> = fixed_bytes!("00");
 ///
 /// Stores the highest height for which the application has processed. This allows resuming
 /// processing from the last processed height after a restart.
-pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
+pub struct Finalizer<
+    B: Block,
+    S: Scheme,
+    R: Spawner + Clock + Metrics + Storage,
+    Z: Reporter<Activity = Update<B, S>>,
+> {
     context: ContextCell<R>,
 
     // Application that processes the finalized blocks.
@@ -29,8 +38,12 @@ pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Report
     metadata: Metadata<R, FixedBytes<1>, u64>,
 }
 
-impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>>
-    Finalizer<B, R, Z>
+impl<
+        B: Block,
+        S: Scheme,
+        R: Spawner + Clock + Metrics + Storage,
+        Z: Reporter<Activity = Update<B, S>>,
+    > Finalizer<B, S, R, Z>
 {
     /// Initialize the finalizer.
     pub async fn new(
@@ -89,7 +102,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
                 // height is processed by the application), it is possible that the application may
                 // be asked to process a block it has already seen (which it can simply ignore).
                 let commitment = block.commitment();
-                self.application.report(block).await;
+                self.application.report(Update::Block(block)).await;
 
                 // Record that we have processed up through this height.
                 latest = height;

@@ -88,8 +88,8 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 pub enum Update<B: Block, S: Scheme> {
     /// A finalized block (non-tip).
     Block(B),
-    /// A finalization certificate for the tip block.
-    Certificate(Finalization<S, B::Commitment>),
+    /// A finalization for the tip block.
+    Finalization(Finalization<S, B::Commitment>),
 }
 
 #[cfg(test)]
@@ -186,7 +186,7 @@ mod tests {
         validator: K,
         scheme_provider: P,
     ) -> (
-        Application<B>,
+        Application<B, S>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
@@ -242,7 +242,7 @@ mod tests {
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
-        let application = Application::<B>::default();
+        let application = Application::<B, S>::default();
 
         // Start the application
         actor.start(application.clone(), buffer, resolver);
