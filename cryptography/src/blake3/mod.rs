@@ -37,13 +37,6 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
-/// Generate a BLAKE3 [Digest] from a message.
-pub fn hash(message: &[u8]) -> Digest {
-    let mut hasher = Blake3::new();
-    hasher.update(message);
-    hasher.finalize()
-}
-
 /// BLAKE3 hasher.
 #[cfg_attr(
     feature = "parallel",
@@ -209,7 +202,7 @@ mod tests {
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test simple hasher
-        let hash = hash(msg);
+        let hash = Blake3::hash(msg);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
