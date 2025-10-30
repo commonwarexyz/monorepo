@@ -340,7 +340,7 @@ async fn setup_network_identities(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register_comms(DEFAULT_CHANNEL)
+                .register(DEFAULT_CHANNEL)
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());

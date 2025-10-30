@@ -196,7 +196,7 @@ mod tests {
 
         // Create the resolver
         let mut control = oracle.control(validator.clone());
-        let backfill = control.register_comms(1).await.unwrap();
+        let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
             peer_provider: oracle.clone(),
@@ -222,7 +222,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register_comms(2).await.unwrap();
+        let network = control.register(2).await.unwrap();
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
@@ -325,7 +325,7 @@ mod tests {
             let mut actors = Vec::new();
 
             // Register the initial peer set.
-            oracle.register(0, participants.clone().into()).await;
+            oracle.update(0, participants.clone().into()).await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),

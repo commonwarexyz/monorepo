@@ -87,7 +87,7 @@ mod tests {
         for peer in peers.iter() {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             registrations.insert(peer.clone(), (sender, receiver));

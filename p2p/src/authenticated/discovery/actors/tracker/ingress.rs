@@ -247,7 +247,7 @@ impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Must be monotonically increasing, per the rules of [Ordered].
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    async fn register(&mut self, index: u64, peers: Self::Peers) {
+    async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
 

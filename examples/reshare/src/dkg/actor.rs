@@ -237,7 +237,7 @@ where
             .chain(players_after_next)
             .collect::<Ordered<_>>();
         self.peer_set_manager
-            .register(current_epoch, next_epoch_peers)
+            .update(current_epoch, next_epoch_peers)
             .await;
 
         // Initialize the DKG manager for the first round.
@@ -438,7 +438,7 @@ where
                             .chain(next_epoch_players)
                             .collect::<Ordered<_>>();
                         self.peer_set_manager
-                            .register(next_epoch, next_epoch_peers)
+                            .update(next_epoch, next_epoch_peers)
                             .await;
 
                         // Inform the orchestrator of the epoch transition

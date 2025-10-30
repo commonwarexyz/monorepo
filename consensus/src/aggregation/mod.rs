@@ -121,7 +121,7 @@ mod tests {
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));

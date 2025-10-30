@@ -499,7 +499,7 @@ mod tests {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register_comms(0)
+            .register(0)
             .await
             .unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
@@ -521,7 +521,7 @@ mod tests {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
             .control(pubkey.clone())
-            .register_comms(0)
+            .register(0)
             .await
             .unwrap();
         let (mux, handle, backup, global_sender) =

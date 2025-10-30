@@ -116,7 +116,7 @@ mod tests {
         for peer in &peers {
             let (sender, receiver) = oracle
                 .control(peer.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             connections.push((sender, receiver));

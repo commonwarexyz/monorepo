@@ -247,7 +247,7 @@ mod tests {
 
             // Register peers
             oracle
-                .register(0, OrderedAssociated::from(peers.clone()))
+                .update(0, OrderedAssociated::from(peers.clone()))
                 .await;
 
             // Register basic application
@@ -518,16 +518,16 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, OrderedAssociated::from([peers[0].clone()]))
+                    .update(0, OrderedAssociated::from([peers[0].clone()]))
                     .await;
                 oracle
-                    .register(
+                    .update(
                         1,
                         OrderedAssociated::from([peers[1].clone(), peers[2].clone()]),
                     )
                     .await;
                 oracle
-                    .register(2, peers.iter().skip(2).cloned().collect())
+                    .update(2, peers.iter().skip(2).cloned().collect())
                     .await;
 
                 // Register basic application
@@ -612,7 +612,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, peers.clone()).await;
+            oracle.update(0, peers.clone()).await;
 
             // Register basic application
             let (mut sender, _) =
@@ -660,7 +660,7 @@ mod tests {
             // Create network for peer 0
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
-            oracle0.register(0, peers.clone()).await;
+            oracle0.update(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -668,7 +668,7 @@ mod tests {
             // Create network for peer 1
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
-            oracle1.register(0, peers.clone()).await;
+            oracle1.update(0, peers.clone()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();

@@ -99,8 +99,8 @@ mod tests {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register_comms(0).await.unwrap();
-            let (b1, b2) = control.register_comms(1).await.unwrap();
+            let (a1, a2) = control.register(0).await.unwrap();
+            let (b1, b2) = control.register(1).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations

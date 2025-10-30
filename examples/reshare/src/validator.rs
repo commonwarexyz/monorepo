@@ -204,17 +204,17 @@ mod test {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let mut control = oracle.control(validator.clone());
-            let pending = control.register_comms(PENDING_CHANNEL).await.unwrap();
+            let pending = control.register(PENDING_CHANNEL).await.unwrap();
             let recovered = oracle
                 .control(validator.clone())
-                .register_comms(RECOVERED_CHANNEL)
+                .register(RECOVERED_CHANNEL)
                 .await
                 .unwrap();
-            let resolver = control.register_comms(RESOLVER_CHANNEL).await.unwrap();
-            let broadcast = control.register_comms(BROADCASTER_CHANNEL).await.unwrap();
-            let marshal = control.register_comms(MARSHAL_CHANNEL).await.unwrap();
-            let dkg = control.register_comms(DKG_CHANNEL).await.unwrap();
-            let orchestrator = control.register_comms(ORCHESTRATOR_CHANNEL).await.unwrap();
+            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
+            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
+            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
+            let dkg = control.register(DKG_CHANNEL).await.unwrap();
+            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),

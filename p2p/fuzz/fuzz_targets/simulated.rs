@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
                     // Only register if not already registered
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
                         if let Ok((sender, receiver)) =
-                            oracle.control(peer_pks[idx].clone()).register_comms(channel_id as u64).await
+                            oracle.control(peer_pks[idx].clone()).register(channel_id as u64).await
                         {
                             e.insert((sender, receiver));
                         }

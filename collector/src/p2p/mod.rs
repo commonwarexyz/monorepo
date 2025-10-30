@@ -106,8 +106,8 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register_comms(0).await.unwrap();
-            let (sender2, receiver2) = control.register_comms(1).await.unwrap();
+            let (sender1, receiver1) = control.register(0).await.unwrap();
+            let (sender2, receiver2) = control.register(1).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 

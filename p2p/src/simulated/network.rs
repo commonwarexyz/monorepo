@@ -28,7 +28,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -186,6 +186,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         self.peers.insert(public_key.clone(), peer);
                     }
                 }
+
+                if peer_set <= self.peer_set_id {
+                    warn!(
+                        new_id = peer_set,
+                        old_id = self.peer_set_id,
+                        "attempted to register peer set with non-monotonically increasing ID"
+                    );
+                    return;
+                }
+
                 self.peer_set_id = peer_set;
             }
             ingress::Message::RegisterComms {
@@ -802,17 +812,17 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register the peer set
-            oracle.register(0, [pk1.clone(), pk2.clone()].into()).await;
+            oracle.update(0, [pk1.clone(), pk2.clone()].into()).await;
             let mut control = oracle.control(pk1.clone());
-            control.register_comms(0).await.unwrap();
-            control.register_comms(1).await.unwrap();
+            control.register(0).await.unwrap();
+            control.register(1).await.unwrap();
             let mut control = oracle.control(pk2.clone());
-            control.register_comms(0).await.unwrap();
-            control.register_comms(1).await.unwrap();
+            control.register(0).await.unwrap();
+            control.register(1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                control.register_comms(1).await,
+                control.register(1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
@@ -885,16 +895,13 @@ mod tests {
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
             oracle
-                .register(0, [sender_pk.clone(), recipient_pk.clone()].into())
+                .update(0, [sender_pk.clone(), recipient_pk.clone()].into())
                 .await;
-            let (mut sender, _sender_recv) = oracle
-                .control(sender_pk.clone())
-                .register_comms(0)
-                .await
-                .unwrap();
+            let (mut sender, _sender_recv) =
+                oracle.control(sender_pk.clone()).register(0).await.unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
 
@@ -959,24 +966,21 @@ mod tests {
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
             oracle
-                .register(
+                .update(
                     0,
                     [sender_pk.clone(), recipient_a.clone(), recipient_b.clone()].into(),
                 )
                 .await;
-            let (mut sender, _recv_sender) = oracle
-                .control(sender_pk.clone())
-                .register_comms(0)
-                .await
-                .unwrap();
+            let (mut sender, _recv_sender) =
+                oracle.control(sender_pk.clone()).register(0).await.unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             let (_sender3, mut recv_b) = oracle
                 .control(recipient_b.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
 

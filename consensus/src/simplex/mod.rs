@@ -315,9 +315,9 @@ mod tests {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let mut control = oracle.control(validator.clone());
-            let (pending_sender, pending_receiver) = control.register_comms(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) = control.register_comms(1).await.unwrap();
-            let (resolver_sender, resolver_receiver) = control.register_comms(2).await.unwrap();
+            let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
+            let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (

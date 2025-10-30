@@ -197,17 +197,17 @@ mod tests {
             // Create a dummy network mailbox
             let peer = participants[1].clone();
             let (pending_sender, _pending_receiver) =
-                oracle.control(me.clone()).register_comms(0).await.unwrap();
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.control(me.clone()).register_comms(1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) = oracle
                 .control(peer.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) = oracle
                 .control(peer.clone())
-                .register_comms(1)
+                .register(1)
                 .await
                 .unwrap();
             oracle
@@ -466,17 +466,17 @@ mod tests {
             // Create a dummy network mailbox
             let peer = participants[1].clone();
             let (pending_sender, _pending_receiver) =
-                oracle.control(me.clone()).register_comms(0).await.unwrap();
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.control(me.clone()).register_comms(1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) = oracle
                 .control(peer.clone())
-                .register_comms(0)
+                .register(0)
                 .await
                 .unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) = oracle
                 .control(peer.clone())
-                .register_comms(1)
+                .register(1)
                 .await
                 .unwrap();
             oracle
@@ -779,9 +779,9 @@ mod tests {
             // Register network channels for the validator
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) =
-                oracle.control(me.clone()).register_comms(0).await.unwrap();
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.control(me.clone()).register_comms(1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             voter.start(

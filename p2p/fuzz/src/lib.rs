@@ -255,7 +255,7 @@ impl NetworkScheme for Discovery {
             let mut addrs = peer_pks.clone();
             addrs.shuffle(&mut context);
             let subset = addrs[..3].to_vec().into();
-            oracle.register(index as u64, subset).await;
+            oracle.update(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -283,7 +283,7 @@ impl NetworkScheme for Discovery {
             .iter()
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .collect();
-        let _ = oracle.register(index, peer_pks).await;
+        let _ = oracle.update(index, peer_pks).await;
     }
 }
 
@@ -327,7 +327,7 @@ impl NetworkScheme for Lookup {
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
             oracle
-                .register(index as u64, peer_list.clone().into())
+                .update(index as u64, peer_list.clone().into())
                 .await;
         }
 
@@ -336,7 +336,7 @@ impl NetworkScheme for Lookup {
             let mut peers = peer_list.clone();
             peers.shuffle(&mut context);
             let subset = peers[..3].to_vec();
-            oracle.register(index as u64, subset.into()).await;
+            oracle.update(index as u64, subset.into()).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -367,7 +367,7 @@ impl NetworkScheme for Lookup {
                 (p.public_key.clone(), p.address)
             })
             .collect();
-        let _ = oracle.register(index, peer_list).await;
+        let _ = oracle.update(index, peer_list).await;
     }
 }
 

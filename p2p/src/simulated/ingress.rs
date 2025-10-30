@@ -189,7 +189,7 @@ impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 
-    async fn register(&mut self, peer_set: u64, peers: Self::Peers) {
+    async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
         self.sender
             .send(Message::Register { peer_set, peers })
             .await
@@ -227,7 +227,7 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register_comms(
+    pub async fn register(
         &mut self,
         channel: Channel,
     ) -> Result<(Sender<P>, Receiver<P>), Error> {

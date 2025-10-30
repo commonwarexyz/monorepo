@@ -192,7 +192,7 @@ impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
     /// * `peers` - Vector of authorized peers at an `index`.
     ///   Each element is a tuple containing the public key and the socket address of the peer.
     ///   The peer must be dialable at and dial from the given socket address.
-    async fn register(&mut self, index: u64, peers: Self::Peers) {
+    async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
     }
 

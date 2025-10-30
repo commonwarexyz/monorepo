@@ -75,8 +75,11 @@ pub trait PeerSetManager: Debug + Clone + Send + 'static {
     /// The type for the peer set in registration.
     type Peers;
 
-    /// Register a new ordered set of peers for a given ID.
-    fn register(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
+    /// Update the peer set.
+    ///
+    /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+    /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
+    fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
 
     /// Fetch the ordered set of peers for a given ID.
     fn peer_set(

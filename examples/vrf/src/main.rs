@@ -230,7 +230,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.register(0, recipients).await;
+        oracle.update(0, recipients).await;
 
         // Parse contributors
         let mut contributors = Vec::new();
