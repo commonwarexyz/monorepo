@@ -221,7 +221,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
                 log_size = loc + 1;
 
                 if log_size > mmr_leaves {
-                    debug!(?loc, "operation was missing from MMR");
+                    warn!(?loc, "operation was missing from MMR");
                     self.mmr.add(&mut self.hasher, &op.encode()).await?;
                     mmr_leaves += 1;
                 }
