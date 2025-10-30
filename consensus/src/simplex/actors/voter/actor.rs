@@ -608,9 +608,10 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
-        {
+        let leader = {
             let round = self.views.get_mut(&self.view).unwrap();
-            if !Self::is_me(&self.scheme, round.leader?) {
+            let leader = round.leader?;
+            if !Self::is_me(&self.scheme, leader) {
                 return None;
             }
 
@@ -627,7 +628,9 @@ impl<
             // Set that we requested a proposal even if we don't end up finding a parent
             // to prevent frequent scans.
             round.requested_proposal_build = true;
-        }
+
+            leader
+        };
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
@@ -647,7 +650,12 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
-            leader: self.scheme.participants()[self.scheme.me().unwrap() as usize].clone(),
+            leader: self
+                .scheme
+                .participants()
+                .key(leader)
+                .expect("leader not found")
+                .clone(),
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -911,7 +919,12 @@ impl<
         debug!(?proposal, "requested proposal verification",);
         let context = Context {
             round: proposal.round,
-            leader: self.scheme.participants()[leader as usize].clone(),
+            leader: self
+                .scheme
+                .participants()
+                .key(leader)
+                .expect("leader not found")
+                .clone(),
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
