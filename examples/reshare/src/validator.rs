@@ -159,7 +159,10 @@ mod test {
     };
     use commonware_consensus::marshal::ingress::handler;
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::variant::MinSig},
+        bls12381::{
+            dkg2::{deal, Output},
+            primitives::{group::Share, variant::MinSig},
+        },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
@@ -169,10 +172,11 @@ mod test {
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
-    use commonware_utils::{quorum, sequence::U64, union};
+    use commonware_utils::{quorum, sequence::U64, set::OrderedAssociated, union};
     use futures::channel::mpsc;
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand_core::CryptoRngCore;
     use std::{
         collections::{HashMap, HashSet},
         time::Duration,
@@ -260,6 +264,33 @@ mod test {
         registrations
     }
 
+    /// Generate signers, validators, and shares for testing
+    fn generate_test_participants(
+        rng: impl CryptoRngCore,
+        n: u32,
+        threshold: u32,
+    ) -> (
+        Vec<PrivateKey>,
+        Vec<PublicKey>,
+        Output<MinSig, PublicKey>,
+        OrderedAssociated<PublicKey, Share>,
+    ) {
+        let mut signers = Vec::new();
+        let mut validators = Vec::new();
+        for i in 0..n {
+            let signer = PrivateKey::from_seed(i as u64);
+            let pk = signer.public_key();
+            signers.push(signer);
+            validators.push(pk);
+        }
+        validators.sort();
+        signers.sort_by_key(|s| s.public_key());
+
+        let (output, shares) = deal(rng, validators.clone(), threshold);
+
+        (signers, validators, output, shares)
+    }
+
     /// Links (or unlinks) validators using the oracle.
     ///
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
@@ -318,21 +349,9 @@ mod test {
             // Start network
             network.start();
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n_active, threshold);
-
-            // Register participants
-            let mut signers = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let signer = PrivateKey::from_seed(i as u64);
-                let pk = signer.public_key();
-                signers.push(signer);
-                validators.push(pk);
-            }
-            validators.sort();
-            signers.sort_by_key(|s| s.public_key());
+            // Generate participants and shares
+            let (signers, validators, output, shares) =
+                generate_test_participants(&mut context, n, threshold);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators
@@ -359,12 +378,11 @@ mod test {
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: shares.get(idx).cloned(),
-                        active_participants: validators[..n_active as usize].to_vec(),
-                        inactive_participants: validators[n_active as usize..].to_vec(),
-                        num_participants_per_epoch: n_active as usize,
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        output: Some(output.clone()),
+                        share: Some(shares.get_value(&public_key).unwrap().clone()),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
@@ -560,21 +578,9 @@ mod test {
             // Start network
             network.start();
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, active, threshold);
+            let (signers, validators, output, shares) =
+                generate_test_participants(&mut context, n, threshold);
 
-            // Register participants
-            let mut signers = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let signer = PrivateKey::from_seed(i as u64);
-                let pk = signer.public_key();
-                signers.push(signer);
-                validators.push(pk);
-            }
-            validators.sort();
-            signers.sort_by_key(|s| s.public_key());
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators
@@ -589,11 +595,7 @@ mod test {
             let mut engine_handles = Vec::with_capacity(n as usize);
             for (idx, signer) in signers.iter().enumerate() {
                 let public_key = signer.public_key();
-                let share = if idx < active as usize {
-                    Some(shares[idx].clone())
-                } else {
-                    None
-                };
+                let share = shares.get_value(&public_key).cloned();
                 let engine =
                     engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label("engine"),
@@ -603,7 +605,7 @@ mod test {
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
-                            polynomial: Some(polynomial.clone()),
+                            output: Some(output.clone()),
                             share,
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
@@ -709,11 +711,7 @@ mod test {
             // Bring all validators back online.
             for (idx, signer) in signers.iter().enumerate() {
                 let public_key = signer.public_key();
-                let share = if idx < active as usize {
-                    Some(shares[idx].clone())
-                } else {
-                    None
-                };
+                let share = shares.get_value(&public_key).cloned();
                 let engine =
                     engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
                         context.with_label("engine"),
@@ -723,7 +721,7 @@ mod test {
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
-                            polynomial: Some(polynomial.clone()),
+                            output: Some(output.clone()),
                             share,
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
@@ -836,21 +834,9 @@ mod test {
             // Start network
             network.start();
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
-
-            // Register participants
-            let mut signers = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let signer = PrivateKey::from_seed(i as u64);
-                let pk = signer.public_key();
-                signers.push(signer);
-                validators.push(pk);
-            }
-            validators.sort();
-            signers.sort_by_key(|s| s.public_key());
+            // Generate participants and shares
+            let (signers, validators, output, shares) =
+                generate_test_participants(&mut context, n, threshold);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators (except 0)
@@ -883,8 +869,8 @@ mod test {
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: Some(shares[idx].clone()),
+                        output: Some(output.clone()),
+                        share: Some(shares.get_value(&public_key).unwrap().clone()),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
@@ -956,27 +942,28 @@ mod test {
             .await;
 
             let signer = signers[0].clone();
-            let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine"),
-                engine::Config {
-                    signer: signer.clone(),
-                    blocker: oracle.control(public_key.clone()),
-                    manager: oracle.manager(),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: Some(share),
-                    active_participants: validators.clone(),
-                    inactive_participants: Vec::default(),
-                    num_participants_per_epoch: validators.len(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: "validator_0".to_string(),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-            )
-            .await;
+            let share = shares.get_value(&public_key).unwrap().clone();
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        blocker: oracle.control(public_key.clone()),
+                        manager: oracle.manager(),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        output: Some(output.clone()),
+                        share: Some(share),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: "validator_0".to_string(),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1076,21 +1063,9 @@ mod test {
             // Start network
             network.start();
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
-
-            // Register participants
-            let mut signers = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let signer = PrivateKey::from_seed(i as u64);
-                let pk = signer.public_key();
-                signers.push(signer);
-                validators.push(pk);
-            }
-            validators.sort();
-            signers.sort_by_key(|s| s.public_key());
+            // Generate participants and shares
+            let (signers, validators, output, shares) =
+                generate_test_participants(&mut context, n, threshold);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators (except 0)
@@ -1124,8 +1099,8 @@ mod test {
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share: Some(shares[idx].clone()),
+                            output: Some(output.clone()),
+                            share: Some(shares.get_value(&public_key).unwrap().clone()),
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len(),
@@ -1197,27 +1172,28 @@ mod test {
             .await;
 
             let signer = signers[0].clone();
-            let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine_0"),
-                engine::Config {
-                    signer: signer.clone(),
-                    manager: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: Some(share),
-                    active_participants: validators.clone(),
-                    inactive_participants: Vec::default(),
-                    num_participants_per_epoch: validators.len(),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: "validator_0".to_string(),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-            )
-            .await;
+            let share = shares.get_value(&public_key).unwrap().clone();
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine_0"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        output: Some(output.clone()),
+                        share: Some(share),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len(),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: "validator_0".to_string(),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1329,19 +1305,15 @@ mod test {
             // Start network
             network.start();
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n - 1, threshold);
+            // Generate participants and shares (for n-1 active participants)
+            let (mut signers, mut validators, output, shares) =
+                generate_test_participants(&mut context, n - 1, threshold);
 
-            // Register participants
-            let mut signers = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let signer = PrivateKey::from_seed(i as u64);
-                let pk = signer.public_key();
-                signers.push(signer);
-                validators.push(pk);
-            }
+            // Add the inactive participant (who won't have a share)
+            let inactive_signer = PrivateKey::from_seed((n - 1) as u64);
+            let inactive_pk = inactive_signer.public_key();
+            signers.push(inactive_signer);
+            validators.push(inactive_pk);
             validators.sort();
             signers.sort_by_key(|s| s.public_key());
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
@@ -1362,7 +1334,7 @@ mod test {
 
             // Create instances
             for (idx, signer) in signers.iter().enumerate() {
-                // Skip first
+                //Skip first
                 if idx == 0 {
                     continue;
                 }
@@ -1377,8 +1349,8 @@ mod test {
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                             participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share: Some(shares[idx - 1].clone()),
+                            output: Some(output.clone()),
+                            share: shares.get_value(&public_key).cloned(),
                             active_participants: validators[1..].to_vec(),
                             inactive_participants: validators[..1].to_vec(),
                             num_participants_per_epoch: validators.len() - 1,
@@ -1453,25 +1425,28 @@ mod test {
             // in the first epoch.
             let signer = signers[0].clone();
             let public_key = signer.public_key();
-            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                context.with_label("engine_0"),
-                engine::Config {
-                    signer: signer.clone(),
-                    manager: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                    participant_config: None,
-                    polynomial: Some(polynomial.clone()),
-                    share: None,
-                    active_participants: validators[1..].to_vec(),
-                    inactive_participants: validators[..1].to_vec(),
-                    num_participants_per_epoch: validators.len() - 1,
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                    partition_prefix: format!("validator_{idx}"),
-                    freezer_table_initial_size: 1024, // 1mb
-                },
-                registrations.remove(&public_key).unwrap(),
-            );
+            let engine =
+                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                    context.with_label("engine_0"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        output: Some(output.clone()),
+                        share: None,
+                        active_participants: validators[1..].to_vec(),
+                        inactive_participants: validators[..1].to_vec(),
+                        num_participants_per_epoch: validators.len() - 1,
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_0"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
+                registrations.remove(&public_key).unwrap();
 
             // Start engine
             engine.start(
@@ -1561,17 +1536,20 @@ mod test {
         let threshold = quorum(n);
         let required_container = 2 * BLOCKS_PER_EPOCH + 1;
 
-        // Derive threshold
+        // Generate participants and shares upfront
         let mut rng = StdRng::seed_from_u64(seed);
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let (signers, validators, output, shares) =
+            generate_test_participants(&mut rng, n, threshold);
 
         // Random restarts every x seconds
         let mut runs = 0;
         let mut prev_ctx = None;
         loop {
             // Setup run
-            let polynomial = polynomial.clone();
+            let polynomial = output.clone();
             let shares = shares.clone();
+            let signers = signers.clone();
+            let validators = validators.clone();
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
@@ -1585,18 +1563,6 @@ mod test {
 
                 // Start network
                 network.start();
-
-                // Register participants
-                let mut signers = Vec::new();
-                let mut validators = Vec::new();
-                for i in 0..n {
-                    let signer = PrivateKey::from_seed(i as u64);
-                    let pk = signer.public_key();
-                    signers.push(signer);
-                    validators.push(pk);
-                }
-                validators.sort();
-                signers.sort_by_key(|s| s.public_key());
                 let mut registrations =
                     register_validators(&context, &mut oracle, &validators).await;
 
@@ -1624,8 +1590,8 @@ mod test {
                                 blocker: oracle.control(public_key.clone()),
                                 namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                                 participant_config: None,
-                                polynomial: Some(polynomial.clone()),
-                                share: Some(shares[idx].clone()),
+                                output: Some(polynomial.clone()),
+                                share: Some(shares.get_value(&public_key).unwrap().clone()),
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
                                 num_participants_per_epoch: validators.len(),
