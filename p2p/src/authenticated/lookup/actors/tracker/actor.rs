@@ -112,6 +112,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         match msg {
             Message::Register { index, peers } => {
                 // If we are no longer interested in a peer, release them.
+                let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
                 for peer in self.directory.add_set(index, peers) {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
@@ -122,9 +123,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let _ = self.listener.send(self.directory.registered()).await;
 
                 // Notify all subscribers about the new peer set
-                let new_set = self.directory.get_set(&index).cloned().unwrap();
                 self.subscribers.retain(|subscriber| {
-                    subscriber.unbounded_send((index, new_set.clone())).is_ok()
+                    subscriber
+                        .unbounded_send((index, peer_keys.clone()))
+                        .is_ok()
                 });
             }
             Message::PeerSet { index, responder } => {
