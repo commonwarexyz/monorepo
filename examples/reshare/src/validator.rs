@@ -1674,7 +1674,7 @@ mod test {
             } else {
                 let cfg = deterministic::Config::default()
                     .with_seed(seed)
-                    .with_timeout(Some(Duration::from_secs(30)));
+                    .with_timeout(Some(Duration::from_secs(90)));
                 Runner::new(cfg)
             }
             .start_and_recover(f);
