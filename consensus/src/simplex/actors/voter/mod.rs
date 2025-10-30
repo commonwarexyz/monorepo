@@ -2,10 +2,7 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Context},
-    },
+    simplex::{signing_scheme::Scheme, types::Activity},
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };
@@ -20,7 +17,7 @@ pub struct Config<
     S: Scheme,
     B: Blocker,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -68,7 +65,7 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
     use std::{sync::Arc, time::Duration};
@@ -843,5 +840,246 @@ mod tests {
         finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
         finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
         finalization_without_notarization_certificate(ed25519);
+    }
+
+    fn replay_duplicate_votes<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalization_without_notarization".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup application mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_finalization_test".to_string(),
+                epoch: 333,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(me.clone(), 1).await.unwrap();
+
+            // Start the actor
+            let handle = voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Provide almost enough finalize votes
+            let view = 2;
+            let proposal = Proposal::new(
+                Round::new(333, view),
+                view - 1,
+                Sha256::hash(b"finalize_without_notarization"),
+            );
+            let (notarize_votes, expected_notarization) =
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+            let (finalize_votes, expected_finalization) =
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+
+            // Submit just short of enough finalize votes
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+            }
+
+            // Submit enough notarize votes to broadcast and force a sync
+            for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
+                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+            }
+
+            // Wait for a notarization to be recorded
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    if matches!(notarizations.get(&view), Some(expected) if expected == &expected_notarization) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Restart voter
+            handle.abort();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_finalization_test".to_string(),
+                epoch: 333,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 2).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(me.clone(), 3).await.unwrap();
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 3);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Provide duplicate finalize votes (should be ignored)
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+            }
+
+            // Verify no finalization was recorded
+            context.sleep(Duration::from_secs(1)).await;
+            {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(finalizations.is_empty());
+            }
+
+            // Provide the final finalize vote
+            mailbox
+                .verified(vec![Voter::Finalize(
+                    finalize_votes.last().unwrap().clone(),
+                )])
+                .await;
+
+            // Verify the finalization was recorded
+            loop {
+                {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    if matches!(finalizations.get(&view), Some(expected) if expected == &expected_finalization) {
+                        // The reporter already checks the certificate for signature validity, so we don't need to do it here.
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_replay_duplicate_votes() {
+        replay_duplicate_votes(bls12381_threshold::<MinPk, _>);
+        replay_duplicate_votes(bls12381_threshold::<MinSig, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinPk, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinSig, _>);
+        replay_duplicate_votes(ed25519);
     }
 }

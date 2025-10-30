@@ -217,6 +217,18 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         self.bitmap.pruned_bits()
     }
 
+    /// Returns the number of complete chunks (excludes partial chunk at end, if any).
+    #[inline]
+    fn complete_chunks(&self) -> usize {
+        let chunks_len = self.bitmap.chunks_len();
+        if self.bitmap.is_chunk_aligned() {
+            chunks_len
+        } else {
+            // Last chunk is partial
+            chunks_len.checked_sub(1).unwrap()
+        }
+    }
+
     /// Prune all complete chunks before the chunk containing the given bit.
     ///
     /// The chunk containing `bit` and all subsequent chunks are retained. All chunks
@@ -241,7 +253,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         self.bitmap.prune_to_bit(bit);
 
         // Update authenticated length
-        self.authenticated_len = self.bitmap.chunks_len() - 1;
+        self.authenticated_len = self.complete_chunks();
 
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
@@ -310,7 +322,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
     /// Whether there are any updates that are not yet reflected in this bitmap's root.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.chunks_len() - 1
+        !self.dirty_chunks.is_empty() || self.authenticated_len < self.complete_chunks()
     }
 
     /// The chunks that have been modified or added since the last call to `merkleize`.
@@ -321,7 +333,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             .iter()
             .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
             .collect();
-        for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
+
+        // Include complete chunks that haven't been authenticated yet
+        for i in self.authenticated_len..self.complete_chunks() {
             chunks.push(Location::new_unchecked((i + pruned_chunks) as u64));
         }
 
@@ -330,11 +344,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub async fn merkleize(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
-        // Add newly pushed chunks to the MMR (other than the very last).
+        // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
-        let num_chunks = self.bitmap.chunks_len();
-        assert!(num_chunks > 0);
-        let end = num_chunks - 1;
+        let end = self.complete_chunks();
         for i in start..end {
             self.mmr.add_batched(hasher, self.bitmap.get_chunk(i));
         }
@@ -377,10 +389,13 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             "cannot compute root with unmerkleized updates",
         );
         let mmr_root = self.mmr.root(hasher);
-        let (last_chunk, next_bit) = self.bitmap.last_chunk();
-        if next_bit == 0 {
+
+        // Check if there's a partial chunk to add
+        if self.bitmap.is_chunk_aligned() {
             return Ok(mmr_root);
         }
+
+        let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
         // We must add the partial chunk to the digest for its bits to be provable.
         let last_chunk_digest = hasher.digest(last_chunk);
@@ -433,10 +448,10 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         }
 
         let chunk = *self.get_chunk_containing(bit);
-        let chunk_loc = PrunableBitMap::<N>::unpruned_chunk(bit);
+        let chunk_loc = Location::from(PrunableBitMap::<N>::unpruned_chunk(bit));
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
-        if chunk_loc as u64 == self.mmr.leaves() {
+        if chunk_loc == self.mmr.leaves() {
             assert!(next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
@@ -449,11 +464,10 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             ));
         }
 
-        let range = Location::new_unchecked(chunk_loc as u64)
-            ..Location::new_unchecked((chunk_loc + 1) as u64);
+        let range = chunk_loc..chunk_loc + 1;
         let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = Position::new(self.len());
-        if next_bit == 0 {
+        if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
         }
@@ -656,8 +670,6 @@ mod tests {
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0).unwrap();
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
-            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
-            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Add a single bit
             let mut hasher = StandardHasher::new();
@@ -701,10 +713,8 @@ mod tests {
             bitmap.prune_to_bit(256).unwrap();
             assert_eq!(bitmap.len(), 256);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 1);
+            assert_eq!(bitmap.bitmap.pruned_bits(), 256);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
-            // Last chunk should be empty again
-            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
-            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Pruning to an earlier point should be a no-op.
             bitmap.prune_to_bit(10).unwrap();

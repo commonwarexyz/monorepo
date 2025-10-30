@@ -24,17 +24,17 @@ use std::{
     time::Duration,
 };
 
-pub enum Message<D: Digest> {
+pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
         epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
-        context: Context<D>,
+        context: Context<D, P>,
         response: oneshot::Sender<D>,
     },
     Verify {
-        context: Context<D>,
+        context: Context<D, P>,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -44,19 +44,19 @@ pub enum Message<D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+pub struct Mailbox<D: Digest, P: PublicKey> {
+    sender: mpsc::Sender<Message<D, P>>,
 }
 
-impl<D: Digest> Mailbox<D> {
-    pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+impl<D: Digest, P: PublicKey> Mailbox<D, P> {
+    pub(super) fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
-    type Context = Context<D>;
+    type Context = Context<D, P>;
 
     async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
@@ -94,7 +94,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -132,7 +132,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
 
-    mailbox: mpsc::Receiver<Message<H::Digest>>,
+    mailbox: mpsc::Receiver<Message<H::Digest, P>>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
@@ -143,7 +143,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
-    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
+    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());
 
@@ -189,7 +189,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
-    async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
+    async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.context);
         self.context
@@ -212,7 +212,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn verify(
         &mut self,
-        context: Context<H::Digest>,
+        context: Context<H::Digest, P>,
         payload: H::Digest,
         mut contents: Bytes,
     ) -> bool {
@@ -256,7 +256,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         #[allow(clippy::type_complexity)]
         let mut waiters: HashMap<
             H::Digest,
-            Vec<(Context<H::Digest>, oneshot::Sender<bool>)>,
+            Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
         > = HashMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 

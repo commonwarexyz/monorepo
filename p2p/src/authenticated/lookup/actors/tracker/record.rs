@@ -50,6 +50,7 @@ pub struct Record {
 impl Record {
     // ---------- Constructors ----------
 
+    /// Create a new record with a known address.
     pub fn known(socket: SocketAddr) -> Self {
         Record {
             address: Address::Known(socket),
@@ -70,6 +71,14 @@ impl Record {
     }
 
     // ---------- Setters ----------
+
+    /// Update the record with a new address.
+    pub fn update(&mut self, socket: SocketAddr) {
+        if matches!(self.address, Address::Myself(_) | Address::Blocked) {
+            return;
+        }
+        self.address = Address::Known(socket);
+    }
 
     /// Attempt to mark the peer as blocked.
     ///

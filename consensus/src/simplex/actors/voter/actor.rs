@@ -7,8 +7,8 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
+            Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -84,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: Vec<Notarize<S, D>>,
+    notarizes: AttributableVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Vec<Nullify<S>>,
+    nullifies: AttributableVec<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: Vec<Finalize<S, D>>,
+    finalizes: AttributableVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -112,10 +112,14 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let participants = scheme.participants();
-        let notarizes = Vec::with_capacity(participants.len());
-        let nullifies = Vec::with_capacity(participants.len());
-        let finalizes = Vec::with_capacity(participants.len());
+        // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
+        // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
+        // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
+        // to ensure we only count a message from a given signer once.
+        let participants = scheme.participants().len();
+        let notarizes = AttributableVec::new(participants);
+        let nullifies = AttributableVec::new(participants);
+        let finalizes = AttributableVec::new(participants);
 
         Self {
             start: context.current(),
@@ -265,7 +269,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.scheme, &self.notarizes)
+        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.iter())
             .expect("failed to recover notarization certificate");
         timer.observe();
 
@@ -294,7 +298,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.scheme, &self.nullifies)
+        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.iter())
             .expect("failed to recover nullification certificate");
         timer.observe();
 
@@ -338,7 +342,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.scheme, &self.finalizes)
+        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.iter())
             .expect("failed to recover finalization certificate");
         timer.observe();
 
@@ -362,7 +366,7 @@ pub struct Actor<
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D>>,
+    A: Automaton<Digest = D, Context = Context<D, P>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -411,7 +415,7 @@ impl<
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D>>,
+        A: Automaton<Digest = D, Context = Context<D, P>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, P, S, B, D, A, R, F>
@@ -606,28 +610,27 @@ impl<
     async fn propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
+    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
-        {
-            let round = self.views.get_mut(&self.view).unwrap();
-            if !Self::is_me(&self.scheme, round.leader?) {
-                return None;
-            }
-
-            // Check if we have already requested a proposal
-            if round.requested_proposal_build {
-                return None;
-            }
-
-            // Check if we have already proposed
-            if round.proposal.is_some() {
-                return None;
-            }
-
-            // Set that we requested a proposal even if we don't end up finding a parent
-            // to prevent frequent scans.
-            round.requested_proposal_build = true;
+        let round = self.views.get_mut(&self.view).unwrap();
+        let leader = round.leader?;
+        if !Self::is_me(&self.scheme, leader) {
+            return None;
         }
+
+        // Check if we have already requested a proposal
+        if round.requested_proposal_build {
+            return None;
+        }
+
+        // Check if we have already proposed
+        if round.proposal.is_some() {
+            return None;
+        }
+
+        // Set that we requested a proposal even if we don't end up finding a parent
+        // to prevent frequent scans.
+        round.requested_proposal_build = true;
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
@@ -647,6 +650,12 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
+            leader: self
+                .scheme
+                .participants()
+                .key(leader)
+                .expect("leader not found")
+                .clone(),
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -813,9 +822,9 @@ impl<
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Get round
-        let proposal = {
+        let (proposal, leader) = {
             // Get view or exit
             let round = self.views.get(&self.view)?;
 
@@ -865,7 +874,7 @@ impl<
                 );
                 return None;
             }
-            proposal
+            (proposal, leader)
         };
 
         // Ensure we have required notarizations
@@ -910,6 +919,12 @@ impl<
         debug!(?proposal, "requested proposal verification",);
         let context = Context {
             round: proposal.round,
+            leader: self
+                .scheme
+                .participants()
+                .key(leader)
+                .expect("leader not found")
+                .clone(),
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();

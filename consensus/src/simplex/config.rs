@@ -16,7 +16,7 @@ pub struct Config<
     S: Scheme,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton<Context = Context<D, P>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -114,7 +114,7 @@ impl<
         S: Scheme,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Context = Context<D>>,
+        A: Automaton<Context = Context<D, P>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
     > Config<P, S, B, D, A, R, F>

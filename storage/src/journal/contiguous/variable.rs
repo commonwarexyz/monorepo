@@ -802,6 +802,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     }
 }
 
+// Implement Contiguous trait for variable-length items
 impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
     type Item = V;
 

@@ -85,7 +85,13 @@ impl<const N: usize> Prunable<N> {
         self.len() == 0
     }
 
-    /// Return the number of chunks in the bitmap.
+    /// Returns true if the bitmap length is aligned to a chunk boundary.
+    #[inline]
+    pub fn is_chunk_aligned(&self) -> bool {
+        self.len().is_multiple_of(Self::CHUNK_SIZE_BITS)
+    }
+
+    /// Return the number of unpruned chunks in the bitmap.
     #[inline]
     pub fn chunks_len(&self) -> usize {
         self.bitmap.chunks_len()
@@ -393,7 +399,7 @@ mod tests {
         assert_eq!(prunable.pruned_bits(), 0);
         assert_eq!(prunable.pruned_chunks(), 0);
         assert!(prunable.is_empty());
-        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+        assert_eq!(prunable.chunks_len(), 0); // No chunks when empty
     }
 
     #[test]
@@ -402,7 +408,7 @@ mod tests {
         assert_eq!(prunable.len(), 16);
         assert_eq!(prunable.pruned_bits(), 16);
         assert_eq!(prunable.pruned_chunks(), 1);
-        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+        assert_eq!(prunable.chunks_len(), 0);
     }
 
     #[test]
@@ -1130,5 +1136,90 @@ mod tests {
             Ok(_) => panic!("Expected error but got Ok"),
             Err(e) => panic!("Expected Invalid error for total length overflow, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_is_chunk_aligned() {
+        // Empty bitmap is chunk aligned
+        let prunable: Prunable<4> = Prunable::new();
+        assert!(prunable.is_chunk_aligned());
+
+        // Add bits one at a time and check alignment
+        let mut prunable: Prunable<4> = Prunable::new();
+        for i in 1..=32 {
+            prunable.push(i % 2 == 0);
+            if i == 32 {
+                assert!(prunable.is_chunk_aligned()); // Exactly one chunk
+            } else {
+                assert!(!prunable.is_chunk_aligned()); // Partial chunk
+            }
+        }
+
+        // Add another full chunk
+        for i in 33..=64 {
+            prunable.push(i % 2 == 0);
+            if i == 64 {
+                assert!(prunable.is_chunk_aligned()); // Exactly two chunks
+            } else {
+                assert!(!prunable.is_chunk_aligned()); // Partial chunk
+            }
+        }
+
+        // Test with push_chunk
+        let mut prunable: Prunable<4> = Prunable::new();
+        assert!(prunable.is_chunk_aligned());
+        prunable.push_chunk(&[1, 2, 3, 4]);
+        assert!(prunable.is_chunk_aligned()); // 32 bits = 1 chunk
+        prunable.push_chunk(&[5, 6, 7, 8]);
+        assert!(prunable.is_chunk_aligned()); // 64 bits = 2 chunks
+        prunable.push(true);
+        assert!(!prunable.is_chunk_aligned()); // 65 bits = partial chunk
+
+        // Test alignment with pruning
+        let mut prunable: Prunable<4> = Prunable::new();
+        prunable.push_chunk(&[1, 2, 3, 4]);
+        prunable.push_chunk(&[5, 6, 7, 8]);
+        prunable.push_chunk(&[9, 10, 11, 12]);
+        assert!(prunable.is_chunk_aligned()); // 96 bits = 3 chunks
+
+        // Prune first chunk - still aligned (64 bits remaining)
+        prunable.prune_to_bit(32);
+        assert!(prunable.is_chunk_aligned());
+        assert_eq!(prunable.len(), 96);
+
+        // Add a partial chunk
+        prunable.push(true);
+        prunable.push(false);
+        assert!(!prunable.is_chunk_aligned()); // 98 bits total
+
+        // Prune to align again
+        prunable.prune_to_bit(64);
+        assert!(!prunable.is_chunk_aligned()); // 98 bits total (34 bits remaining)
+
+        // Test with new_with_pruned_chunks
+        let prunable: Prunable<4> = Prunable::new_with_pruned_chunks(2).unwrap();
+        assert!(prunable.is_chunk_aligned()); // 64 bits pruned, 0 bits in bitmap
+
+        let mut prunable: Prunable<4> = Prunable::new_with_pruned_chunks(1).unwrap();
+        assert!(prunable.is_chunk_aligned()); // 32 bits pruned, 0 bits in bitmap
+        prunable.push(true);
+        assert!(!prunable.is_chunk_aligned()); // 33 bits total
+
+        // Test with push_byte
+        let mut prunable: Prunable<4> = Prunable::new();
+        for _ in 0..4 {
+            prunable.push_byte(0xFF);
+        }
+        assert!(prunable.is_chunk_aligned()); // 32 bits = 1 chunk
+
+        // Test after pop
+        prunable.pop();
+        assert!(!prunable.is_chunk_aligned()); // 31 bits
+
+        // Pop back to alignment
+        for _ in 0..31 {
+            prunable.pop();
+        }
+        assert!(prunable.is_chunk_aligned()); // 0 bits
     }
 }
