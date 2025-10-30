@@ -893,8 +893,8 @@ mod test {
     use super::*;
     use crate::translator::TwoCap;
     use commonware_cryptography::{
-        blake3::{hash, Digest},
-        Digest as _,
+        blake3::{Blake3, Digest},
+        Digest as _, Hasher as _,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -1247,7 +1247,7 @@ mod test {
             let mut db = create_test_store(context.with_label("store")).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1259,7 +1259,7 @@ mod test {
 
             // re-apply the updates and commit them this time.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1271,7 +1271,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1286,7 +1286,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1300,7 +1300,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
 
@@ -1319,7 +1319,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
             db.commit(None).await.unwrap();
