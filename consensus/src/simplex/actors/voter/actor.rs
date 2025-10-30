@@ -206,6 +206,47 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
+    /// Returns the payload if this round is finalized.
+    /// If `allow_notarized` is true, falls back to a notarized payload.
+    fn payload(&self, allow_notarized: bool) -> Option<&D> {
+        if let Some(result) = self.finalized_payload() {
+            return Some(result);
+        }
+        allow_notarized.then(|| self.notarized_payload())?
+    }
+
+    /// Returns the payload if this round is finalized (via certificate or quorum of finalizes).
+    fn finalized_payload(&self) -> Option<&D> {
+        if let Some(finalization) = &self.finalization {
+            return Some(&finalization.proposal.payload);
+        }
+        let proposal = self.proposal.as_ref()?;
+        let quorum = self.scheme.participants().quorum() as usize;
+        if self.finalizes.len() >= quorum {
+            return Some(&proposal.payload);
+        }
+        None
+    }
+
+    /// Returns the payload if this round is notarized (via certificate or quorum of notarizes).
+    fn notarized_payload(&self) -> Option<&D> {
+        if let Some(notarization) = &self.notarization {
+            return Some(&notarization.proposal.payload);
+        }
+        let proposal = self.proposal.as_ref()?;
+        let quorum = self.scheme.participants().quorum() as usize;
+        if self.notarizes.len() >= quorum {
+            return Some(&proposal.payload);
+        }
+        None
+    }
+
+    /// Returns true if this round is nullified (via certificate or quorum of nullifies).
+    fn is_nullified(&self) -> bool {
+        let quorum = self.scheme.participants().quorum() as usize;
+        self.nullification.is_some() || self.nullifies.len() >= quorum
+    }
+
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
         if self.proposal.is_none() {
             self.proposal = Some(notarize.proposal.clone());
@@ -579,71 +620,35 @@ impl<
         scheme.me().map(|me| me == other).unwrap_or(false)
     }
 
-    /// Returns the payload of the notarized proposal for the given view.
-    fn is_notarized(&self, view: View) -> Option<&D> {
-        // Finalized blocks are notarized.
-        if let Some(finalization) = self.is_finalized(view) {
-            return Some(finalization);
-        }
-
-        // Check that the proposal is notarized.
-        let round = self.views.get(&view)?;
-        if let Some(notarization) = &round.notarization {
-            return Some(&notarization.proposal.payload);
-        }
-        let proposal = round.proposal.as_ref()?;
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.notarizes.len() >= quorum {
-            return Some(&proposal.payload);
-        }
-        None
-    }
-
-    /// Returns the payload of the certified proposal for the given view.
-    fn is_certified(&self, view: View) -> Option<&D> {
-        // Finalized blocks are certified
-        if let Some(finalization) = self.is_finalized(view) {
-            return Some(finalization);
-        }
-
-        // Return `None` early if the view is not certified.
-        let round = self.views.get(&view)?;
-        if round.certified_proposal != Some(true) {
-            return None;
-        }
-
-        // Return the result of `is_notarized`
-        self.is_notarized(view)
-    }
-
-    /// Returns `true` if the view has a nullification, otherwise `false`.
-    fn is_nullified(&self, view: View) -> bool {
-        let round = match self.views.get(&view) {
-            Some(round) => round,
-            None => return false,
-        };
-        let quorum = self.scheme.participants().quorum() as usize;
-        round.nullification.is_some() || round.nullifies.len() >= quorum
-    }
-
-    /// Returns the payload of the finalized proposal for the given view.
-    fn is_finalized(&self, view: View) -> Option<&D> {
+    /// Helper function to get the payload for a given view.
+    ///
+    /// Runs the provided function to determine if a notarized (but not finalized) payload should
+    /// still be returned.
+    fn payload_for_view(&self, view: View, allow_uncertified: bool) -> Option<&D> {
         // Special case for genesis view
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().unwrap());
         }
 
-        // Check for finalization
+        // Get the round and determine if we should allow a notarized payload
         let round = self.views.get(&view)?;
-        if let Some(finalization) = &round.finalization {
-            return Some(&finalization.proposal.payload);
-        }
-        let proposal = round.proposal.as_ref()?;
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.finalizes.len() >= quorum {
-            return Some(&proposal.payload);
-        }
-        None
+        let allow_notarized = allow_uncertified || matches!(round.certified_proposal, Some(true));
+        round.payload(allow_notarized)
+    }
+
+    /// Returns the payload of the notarized proposal for the given view.
+    fn is_notarized(&self, view: View) -> Option<&D> {
+        self.payload_for_view(view, true)
+    }
+
+    /// Returns the payload of the certified proposal for the given view.
+    fn is_certified(&self, view: View) -> Option<&D> {
+        self.payload_for_view(view, false)
+    }
+
+    /// Returns `true` if the view has a nullification, otherwise `false`.
+    fn is_nullified(&self, view: View) -> bool {
+        self.views.get(&view).is_some_and(|r| r.is_nullified())
     }
 
     /// Returns the `(view, payload)` tuple of the highest view below `self.view` that is either
