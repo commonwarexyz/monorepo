@@ -780,6 +780,8 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
+            let mut did_broadcast = false;
+            // If we have a previous finalization, broadcast it
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::finalization())
@@ -790,33 +792,45 @@ impl<
                     .await
                     .unwrap();
                 debug!(view = past_view, "rebroadcast entry finalization");
-            } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
-                self.outbound_messages
-                    .get_or_create(metrics::Outbound::notarization())
-                    .inc();
-                let msg = Voter::Notarization(notarization);
-                recovered_sender
-                    .send(Recipients::All, msg, true)
-                    .await
-                    .unwrap();
-                debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true).await
-            {
-                self.outbound_messages
-                    .get_or_create(metrics::Outbound::nullification())
-                    .inc();
-                let msg = Voter::Nullification(nullification);
-                recovered_sender
-                    .send(Recipients::All, msg, true)
-                    .await
-                    .unwrap();
-                debug!(view = past_view, "rebroadcast entry nullification");
-            } else {
-                warn!(
-                    current = self.view,
-                    "unable to rebroadcast entry notarization/nullification/finalization"
-                );
+                did_broadcast = true;
             }
+
+            // If we haven't broadcast a finalization, broadcast any other certificates.
+            // If we have both a notarization and a nullification, we will broadcast both.
+            if !did_broadcast {
+                // If we have a previous notarization, broadcast it.
+                // The payload may not be certified.
+                if let Some(notarization) = self.construct_notarization(past_view, true).await {
+                    self.outbound_messages
+                        .get_or_create(metrics::Outbound::notarization())
+                        .inc();
+                    let msg = Voter::Notarization(notarization);
+                    recovered_sender
+                        .send(Recipients::All, msg, true)
+                        .await
+                        .unwrap();
+                    debug!(view = past_view, "rebroadcast entry notarization");
+                    did_broadcast = true;
+                }
+
+                // If we have a previous nullification, broadcast it
+                if let Some(nullification) = self.construct_nullification(past_view, true).await {
+                    self.outbound_messages
+                        .get_or_create(metrics::Outbound::nullification())
+                        .inc();
+                    let msg = Voter::Nullification(nullification);
+                    recovered_sender
+                        .send(Recipients::All, msg, true)
+                        .await
+                        .unwrap();
+                    debug!(view = past_view, "rebroadcast entry nullification");
+                    did_broadcast = true;
+                }
+            }
+
+            // Log if we were unable to rebroadcast any certificates
+            (!did_broadcast)
+                .then(|| warn!(view = self.view, "unable to rebroadcast entry certificate"));
         }
 
         // Construct nullify

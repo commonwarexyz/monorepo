@@ -276,7 +276,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn certify(
         &mut self,
-        _context: Context<H::Digest>,
+        context: Context<H::Digest>,
         _payload: H::Digest,
         _contents: Bytes,
     ) -> bool {
@@ -287,6 +287,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // TODO: pass in a function to determine if the payload should be certified.
+        if (context.round.view() % 11) >= 9 {
+            return false;
+        }
         true
     }
 
@@ -367,7 +370,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 Waiter::Verify(context, sender) => (self.verify(context, digest, contents.clone()).await, sender),
                                 Waiter::Certify(context, sender) => (self.certify(context, digest, contents.clone()).await, sender),
                             };
-                            sender.send(success).expect("Failed to send result");
+                            let _ = sender.send(success);
                         }
                     }
                 }

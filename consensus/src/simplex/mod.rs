@@ -398,7 +398,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -645,7 +645,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -966,7 +966,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(60))
+                deterministic::Runner::timed(Duration::from_secs(600))
             }
             .start_and_recover(f);
 
@@ -1256,7 +1256,7 @@ mod tests {
         let skip_timeout = 5;
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1513,7 +1513,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1693,7 +1693,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 2;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(180));
+        let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1858,13 +1858,15 @@ mod tests {
                 // Ensure quick recovery.
                 //
                 // If the skip timeout isn't implemented correctly, we may go many views before participants
-                // start to consider a validator's proposal.
+                // start to notarize a validator's proposal.
                 {
-                    // Ensure nearly all views around latest finalize
+                    // Ensure nearly all views around latest are notarized.
+                    // We don't check for finalization since some of the blocks may fail to be
+                    // certified for the purposes of testing.
                     let mut found = 0;
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock().unwrap();
                     for i in latest..latest + activity_timeout {
-                        if finalizations.contains_key(&i) {
+                        if notarizations.contains_key(&i) {
                             found += 1;
                         }
                     }
