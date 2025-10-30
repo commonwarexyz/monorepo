@@ -28,7 +28,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -42,6 +42,13 @@ pub struct Config {
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
+
+    /// The maximum number of peer sets to track. When a new peer set is registered and this
+    /// limit is exceeded, the oldest peer set is removed. Peers that are no longer in any
+    /// tracked peer set will have their links removed and messages to them will be dropped.
+    ///
+    /// Defaults to 3 if not specified, matching production p2p implementations.
+    pub tracked_peer_sets: usize,
 }
 
 /// Implementation of a simulated network.
@@ -75,8 +82,14 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // The current peer set ID
-    peer_set_id: u64,
+    // Peer sets indexed by their ID
+    peer_sets: BTreeMap<u64, commonware_utils::set::Ordered<P>>,
+
+    // Reference count for each peer (number of peer sets they belong to)
+    peer_refs: HashMap<P, usize>,
+
+    // Maximum number of peer sets to track
+    tracked_peer_sets: usize,
 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
@@ -113,13 +126,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
+                tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
                 sender,
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
-                peer_set_id: 0,
+                peer_sets: BTreeMap::new(),
+                peer_refs: HashMap::new(),
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 received_messages,
@@ -174,9 +189,28 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         match message {
             ingress::Message::Register { peer_set, peers } => {
-                // If peer does not exist, then create it.
-                for public_key in peers {
-                    if !self.peers.contains_key(&public_key) {
+                // Check if peer set already exists
+                if self.peer_sets.contains_key(&peer_set) {
+                    warn!(index = peer_set, "peer set already exists");
+                    return;
+                }
+
+                // Ensure that peer set is monotonically increasing
+                if let Some((last, _)) = self.peer_sets.last_key_value() {
+                    if peer_set <= *last {
+                        warn!(
+                            new_id = peer_set,
+                            old_id = last,
+                            "attempted to register peer set with non-monotonically increasing ID"
+                        );
+                        return;
+                    }
+                }
+
+                // Create and store new peer set
+                for public_key in peers.iter() {
+                    // Create peer if it doesn't exist
+                    if !self.peers.contains_key(public_key) {
                         let peer = Peer::new(
                             self.context.with_label("peer"),
                             public_key.clone(),
@@ -185,18 +219,35 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         );
                         self.peers.insert(public_key.clone(), peer);
                     }
-                }
 
-                if peer_set <= self.peer_set_id {
-                    warn!(
-                        new_id = peer_set,
-                        old_id = self.peer_set_id,
-                        "attempted to register peer set with non-monotonically increasing ID"
-                    );
-                    return;
+                    // Increment reference count
+                    *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
+                self.peer_sets.insert(peer_set, peers);
 
-                self.peer_set_id = peer_set;
+                // Remove oldest peer set if we exceed the limit
+                while self.peer_sets.len() > self.tracked_peer_sets {
+                    let (index, set) = self.peer_sets.pop_first().unwrap();
+                    debug!(index, "removed oldest peer set");
+
+                    // Decrement reference counts and clean up peers/links
+                    for public_key in set.iter() {
+                        let refs = self.peer_refs.get_mut(public_key).unwrap();
+                        *refs = refs.saturating_sub(1);
+
+                        // If peer is no longer in any tracked set, remove it
+                        if *refs == 0 {
+                            self.peer_refs.remove(public_key);
+                            self.peers.remove(public_key);
+
+                            // Remove all links involving this peer
+                            self.links
+                                .retain(|(from, to), _| from != public_key && to != public_key);
+
+                            debug!(?public_key, "removed peer no longer in any tracked set");
+                        }
+                    }
+                }
             }
             ingress::Message::RegisterComms {
                 channel,
@@ -231,12 +282,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
-            ingress::Message::PeerSet { response, .. } => {
-                let _ = response.send(Some(self.peers.keys().cloned().collect()));
+            ingress::Message::PeerSet { index, response } => {
+                if self.peer_sets.is_empty() {
+                    // Return all peers if no peer sets are registered.
+                    let _ = response.send(Some(self.peers.keys().cloned().collect()));
+                } else {
+                    // Return the peer set at the given index
+                    let _ = response.send(self.peer_sets.get(&index).cloned());
+                }
             }
             ingress::Message::LatestPeerSet { response } => {
-                // The peer set is constant in the simulated network.
-                let _ = response.send(Some(self.peer_set_id));
+                // Return the latest peer set or 0 if none exist
+                let _ = response.send(Some(self.peer_sets.keys().last().copied().unwrap_or(0)));
             }
             ingress::Message::LimitBandwidth {
                 public_key,
@@ -352,7 +409,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
         let recipients = match recipients {
-            Recipients::All => self.peers.keys().cloned().collect(),
+            Recipients::All => {
+                // If peer sets have been registered, send only to tracked peers
+                // Otherwise, send to all registered peers (compatibility
+                // with tests that do not register peer sets.)
+                if self.peer_sets.is_empty() {
+                    self.peers.keys().cloned().collect()
+                } else {
+                    // Sort keys for deterministic ordering (peer_refs is a HashMap)
+                    let mut keys: Vec<_> = self.peer_refs.keys().cloned().collect();
+                    keys.sort();
+                    keys
+                }
+            }
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -364,6 +433,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Skip self
             if recipient == origin {
                 trace!(?recipient, reason = "self", "dropping message");
+                continue;
+            }
+
+            // Check if recipient is in any tracked peer set (only if peer sets have been registered)
+            if !self.peer_sets.is_empty() && !self.peer_refs.contains_key(&recipient) {
+                trace!(
+                    ?origin,
+                    ?recipient,
+                    reason = "not in tracked peer set",
+                    "dropping message"
+                );
                 continue;
             }
 
@@ -802,6 +882,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
+                tracked_peer_sets: 3,
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
@@ -850,6 +931,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: 3,
         };
         let runner = deterministic::Runner::default();
 
@@ -884,6 +966,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: 3,
         };
         let runner = deterministic::Runner::default();
 
@@ -954,6 +1037,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: 3,
         };
         let runner = deterministic::Runner::default();
 

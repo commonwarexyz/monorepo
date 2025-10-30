@@ -21,6 +21,7 @@ pub enum Message<P: PublicKey> {
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
     PeerSet {
+        index: u64,
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     LatestPeerSet {
@@ -196,10 +197,13 @@ impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
             .unwrap();
     }
 
-    async fn peer_set(&mut self, _id: u64) -> Option<Ordered<Self::PublicKey>> {
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::PeerSet { response: sender })
+            .send(Message::PeerSet {
+                index: id,
+                response: sender,
+            })
             .await
             .unwrap();
         receiver.await.unwrap()
@@ -227,10 +231,7 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register(
-        &mut self,
-        channel: Channel,
-    ) -> Result<(Sender<P>, Receiver<P>), Error> {
+    pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::RegisterComms {
