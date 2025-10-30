@@ -163,6 +163,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
             NetworkConfig {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false, // Ignore blocking operation
+                tracked_peer_sets: None,
             },
         );
 
