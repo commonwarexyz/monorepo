@@ -86,7 +86,7 @@ pub struct Any<
 impl<
         E: Storage + Clock + Metrics,
         K: Array + Ord,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Send + Sync,
         H: CHasher,
         T: Translator,
     > Any<E, K, V, H, T>
@@ -721,7 +721,7 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Send + Sync,
         H: CHasher,
         T: Translator,
     > Db<E, K, V, T> for Any<E, K, V, H, T>

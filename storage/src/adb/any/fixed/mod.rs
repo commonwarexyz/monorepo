@@ -13,7 +13,10 @@ use crate::{
         Error,
     },
     index::{Cursor, Index},
-    journal::contiguous::fixed::{Config as JConfig, Journal},
+    journal::contiguous::{
+        fixed::{Config as JConfig, Journal},
+        Contiguous,
+    },
     mmr::{
         bitmap::BitMap,
         journaled::{Config as MmrConfig, Mmr},
@@ -74,9 +77,9 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-/// Initialize and return the mmr and log from the given config, correcting any inconsistencies
-/// between them. Any uncommitted operations in the log will be rolled back and the state of the
-/// db will be as of the last committed operation.
+/// Initialize an MMR and log from the given config, and return them after ensuring they are
+/// aligned. The returned log will either be empty, or its last operation will be a commit floor
+/// operation. The number of leaves in the MMR will be equal to the number of operations in the log.
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
     O: Keyed + FixedSize,
@@ -112,6 +115,26 @@ pub(crate) async fn init_mmr_and_log<
     )
     .await?;
 
+    let inactivity_floor_loc = align_mmr_and_log(&mut mmr, &mut log, hasher).await?;
+
+    Ok((inactivity_floor_loc, mmr, log))
+}
+
+/// Discard any uncommitted log operations, then correct any inconsistencies between the MMR and
+/// log.
+///
+/// # Post-conditions
+/// - The log will either be empty, or its last operation will be a commit floor operation.
+/// - The number of leaves in the MMR will be equal to the number of operations in the log.
+pub(crate) async fn align_mmr_and_log<
+    E: Storage + Clock + Metrics,
+    O: Keyed + FixedSize,
+    H: CHasher,
+>(
+    mmr: &mut Mmr<E, H>,
+    log: &mut Journal<E, O>,
+    hasher: &mut Standard<H>,
+) -> Result<Location, Error> {
     // Back up over / discard any uncommitted operations in the log.
     let mut log_size: Location = log.size().await.into();
     let mut rewind_leaf_num = log_size;
@@ -164,7 +187,18 @@ pub(crate) async fn init_mmr_and_log<
     // At this point the MMR and log should be consistent.
     assert_eq!(log.size().await, mmr.leaves());
 
-    Ok((inactivity_floor_loc, mmr, log))
+    // The final operation in the log (if any) should be a commit.
+    let last_op_loc = log.size().await.checked_sub(1);
+    assert!(
+        last_op_loc.is_none()
+            || log
+                .read(last_op_loc.unwrap())
+                .await?
+                .commit_floor()
+                .is_some()
+    );
+
+    Ok(inactivity_floor_loc)
 }
 
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
@@ -172,20 +206,19 @@ pub(crate) async fn init_mmr_and_log<
 /// floor. The callback is invoked for each replayed operation, indicating activity status updates.
 /// The first argument of the callback is the activity status of the operation, and the second
 /// argument is the location of the operation it inactivates (if any).
-pub(crate) async fn build_snapshot_from_log<E, O, I, F>(
+pub(crate) async fn build_snapshot_from_log<O, I, F>(
     inactivity_floor_loc: Location,
-    log: &Journal<E, O>,
+    log: &impl Contiguous<Item = O>,
     snapshot: &mut I,
     mut callback: F,
 ) -> Result<(), Error>
 where
-    E: Storage + Clock + Metrics,
     O: Keyed + FixedSize,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
-        .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
+        .replay(*inactivity_floor_loc, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
         .await?;
     pin_mut!(stream);
     let last_commit_loc = log.size().await.saturating_sub(1);
@@ -310,14 +343,13 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_loc<E, I: Index<Value = Location>, O>(
+async fn update_loc<I: Index<Value = Location>, O>(
     snapshot: &mut I,
-    log: &Journal<E, O>,
+    log: &impl Contiguous<Item = O>,
     key: &<O as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
-    E: Storage + Clock + Metrics,
     O: Keyed + FixedSize,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
@@ -341,13 +373,12 @@ where
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
-async fn delete_key<E, I, O>(
+async fn delete_key<I, O>(
     snapshot: &mut I,
-    log: &Journal<E, O>,
+    log: &impl Contiguous<Item = O>,
     key: &O::Key,
 ) -> Result<Option<Location>, Error>
 where
-    E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
     O: Keyed + FixedSize,
 {
@@ -367,13 +398,12 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
-async fn find_update_op<E, C, O>(
-    log: &Journal<E, O>,
+async fn find_update_op<C, O>(
+    log: &impl Contiguous<Item = O>,
     cursor: &mut C,
     key: &<O as Keyed>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    E: Storage + Clock + Metrics,
     C: Cursor<Value = Location>,
     O: Keyed + FixedSize,
 {
