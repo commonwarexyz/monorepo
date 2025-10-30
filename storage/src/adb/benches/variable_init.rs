@@ -52,13 +52,11 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
-        locations_items_per_blob: ITEMS_PER_BLOB,
         translator: EightCap,
         thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -131,7 +129,7 @@ fn bench_variable_init(c: &mut Criterion) {
                         let start = Instant::now();
                         for _ in 0..iters {
                             let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
-                            assert_ne!(db.op_count(), 0);
+                            assert_ne!(db.op_count().await.unwrap(), 0);
                             db.close().await.unwrap();
                         }
 

@@ -397,8 +397,8 @@ impl<
         T: Translator,
     > Db<E, K, V, T> for Any<E, K, V, H, T>
 {
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn op_count(&self) -> Result<Location, store::Error> {
+        Ok(self.op_count())
     }
 
     fn inactivity_floor_loc(&self) -> Location {

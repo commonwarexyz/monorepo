@@ -59,7 +59,6 @@ enum Operation {
     Root,
     SimulateFailure {
         sync_log: bool,
-        sync_locations: bool,
         sync_mmr: bool,
         write_limit: u8,
     },
@@ -131,12 +130,10 @@ impl<'a> Arbitrary<'a> for Operation {
             14 => Ok(Operation::Root),
             15 | 16 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_locations: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
                 Ok(Operation::SimulateFailure {
                     sync_log,
-                    sync_locations,
                     sync_mmr,
                     write_limit,
                 })
@@ -169,13 +166,11 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         mmr_metadata_partition: format!("{test_name}_meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}_log"),
         log_items_per_section: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=100000).into(), ()),
-        locations_journal_partition: format!("{test_name}_locations"),
-        locations_items_per_blob: NZU64!(3),
         translator: TwoCap,
         thread_pool: None,
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
@@ -221,7 +216,8 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    historical_roots.insert(db.op_count(), db.root(&mut hasher));
+                    let op_count = db.op_count().await.unwrap();
+                    historical_roots.insert(op_count, db.root(&mut hasher));
                     has_uncommitted = false;
                 }
 
@@ -236,7 +232,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::GetLoc { loc_offset } => {
-                    let op_count = db.op_count();
+                    let op_count = db.op_count().await.unwrap();
                     if op_count > 0 {
                         let loc = *loc_offset as u64 % *op_count;
                         let loc = Location::new(loc).unwrap();
@@ -253,10 +249,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    let op_count = db.op_count();
+                    let op_count = db.op_count().await.unwrap();
+                    let oldest_retained_loc = db
+                        .oldest_retained_loc()
+                        .await
+                        .unwrap()
+                        .unwrap_or(Location::new(0).unwrap());
                     if op_count > 0 && !has_uncommitted {
-                        if *start_loc < db.oldest_retained_loc().unwrap() || *start_loc >= op_count
-                        {
+                        if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
                             continue;
                         }
 
@@ -273,8 +273,9 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
-                    if db.op_count() > 0 && !has_uncommitted {
-                        let op_count = Location::new(*size % *db.op_count()).unwrap() + 1;
+                    let op_count = db.op_count().await.unwrap();
+                    if op_count > 0 && !has_uncommitted {
+                        let op_count = Location::new(*size % *op_count).unwrap() + 1;
 
                         if *start_loc >= op_count || op_count > max_ops.get() {
                             continue;
@@ -295,7 +296,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    let _ = db.oldest_retained_loc().await;
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -303,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    let _ = db.op_count().await;
                 }
 
                 Operation::Root => {
@@ -315,18 +316,12 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::SimulateFailure {
                     sync_log,
-                    sync_locations,
                     sync_mmr,
                     write_limit,
                 } => {
-                    db.simulate_failure(
-                        *sync_log,
-                        *sync_locations,
-                        *sync_mmr,
-                        *write_limit as usize,
-                    )
-                    .await
-                    .expect("Simulate failure should not fail");
+                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                        .await
+                        .expect("Simulate failure should not fail");
 
                     db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context.clone(),
