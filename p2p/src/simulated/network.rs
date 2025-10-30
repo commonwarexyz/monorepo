@@ -244,7 +244,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     // Decrement reference counts and clean up peers/links
                     for public_key in set.iter() {
                         let refs = self.peer_refs.get_mut(public_key).unwrap();
-                        *refs = refs.saturating_sub(1);
+                        *refs = refs.checked_sub(1).expect("reference count underflow");
 
                         // If peer is no longer in any tracked set, remove it
                         if *refs == 0 {
