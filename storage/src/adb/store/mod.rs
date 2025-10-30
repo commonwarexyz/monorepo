@@ -576,7 +576,7 @@ where
     /// Returns the number of operations that were applied to the store, the oldest retained
     /// location, and the inactivity floor location.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        let mut locations_size = self.locations.size().await?;
+        let mut locations_size = self.locations.size().await;
 
         // The location and blob-offset of the first operation to follow the last known commit point.
         let mut after_last_commit = None;
@@ -700,11 +700,11 @@ where
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(self.log_size, self.locations.size().await?);
+        assert_eq!(self.log_size, self.locations.size().await);
         self.last_commit = self
             .locations
             .size()
-            .await?
+            .await
             .checked_sub(1)
             .map(Location::new_unchecked);
         assert!(

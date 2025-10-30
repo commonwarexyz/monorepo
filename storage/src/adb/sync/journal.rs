@@ -9,7 +9,7 @@ pub trait Journal {
     type Error: std::error::Error + Send + 'static + Into<crate::adb::Error>;
 
     /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = Result<u64, Self::Error>>;
+    fn size(&self) -> impl Future<Output = u64>;
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
@@ -23,8 +23,8 @@ where
     type Op = V;
     type Error = crate::journal::Error;
 
-    async fn size(&self) -> Result<u64, Self::Error> {
-        crate::journal::contiguous::variable::Journal::size(self).await
+    async fn size(&self) -> u64 {
+        crate::journal::contiguous::variable::Journal::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {

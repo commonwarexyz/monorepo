@@ -227,9 +227,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         let mut mmr_leaves = mmr.leaves();
 
         // Get the start location from the log.
-        let start_loc = match log.oldest_retained_pos().await? {
+        let start_loc = match log.oldest_retained_pos() {
             Some(loc) => loc,
-            None => log.size().await?,
+            None => log.size(),
         };
 
         // The number of operations in the log.
@@ -301,19 +301,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
         // Confirm post-conditions hold.
         assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
-        assert_eq!(*log_size, log.size().await.map_err(Error::Journal)?);
+        assert_eq!(log_size, log.size());
 
         Ok(log_size)
     }
 
     /// Return the oldest location that remains retrievable.
-    pub async fn oldest_retained_loc(&self) -> Result<Option<Location>, Error> {
-        Ok(self
-            .log
-            .oldest_retained_pos()
-            .await
-            .map_err(Error::Journal)?
-            .map(Location::new_unchecked))
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
@@ -336,10 +331,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log.prune(*loc).await?;
 
         // Get the oldest retained location based on what the log actually pruned.
-        let pruning_boundary = match self.log.oldest_retained_pos().await? {
+        let pruning_boundary = match self.log.oldest_retained_pos() {
             Some(pos) => Location::new_unchecked(pos),
             None => {
-                let size = self.log.size().await?;
+                let size = self.log.size();
                 Location::new_unchecked(size)
             }
         };
@@ -356,7 +351,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let oldest = self
             .oldest_retained_loc()
-            .await?
             .unwrap_or(Location::new_unchecked(0));
         let iter = self.snapshot.get(key);
         for &loc in iter {
@@ -378,13 +372,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Returns [Error::LocationOutOfBounds] if `loc >= op_count()`.
     /// Returns [Error::OperationPruned] if `loc` precedes the oldest retained location.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        let op_count = self.op_count().await?;
+        let op_count = self.op_count();
         if loc >= op_count {
             return Err(Error::LocationOutOfBounds(loc, op_count));
         }
-        let pruning_boundary = match self.oldest_retained_loc().await? {
+        let pruning_boundary = match self.oldest_retained_loc() {
             Some(oldest) => oldest,
-            None => self.op_count().await?,
+            None => self.op_count(),
         };
         if loc < pruning_boundary {
             return Err(Error::OperationPruned(loc));
@@ -398,9 +392,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        let pruning_boundary = match self.oldest_retained_loc().await? {
+        let pruning_boundary = match self.oldest_retained_loc() {
             Some(oldest) => oldest,
-            None => self.op_count().await?,
+            None => self.op_count(),
         };
         if loc < pruning_boundary {
             return Err(Error::OperationPruned(loc));
@@ -419,12 +413,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub async fn op_count(&self) -> Result<Location, Error> {
-        self.log
-            .size()
-            .await
-            .map(Location::new_unchecked)
-            .map_err(Error::Journal)
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -434,10 +424,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Any keys that have been pruned and map to the same translated key will be dropped
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let op_count = self.op_count().await?;
+        let op_count = self.op_count();
         let oldest = self
             .oldest_retained_loc()
-            .await?
             .unwrap_or(Location::new_unchecked(0));
         self.snapshot
             .insert_and_prune(&key, op_count, |v| *v < oldest);
@@ -493,7 +482,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.op_count().await?;
+        let op_count = self.op_count();
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
@@ -513,16 +502,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let current_op_count = self.op_count().await?;
+        let current_op_count = self.op_count();
         if op_count > current_op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
         }
         if start_loc >= op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
-        let pruning_boundary = match self.oldest_retained_loc().await? {
+        let pruning_boundary = match self.oldest_retained_loc() {
             Some(oldest) => oldest,
-            None => self.op_count().await?,
+            None => self.op_count(),
         };
         if start_loc < pruning_boundary {
             return Err(Error::OperationPruned(start_loc));
@@ -549,7 +538,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        let log_size = self.op_count().await?;
+        let log_size = self.op_count();
         self.last_commit = Some(log_size);
         let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
@@ -643,7 +632,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         V: Default,
     {
         self.apply_op(Operation::Commit(None)).await?;
-        let log_size = self.log.size().await?;
+        let log_size = self.log.size();
 
         self.mmr.close(&mut self.hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
@@ -707,8 +696,8 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
-            assert_eq!(db.op_count().await.unwrap(), 0);
-            assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -720,11 +709,11 @@ pub(super) mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.op_count().await.unwrap(), 0);
+            assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
-            assert_eq!(db.op_count().await.unwrap(), 1); // commit op added
+            assert_eq!(db.op_count(), 1); // commit op added
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
 
@@ -755,13 +744,13 @@ pub(super) mod test {
             db.set(k1, v1.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
-            assert_eq!(db.op_count().await.unwrap(), 1);
+            assert_eq!(db.op_count(), 1);
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
             db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
-            assert_eq!(db.op_count().await.unwrap(), 2);
+            assert_eq!(db.op_count(), 2);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(1), metadata.clone()))
@@ -770,7 +759,7 @@ pub(super) mod test {
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
-            assert_eq!(db.op_count().await.unwrap(), 3);
+            assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
             assert_eq!(
@@ -780,7 +769,7 @@ pub(super) mod test {
 
             // Commit the second key.
             db.commit(None).await.unwrap();
-            assert_eq!(db.op_count().await.unwrap(), 4);
+            assert_eq!(db.op_count(), 4);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(3), None))
@@ -793,14 +782,14 @@ pub(super) mod test {
             let k3 = Sha256::fill(3u8);
             let v3 = vec![9, 10, 11];
             db.set(k3, v3).await.unwrap();
-            assert_eq!(db.op_count().await.unwrap(), 5);
+            assert_eq!(db.op_count(), 5);
             assert_ne!(db.root(&mut hasher), root);
 
             // Close & reopen, make sure state is restored to last commit point.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.get(&k3).await.unwrap().is_none());
-            assert_eq!(db.op_count().await.unwrap(), 4);
+            assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
@@ -827,17 +816,17 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS);
+            assert_eq!(db.op_count(), ELEMENTS);
 
             db.commit(None).await.unwrap();
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 1);
+            assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 1);
+            assert_eq!(db.op_count(), ELEMENTS + 1);
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -847,7 +836,7 @@ pub(super) mod test {
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
             let max_ops = NZU64!(5);
-            let op_count = db.op_count().await.unwrap();
+            let op_count = db.op_count();
             for i in 0..*op_count {
                 let (proof, log) = db.proof(Location::new_unchecked(i), max_ops).await.unwrap();
                 assert!(verify_proof(
@@ -878,7 +867,7 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS);
+            assert_eq!(db.op_count(), ELEMENTS);
             db.sync().await.unwrap();
             let halfway_root = db.root(&mut hasher);
 
@@ -894,14 +883,14 @@ pub(super) mod test {
 
             // Recovery should replay the log to regenerate the mmr.
             let db = open_db(context.clone()).await;
-            assert_eq!(db.op_count().await.unwrap(), 2001);
+            assert_eq!(db.op_count(), 2001);
             let root = db.root(&mut hasher);
             assert_ne!(root, halfway_root);
 
             // Close & reopen could preserve the final commit.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(db.op_count().await.unwrap(), 2001);
+            assert_eq!(db.op_count(), 2001);
             assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
@@ -931,7 +920,7 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 2);
+            assert_eq!(db.op_count(), ELEMENTS + 2);
             db.sync().await.unwrap();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
@@ -946,7 +935,7 @@ pub(super) mod test {
 
             // Recovery should back up to previous commit point.
             let db = open_db(context.clone()).await;
-            assert_eq!(db.op_count().await.unwrap(), 2);
+            assert_eq!(db.op_count(), 2);
             let root = db.root(&mut hasher);
             assert_eq!(root, first_commit_root);
 
@@ -969,20 +958,20 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS);
+            assert_eq!(db.op_count(), ELEMENTS);
 
             db.commit(None).await.unwrap();
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 1);
+            assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
             db.prune(Location::new_unchecked(ELEMENTS / 2))
                 .await
                 .unwrap();
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 1);
+            assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
@@ -999,15 +988,15 @@ pub(super) mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
-            assert_eq!(db.op_count().await.unwrap(), ELEMENTS + 1);
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            assert_eq!(db.op_count(), ELEMENTS + 1);
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
             let loc = Location::new_unchecked(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
             db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
@@ -1016,7 +1005,7 @@ pub(super) mod test {
             // Confirm boundary persists across restart.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)

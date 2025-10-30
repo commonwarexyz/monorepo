@@ -40,7 +40,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                     let mut j = get_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
                     append_random_data::<ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size().await.unwrap();
+                    let sz = j.size().await;
                     assert_eq!(sz, items);
 
                     // Run the benchmark

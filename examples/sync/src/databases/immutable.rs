@@ -106,13 +106,12 @@ where
     }
 
     async fn op_count(&self) -> Result<Location, adb::Error> {
-        self.op_count().await
+        Ok(self.op_count())
     }
 
     async fn lower_bound(&self) -> Result<Location, adb::Error> {
         Ok(self
             .oldest_retained_loc()
-            .await?
             .unwrap_or(Location::new(0).unwrap()))
     }
 
