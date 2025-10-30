@@ -8,8 +8,15 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum, set::OrderedAssociated};
-use rand::{rngs::OsRng, seq::IteratorRandom};
+use commonware_utils::{
+    from_hex, hex, quorum,
+    set::{Ordered, OrderedAssociated},
+};
+use rand::{
+    rngs::{OsRng, StdRng},
+    seq::IteratorRandom,
+    SeedableRng,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -63,20 +70,37 @@ impl ParticipantConfig {
 
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerConfig {
+pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
     /// The number of participants per epoch.
     pub num_participants_per_epoch: u32,
     /// All active peer public keys.
-    #[serde(with = "serde_hex_vec")]
-    pub active: Vec<PublicKey>,
-    /// All inactive peer public keys.
-    #[serde(with = "serde_hex_vec")]
-    pub inactive: Vec<PublicKey>,
+    #[serde(with = "serde_hex_ordered")]
+    pub participants: Ordered<P>,
 }
 
-impl PeerConfig {
+impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
     pub fn threshold(&self) -> u32 {
         quorum(self.num_participants_per_epoch)
+    }
+
+    /// Pick the dealers for a particular round.
+    ///
+    /// The first round will use the first `num_participants_per_epoch` players
+    /// as the dealers.
+    ///
+    /// Subsequent rounds will choose the same number, pseudo-randomly,
+    /// using the round number as a seed.
+    pub fn dealers(&self, round: u64) -> Ordered<P> {
+        let p_iter = self.participants.iter().cloned();
+        let to_choose = self.num_participants_per_epoch as usize;
+        if round == 0 {
+            return p_iter.take(to_choose).collect();
+        }
+        let mut rng = StdRng::seed_from_u64(round);
+        p_iter
+            .choose_multiple(&mut rng, to_choose)
+            .into_iter()
+            .collect()
     }
 }
 
@@ -200,29 +224,16 @@ fn generate_configs(
     let peers = if args.with_dkg {
         PeerConfig {
             num_participants_per_epoch: args.num_participants_per_epoch,
-            active: identities
+            participants: identities
                 .iter()
                 .map(|(signer, _)| signer.public_key())
-                .take(args.num_participants_per_epoch as usize)
-                .collect(),
-            inactive: identities
-                .iter()
-                .map(|(signer, _)| signer.public_key())
-                .skip(args.num_participants_per_epoch as usize)
-                .take((args.num_peers - args.num_participants_per_epoch) as usize)
                 .collect(),
         }
     } else {
         PeerConfig {
             num_participants_per_epoch: args.num_participants_per_epoch,
-            active: identities
+            participants: identities
                 .iter()
-                .filter(|(_, share)| share.is_some())
-                .map(|(signer, _)| signer.public_key())
-                .collect(),
-            inactive: identities
-                .iter()
-                .filter(|(_, share)| share.is_none())
                 .map(|(signer, _)| signer.public_key())
                 .collect(),
         }
@@ -270,7 +281,7 @@ mod serde_hex {
     }
 }
 
-mod serde_hex_vec {
+mod serde_hex_ordered {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_utils::from_hex;
@@ -280,7 +291,7 @@ mod serde_hex_vec {
         Deserializer, Serializer,
     };
 
-    pub fn serialize<T, S>(value: &[T], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<T, S>(value: &Ordered<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Encode,
         S: Serializer,
@@ -289,18 +300,18 @@ mod serde_hex_vec {
         serializer.collect_seq(value.iter().map(|v| hex(&v.encode())))
     }
 
-    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Ordered<T>, D::Error>
     where
-        T: DecodeExt<()>,
+        T: Ord + DecodeExt<()>,
         D: Deserializer<'de>,
     {
         struct HexVecVisitor<T>(std::marker::PhantomData<T>);
 
         impl<'de, T> Visitor<'de> for HexVecVisitor<T>
         where
-            T: DecodeExt<()>,
+            T: Ord + DecodeExt<()>,
         {
-            type Value = Vec<T>;
+            type Value = Ordered<T>;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("a sequence of hex-encoded values")
@@ -318,7 +329,7 @@ mod serde_hex_vec {
 
                     out.push(T::decode(&mut bytes.as_ref()).map_err(serde::de::Error::custom)?);
                 }
-                Ok(out)
+                Ok(out.into_iter().collect())
             }
         }
 

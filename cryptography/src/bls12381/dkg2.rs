@@ -85,6 +85,11 @@ impl<V: Variant, P: PublicKey> Output<V, P> {
     pub fn public(&self) -> &Public<V> {
         &self.public
     }
+
+    /// Return the players who participated in this round of the DKG, and should have shares.
+    pub fn players(&self) -> &Ordered<P> {
+        &self.players
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
@@ -116,7 +121,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
