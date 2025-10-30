@@ -85,6 +85,11 @@ impl<V: Variant, P: PublicKey> Output<V, P> {
     pub fn public(&self) -> &Public<V> {
         &self.public
     }
+
+    /// Return the players who participated in this round of the DKG, and should have shares.
+    pub fn players(&self) -> &Ordered<P> {
+        &self.players
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
@@ -116,7 +121,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
@@ -828,11 +833,10 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
 pub fn deal<V: Variant, P: PublicKey>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
-    t: u32,
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
-    assert!(t >= 1, "threshold must be at least 1");
-    let private = poly::new_from(t - 1, &mut rng);
     let players = Ordered::from_iter(players.into_iter());
+    let t = quorum(players.len() as u32);
+    let private = poly::new_from(t - 1, &mut rng);
     let shares: OrderedAssociated<_, _> = players
         .iter()
         .enumerate()
