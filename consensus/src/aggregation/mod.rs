@@ -119,7 +119,11 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let (sender, receiver) = oracle.register(participant.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(participant.clone())
+                .register(0)
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
         }
         registrations
@@ -161,6 +165,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets: None,
             },
         );
         network.start();

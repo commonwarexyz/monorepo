@@ -73,6 +73,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets: None,
             },
         );
         network.start();
@@ -85,7 +86,7 @@ mod tests {
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
             registrations.insert(peer.clone(), (sender, receiver));
         }
 

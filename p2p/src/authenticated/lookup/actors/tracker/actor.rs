@@ -12,6 +12,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
+use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -43,6 +44,10 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
+
+    /// Subscribers to peer set updates.
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -84,6 +89,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 directory,
                 listener: cfg.listener,
                 mailboxes: HashMap::new(),
+                subscribers: Vec::new(),
             },
             mailbox,
             oracle,
@@ -107,6 +113,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         match msg {
             Message::Register { index, peers } => {
                 // If we are no longer interested in a peer, release them.
+                let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
                 for peer in self.directory.add_set(index, peers) {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
@@ -115,6 +122,33 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                 // Send the updated registered IP addresses to the listener.
                 let _ = self.listener.send(self.directory.registered()).await;
+
+                // Notify all subscribers about the new peer set
+                self.subscribers.retain(|subscriber| {
+                    subscriber
+                        .unbounded_send((index, peer_keys.clone(), self.directory.tracked()))
+                        .is_ok()
+                });
+            }
+            Message::PeerSet { index, responder } => {
+                // Send the peer set at the given index.
+                let _ = responder.send(self.directory.get_set(&index).cloned());
+            }
+            Message::Subscribe { responder } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded();
+
+                // Send the latest peer set immediately
+                if let Some(latest_set_id) = self.directory.latest_set_index() {
+                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    sender
+                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
+                        .ok();
+                }
+                self.subscribers.push(sender);
+
+                // Return the receiver to the caller
+                let _ = responder.send(receiver);
             }
             Message::Connect {
                 public_key,
@@ -180,6 +214,7 @@ mod tests {
     use crate::{
         authenticated::lookup::actors::peer,
         Blocker,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_cryptography::{
@@ -270,7 +305,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, OrderedAssociated::from([(pk.clone(), addr)]))
+                .update(0, OrderedAssociated::from([(pk.clone(), addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -299,7 +334,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, OrderedAssociated::from([(pk1.clone(), addr)]))
+                .update(0, OrderedAssociated::from([(pk1.clone(), addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -353,7 +388,7 @@ mod tests {
             assert!(!mailbox.listenable(peer_pk3.clone()).await);
 
             oracle
-                .register(
+                .update(
                     0,
                     OrderedAssociated::from([
                         (peer_pk.clone(), peer_addr),
@@ -390,7 +425,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .register(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -425,7 +460,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .register(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -449,7 +484,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .register(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .update(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
                 .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
@@ -486,7 +521,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .register(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .update(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -538,7 +573,7 @@ mod tests {
 
             // Register set with myself and one other peer
             oracle
-                .register(
+                .update(
                     0,
                     OrderedAssociated::from([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]),
                 )
@@ -561,7 +596,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .register(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]))
+                .update(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]))
                 .await;
 
             // Wait for a listener update

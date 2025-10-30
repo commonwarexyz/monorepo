@@ -83,7 +83,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, set::Ordered, NZU32};
 use governor::Quota;
@@ -230,7 +230,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.register(0, recipients).await;
+        oracle.update(0, recipients).await;
 
         // Parse contributors
         let mut contributors = Vec::new();

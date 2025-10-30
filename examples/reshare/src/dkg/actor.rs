@@ -17,7 +17,7 @@ use commonware_cryptography::{
     },
     Hasher, Signer,
 };
-use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
@@ -39,7 +39,8 @@ use tracing::info;
 
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
-pub struct Config<C> {
+pub struct Config<C, P> {
+    pub manager: P,
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
@@ -50,14 +51,16 @@ pub struct Config<C> {
     pub partition_prefix: String,
 }
 
-pub struct Actor<E, H, C, V>
+pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
+    manager: P,
     participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
@@ -69,15 +72,16 @@ where
     failed_rounds: Counter,
 }
 
-impl<E, H, C, V> Actor<E, H, C, V>
+impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub async fn init(context: E, config: Config<C>) -> (Self, Mailbox<H, C, V>) {
+    pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         let context = ContextCell::new(context);
 
         // Initialize a metadata store for epoch and round information.
@@ -115,6 +119,7 @@ where
         (
             Self {
                 context,
+                manager: config.manager,
                 participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
@@ -210,10 +215,24 @@ where
             epoch: current_epoch,
             poly: current_public.clone(),
             share: current_share.clone(),
-            participants: dealers.clone(),
+            dealers: dealers.clone(),
         };
         orchestrator
             .report(orchestrator::Message::Enter(transition))
+            .await;
+
+        // Register the initial set of peers.
+        self.manager
+            .update(
+                current_epoch,
+                dealers.clone().into_iter().collect::<Ordered<_>>(),
+            )
+            .await;
+        self.manager
+            .update(
+                current_epoch + 1,
+                players.clone().into_iter().collect::<Ordered<_>>(),
+            )
             .await;
 
         // Initialize the DKG manager for the first round.
@@ -306,18 +325,18 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
-                        let (next_participants, next_public, next_share, success) =
+                        let (next_dealers, next_public, next_share, success) =
                             match manager.finalize(epoch).await {
                                 (
-                                    next_participants,
+                                    next_dealers,
                                     RoundResult::Output(Output { public, share }),
                                     success,
-                                ) => (next_participants, Some(public), Some(share), success),
-                                (next_participants, RoundResult::Polynomial(public), success) => {
-                                    (next_participants, Some(public), None, success)
+                                ) => (next_dealers, Some(public), Some(share), success),
+                                (next_dealers, RoundResult::Polynomial(public), success) => {
+                                    (next_dealers, Some(public), None, success)
                                 }
-                                (next_participants, RoundResult::None, success) => {
-                                    (next_participants, None, None, success)
+                                (next_dealers, RoundResult::None, success) => {
+                                    (next_dealers, None, None, success)
                                 }
                             };
 
@@ -383,7 +402,7 @@ where
                         let next_players = if is_dkg {
                             // Use the same set of participants for DKG - if we enter a new epoch,
                             // the DKG failed, and we do not want to change the set of participants.
-                            next_participants.clone()
+                            next_dealers.clone()
                         } else {
                             // Pseudorandomly select some random players to receive shares for the next epoch.
                             Self::choose_from_all(
@@ -395,12 +414,17 @@ where
                             .collect::<Ordered<_>>()
                         };
 
+                        // Register the players for the next epoch + 1
+                        self.manager
+                            .update(next_epoch + 1, next_players.clone())
+                            .await;
+
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                             epoch: next_epoch,
                             poly: next_public.clone(),
                             share: next_share.clone(),
-                            participants: next_participants.clone(),
+                            dealers: next_dealers.clone(),
                         };
                         orchestrator
                             .report(orchestrator::Message::Enter(transition))
@@ -414,7 +438,7 @@ where
                             next_public,
                             next_share,
                             &mut self.signer,
-                            next_participants,
+                            next_dealers,
                             next_players,
                             &mut dkg_mux,
                             self.rate_limit,

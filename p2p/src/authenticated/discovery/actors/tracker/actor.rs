@@ -14,7 +14,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{union, SystemTimeExt};
+use commonware_utils::{set::Ordered, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
@@ -48,6 +48,10 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
+
+    /// Subscribers to peer set updates.
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -106,6 +110,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 directory,
+                subscribers: Vec::new(),
             },
             mailbox,
             oracle,
@@ -134,8 +139,34 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let len = peers.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
+                self.directory.add_set(index, peers.clone());
 
-                self.directory.add_set(index, peers);
+                // Notify all subscribers about the new peer set
+                self.subscribers.retain(|subscriber| {
+                    subscriber
+                        .unbounded_send((index, peers.clone(), self.directory.tracked()))
+                        .is_ok()
+                });
+            }
+            Message::PeerSet { index, responder } => {
+                // Send the peer set at the given index.
+                let _ = responder.send(self.directory.get_set(&index).cloned());
+            }
+            Message::Subscribe { responder } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded();
+
+                // Send the latest peer set immediately
+                if let Some(latest_set_id) = self.directory.latest_set_index() {
+                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    sender
+                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
+                        .ok();
+                }
+                self.subscribers.push(sender);
+
+                // Return the receiver to the caller
+                let _ = responder.send(receiver);
             }
             Message::Connect {
                 public_key,
@@ -241,6 +272,7 @@ mod tests {
             Mailbox,
         },
         Blocker,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
@@ -383,7 +415,7 @@ mod tests {
             let too_many_peers: Ordered<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .collect();
-            oracle.register(0, too_many_peers).await;
+            oracle.update(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
             let _ = mailbox.dialable().await;
         });
@@ -433,7 +465,7 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .register(0, Ordered::from([tracker_pk.clone(), auth_pk.clone()]))
+                .update(0, Ordered::from([tracker_pk.clone(), auth_pk.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -502,7 +534,7 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, Ordered::from([tracker_pk, pk1.clone()]))
+                .update(0, Ordered::from([tracker_pk, pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -542,7 +574,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -576,7 +608,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -625,7 +657,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
+                .update(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -641,7 +673,7 @@ mod tests {
             );
 
             let set1 = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
-            oracle.register(1, set1.clone()).await;
+            oracle.update(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
@@ -697,7 +729,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             let peer_set_0_peers = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
-            oracle.register(0, peer_set_0_peers.clone()).await;
+            oracle.update(0, peer_set_0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let pk2_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 2002);
@@ -777,7 +809,7 @@ mod tests {
             assert!(!mailbox.listenable(peer_pk3.clone()).await);
 
             oracle
-                .register(0, Ordered::from([peer_pk.clone(), peer_pk2.clone()]))
+                .update(0, Ordered::from([peer_pk.clone(), peer_pk2.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -806,7 +838,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.register(0, Ordered::from([peer_pk.clone()])).await;
+            oracle.update(0, Ordered::from([peer_pk.clone()])).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.listenable(peer_pk.clone()).await);
@@ -890,7 +922,7 @@ mod tests {
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
             oracle
-                .register(0, Ordered::from([tracker_pk, pk1.clone(), pk2.clone()]))
+                .update(0, Ordered::from([tracker_pk, pk1.clone(), pk2.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -935,7 +967,7 @@ mod tests {
             // --- Register set 0, then Construct for authorized peer1 ---
             let set0_peers =
                 Ordered::from([tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]);
-            oracle.register(0, set0_peers.clone()).await;
+            oracle.update(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let _r1 =
@@ -1004,11 +1036,11 @@ mod tests {
             // --- Set eviction and peer killing ---
             let (_peer3_s, peer3_pk) = new_signer_and_pk(3);
             let set1_peers = Ordered::from([tracker_pk.clone(), peer2_pk.clone()]); // New set without peer1
-            oracle.register(1, set1_peers.clone()).await;
+            oracle.update(1, set1_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let set2_peers = Ordered::from([tracker_pk.clone(), peer3_pk.clone()]); // Another new set without peer1
-            oracle.register(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
+            oracle.update(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
             context.sleep(Duration::from_millis(10)).await;
 
             // Peer1 was only in set 0, which is now evicted.

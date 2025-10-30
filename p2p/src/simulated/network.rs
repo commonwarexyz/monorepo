@@ -15,6 +15,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
+use commonware_utils::set::Ordered;
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
@@ -28,7 +29,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, trace};
+use tracing::{debug, error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -42,6 +43,13 @@ pub struct Config {
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
+
+    /// The maximum number of peer sets to track. When a new peer set is registered and this
+    /// limit is exceeded, the oldest peer set is removed. Peers that are no longer in any
+    /// tracked peer set will have their links removed and messages to them will be dropped.
+    ///
+    /// If [None], peer sets are not considered.
+    pub tracked_peer_sets: Option<usize>,
 }
 
 /// Implementation of a simulated network.
@@ -75,11 +83,24 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
+    // Peer sets indexed by their ID
+    peer_sets: BTreeMap<u64, Ordered<P>>,
+
+    // Reference count for each peer (number of peer sets they belong to)
+    peer_refs: BTreeMap<P, usize>,
+
+    // Maximum number of peer sets to track
+    tracked_peer_sets: Option<usize>,
+
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
     // State of the transmitter
     transmitter: transmitter::State<P>,
+
+    // Subscribers to peer set updates
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -110,14 +131,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
+                tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
                 sender,
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
+                peer_sets: BTreeMap::new(),
+                peer_refs: BTreeMap::new(),
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
+                subscribers: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -169,9 +194,77 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
+            ingress::Message::Update { peer_set, peers } => {
+                let Some(tracked_peer_sets) = self.tracked_peer_sets else {
+                    warn!("attempted to register peer set when tracking is disabled");
+                    return;
+                };
+
+                // Check if peer set already exists
+                if self.peer_sets.contains_key(&peer_set) {
+                    warn!(index = peer_set, "peer set already exists");
+                    return;
+                }
+
+                // Ensure that peer set is monotonically increasing
+                if let Some((last, _)) = self.peer_sets.last_key_value() {
+                    if peer_set <= *last {
+                        warn!(
+                            new_id = peer_set,
+                            old_id = last,
+                            "attempted to register peer set with non-monotonically increasing ID"
+                        );
+                        return;
+                    }
+                }
+
+                // Create and store new peer set
+                for public_key in peers.iter() {
+                    // Create peer if it doesn't exist
+                    if !self.peers.contains_key(public_key) {
+                        let peer = Peer::new(
+                            self.context.with_label("peer"),
+                            public_key.clone(),
+                            self.get_next_socket(),
+                            self.max_size,
+                        );
+                        self.peers.insert(public_key.clone(), peer);
+                    }
+
+                    // Increment reference count
+                    *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
+                }
+                self.peer_sets.insert(peer_set, peers.clone());
+
+                // Remove oldest peer set if we exceed the limit
+                while self.peer_sets.len() > tracked_peer_sets {
+                    let (index, set) = self.peer_sets.pop_first().unwrap();
+                    debug!(index, "removed oldest peer set");
+
+                    // Decrement reference counts and clean up peers/links
+                    for public_key in set.iter() {
+                        let refs = self.peer_refs.get_mut(public_key).unwrap();
+                        *refs = refs.checked_sub(1).expect("reference count underflow");
+
+                        // If peer is no longer in any tracked set, remove it
+                        if *refs == 0 {
+                            self.peer_refs.remove(public_key);
+                            self.peers.remove(public_key);
+
+                            debug!(?public_key, "removed peer no longer in any tracked set");
+                        }
+                    }
+                }
+
+                // Notify all subscribers about the new peer set
+                let all = self.peer_refs.keys().cloned().collect();
+                let notification = (peer_set, peers, all);
+                self.subscribers
+                    .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
+            }
             ingress::Message::Register {
-                public_key,
                 channel,
+                public_key,
                 result,
             } => {
                 // If peer does not exist, then create it.
@@ -201,6 +294,30 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.sender.clone(),
                 );
                 send_result(result, Ok((sender, receiver)))
+            }
+            ingress::Message::PeerSet { index, response } => {
+                if self.peer_sets.is_empty() {
+                    // Return all peers if no peer sets are registered.
+                    let _ = response.send(Some(self.peers.keys().cloned().collect()));
+                } else {
+                    // Return the peer set at the given index
+                    let _ = response.send(self.peer_sets.get(&index).cloned());
+                }
+            }
+            ingress::Message::Subscribe { response } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded();
+
+                // Send the latest peer set upon subscription
+                if let Some((index, peers)) = self.peer_sets.last_key_value() {
+                    let all = self.peer_refs.keys().cloned().collect();
+                    let notification = (*index, peers.clone(), all);
+                    let _ = sender.unbounded_send(notification);
+                }
+                self.subscribers.push(sender);
+
+                // Return the receiver to the caller
+                let _ = response.send(receiver);
             }
             ingress::Message::LimitBandwidth {
                 public_key,
@@ -313,10 +430,29 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
-        // Collect recipients
+        // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
+        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+            warn!(
+                ?origin,
+                reason = "not in tracked peer set",
+                "dropping message"
+            );
+            return;
+        }
+
+        // Collect recipients
         let recipients = match recipients {
-            Recipients::All => self.peers.keys().cloned().collect(),
+            Recipients::All => {
+                // If peer sets have been registered, send only to tracked peers
+                // Otherwise, send to all registered peers (compatibility
+                // with tests that do not register peer sets.)
+                if self.peer_sets.is_empty() {
+                    self.peers.keys().cloned().collect()
+                } else {
+                    self.peer_refs.keys().cloned().collect()
+                }
+            }
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -328,6 +464,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Skip self
             if recipient == origin {
                 trace!(?recipient, reason = "self", "dropping message");
+                continue;
+            }
+
+            // If tracking peer sets, ensure recipient and sender are in a tracked peer set
+            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
+                trace!(
+                    ?origin,
+                    ?recipient,
+                    reason = "not in tracked peer set",
+                    "dropping message"
+                );
                 continue;
             }
 
@@ -753,7 +900,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Receiver as _, Recipients, Sender as _};
+    use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
@@ -766,6 +913,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
@@ -775,15 +923,18 @@ mod tests {
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Register
-            oracle.register(pk1.clone(), 0).await.unwrap();
-            oracle.register(pk1.clone(), 1).await.unwrap();
-            oracle.register(pk2.clone(), 0).await.unwrap();
-            oracle.register(pk2.clone(), 1).await.unwrap();
+            // Register the peer set
+            oracle.update(0, [pk1.clone(), pk2.clone()].into()).await;
+            let mut control = oracle.control(pk1.clone());
+            control.register(0).await.unwrap();
+            control.register(1).await.unwrap();
+            let mut control = oracle.control(pk2.clone());
+            control.register(0).await.unwrap();
+            control.register(1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1.clone(), 1).await,
+                control.register(1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
@@ -811,6 +962,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: None,
         };
         let runner = deterministic::Runner::default();
 
@@ -845,6 +997,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: Some(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -855,8 +1008,16 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
-            let (mut sender, _sender_recv) = oracle.register(sender_pk.clone(), 0).await.unwrap();
-            let (_sender2, mut receiver) = oracle.register(recipient_pk.clone(), 0).await.unwrap();
+            oracle
+                .update(0, [sender_pk.clone(), recipient_pk.clone()].into())
+                .await;
+            let (mut sender, _sender_recv) =
+                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (_sender2, mut receiver) = oracle
+                .control(recipient_pk.clone())
+                .register(0)
+                .await
+                .unwrap();
 
             oracle
                 .limit_bandwidth(sender_pk.clone(), Some(5_000), None)
@@ -907,6 +1068,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
+            tracked_peer_sets: Some(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -918,9 +1080,24 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
-            let (mut sender, _recv_sender) = oracle.register(sender_pk.clone(), 0).await.unwrap();
-            let (_sender2, mut recv_a) = oracle.register(recipient_a.clone(), 0).await.unwrap();
-            let (_sender3, mut recv_b) = oracle.register(recipient_b.clone(), 0).await.unwrap();
+            oracle
+                .update(
+                    0,
+                    [sender_pk.clone(), recipient_a.clone(), recipient_b.clone()].into(),
+                )
+                .await;
+            let (mut sender, _recv_sender) =
+                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (_sender2, mut recv_a) = oracle
+                .control(recipient_a.clone())
+                .register(0)
+                .await
+                .unwrap();
+            let (_sender3, mut recv_b) = oracle
+                .control(recipient_b.clone())
+                .register(0)
+                .await
+                .unwrap();
 
             oracle
                 .limit_bandwidth(sender_pk.clone(), Some(1_000), None)

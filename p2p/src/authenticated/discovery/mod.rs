@@ -122,7 +122,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::discovery::{self, Network}, Sender, Recipients};
+//! use commonware_p2p::{authenticated::discovery::{self, Network}, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
@@ -178,7 +178,7 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3].into()).await;
+//!     oracle.update(0, vec![signer.public_key(), peer1, peer2, peer3].into()).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -225,7 +225,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Receiver, Recipients, Sender};
+    use crate::{Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
@@ -313,7 +313,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, addresses.clone().into()).await;
+            oracle.update(0, addresses.clone().into()).await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -577,16 +577,16 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .register(0, Ordered::from([addresses[0].clone()]))
+                    .update(0, Ordered::from([addresses[0].clone()]))
                     .await;
                 oracle
-                    .register(
+                    .update(
                         1,
                         Ordered::from([addresses[1].clone(), addresses[2].clone()]),
                     )
                     .await;
                 oracle
-                    .register(2, addresses.iter().skip(2).cloned().collect())
+                    .update(2, addresses.iter().skip(2).cloned().collect())
                     .await;
 
                 // Register basic application
@@ -665,7 +665,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, addresses.clone()).await;
+            oracle.update(0, addresses.clone()).await;
 
             // Register basic application
             let (mut sender, _) =
@@ -713,7 +713,7 @@ mod tests {
                 1_024 * 1_024, // 1MB
             );
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
-            oracle0.register(0, addresses.clone().into()).await;
+            oracle0.update(0, addresses.clone().into()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -727,7 +727,7 @@ mod tests {
                 1_024 * 1_024, // 1MB
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
-            oracle1.register(0, addresses.clone().into()).await;
+            oracle1.update(0, addresses.clone().into()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();

@@ -1,23 +1,20 @@
-use crate::{
-    p2p::{Coordinator, Producer},
-    Consumer,
-};
+use crate::{p2p::Producer, Consumer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::utils::requester;
+use commonware_p2p::{utils::requester, Manager};
 use commonware_utils::Span;
 use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
     P: PublicKey,
-    D: Coordinator<PublicKey = P>,
+    D: Manager<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers
-    pub coordinator: D,
+    pub manager: D,
 
     /// The consumer that gets notified when data is available
     pub consumer: Con,

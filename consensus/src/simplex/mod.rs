@@ -319,12 +319,10 @@ mod tests {
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (pending_sender, pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
-                oracle.register(validator.clone(), 2).await.unwrap();
+            let mut control = oracle.control(validator.clone());
+            let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
+            let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (
@@ -411,6 +409,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -657,6 +656,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -838,6 +838,7 @@ mod tests {
                     Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
+                        tracked_peer_sets: None,
                     },
                 );
 
@@ -1005,6 +1006,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -1260,6 +1262,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -1516,6 +1519,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -1694,6 +1698,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -1898,6 +1903,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2098,6 +2104,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2299,6 +2306,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2482,6 +2490,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2648,6 +2657,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2815,6 +2825,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2981,6 +2992,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -3157,6 +3169,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -3314,6 +3327,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -3477,6 +3491,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -3625,6 +3640,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -3815,6 +3831,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
+                    tracked_peer_sets: None,
                 },
             );
 

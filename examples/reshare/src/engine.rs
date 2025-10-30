@@ -15,11 +15,11 @@ use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
     Hasher, Signer,
 };
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{quorum, union, NZUsize, NZU64};
+use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -40,15 +40,17 @@ const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: u64 = 20;
+const MAX_REPAIR: u64 = 50;
 
-pub struct Config<C, B, V>
+pub struct Config<C, P, B, V>
 where
     C: Signer,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
     pub signer: C,
+    pub manager: P,
     pub blocker: B,
     pub namespace: Vec<u8>,
 
@@ -65,10 +67,11 @@ where
     pub freezer_table_initial_size: u32,
 }
 
-pub struct Engine<E, C, B, H, V, S>
+pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -76,8 +79,8 @@ where
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    config: Config<C, B, V>,
-    dkg: dkg::Actor<E, H, C, V>,
+    config: Config<C, P, B, V>,
+    dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     application: application::Actor<E, H, C, V, S>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
@@ -89,17 +92,18 @@ where
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
-impl<E, C, B, H, V, S> Engine<E, C, B, H, V, S>
+impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
     S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, B, V>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
@@ -108,6 +112,7 @@ where
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
+                manager: config.manager.clone(),
                 participant_config: config.participant_config.clone(),
                 namespace: dkg_namespace,
                 signer: config.signer.clone(),

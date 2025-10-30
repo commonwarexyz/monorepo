@@ -12,6 +12,8 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
+use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
@@ -64,6 +66,38 @@ pub trait Receiver: Debug + Send + 'static {
     fn recv(
         &mut self,
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+}
+
+/// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
+pub trait Manager: Debug + Clone + Send + 'static {
+    /// Public key type used to identify peers.
+    type PublicKey: PublicKey;
+
+    /// The type for the peer set in registration.
+    type Peers;
+
+    /// Update the peer set.
+    ///
+    /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+    /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
+    fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
+
+    /// Fetch the ordered set of peers for a given ID.
+    fn peer_set(
+        &mut self,
+        id: u64,
+    ) -> impl Future<Output = Option<Ordered<Self::PublicKey>>> + Send;
+
+    /// Subscribe to notifications when new peer sets are added.
+    ///
+    /// Returns a receiver that will receive the peer set ID whenever a new peer set
+    /// is registered via `update`.
+    #[allow(clippy::type_complexity)]
+    fn subscribe(
+        &mut self,
+    ) -> impl Future<
+        Output = mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)>,
+    > + Send;
 }
 
 /// Interface for blocking other peers.

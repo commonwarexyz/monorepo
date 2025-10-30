@@ -2,7 +2,7 @@ use super::{
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
-    metrics, wire, Coordinator, Producer,
+    metrics, wire, Producer,
 };
 use crate::Consumer;
 use bytes::Bytes;
@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -43,7 +43,7 @@ struct Serve<E: Clock, P: PublicKey> {
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Coordinator<PublicKey = P>,
+    D: Manager<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    coordinator: D,
+    manager: D,
 
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
@@ -94,7 +94,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: Coordinator<PublicKey = P>,
+        D: Manager<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
@@ -121,7 +121,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                coordinator: cfg.coordinator,
+                manager: cfg.manager,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -148,13 +148,10 @@ impl<
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
         let mut shutdown = self.context.stopped();
+        let peer_set_subscription = &mut self.manager.subscribe().await;
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
-
-        // Set initial peer set.
-        self.last_peer_set_id = Some(self.coordinator.peer_set_id());
-        self.fetcher.reconcile(self.coordinator.peers());
 
         loop {
             // Update metrics
@@ -168,13 +165,6 @@ impl<
                 .peers_blocked
                 .set(self.fetcher.len_blocked() as i64);
             self.metrics.serve_processing.set(self.serves.len() as i64);
-
-            // Update peer list if-and-only-if it might have changed.
-            let peer_set_id = self.coordinator.peer_set_id();
-            if self.last_peer_set_id != Some(peer_set_id) {
-                self.last_peer_set_id = Some(peer_set_id);
-                self.fetcher.reconcile(self.coordinator.peers());
-            }
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
@@ -194,6 +184,21 @@ impl<
                     debug!("shutdown");
                     self.serves.cancel_all();
                     return;
+                },
+
+                // Handle peer set updates
+                peer_set_update = peer_set_subscription.next() => {
+                    let Some((id, _, all)) = peer_set_update else {
+                        debug!("peer set subscription closed");
+                        return;
+                    };
+
+                    // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
+                    // reconcile with all tracked peers).
+                    if self.last_peer_set_id < Some(id) {
+                        self.last_peer_set_id = Some(id);
+                        self.fetcher.reconcile(all.as_ref());
+                    }
                 },
 
                 // Handle mailbox messages

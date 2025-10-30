@@ -6,7 +6,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated::discovery, Receiver, Recipients, Sender};
+use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, set::Ordered, union, NZU32};
 use futures::future::try_join_all;
@@ -124,7 +124,7 @@ fn main() {
             discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.register(0, peer_keys.clone()).await;
+        oracle.update(0, peer_keys.clone()).await;
 
         // Register flood channel
         let (mut flood_sender, mut flood_receiver) = network.register(

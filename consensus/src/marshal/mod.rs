@@ -109,8 +109,8 @@ mod tests {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::requester,
+        Manager,
     };
-    use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
@@ -166,7 +166,6 @@ mod tests {
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<K>,
-        coordinator: p2p::mocks::Coordinator<K>,
         validator: K,
         scheme_provider: P,
     ) -> (
@@ -196,10 +195,11 @@ mod tests {
         };
 
         // Create the resolver
-        let backfill = oracle.register(validator.clone(), 1).await.unwrap();
+        let mut control = oracle.control(validator.clone());
+        let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            coordinator,
+            manager: oracle.clone(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -222,7 +222,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(validator, 2).await.unwrap();
+        let network = control.register(2).await.unwrap();
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
@@ -258,12 +258,16 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
-    fn setup_network(context: deterministic::Context) -> Oracle<K> {
+    fn setup_network(
+        context: deterministic::Context,
+        tracked_peer_sets: Option<usize>,
+    ) -> Oracle<K> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
+                tracked_peer_sets,
             },
         );
         network.start();
@@ -313,7 +317,7 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(300))),
         );
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), Some(3));
             let Fixture {
                 participants,
                 schemes,
@@ -324,11 +328,12 @@ mod tests {
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
 
+            // Register the initial peer set.
+            oracle.update(0, participants.clone().into()).await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -424,7 +429,7 @@ mod tests {
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -436,7 +441,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(vec![]),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -476,7 +480,7 @@ mod tests {
     fn test_subscribe_multiple_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -488,7 +492,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -548,7 +551,7 @@ mod tests {
     fn test_subscribe_canceled_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -560,7 +563,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -612,7 +614,7 @@ mod tests {
     fn test_subscribe_blocks_from_different_sources() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -624,7 +626,6 @@ mod tests {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    p2p::mocks::Coordinator::new(participants.clone()),
                     validator.clone(),
                     schemes[i].clone().into(),
                 )
@@ -714,7 +715,7 @@ mod tests {
     fn test_get_info_basic_queries_present_and_missing() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -726,7 +727,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -775,7 +775,7 @@ mod tests {
     fn test_get_info_latest_progression_multiple_finalizations() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -787,7 +787,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -852,7 +851,7 @@ mod tests {
     fn test_get_block_by_height_and_latest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -863,7 +862,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
@@ -910,7 +908,7 @@ mod tests {
     fn test_get_block_by_commitment_from_sources_and_missing() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -921,7 +919,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(participants),
                 me,
                 schemes[0].clone().into(),
             )
@@ -969,7 +966,7 @@ mod tests {
     fn test_get_finalization_by_height() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -980,7 +977,6 @@ mod tests {
             let (_application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
                 me,
                 schemes[0].clone().into(),
             )
