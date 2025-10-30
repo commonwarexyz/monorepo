@@ -115,32 +115,70 @@ pub fn ed25519_fixture_twins<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Sche
 where
     R: RngCore + CryptoRng,
 {
-    assert!(n > 0);
+    assert_eq!(n, 4, "twins test requires exactly 4 nodes");
 
-    let mut ed25519_keys: Vec<_> = (0..n)
-        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-        .collect();
-    ed25519_keys.sort_by_key(|k| k.public_key());
+    // Register participants with Twins approach
+    // Nodes 0,1,2,3 have normal keys, node 4 is a twin of node 3
+    let mut schemes = Vec::new();
+    let mut validators = Vec::new();
+    let mut ed25519_keys = Vec::new();
 
+    // Create nodes 0,1,2,3 normally
+    for i in 0..4 {
+        let scheme = ed25519::PrivateKey::from_seed(i as u64);
+        let pk = scheme.public_key();
+        ed25519_keys.push(scheme.clone());
+        validators.push(pk);
+        println!("node {}: private key {:?} public key {:?}", i, scheme, scheme.public_key());
+    }
 
-    let twin_key = ed25519::PrivateKey::from_seed((n - 1) as u64);
-    let twin_registration_key = ed25519::PrivateKey::from_seed((n as u64 - 1) + 0xffffffffffffffed);
+    // Create node 4 as a twin of node 3
+    // It uses the same private key as node 3 but needs a different public key for registration
+    let twin_scheme = ed25519::PrivateKey::from_seed(3_u64); // Same seed as node 3
+    // For registration, we need a unique public key for the twin
+    // We'll use a different seed just for generating a unique validator ID
+    let twin_registration_key = ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
     let twin_validator_id = twin_registration_key.public_key();
 
-    let mut ed25519_public = ed25519_keys
-        .iter()
-        .map(|k| k.public_key())
-        .collect::<Vec<_>>();
+    println!("private key for seed 3 twin validator id: {:?}", ed25519::PrivateKey::from_seed(3_u64));
+    println!("pub key for seed 3 twin validator id: {:?}", ed25519::PrivateKey::from_seed(3_u64).public_key());
+    println!("twin validator private key: {:?}", twin_scheme);
+    println!("twin validator public key: {:?}", twin_registration_key.public_key());
+    println!("---");
 
-    ed25519_keys.push(twin_key);
-    ed25519_public.push(twin_validator_id);
+    ed25519_keys.push(twin_scheme.clone());
+    //validators.sort();
+    validators.push(twin_validator_id);
 
-    let schemes = ed25519_keys
-        .iter()
-        .cloned()
-        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
-        .collect();
+    assert_eq!(ed25519_keys[3], ed25519_keys[4], "twins private keys are the same");
+
+    // The consensus participants should be the 4 original nodes (not including twin ID)
+    // Get the original public keys for nodes 0,1,2,3
+    let mut ed25519_public = Vec::new();
+    for i in 0..4 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
+    ed25519_public.sort();
+
+    // Create schemes for all 5 nodes
+    for i in 0..4 {
+        schemes.push(ed_scheme::Scheme::new(ed25519_public.clone(), ed25519::PrivateKey::from_seed(i as u64)));
+    }
+
+    println!("ed25519_public {:?}", ed25519_public);
+    
+    // Twin uses new_twins constructor to sign as node 3
+    let node3_public_key = ed25519::PrivateKey::from_seed(3_u64).public_key();
+    let node3_index = ed25519_public.iter().position(|pk| *pk == node3_public_key).expect("node 3 must be in participants") as u32;
+    
+    schemes.push(ed_scheme::Scheme::new_twins(
+        ed25519_public.clone(), 
+        Some((node3_index, twin_scheme))
+    ));
+
+    println!("schemes {:?}", schemes);
+
     let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 
-    (ed25519_keys, ed25519_public, schemes, verifier)
+    (ed25519_keys, validators, schemes, verifier)
 }

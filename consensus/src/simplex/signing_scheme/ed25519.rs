@@ -43,6 +43,15 @@ impl Scheme {
         }
     }
 
+    pub fn new_twins(participants: impl Into<Participants<PublicKey>>, signer: Option<(u32, PrivateKey)>) -> Self {
+        let participants = participants.into();
+
+        Self {
+            participants,
+            signer,
+        }
+    }
+
     /// Builds a pure verifier that can authenticate votes without signing.
     pub fn verifier(participants: impl Into<Participants<PublicKey>>) -> Self {
         Self {

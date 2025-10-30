@@ -91,6 +91,10 @@ impl<
 
     async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
         // Check if sender is a participant
+        println!("----");
+        println!("Participants: {:?} ", self.participants);
+        println!("sender: {:?} exist {:?}", sender, self.participants.index(&sender).is_some());
+
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
@@ -107,6 +111,7 @@ impl<
 
                 // Verify sender is signer
                 if index != notarize.signer() {
+                    println!("Nullify: not a signer index {:?} != {:?}", index, notarize.signer());
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
@@ -143,6 +148,7 @@ impl<
 
                 // Verify sender is signer
                 if index != nullify.signer() {
+                    println!("Nullify: not a signer index {:?} != {:?}", index, nullify.signer());
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;

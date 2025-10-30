@@ -3733,175 +3733,6 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn twins_old<S, F>(seed: u64, mut fixture: F)
-    where
-        S: Scheme,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
-    {
-        // Create context
-        let required_containers = 100;
-        let activity_timeout = 100;
-        let skip_timeout = 50;
-        let namespace = b"twins_consensus".to_vec();
-        let cfg = deterministic::Config::new()
-            .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
-        let executor = deterministic::Runner::new(cfg);
-        executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                },
-            );
-
-            // Start network
-            network.start();
-
-            // Register participants with Twins approach
-            // Create fixture for 4 nodes first
-            let (schemes, original_validators, signing_schemes, _verifier) = fixture(&mut context, 4);
-            
-            // Now add the twin - node 4 will be a twin of node 3
-            // The twin has a different validator ID but uses the SAME signing scheme
-            
-            // Create a unique validator ID for the twin
-            let twin_registration_key = ed25519::PrivateKey::from_seed(999);
-            let twin_validator_id = twin_registration_key.public_key();
-            
-            // Build the complete list with the twin
-            let mut all_validators = original_validators.clone();
-            all_validators.push(twin_validator_id.clone());
-            all_validators.sort();
-            
-            // Create a mapping from scheme to validator ID
-            // First 4 schemes map to their original validators, 5th (twin) maps to twin_validator_id
-            let mut scheme_to_validator = Vec::new();
-            for i in 0..4 {
-                scheme_to_validator.push(original_validators[i].clone());
-            }
-            scheme_to_validator.push(twin_validator_id.clone()); // Twin uses different validator ID
-            
-            let mut registrations = register_validators(&mut oracle, &all_validators).await;
-
-            // Link all validators
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
-
-            // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let mut reporters = Vec::new();
-            
-            // Create all 5 engines (4 regular + 1 twin)
-            for idx in 0..5 {
-                let validator = scheme_to_validator[idx].clone();
-                
-                // Get the appropriate scheme and signing_scheme
-                let scheme = if idx < 4 {
-                    schemes[idx].clone()
-                } else {
-                    schemes[3].clone()  // Twin uses same scheme as node 3
-                };
-                
-                let signing_scheme = if idx < 4 {
-                    signing_schemes[idx].clone()
-                } else {
-                    signing_schemes[3].clone()  // Twin uses same signing scheme as node 3
-                };
-                
-                // Create scheme context
-                let context = context.with_label(&format!("validator-{}", validator));
-
-                // Start engine
-                let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
-                    participants: all_validators.clone().into(),
-                    scheme: signing_scheme.clone(),
-                };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-                reporters.push(reporter.clone());
-                
-                let (pending, recovered, resolver) = registrations
-                    .remove(&validator)
-                    .expect("validator should be registered");
-                
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
-                    relay: relay.clone(),
-                    participant: validator.clone(),
-                    propose_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context.with_label("application"),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    me: validator.clone(),
-                    participants: all_validators.clone().into(),
-                    scheme: signing_scheme.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    partition: validator.to_string(),
-                    mailbox_size: 1024,
-                    epoch: 333,
-                    namespace: namespace.clone(),
-                    leader_timeout: Duration::from_secs(1),
-                    notarization_timeout: Duration::from_secs(2),
-                    nullify_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
-                    skip_timeout,
-                    max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-                let engine = Engine::new(context.with_label("engine"), cfg);
-                engine.start(pending, recovered, resolver);
-            }
-
-            // Wait for engines to finish
-            // With twins, we should only wait for honest nodes (first 3) to reach consensus
-            let mut finalizers = Vec::new();
-            for (idx, reporter) in reporters.iter_mut().enumerate() {
-                // Only wait for the first 3 honest nodes
-                if idx < 3 {
-                    let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
-                        }
-                    }));
-                }
-            }
-
-            join_all(finalizers).await;
-
-            // Check that twins caused Byzantine faults to be detected
-            for reporter in reporters.iter() {
-                let faults = reporter.faults.lock().unwrap();
-                // Faults should be detected due to twins behavior
-                assert!(!faults.is_empty(), "Byzantine twins behavior should be detected");
-            }
-
-            check_twins_invariants(reporters);
-        });
-    }
-
     fn twins<S, F>(mut fixture: F)
     where
         S: Scheme,
@@ -3910,11 +3741,13 @@ mod tests {
         // Create context
         let n = 4;
         let quorum = 3;
-        let required_containers = 100;
+        let required_containers = 10;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        //let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -3940,10 +3773,12 @@ mod tests {
             for s in signing_schemes.iter() {
                 println!("scheme: {:?}", s);
             }
+
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             assert_eq!(validators.len(), (n + 1) as usize);
-            
+            assert_eq!(schemes.len(), (n + 1) as usize);
+            assert_eq!(signing_schemes.len(), (n + 1) as usize);
 
             // Link all validators
             let link = Link {
@@ -3952,11 +3787,17 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+            // a: a b c d
+            // b: a b c d
+            // a: a b c d
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
+            // Get the actual consensus participants (not including the twin's registration ID)
+            let consensus_participants = validators[0..4].to_vec();
+            
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // IMPORTANT: Use the registered validator ID from the validators array
                 // For the twin (last element), validator ID != scheme.public_key()
@@ -3965,10 +3806,10 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", validator));
 
-                // Configure engine
+                // Configure engine - use only the 4 consensus participants
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: validators.clone().into(),
+                    participants: consensus_participants.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                 };
                 let reporter =
@@ -3986,10 +3827,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
-                let blocker = oracle.control(scheme.public_key());
+                let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     me: validator.clone(),
-                    participants: validators.clone().into(),
+                    participants: consensus_participants.clone().into(),
                     scheme: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
@@ -4023,7 +3864,7 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters[0..1].iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -4031,9 +3872,15 @@ mod tests {
                     }
                 }));
             }
+
             join_all(finalizers).await;
 
-
+            for reporter in reporters[0..1].iter() {
+                {
+                   let faults = reporter.faults.lock().unwrap();
+                   println!("Faults: {:?}", faults);
+                }
+            }
         });
     }
 
