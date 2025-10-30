@@ -137,7 +137,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded();
 
-                // Send the current peer sets immediately
+                // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
                     sender.unbounded_send((latest_set_id, latest_set)).ok();
