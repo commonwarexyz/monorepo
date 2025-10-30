@@ -204,7 +204,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -322,7 +322,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -364,7 +364,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -403,7 +403,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -430,7 +430,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -471,7 +471,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -548,7 +548,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -602,7 +602,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -675,7 +675,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -864,7 +864,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -957,7 +957,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1108,7 +1108,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1167,7 +1167,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1274,7 +1274,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1358,7 +1358,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1443,7 +1443,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1534,7 +1534,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1675,7 +1675,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1771,7 +1771,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1869,7 +1869,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -1960,7 +1960,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -2036,7 +2036,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
