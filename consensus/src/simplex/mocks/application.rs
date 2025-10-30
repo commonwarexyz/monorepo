@@ -137,6 +137,14 @@ enum Waiter<D: Digest> {
     Certify(Context<D>, oneshot::Sender<bool>),
 }
 
+pub fn certify_all<D: Digest>(_: Context<D>) -> bool {
+    true
+}
+
+pub fn certify_some<D: Digest>(context: Context<D>) -> bool {
+    (context.round.view() % 11) < 9
+}
+
 pub struct Config<H: Hasher, P: PublicKey, CertFn: Fn(Context<H::Digest>) -> bool + Send + 'static>
 {
     pub hasher: H,

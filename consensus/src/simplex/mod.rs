@@ -279,7 +279,9 @@ mod tests {
             primitives::variant::{MinPk, MinSig, Variant},
             tle::{decrypt, encrypt, Block},
         },
-        ed25519, sha256, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        ed25519,
+        sha256::Digest,
+        PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -288,6 +290,7 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
+    use mocks::application::{certify_all, certify_some};
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::HashMap,
@@ -297,6 +300,8 @@ mod tests {
     };
     use tracing::{debug, warn};
     use types::Activity;
+
+    type CertifyFn = fn(Context<Digest>) -> bool;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -387,7 +392,47 @@ mod tests {
         }
     }
 
-    fn all_online<S, F>(mut fixture: F)
+    // Run the given runner for all schemes and certification functions.
+    // Creates a matrix of tests for all combinations of schemes and certification functions.
+    macro_rules! scheme_cert_matrix {
+        ($runner:ident) => {
+            mod $runner {
+                use super::*;
+
+                macro_rules! scheme {
+                    ($modname:ident, $fixture:expr) => {
+                        mod $modname {
+                            use super::*;
+                            #[test_traced]
+                            fn cert_all() {
+                                super::$runner(
+                                    $fixture,
+                                    certify_all::<commonware_cryptography::sha256::Digest>
+                                        as CertifyFn,
+                                );
+                            }
+                            #[test_traced]
+                            fn cert_some() {
+                                super::$runner(
+                                    $fixture,
+                                    certify_some::<commonware_cryptography::sha256::Digest>
+                                        as CertifyFn,
+                                );
+                            }
+                        }
+                    };
+                }
+
+                scheme!(bls_threshold_minpk, bls12381_threshold::<MinPk, _>);
+                scheme!(bls_threshold_minsig, bls12381_threshold::<MinSig, _>);
+                scheme!(bls_multisig_minpk, bls12381_multisig::<MinPk, _>);
+                scheme!(bls_multisig_minsig, bls12381_multisig::<MinSig, _>);
+                scheme!(ed25519_scheme, ed25519);
+            }
+        };
+    }
+
+    fn all_online<S, F>(mut fixture: F, should_certify: CertifyFn)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -453,7 +498,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: |context| (context.round.view() % 11) < 9,
+                    should_certify,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -627,14 +672,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_all_online() {
-        all_online(bls12381_threshold::<MinPk, _>);
-        all_online(bls12381_threshold::<MinSig, _>);
-        all_online(bls12381_multisig::<MinPk, _>);
-        all_online(bls12381_multisig::<MinSig, _>);
-        all_online(ed25519);
-    }
+    scheme_cert_matrix!(all_online);
 
     fn observer<S, F>(mut fixture: F)
     where
@@ -1567,8 +1605,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let should_certify =
-                    |context: Context<sha256::Digest>| (context.round.view() % 11) < 9;
+                let should_certify = |context: Context<Digest>| (context.round.view() % 11) < 9;
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
                         hasher: Sha256::default(),
