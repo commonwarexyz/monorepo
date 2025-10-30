@@ -426,8 +426,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
-        // Collect recipients
+        // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
+        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+            warn!(
+                ?origin,
+                reason = "not in tracked peer set",
+                "dropping message"
+            );
+            return;
+        }
+
+        // Collect recipients
         let recipients = match recipients {
             Recipients::All => {
                 // If peer sets have been registered, send only to tracked peers
@@ -453,8 +463,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // Check if recipient is in any tracked peer set (only if peer sets have been registered)
-            if !self.peer_sets.is_empty() && !self.peer_refs.contains_key(&recipient) {
+            // If tracking peer sets, ensure recipient and sender are in a tracked peer set
+            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
                 trace!(
                     ?origin,
                     ?recipient,
