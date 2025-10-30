@@ -87,7 +87,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     peer_sets: BTreeMap<u64, Ordered<P>>,
 
     // Reference count for each peer (number of peer sets they belong to)
-    peer_refs: HashMap<P, usize>,
+    peer_refs: BTreeMap<P, usize>,
 
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
@@ -99,7 +99,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     transmitter: transmitter::State<P>,
 
     // Subscribers to peer set updates
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>)>>,
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -138,7 +139,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
-                peer_refs: HashMap::new(),
+                peer_refs: BTreeMap::new(),
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -193,7 +194,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
-            ingress::Message::Register { peer_set, peers } => {
+            ingress::Message::Update { peer_set, peers } => {
                 let Some(tracked_peer_sets) = self.tracked_peer_sets else {
                     warn!("attempted to register peer set when tracking is disabled");
                     return;
@@ -256,11 +257,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Notify all subscribers about the new peer set
-                let notification = (peer_set, peers);
+                let all = self.peer_refs.keys().cloned().collect();
+                let notification = (peer_set, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
             }
-            ingress::Message::RegisterComms {
+            ingress::Message::Register {
                 channel,
                 public_key,
                 result,
@@ -308,7 +310,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
-                    let notification = (*index, peers.clone());
+                    let all = self.peer_refs.keys().cloned().collect();
+                    let notification = (*index, peers.clone(), all);
                     let _ = sender.unbounded_send(notification);
                 }
 
@@ -426,8 +429,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
-        // Collect recipients
+        // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
+        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+            warn!(
+                ?origin,
+                reason = "not in tracked peer set",
+                "dropping message"
+            );
+            return;
+        }
+
+        // Collect recipients
         let recipients = match recipients {
             Recipients::All => {
                 // If peer sets have been registered, send only to tracked peers
@@ -436,10 +449,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if self.peer_sets.is_empty() {
                     self.peers.keys().cloned().collect()
                 } else {
-                    // Sort keys for deterministic ordering (peer_refs is a HashMap)
-                    let mut keys: Vec<_> = self.peer_refs.keys().cloned().collect();
-                    keys.sort();
-                    keys
+                    self.peer_refs.keys().cloned().collect()
                 }
             }
             Recipients::Some(keys) => keys,
@@ -456,8 +466,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // Check if recipient is in any tracked peer set (only if peer sets have been registered)
-            if !self.peer_sets.is_empty() && !self.peer_refs.contains_key(&recipient) {
+            // If tracking peer sets, ensure recipient and sender are in a tracked peer set
+            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
                 trace!(
                     ?origin,
                     ?recipient,
@@ -889,7 +899,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PeerSetManager, Receiver as _, Recipients, Sender as _};
+    use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};

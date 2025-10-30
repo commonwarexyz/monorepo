@@ -10,11 +10,11 @@ use rand_distr::Normal;
 use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
-    Register {
+    Update {
         peer_set: u64,
         peers: Ordered<P>,
     },
-    RegisterComms {
+    Register {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
@@ -25,7 +25,8 @@ pub enum Message<P: PublicKey> {
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     Subscribe {
-        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>)>>,
+        #[allow(clippy::type_complexity)]
+        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -186,13 +187,13 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
-impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
+impl<P: PublicKey> crate::Manager for Oracle<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 
     async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
         self.sender
-            .send(Message::Register { peer_set, peers })
+            .send(Message::Update { peer_set, peers })
             .await
             .unwrap();
     }
@@ -209,7 +210,9 @@ impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
         receiver.await.unwrap()
     }
 
-    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)> {
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe { response: sender })
@@ -234,7 +237,7 @@ impl<P: PublicKey> Control<P> {
     pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(Message::RegisterComms {
+            .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
                 result: tx,

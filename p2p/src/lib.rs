@@ -69,7 +69,7 @@ pub trait Receiver: Debug + Send + 'static {
 }
 
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
-pub trait PeerSetManager: Debug + Clone + Send + 'static {
+pub trait Manager: Debug + Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;
 
@@ -92,9 +92,12 @@ pub trait PeerSetManager: Debug + Clone + Send + 'static {
     ///
     /// Returns a receiver that will receive the peer set ID whenever a new peer set
     /// is registered via `update`.
+    #[allow(clippy::type_complexity)]
     fn subscribe(
         &mut self,
-    ) -> impl Future<Output = mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)>> + Send;
+    ) -> impl Future<
+        Output = mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)>,
+    > + Send;
 }
 
 /// Interface for blocking other peers.

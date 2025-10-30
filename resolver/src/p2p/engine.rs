@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    PeerSetManager, Receiver, Recipients, Sender,
+    Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -43,7 +43,7 @@ struct Serve<E: Clock, P: PublicKey> {
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: PeerSetManager<PublicKey = P>,
+    D: Manager<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -94,7 +94,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: PeerSetManager<PublicKey = P>,
+        D: Manager<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
@@ -188,14 +188,16 @@ impl<
 
                 // Handle peer set updates
                 peer_set_update = peer_set_subscription.next() => {
-                    let Some((id, set)) = peer_set_update else {
+                    let Some((id, _, all)) = peer_set_update else {
                         debug!("peer set subscription closed");
                         return;
                     };
 
+                    // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
+                    // reconcile with all tracked peers).
                     if self.last_peer_set_id < Some(id) {
                         self.last_peer_set_id = Some(id);
-                        self.fetcher.reconcile(set.as_ref());
+                        self.fetcher.reconcile(all.as_ref());
                     }
                 },
 

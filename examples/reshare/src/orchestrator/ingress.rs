@@ -18,12 +18,12 @@ pub enum Message<V: Variant, P: PublicKey> {
 pub struct EpochTransition<V: Variant, P: PublicKey> {
     /// The epoch to transition to.
     pub epoch: Epoch,
-    /// The new public polynomial for the epoch.
+    /// The public polynomial for the epoch.
     pub poly: Option<Public<V>>,
     /// The share for the local participant for the epoch, if participating.
     pub share: Option<group::Share>,
-    /// The new participants for the epoch.
-    pub participants: Ordered<P>,
+    /// The dealers for the epoch.
+    pub dealers: Ordered<P>,
 }
 
 /// Inbound communication channel for epoch transitions.

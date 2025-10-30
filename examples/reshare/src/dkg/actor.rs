@@ -17,7 +17,7 @@ use commonware_cryptography::{
     },
     Hasher, Signer,
 };
-use commonware_p2p::{utils::mux::Muxer, PeerSetManager, Receiver, Sender};
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
@@ -40,7 +40,7 @@ use tracing::info;
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
 pub struct Config<C, P> {
-    pub peer_set_manager: P,
+    pub manager: P,
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
@@ -54,13 +54,13 @@ pub struct Config<C, P> {
 pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
-    peer_set_manager: P,
+    manager: P,
     participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
@@ -75,7 +75,7 @@ where
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -119,7 +119,7 @@ where
         (
             Self {
                 context,
-                peer_set_manager: config.peer_set_manager,
+                manager: config.manager,
                 participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
@@ -215,26 +215,24 @@ where
             epoch: current_epoch,
             poly: current_public.clone(),
             share: current_share.clone(),
-            participants: dealers.clone(),
+            dealers: dealers.clone(),
         };
         orchestrator
             .report(orchestrator::Message::Enter(transition))
             .await;
 
         // Register the initial set of peers.
-        let players_after_next = Self::choose_from_all(
-            &all_participants,
-            self.num_participants_per_epoch,
-            current_epoch + 1,
-        );
-        let next_epoch_peers = dealers
-            .clone()
-            .into_iter()
-            .chain(players.clone())
-            .chain(players_after_next)
-            .collect::<Ordered<_>>();
-        self.peer_set_manager
-            .update(current_epoch, next_epoch_peers)
+        self.manager
+            .update(
+                current_epoch,
+                dealers.clone().into_iter().collect::<Ordered<_>>(),
+            )
+            .await;
+        self.manager
+            .update(
+                current_epoch + 1,
+                players.clone().into_iter().collect::<Ordered<_>>(),
+            )
             .await;
 
         // Initialize the DKG manager for the first round.
@@ -327,18 +325,18 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
-                        let (next_participants, next_public, next_share, success) =
+                        let (next_dealers, next_public, next_share, success) =
                             match manager.finalize(epoch).await {
                                 (
-                                    next_participants,
+                                    next_dealers,
                                     RoundResult::Output(Output { public, share }),
                                     success,
-                                ) => (next_participants, Some(public), Some(share), success),
-                                (next_participants, RoundResult::Polynomial(public), success) => {
-                                    (next_participants, Some(public), None, success)
+                                ) => (next_dealers, Some(public), Some(share), success),
+                                (next_dealers, RoundResult::Polynomial(public), success) => {
+                                    (next_dealers, Some(public), None, success)
                                 }
-                                (next_participants, RoundResult::None, success) => {
-                                    (next_participants, None, None, success)
+                                (next_dealers, RoundResult::None, success) => {
+                                    (next_dealers, None, None, success)
                                 }
                             };
 
@@ -404,7 +402,7 @@ where
                         let next_players = if is_dkg {
                             // Use the same set of participants for DKG - if we enter a new epoch,
                             // the DKG failed, and we do not want to change the set of participants.
-                            next_participants.clone()
+                            next_dealers.clone()
                         } else {
                             // Pseudorandomly select some random players to receive shares for the next epoch.
                             Self::choose_from_all(
@@ -416,23 +414,9 @@ where
                             .collect::<Ordered<_>>()
                         };
 
-                        // Select the players for the epoch after next to allow them to sync two epochs prior
-                        // to their participation.
-                        let next_epoch_players = Self::choose_from_all(
-                            &all_participants,
-                            self.num_participants_per_epoch,
-                            next_epoch + 1,
-                        );
-
-                        // Register the set of peers for the next epoch.
-                        let next_epoch_peers = next_participants
-                            .clone()
-                            .into_iter()
-                            .chain(next_players.clone())
-                            .chain(next_epoch_players)
-                            .collect::<Ordered<_>>();
-                        self.peer_set_manager
-                            .update(next_epoch, next_epoch_peers)
+                        // Register the players for the next epoch + 1
+                        self.manager
+                            .update(next_epoch + 1, next_players.clone())
                             .await;
 
                         // Inform the orchestrator of the epoch transition
@@ -440,7 +424,7 @@ where
                             epoch: next_epoch,
                             poly: next_public.clone(),
                             share: next_share.clone(),
-                            participants: next_participants.clone(),
+                            dealers: next_dealers.clone(),
                         };
                         orchestrator
                             .report(orchestrator::Message::Enter(transition))
@@ -454,7 +438,7 @@ where
                             next_public,
                             next_share,
                             &mut self.signer,
-                            next_participants,
+                            next_dealers,
                             next_players,
                             &mut dkg_mux,
                             self.rate_limit,

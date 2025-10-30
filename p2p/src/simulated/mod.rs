@@ -59,7 +59,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{PeerSetManager, simulated::{Config, Link, Network}};
+//! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use std::time::Duration;
@@ -180,7 +180,7 @@ pub use network::{Config, Network, Receiver, Sender};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PeerSetManager, Receiver, Recipients, Sender};
+    use crate::{Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
@@ -2254,7 +2254,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(2),
                 },
             );
             network.start();
@@ -2273,8 +2273,10 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 1);
+            assert_eq!(peer_set, vec![pk1.clone(), pk2.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone()].into());
 
             // Register second peer set
             oracle
@@ -2282,8 +2284,10 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 2);
+            assert_eq!(peer_set, vec![pk2.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
 
             // Register third peer set
             oracle
@@ -2291,8 +2295,21 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 3);
+            assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
+
+            // Register fourth peer set
+            oracle
+                .update(4, vec![pk1.clone(), pk3.clone()].into())
+                .await;
+
+            // Verify we receive the notification
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            assert_eq!(peer_set_id, 4);
+            assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk3.clone()].into());
         });
     }
 
@@ -2325,9 +2342,9 @@ mod tests {
                 .await;
 
             // Verify all subscriptions receive the notification
-            let (id1, _) = subscription1.next().await.unwrap();
-            let (id2, _) = subscription2.next().await.unwrap();
-            let (id3, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.next().await.unwrap();
+            let (id2, _, _) = subscription2.next().await.unwrap();
+            let (id3, _, _) = subscription3.next().await.unwrap();
 
             assert_eq!(id1, 1);
             assert_eq!(id2, 1);
@@ -2342,8 +2359,8 @@ mod tests {
                 .await;
 
             // Verify remaining subscriptions still receive notifications
-            let (id1, _) = subscription1.next().await.unwrap();
-            let (id3, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.next().await.unwrap();
+            let (id3, _, _) = subscription3.next().await.unwrap();
 
             assert_eq!(id1, 2);
             assert_eq!(id3, 2);

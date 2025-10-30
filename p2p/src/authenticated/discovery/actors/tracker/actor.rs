@@ -50,7 +50,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     directory: Directory<E, C::PublicKey>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>)>>,
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -138,13 +139,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let len = peers.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
-
-                self.directory.add_set(index, peers);
+                self.directory.add_set(index, peers.clone());
 
                 // Notify all subscribers about the new peer set
-                let new_set = self.directory.get_set(&index).cloned().unwrap();
                 self.subscribers.retain(|subscriber| {
-                    subscriber.unbounded_send((index, new_set.clone())).is_ok()
+                    subscriber
+                        .unbounded_send((index, peers.clone(), self.directory.tracked()))
+                        .is_ok()
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -155,10 +156,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded();
 
-                // Send the current peer sets immediately
+                // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.unbounded_send((latest_set_id, latest_set)).ok();
+                    sender
+                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
+                        .ok();
                 }
 
                 self.subscribers.push(sender);
@@ -268,7 +271,7 @@ mod tests {
             Mailbox,
         },
         Blocker,
-        PeerSetManager,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};

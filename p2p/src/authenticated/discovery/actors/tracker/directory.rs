@@ -259,6 +259,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
+    /// Returns all tracked peers.
+    pub fn tracked(&self) -> Ordered<C> {
+        self.peers.keys().cloned().collect()
+    }
+
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<Info<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())

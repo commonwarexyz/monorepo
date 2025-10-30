@@ -1,14 +1,14 @@
 use crate::{p2p::Producer, Consumer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::requester, PeerSetManager};
+use commonware_p2p::{utils::requester, Manager};
 use commonware_utils::Span;
 use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
     P: PublicKey,
-    D: PeerSetManager<PublicKey = P>,
+    D: Manager<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,

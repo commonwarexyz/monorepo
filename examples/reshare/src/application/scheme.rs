@@ -88,7 +88,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
     ) -> Self::Scheme {
         if let Some(share) = transition.share.as_ref() {
             ThresholdScheme::new(
-                transition.participants.clone(),
+                transition.dealers.clone(),
                 transition
                     .poly
                     .as_ref()
@@ -97,7 +97,7 @@ impl<V: Variant> EpochSchemeProvider for SchemeProvider<ThresholdScheme<V>, ed25
             )
         } else {
             ThresholdScheme::verifier(
-                transition.participants.clone(),
+                transition.dealers.clone(),
                 transition
                     .poly
                     .as_ref()
@@ -116,6 +116,6 @@ impl EpochSchemeProvider for SchemeProvider<EdScheme, ed25519::PrivateKey> {
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme {
-        EdScheme::new(transition.participants.clone(), self.signer.clone())
+        EdScheme::new(transition.dealers.clone(), self.signer.clone())
     }
 }

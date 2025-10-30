@@ -109,7 +109,7 @@ mod tests {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::requester,
-        PeerSetManager,
+        Manager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
@@ -258,13 +258,16 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
-    fn setup_network(context: deterministic::Context) -> Oracle<K> {
+    fn setup_network(
+        context: deterministic::Context,
+        tracked_peer_sets: Option<usize>,
+    ) -> Oracle<K> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets,
             },
         );
         network.start();
@@ -314,7 +317,7 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(300))),
         );
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), Some(3));
             let Fixture {
                 participants,
                 schemes,
@@ -426,7 +429,7 @@ mod tests {
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -477,7 +480,7 @@ mod tests {
     fn test_subscribe_multiple_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -548,7 +551,7 @@ mod tests {
     fn test_subscribe_canceled_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -611,7 +614,7 @@ mod tests {
     fn test_subscribe_blocks_from_different_sources() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -712,7 +715,7 @@ mod tests {
     fn test_get_info_basic_queries_present_and_missing() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -772,7 +775,7 @@ mod tests {
     fn test_get_info_latest_progression_multiple_finalizations() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -848,7 +851,7 @@ mod tests {
     fn test_get_block_by_height_and_latest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -905,7 +908,7 @@ mod tests {
     fn test_get_block_by_commitment_from_sources_and_missing() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,
@@ -963,7 +966,7 @@ mod tests {
     fn test_get_finalization_by_height() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
+            let mut oracle = setup_network(context.clone(), None);
             let Fixture {
                 participants,
                 schemes,

@@ -46,7 +46,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>)>>,
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -112,6 +113,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         match msg {
             Message::Register { index, peers } => {
                 // If we are no longer interested in a peer, release them.
+                let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
                 for peer in self.directory.add_set(index, peers) {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
@@ -122,9 +124,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let _ = self.listener.send(self.directory.registered()).await;
 
                 // Notify all subscribers about the new peer set
-                let new_set = self.directory.get_set(&index).cloned().unwrap();
                 self.subscribers.retain(|subscriber| {
-                    subscriber.unbounded_send((index, new_set.clone())).is_ok()
+                    subscriber
+                        .unbounded_send((index, peer_keys.clone(), self.directory.tracked()))
+                        .is_ok()
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -135,10 +138,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded();
 
-                // Send the current peer sets immediately
+                // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.unbounded_send((latest_set_id, latest_set)).ok();
+                    sender
+                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
+                        .ok();
                 }
 
                 self.subscribers.push(sender);
@@ -208,7 +213,7 @@ mod tests {
     use crate::{
         authenticated::lookup::actors::peer,
         Blocker,
-        PeerSetManager,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_cryptography::{

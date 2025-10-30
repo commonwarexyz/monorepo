@@ -192,6 +192,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // ---------- Getters ----------
 
+    /// Returns all tracked peers.
+    pub fn tracked(&self) -> Ordered<C> {
+        self.peers.keys().cloned().collect()
+    }
+
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C) -> bool {
         self.peers
