@@ -1123,6 +1123,11 @@ impl<S: Scheme> Nullify<S> {
             &self.vote,
         )
     }
+
+    /// Returns the round associated with this nullify vote.
+    pub fn round(&self) -> Round {
+        self.round
+    }
 }
 
 impl<S: Scheme> Write for Nullify<S> {
@@ -1192,6 +1197,11 @@ impl<S: Scheme> Nullification<S> {
         let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
         Some(Self { round, certificate })
+    }
+
+    /// Returns the round associated with this nullification.
+    pub fn round(&self) -> Round {
+        self.round
     }
 }
 
