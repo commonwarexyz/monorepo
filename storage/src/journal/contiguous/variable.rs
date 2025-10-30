@@ -282,19 +282,19 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    pub async fn size(&self) -> Result<u64, Error> {
-        Ok(self.size)
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
-    pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
+    pub fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
-            Ok(None)
+            None
         } else {
-            Ok(Some(self.oldest_retained_pos))
+            Some(self.oldest_retained_pos)
         }
     }
 
@@ -484,7 +484,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
-            let size = offsets.size().await?;
+            let size = offsets.size().await;
 
             if !data.blobs.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
@@ -556,7 +556,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
                 // This can happen if we pruned all data, then appended new data, synced the
                 // data journal, but crashed before syncing the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
-                let offsets_size = offsets.size().await?;
+                let offsets_size = offsets.size().await;
                 if offsets_size != data_oldest_pos {
                     return Err(Error::Corruption(format!(
                         "offsets journal empty: size ({offsets_size}) != data oldest pos ({data_oldest_pos})"
@@ -569,7 +569,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             }
         }
 
-        let offsets_size = offsets.size().await?;
+        let offsets_size = offsets.size().await;
         if offsets_size > data_size {
             // We must have crashed after writing offsets but before writing data.
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
@@ -580,7 +580,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
         }
 
-        assert_eq!(offsets.size().await?, data_size);
+        assert_eq!(offsets.size().await, data_size);
         // Oldest retained position is always Some because the data journal is non-empty.
         assert_eq!(offsets.oldest_retained_pos().await?, Some(data_oldest_pos));
 
@@ -663,12 +663,12 @@ impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> 
         Journal::append(self, item).await
     }
 
-    async fn size(&self) -> Result<u64, Error> {
-        Journal::size(self).await
+    async fn size(&self) -> u64 {
+        Journal::size(self)
     }
 
     async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        Journal::oldest_retained_pos(self).await
+        Ok(Journal::oldest_retained_pos(self))
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
@@ -743,8 +743,8 @@ mod tests {
 
             // Prune to position 20 (removes sections 0-1, keeps sections 2-3)
             journal.prune(20).await.unwrap();
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(20));
-            assert_eq!(journal.size().await.unwrap(), 40);
+            assert_eq!(journal.oldest_retained_pos(), Some(20));
+            assert_eq!(journal.size(), 40);
 
             journal.close().await.unwrap();
 
@@ -804,10 +804,10 @@ mod tests {
                 .expect("Should align offsets to match empty data");
 
             // Size should be preserved
-            assert_eq!(journal.size().await.unwrap(), 20);
+            assert_eq!(journal.size(), 20);
 
             // But no items remain (both journals pruned)
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(journal.oldest_retained_pos(), None);
 
             // All reads should fail with ItemPruned
             for i in 0..20 {
@@ -874,15 +874,15 @@ mod tests {
             }
 
             // Initial state: all items accessible
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
-            assert_eq!(journal.size().await.unwrap(), 40);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
+            assert_eq!(journal.size(), 40);
 
             // First prune: remove section 0 (positions 0-9)
             let pruned = journal.prune(10).await.unwrap();
             assert!(pruned);
 
             // Variable-specific guarantee: oldest is EXACTLY at section boundary
-            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            let oldest = journal.oldest_retained_pos().unwrap();
             assert_eq!(oldest, 10);
 
             // Items 0-9 should be pruned, 10+ should be accessible
@@ -898,7 +898,7 @@ mod tests {
             assert!(pruned);
 
             // Variable-specific guarantee: oldest is EXACTLY at section boundary
-            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            let oldest = journal.oldest_retained_pos().unwrap();
             assert_eq!(oldest, 20);
 
             // Items 0-19 should be pruned, 20+ should be accessible
@@ -918,7 +918,7 @@ mod tests {
             assert!(pruned);
 
             // Variable-specific guarantee: oldest is EXACTLY at section boundary
-            let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+            let oldest = journal.oldest_retained_pos().unwrap();
             assert_eq!(oldest, 30);
 
             // Items 0-29 should be pruned, 30+ should be accessible
@@ -934,7 +934,7 @@ mod tests {
             assert_eq!(journal.read(39).await.unwrap(), 3900);
 
             // Size should still be 40 (pruning doesn't affect size)
-            assert_eq!(journal.size().await.unwrap(), 40);
+            assert_eq!(journal.size(), 40);
 
             journal.destroy().await.unwrap();
         });
@@ -963,16 +963,16 @@ mod tests {
                 journal.append(i * 100).await.unwrap();
             }
 
-            assert_eq!(journal.size().await.unwrap(), 100);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
 
             // === Phase 2: Prune all data ===
             let pruned = journal.prune(100).await.unwrap();
             assert!(pruned);
 
             // All data is pruned - no items remain
-            assert_eq!(journal.size().await.unwrap(), 100);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
 
             // All reads should fail with ItemPruned
             for i in 0..100 {
@@ -990,8 +990,8 @@ mod tests {
                 .unwrap();
 
             // Size should be preserved, but no items remain
-            assert_eq!(journal.size().await.unwrap(), 100);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
 
             // All reads should still fail
             for i in 0..100 {
@@ -1004,9 +1004,9 @@ mod tests {
             // === Phase 4: Append new data ===
             // Next append should get position 100
             journal.append(10000).await.unwrap();
-            assert_eq!(journal.size().await.unwrap(), 101);
+            assert_eq!(journal.size(), 101);
             // Now we have one item at position 100
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(100));
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
 
             // Can read the new item
             assert_eq!(journal.read(100).await.unwrap(), 10000);
@@ -1047,7 +1047,7 @@ mod tests {
 
             // Prune to position 10 normally (both data and offsets journals pruned)
             variable.prune(10).await.unwrap();
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
+            assert_eq!(variable.oldest_retained_pos(), Some(10));
 
             // === Simulate crash: Prune data journal but not offsets journal ===
             // Manually prune data journal to section 2 (position 20)
@@ -1062,8 +1062,8 @@ mod tests {
                 .unwrap();
 
             // Init should auto-repair: offsets journal pruned to match data journal
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(20));
-            assert_eq!(variable.size().await.unwrap(), 40);
+            assert_eq!(variable.oldest_retained_pos(), Some(20));
+            assert_eq!(variable.size(), 40);
 
             // Reads before position 20 should fail (pruned from both journals)
             assert!(matches!(
@@ -1142,7 +1142,7 @@ mod tests {
                 variable.append(i * 100).await.unwrap();
             }
 
-            assert_eq!(variable.size().await.unwrap(), 15);
+            assert_eq!(variable.size(), 15);
 
             // Manually append 5 more items directly to data journal only
             for i in 15..20u64 {
@@ -1158,8 +1158,8 @@ mod tests {
                 .unwrap();
 
             // Init should rebuild offsets journal from data journal replay
-            assert_eq!(variable.size().await.unwrap(), 20);
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
+            assert_eq!(variable.size(), 20);
+            assert_eq!(variable.oldest_retained_pos(), Some(0));
 
             // All items should be readable from both journals
             for i in 0..20u64 {
@@ -1167,7 +1167,7 @@ mod tests {
             }
 
             // Offsets journal should be fully rebuilt to match data journal
-            assert_eq!(variable.offsets.size().await.unwrap(), 20);
+            assert_eq!(variable.offsets.size().await, 20);
 
             variable.destroy().await.unwrap();
         });
@@ -1199,7 +1199,7 @@ mod tests {
 
             // Prune to position 10 normally (both data and offsets journals pruned)
             variable.prune(10).await.unwrap();
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(10));
+            assert_eq!(variable.oldest_retained_pos(), Some(10));
 
             // === Simulate crash: Multiple prunes on data journal, not on offsets journal ===
             // Manually prune data journal to section 3 (position 30)
@@ -1214,8 +1214,8 @@ mod tests {
                 .unwrap();
 
             // Init should auto-repair: offsets journal pruned to match data journal
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(30));
-            assert_eq!(variable.size().await.unwrap(), 50);
+            assert_eq!(variable.oldest_retained_pos(), Some(30));
+            assert_eq!(variable.size(), 50);
 
             // Reads before position 30 should fail (pruned from both journals)
             assert!(matches!(
@@ -1264,7 +1264,7 @@ mod tests {
                 variable.append(i * 100).await.unwrap();
             }
 
-            assert_eq!(variable.size().await.unwrap(), 25);
+            assert_eq!(variable.size(), 25);
 
             // === Simulate crash during rewind(5) ===
             // Rewind offsets journal to size 5 (keeps positions 0-4)
@@ -1279,8 +1279,8 @@ mod tests {
                 .unwrap();
 
             // Init should rebuild offsets[5-24] from data journal across all 3 sections
-            assert_eq!(variable.size().await.unwrap(), 25);
-            assert_eq!(variable.oldest_retained_pos().await.unwrap(), Some(0));
+            assert_eq!(variable.size(), 25);
+            assert_eq!(variable.oldest_retained_pos(), Some(0));
 
             // All items should be readable - offsets rebuilt correctly across all sections
             for i in 0..25u64 {
@@ -1288,7 +1288,7 @@ mod tests {
             }
 
             // Verify offsets journal fully rebuilt
-            assert_eq!(variable.offsets.size().await.unwrap(), 25);
+            assert_eq!(variable.offsets.size().await, 25);
 
             // Verify next append gets position 25
             let pos = variable.append(2500).await.unwrap();
@@ -1323,13 +1323,13 @@ mod tests {
             for i in 0..10u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            assert_eq!(journal.size().await.unwrap(), 10);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
 
             // === Phase 2: Prune to create empty journal ===
             journal.prune(10).await.unwrap();
-            assert_eq!(journal.size().await.unwrap(), 10);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Empty!
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), None); // Empty!
 
             // === Phase 3: Append directly to data journal to simulate crash ===
             // Manually append to data journal only (bypassing Variable's append logic)
@@ -1350,8 +1350,8 @@ mod tests {
                 .expect("Should recover from crash after data sync but before offsets sync");
 
             // All data should be recovered
-            assert_eq!(journal.size().await.unwrap(), 20);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+            assert_eq!(journal.size(), 20);
+            assert_eq!(journal.oldest_retained_pos(), Some(10));
 
             // All items from position 10-19 should be readable
             for i in 10..20u64 {
@@ -1401,7 +1401,7 @@ mod tests {
                 .unwrap();
 
             // Data should be intact and offsets rebuilt
-            assert_eq!(journal.size().await.unwrap(), 15);
+            assert_eq!(journal.size(), 15);
             for i in 0..15u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }

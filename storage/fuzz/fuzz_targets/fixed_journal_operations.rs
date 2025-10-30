@@ -86,7 +86,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size().await.unwrap();
+                    let size = journal.size().await;
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 

@@ -226,7 +226,7 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await?;
+        let log_size = self.journal.size().await;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -311,7 +311,7 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
-        let mut next_loc = self.journal.size().await?;
+        let mut next_loc = self.journal.size().await;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -369,7 +369,7 @@ where
 
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
-        let journal_size = self.journal.size().await?;
+        let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end;
 
         // Check if we've completed sync

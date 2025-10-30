@@ -41,7 +41,7 @@ pub trait Contiguous {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    fn size(&self) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
+    fn size(&self) -> impl std::future::Future<Output = u64> + Send;
 
     /// Return the position of the oldest item still retained in the journal.
     ///
