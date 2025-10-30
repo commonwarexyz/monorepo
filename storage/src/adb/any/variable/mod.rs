@@ -87,8 +87,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHas
     /// `log`.
     mmr: Mmr<E, H>,
 
-    /// A (pruned) log of all operations applied to the db in order of occurrence. The _location_
-    /// of an operation is its position in this log, and corresponds to its location in the MMR.
+    /// A (pruned) log of all operations applied to the db in order of occurrence.
     log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
@@ -179,10 +178,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// * `last_commit` is set to the location of the last commit operation.
     /// * `inactivity_floor_loc` is set to the inactivity floor.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        // Get current MMR size
+        // The number of leaves (operations) in the MMR.
         let mut mmr_leaves = self.mmr.leaves();
-
-        // Get the start location from the log.
+        // The first location in the log.
         let start_loc = match self.log.oldest_retained_pos() {
             Some(loc) => loc,
             None => self.log.size(),
