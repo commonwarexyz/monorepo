@@ -8,23 +8,18 @@ use commonware_consensus::{
     simplex::{
         mocks::reporter::Reporter,
         signing_scheme::Scheme,
-        types::{Finalize, Notarize, Nullify, Proposal, Voter},
+        types::{Finalize, Notarize, Nullify, OrderedExt, Proposal, Voter},
     },
     types::Round,
     Epochable, Viewable,
 };
-use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
-    sha256::Digest as Sha256Digest,
-    Digest, Signer as _,
-};
+use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest, Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use std::time::Duration;
-use commonware_consensus::simplex::types::OrderedExt;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -50,7 +45,7 @@ pub enum Mutation {
 /// system without coordinated or targeted attack strategies.
 pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme, D: Digest> {
     context: E,
-    private_key: PrivateKey,
+    validator: PublicKey,
     scheme: S,
     reporter: Reporter<E, PublicKey, S, D>,
     namespace: Vec<u8>,
@@ -68,7 +63,7 @@ where
 {
     pub fn new(
         context: E,
-        private_key: PrivateKey,
+        validator: PublicKey,
         scheme: S,
         reporter: Reporter<E, PublicKey, S, D>,
         namespace: Vec<u8>,
@@ -81,7 +76,7 @@ where
             last_nullified: 0,
             last_notarized: 0,
             context,
-            private_key,
+            validator,
             scheme,
             reporter,
             namespace,
@@ -374,8 +369,7 @@ where
         );
 
         // Check if we're a participant
-        let validator = self.private_key.public_key();
-        if self.reporter.participants.index(&validator).is_some() {
+        if self.reporter.participants.index(&self.validator).is_some() {
             let message = self.random_message();
 
             match message {

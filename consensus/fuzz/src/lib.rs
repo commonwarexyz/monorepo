@@ -26,7 +26,12 @@ use commonware_consensus::{
     types::View,
     Monitor,
 };
-use commonware_cryptography::{ed25519::{PublicKey as Ed25519PublicKey}, bls12381::primitives::variant::{MinPk, MinSig}, sha256::Digest as Sha256Digest, PublicKey, Sha256, Signer as _};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinPk, MinSig},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
+};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
@@ -57,7 +62,7 @@ pub trait Simplex: 'static
 where
     <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
 {
-    type Scheme: SimplexScheme;
+    type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
 
     fn namespace() -> Vec<u8> {
         b"consensus_fuzz".to_vec()
@@ -169,7 +174,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         let Fixture {
             participants,
             schemes,
-            verifier
+            verifier: _,
         } = P::fixture(&mut context, n);
         let mut registrations = register_validators(&mut oracle, &participants).await;
 
@@ -194,7 +199,6 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         let mut reporters = Vec::new();
 
         for i in 0..f as usize {
-            let private_key = schemes[i].clone();
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{}", validator));
@@ -210,7 +214,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
                 .expect("validator should be registered");
             let actor = Disrupter::<_, _, Sha256Digest>::new(
                 context.with_label("fuzzing_actor"),
-                private_key,
+                validator.clone(),
                 scheme,
                 reporter,
                 namespace.clone(),
@@ -221,8 +225,6 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
 
         // Start regular consensus engines for the remaining correct validators.
         for i in (f as usize)..(n as usize) {
-            let private_key = &schemes[i];
-            let scheme = schemes[i].clone();
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{}", validator));
             let reporter_config = reporter::Config {
