@@ -216,8 +216,7 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    let op_count = db.op_count();
-                    historical_roots.insert(op_count, db.root(&mut hasher));
+                    historical_roots.insert(db.op_count(), db.root(&mut hasher));
                     has_uncommitted = false;
                 }
 

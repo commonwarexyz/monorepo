@@ -533,8 +533,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.op_count();
-        self.historical_proof(op_count, start_loc, max_ops).await
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
     }
 
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
@@ -558,8 +558,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let current_op_count = self.op_count();
-        if op_count > current_op_count {
+        if op_count > self.op_count() {
             return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
         }
         if start_loc >= op_count {
@@ -604,7 +603,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
         let op_count = self.op_count();
-        self.last_commit = (*op_count).checked_sub(1).map(Location::new_unchecked);
+        self.last_commit = Some(op_count - 1);
 
         // Sync the log and merkleize the MMR updates in parallel.
         let mmr_fut = async {
