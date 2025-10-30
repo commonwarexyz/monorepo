@@ -87,6 +87,11 @@ impl<V: Variant, P: PublicKey> Output<V, P> {
     pub fn public(&self) -> &Public<V> {
         &self.public
     }
+
+    /// Return the players who participated in this round of the DKG, and should have shares.
+    pub fn players(&self) -> &Ordered<P> {
+        &self.players
+    }
 }
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
@@ -111,7 +116,6 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            round: ReadExt::read(buf)?,
             hash: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get()), ()))?,
             public: Read::read_cfg(buf, &RangeCfg::from(NZUsize!(1)..=max_players))?,
@@ -119,7 +123,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
@@ -236,14 +240,14 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         })
     }
 
-    /// Return the `usize` governing the size of reads.
+    /// Return the [`NonZeroUsize`] governing the size of reads.
     ///
     /// This will need to be passed to various structs when reading them from
     /// bytes, to avoid allocating buffers that are too large for the round.
-    pub fn max_read_size(&self) -> usize {
+    pub fn max_read_size(&self) -> NonZeroUsize {
         // This isn't as tight as it could be, but provides a nice upper bound
         // for various things, like polynomial sizes, messages, etc.
-        self.players.len() + self.dealers.len()
+        NZUsize!(self.players.len() + self.dealers.len())
     }
 
     /// Return the round number for this round.
@@ -468,7 +472,7 @@ impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
-    type Cfg = usize;
+    type Cfg = NonZeroUsize;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -476,7 +480,7 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             pub_msg: Read::read_cfg(buf, &max_players)?,
-            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players), ()))?,
+            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players.get()), ()))?,
         })
     }
 }
@@ -539,7 +543,7 @@ impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
 }
 
 impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
-    type Cfg = usize;
+    type Cfg = NonZeroUsize;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -831,11 +835,10 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
 pub fn deal<V: Variant, P: PublicKey>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
-    t: u32,
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
-    assert!(t >= 1, "threshold must be at least 1");
-    let private = poly::new_from(t - 1, &mut rng);
     let players = Ordered::from_iter(players.into_iter());
+    let t = quorum(players.len() as u32);
+    let private = poly::new_from(t - 1, &mut rng);
     let shares: OrderedAssociated<_, _> = players
         .iter()
         .enumerate()

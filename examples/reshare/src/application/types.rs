@@ -1,6 +1,4 @@
 //! Types for the `commonware-reshare` example application.
-
-use crate::dkg::IdentifiedLog;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
@@ -8,6 +6,7 @@ use commonware_cryptography::{
     bls12381::{dkg2::SignedDealerLog, primitives::variant::Variant},
     Committable, Digestible, Hasher, PrivateKey,
 };
+use std::num::{NonZeroU32, NonZeroUsize};
 
 /// A block in the reshare chain.
 #[derive(Clone)]
@@ -74,7 +73,7 @@ where
     V: Variant,
 {
     // The consensus quorum
-    type Cfg = u32;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
