@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    varint::UInt, Decode, DecodeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
+    varint::UInt, Decode, DecodeExt, Encode, EncodeSize, Error, IsUnit, RangeCfg, Read, Write,
 };
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashMap, hash::Hash, net::SocketAddr};
@@ -55,7 +55,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
 fn roundtrip_primitive<T, X>(v: T)
 where
-    X: Default,
+    X: IsUnit,
     T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();

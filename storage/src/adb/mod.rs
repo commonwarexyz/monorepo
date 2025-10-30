@@ -11,7 +11,7 @@
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use crate::{
-    journal::fixed::Journal,
+    journal::contiguous::fixed::Journal,
     mmr::{journaled, Location},
 };
 use commonware_cryptography::Hasher;
@@ -22,6 +22,8 @@ pub mod any;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
+pub mod operation;
+pub mod store;
 pub mod sync;
 pub mod verify;
 use tracing::warn;
@@ -53,6 +55,10 @@ pub enum Error {
     #[error("key not found")]
     KeyNotFound,
 
+    /// The key exists in the db, so we cannot prove its exclusion.
+    #[error("key exists")]
+    KeyExists,
+
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
 
@@ -76,7 +82,7 @@ async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
     locations: &mut Journal<E, u32>,
 ) -> Result<u64, Error> {
     let aligned_size = {
-        let locations_size = locations.size().await?;
+        let locations_size = locations.size().await;
         let mmr_leaves = *mmr.leaves();
         if locations_size > mmr_leaves {
             warn!(
@@ -96,7 +102,7 @@ async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
     };
 
     // Verify post-conditions hold.
-    assert_eq!(aligned_size, locations.size().await?);
+    assert_eq!(aligned_size, locations.size().await);
     assert_eq!(aligned_size, mmr.leaves());
 
     Ok(aligned_size)

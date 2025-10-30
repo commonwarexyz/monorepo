@@ -2,32 +2,25 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Context},
-    },
+    simplex::{signing_scheme::Scheme, types::Activity},
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Set;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
-    P: PublicKey,
     S: Scheme,
     B: Blocker,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    pub me: P,
-    pub participants: Set<P>,
     pub scheme: S,
     pub blocker: B,
     pub automaton: A,
@@ -54,9 +47,7 @@ mod tests {
         simplex::{
             actors::{batcher, resolver},
             mocks,
-            mocks::fixtures::{
-                bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture,
-            },
+            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -65,15 +56,16 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
+        ed25519,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256, Signer,
+        Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
     use std::{sync::Arc, time::Duration};
@@ -127,7 +119,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     fn stale_backfill<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -146,16 +138,18 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Initialize voter actor
-            let scheme = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = scheme.public_key();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -163,7 +157,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -173,10 +167,8 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                me: scheme.public_key(),
-                participants: validators.clone().into(),
-                scheme: signing.clone(),
-                blocker: oracle.control(validator.clone()),
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -203,18 +195,17 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let peer = participants[1].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -227,7 +218,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -275,7 +266,7 @@ mod tests {
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(Round::new(333, 100), 50, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -319,7 +310,7 @@ mod tests {
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
-                build_notarization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
                 .await;
@@ -328,7 +319,7 @@ mod tests {
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(Round::new(333, 300), 100, payload);
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -372,11 +363,11 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill(bls_threshold_fixture::<MinPk, _>);
-        stale_backfill(bls_threshold_fixture::<MinSig, _>);
-        stale_backfill(bls_multisig_fixture::<MinPk, _>);
-        stale_backfill(bls_multisig_fixture::<MinSig, _>);
-        stale_backfill(ed25519_fixture);
+        stale_backfill(bls12381_threshold::<MinPk, _>);
+        stale_backfill(bls12381_threshold::<MinSig, _>);
+        stale_backfill(bls12381_multisig::<MinPk, _>);
+        stale_backfill(bls12381_multisig::<MinSig, _>);
+        stale_backfill(ed25519);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -390,7 +381,7 @@ mod tests {
     ///    relative to the current last_finalized.
     fn append_old_interesting_view<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -410,15 +401,18 @@ mod tests {
             network.start();
 
             // Get participants
-            let (schemes, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup the target Voter actor (validator 0)
-            let private_key = schemes[0].clone();
-            let signing = signing_schemes[0].clone();
-            let validator = private_key.public_key();
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
+                participants: participants.clone().into(),
                 scheme: signing.clone(),
             };
             let reporter =
@@ -427,7 +421,7 @@ mod tests {
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -435,14 +429,12 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
             let voter_config = Config {
-                me: private_key.public_key(),
-                participants: validators.clone().into(),
                 scheme: signing.clone(),
-                blocker: oracle.control(validator.clone()),
+                blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: format!("voter_actor_test_{validator}"),
+                partition: format!("voter_actor_test_{me}"),
                 epoch: 333,
                 namespace: namespace.clone(),
                 mailbox_size: 128,
@@ -465,18 +457,17 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let peer = participants[1].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
-                    validator.clone(),
+                    me.clone(),
                     peer.clone(),
                     Link {
                         latency: Duration::from_millis(0),
@@ -489,7 +480,7 @@ mod tests {
             oracle
                 .add_link(
                     peer,
-                    validator,
+                    me,
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
@@ -547,7 +538,7 @@ mod tests {
                 Sha256::hash(b"test"),
             );
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -594,7 +585,7 @@ mod tests {
                 Sha256::hash(b"test2"),
             );
             let (_, notarization_for_floor) =
-                build_notarization(&signing_schemes, &namespace, &proposal_jft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -624,7 +615,7 @@ mod tests {
                 Sha256::hash(b"test3"),
             );
             let (_, notarization_for_bft) =
-                build_notarization(&signing_schemes, &namespace, &proposal_bft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -646,7 +637,7 @@ mod tests {
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
             let (_, finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal_lf, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -690,16 +681,16 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view(bls_threshold_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_threshold_fixture::<MinSig, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinPk, _>);
-        append_old_interesting_view(bls_multisig_fixture::<MinSig, _>);
-        append_old_interesting_view(ed25519_fixture);
+        append_old_interesting_view(bls12381_threshold::<MinPk, _>);
+        append_old_interesting_view(bls12381_threshold::<MinSig, _>);
+        append_old_interesting_view(bls12381_multisig::<MinPk, _>);
+        append_old_interesting_view(bls12381_multisig::<MinSig, _>);
+        append_old_interesting_view(ed25519);
     }
 
     fn finalization_without_notarization_certificate<S, F>(mut fixture: F)
     where
-        S: Scheme,
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
@@ -718,13 +709,17 @@ mod tests {
             network.start();
 
             // Get participants
-            let (_, validators, signing_schemes, _) = fixture(&mut context, n);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
             // Setup application mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing_schemes[0].clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -732,7 +727,7 @@ mod tests {
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validators[0].clone(),
+                me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
             };
@@ -742,10 +737,8 @@ mod tests {
 
             // Initialize voter actor
             let voter_cfg = Config {
-                me: validators[0].clone(),
-                participants: validators.clone().into(),
-                scheme: signing_schemes[0].clone(),
-                blocker: oracle.control(validators[0].clone()),
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -770,11 +763,10 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
-            let validator = validators[0].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
+                oracle.register(me.clone(), 1).await.unwrap();
 
             // Start the actor
             voter.start(
@@ -809,7 +801,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
-                build_finalization(&signing_schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
                 mailbox.verified(vec![Voter::Finalize(finalize)]).await;
@@ -843,10 +835,251 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_threshold_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinPk, _>);
-        finalization_without_notarization_certificate(bls_multisig_fixture::<MinSig, _>);
-        finalization_without_notarization_certificate(ed25519_fixture);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_threshold::<MinSig, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinPk, _>);
+        finalization_without_notarization_certificate(bls12381_multisig::<MinSig, _>);
+        finalization_without_notarization_certificate(ed25519);
+    }
+
+    fn replay_duplicate_votes<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalization_without_notarization".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup application mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_finalization_test".to_string(),
+                epoch: 333,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(me.clone(), 1).await.unwrap();
+
+            // Start the actor
+            let handle = voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Provide almost enough finalize votes
+            let view = 2;
+            let proposal = Proposal::new(
+                Round::new(333, view),
+                view - 1,
+                Sha256::hash(b"finalize_without_notarization"),
+            );
+            let (notarize_votes, expected_notarization) =
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+            let (finalize_votes, expected_finalization) =
+                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+
+            // Submit just short of enough finalize votes
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+            }
+
+            // Submit enough notarize votes to broadcast and force a sync
+            for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
+                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+            }
+
+            // Wait for a notarization to be recorded
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    if matches!(notarizations.get(&view), Some(expected) if expected == &expected_notarization) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Restart voter
+            handle.abort();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_finalization_test".to_string(),
+                epoch: 333,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
+            let me = participants[0].clone();
+            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 2).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(me.clone(), 3).await.unwrap();
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 3);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Provide duplicate finalize votes (should be ignored)
+            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
+                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+            }
+
+            // Verify no finalization was recorded
+            context.sleep(Duration::from_secs(1)).await;
+            {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(finalizations.is_empty());
+            }
+
+            // Provide the final finalize vote
+            mailbox
+                .verified(vec![Voter::Finalize(
+                    finalize_votes.last().unwrap().clone(),
+                )])
+                .await;
+
+            // Verify the finalization was recorded
+            loop {
+                {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    if matches!(finalizations.get(&view), Some(expected) if expected == &expected_finalization) {
+                        // The reporter already checks the certificate for signature validity, so we don't need to do it here.
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_replay_duplicate_votes() {
+        replay_duplicate_votes(bls12381_threshold::<MinPk, _>);
+        replay_duplicate_votes(bls12381_threshold::<MinSig, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinPk, _>);
+        replay_duplicate_votes(bls12381_multisig::<MinSig, _>);
+        replay_duplicate_votes(ed25519);
     }
 }

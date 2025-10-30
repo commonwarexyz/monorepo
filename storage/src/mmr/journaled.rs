@@ -7,7 +7,7 @@
 use crate::{
     adb::any::fixed::sync::{init_journal, init_journal_at_size},
     journal::{
-        fixed::{Config as JConfig, Journal},
+        contiguous::fixed::{Config as JConfig, Journal},
         Error as JError,
     },
     metadata::{Config as MConfig, Metadata},
@@ -191,7 +191,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = Position::new(journal.size().await?);
+        let mut journal_size = Position::new(journal.size().await);
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -295,7 +295,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             s.mem_mmr.add_leaf_digest(hasher, leaf);
             assert_eq!(pos, journal_size);
             s.sync(hasher).await?;
-            assert_eq!(s.size(), s.journal.size().await?);
+            assert_eq!(s.size(), s.journal.size().await);
         }
 
         Ok(s)
@@ -349,7 +349,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             *cfg.range.start..*cfg.range.end,
         )
         .await?;
-        let journal_size = Position::new(journal.size().await?);
+        let journal_size = Position::new(journal.size().await);
         assert!(journal_size <= *cfg.range.end);
 
         // Open the metadata.
@@ -478,7 +478,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed updates.
+    /// Panics if there are unmerkleized updates.
     pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
         Ok(self.mem_mmr.add(h, element))
     }
@@ -499,7 +499,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unmerkleized updates.
     pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
         // See if the elements are still cached in which case we can just pop them from the in-mem
         // MMR.
@@ -562,20 +562,20 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed updates.
+    /// Panics if there are unmerkleized updates.
     pub fn root(&self, h: &mut impl Hasher<H>) -> H::Digest {
         self.mem_mmr.root(h)
     }
 
-    /// Process all batched updates without syncing to disk.
-    pub fn process_updates(&mut self, h: &mut impl Hasher<H>) {
-        self.mem_mmr.sync(h)
+    /// Merkleize all batched updates. Data is not persisted to disk.
+    pub fn merkleize(&mut self, h: &mut impl Hasher<H>) {
+        self.mem_mmr.merkleize(h)
     }
 
-    /// Process all batched updates and sync the MMR to disk. If `pool` is non-null, then it will be
+    /// Merkleize all batched updates and sync the MMR to disk. If `pool` is non-null, then it will be
     /// used to parallelize the sync.
     pub async fn sync(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        self.process_updates(h);
+        self.merkleize(h);
 
         // Write the nodes cached in the memory-resident MMR to the journal.
         for pos in *self.journal_size..*self.size() {
@@ -585,7 +585,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
         self.journal_size = self.size();
         self.journal.sync().await?;
-        assert_eq!(self.journal_size, self.journal.size().await?);
+        assert_eq!(self.journal_size, self.journal.size().await);
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
@@ -639,7 +639,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed updates.
+    /// Panics if there are unmerkleized updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
@@ -660,7 +660,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed updates.
+    /// Panics if there are unmerkleized updates.
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
         verification::range_proof(self, range).await
@@ -679,7 +679,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed updates.
+    /// Panics if there are unmerkleized updates.
     pub async fn historical_range_proof(
         &self,
         size: Position,
@@ -702,7 +702,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// Prune all nodes up to but not including the given position and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
-    /// requiring it sync the MMR to write any potential unprocessed updates.
+    /// requiring it sync the MMR to write any potential unmerkleized updates.
     pub async fn prune_to_pos(
         &mut self,
         h: &mut impl Hasher<H>,
@@ -772,7 +772,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
-        self.mem_mmr.sync(hasher);
+        self.mem_mmr.merkleize(hasher);
         for i in *self.journal_size..*self.size() {
             let node = *self.mem_mmr.get_node_unchecked(Position::new(i));
             self.journal.append(node).await?;

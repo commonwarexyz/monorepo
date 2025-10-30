@@ -7,7 +7,6 @@ use crate::{
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::set::Set;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -17,17 +16,10 @@ pub struct Config<
     S: Scheme,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton<Context = Context<D, P>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    /// Identity of the participant.
-    pub me: P,
-
-    /// List of validators for the consensus engine, this is static for the
-    /// lifetime of the engine (i.e. the epoch).
-    pub participants: Set<P>,
-
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
@@ -51,6 +43,10 @@ pub struct Config<
     pub relay: R,
 
     /// Reporter for the consensus engine.
+    ///
+    /// All activity is exported for downstream applications that benefit from total observability,
+    /// consider wrapping with [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to
+    /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
     /// Partition for the consensus engine.
@@ -118,13 +114,17 @@ impl<
         S: Scheme,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Context = Context<D>>,
+        A: Automaton<Context = Context<D, P>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
     > Config<P, S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
+        assert!(
+            !self.scheme.participants().is_empty(),
+            "there must be at least one participant"
+        );
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"

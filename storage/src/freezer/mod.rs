@@ -11,7 +11,7 @@
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::journal::variable::Journal] that stores key-value data.
+//! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -206,7 +206,7 @@ pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition to use for storing the journal.
     pub journal_partition: String,
 
-    /// The compression level to use for the [crate::journal::variable::Journal].
+    /// The compression level to use for the [crate::journal::segmented::variable::Journal].
     pub journal_compression: Option<u8>,
 
     /// The size of the write buffer to use for the journal.
@@ -244,7 +244,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
     use rand::{Rng, RngCore};
 
     const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
@@ -829,7 +829,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], size)
+                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();

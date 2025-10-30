@@ -249,7 +249,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, NZU32};
+    use commonware_utils::{bitmap::BitMap, set::Ordered, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -380,7 +380,7 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Vec<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+            let too_many_peers: Ordered<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .collect();
             oracle.register(0, too_many_peers).await;
@@ -433,7 +433,7 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .register(0, vec![tracker_pk.clone(), auth_pk.clone()])
+                .register(0, Ordered::from([tracker_pk.clone(), auth_pk.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -501,7 +501,9 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             let (_, pk1) = new_signer_and_pk(1);
-            oracle.register(0, vec![tracker_pk, pk1.clone()]).await;
+            oracle
+                .register(0, Ordered::from([tracker_pk, pk1.clone()]))
+                .await;
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
@@ -540,7 +542,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, vec![tracker_pk.clone(), pk1.clone()])
+                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -574,7 +576,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, vec![tracker_pk.clone(), pk1.clone()])
+                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -623,7 +625,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .register(0, vec![tracker_pk.clone(), pk1.clone()])
+                .register(0, Ordered::from([tracker_pk.clone(), pk1.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -638,8 +640,7 @@ mod tests {
                 false,
             );
 
-            let mut set1 = vec![tracker_pk.clone(), pk1.clone(), pk2.clone()];
-            set1.sort();
+            let set1 = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
             oracle.register(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -695,7 +696,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
-            let peer_set_0_peers = vec![tracker_pk.clone(), pk1.clone(), pk2.clone()];
+            let peer_set_0_peers = Ordered::from([tracker_pk.clone(), pk1.clone(), pk2.clone()]);
             oracle.register(0, peer_set_0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -732,14 +733,9 @@ mod tests {
             mailbox.peers(vec![pk2_info_older]);
             context.sleep(Duration::from_millis(10)).await;
 
-            let mut sorted_set0_peers = peer_set_0_peers.clone();
-            sorted_set0_peers.sort();
-            let mut knowledge_for_set0 = BitMap::zeroes(sorted_set0_peers.len() as u64);
-            let idx_tracker_in_set0 = sorted_set0_peers
-                .iter()
-                .position(|p| p == &tracker_pk)
-                .unwrap();
-            let idx_pk1_in_set0 = sorted_set0_peers.iter().position(|p| p == &pk1).unwrap();
+            let mut knowledge_for_set0 = BitMap::zeroes(peer_set_0_peers.len() as u64);
+            let idx_tracker_in_set0 = peer_set_0_peers.position(&tracker_pk).unwrap();
+            let idx_pk1_in_set0 = peer_set_0_peers.position(&pk1).unwrap();
             knowledge_for_set0.set(idx_tracker_in_set0 as u64, true);
             knowledge_for_set0.set(idx_pk1_in_set0 as u64, true);
 
@@ -781,7 +777,7 @@ mod tests {
             assert!(!mailbox.listenable(peer_pk3.clone()).await);
 
             oracle
-                .register(0, vec![peer_pk.clone(), peer_pk2.clone()])
+                .register(0, Ordered::from([peer_pk.clone(), peer_pk2.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -810,7 +806,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.register(0, vec![peer_pk.clone()]).await;
+            oracle.register(0, Ordered::from([peer_pk.clone()])).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.listenable(peer_pk.clone()).await);
@@ -894,7 +890,7 @@ mod tests {
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
             oracle
-                .register(0, vec![tracker_pk, pk1.clone(), pk2.clone()])
+                .register(0, Ordered::from([tracker_pk, pk1.clone(), pk2.clone()]))
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -937,8 +933,8 @@ mod tests {
             );
 
             // --- Register set 0, then Construct for authorized peer1 ---
-            let mut set0_peers = vec![tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()];
-            set0_peers.sort(); // Directory expects sorted, Oracle also benefits
+            let set0_peers =
+                Ordered::from([tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]);
             oracle.register(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1007,13 +1003,11 @@ mod tests {
 
             // --- Set eviction and peer killing ---
             let (_peer3_s, peer3_pk) = new_signer_and_pk(3);
-            let mut set1_peers = vec![tracker_pk.clone(), peer2_pk.clone()]; // New set without peer1
-            set1_peers.sort();
+            let set1_peers = Ordered::from([tracker_pk.clone(), peer2_pk.clone()]); // New set without peer1
             oracle.register(1, set1_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let mut set2_peers = vec![tracker_pk.clone(), peer3_pk.clone()]; // Another new set without peer1
-            set2_peers.sort();
+            let set2_peers = Ordered::from([tracker_pk.clone(), peer3_pk.clone()]); // Another new set without peer1
             oracle.register(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
             context.sleep(Duration::from_millis(10)).await;
 

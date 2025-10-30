@@ -82,13 +82,15 @@ where
 
     async fn report(&mut self, block: Self::Activity) {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+
+        // Report the finalized block to the DKG actor on a best-effort basis.
+        let _ = self
+            .sender
             .send(Message::Finalized {
                 block,
                 response: sender,
             })
-            .await
-            .expect("mailbox closed");
-        receiver.await.expect("response channel closed")
+            .await;
+        let _ = receiver.await;
     }
 }

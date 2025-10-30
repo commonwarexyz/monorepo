@@ -8,16 +8,18 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum_from_slice, set::Set};
+use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
 #[derive(Clone)]
-pub struct Context<D: Digest> {
+pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
+    /// Leader of the current round.
+    pub leader: P,
     /// Parent the payload is built on.
     ///
     /// If there is a gap between the current view and the parent view, the participant
@@ -27,7 +29,7 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
-impl<D: Digest> Epochable for Context<D> {
+impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -35,7 +37,7 @@ impl<D: Digest> Epochable for Context<D> {
     }
 }
 
-impl<D: Digest> Viewable for Context<D> {
+impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     type View = View;
 
     fn view(&self) -> View {
@@ -48,6 +50,52 @@ impl<D: Digest> Viewable for Context<D> {
 pub trait Attributable {
     /// Returns the index of the signer (validator) who produced this message.
     fn signer(&self) -> u32;
+}
+
+/// AttributableVec is a vector of [Attributable] items where a given [Attributable::signer()]
+/// can add at most one item.
+pub struct AttributableVec<T: Attributable> {
+    data: Vec<Option<T>>,
+    added: usize,
+}
+
+impl<T: Attributable> AttributableVec<T> {
+    /// Creates a new [AttributableVec] with the given number of participants.
+    pub fn new(participants: usize) -> Self {
+        // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
+        let mut data = Vec::with_capacity(participants);
+        data.resize_with(participants, || None);
+
+        Self { data, added: 0 }
+    }
+
+    /// Adds an item to the [AttributableVec] if it has not been added yet.
+    ///
+    /// Returns `true` if the item was added, `false` if it was already added.
+    pub fn push(&mut self, item: T) -> bool {
+        let index = item.signer() as usize;
+        if self.data[index].is_some() {
+            return false;
+        }
+        self.data[index] = Some(item);
+        self.added += 1;
+        true
+    }
+
+    /// Returns the number of items in the [AttributableVec].
+    pub fn len(&self) -> usize {
+        self.added
+    }
+
+    /// Returns `true` if the [AttributableVec] is empty.
+    pub fn is_empty(&self) -> bool {
+        self.added == 0
+    }
+
+    /// Returns an ordered iterator over [Attributable::signer()]s in the [AttributableVec].
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.data.iter().filter_map(|o| o.as_ref())
+    }
 }
 
 /// Identifies the signing domain for a vote or certificate.
@@ -142,71 +190,36 @@ impl<S: Scheme> VoteVerification<S> {
     }
 }
 
-/// The set of consensus participants.
-///
-/// Keys are stored in sorted order to provide stable, deterministic indices for
-/// signing schemes.
-#[derive(Clone, Debug)]
-pub struct Participants<P: PublicKey> {
-    /// Set of participants' public keys.
-    keys: Set<P>,
-    /// Quorum (2f+1) computed from the participant set.
-    quorum: u32,
-    /// Maximum number of faults (f) tolerated by the participant set.
-    max_faults: u32,
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedExt<P> {
+    /// Returns the quorum value (2f+1) for this participant set.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&P>;
+
+    /// Returns the index for the given participant key, if present.
+    fn index(&self, key: &P) -> Option<u32>;
 }
 
-impl<P: PublicKey> Participants<P> {
-    /// Builds a new participant set from the provided keys.
-    pub fn new(keys: Set<P>) -> Self {
-        let quorum = quorum_from_slice(keys.as_ref());
-        let max_faults = max_faults(keys.len() as u32);
-
-        Self {
-            keys,
-            quorum,
-            max_faults,
-        }
+impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
+    fn quorum(&self) -> u32 {
+        quorum(self.len() as u32)
     }
 
-    /// Returns the participant key at the given signer index.
-    pub fn get(&self, signer: u32) -> Option<&P> {
-        self.keys.get(signer as usize)
+    fn max_faults(&self) -> u32 {
+        max_faults(self.len() as u32)
     }
 
-    /// Returns the signer index for the given key, if present.
-    pub fn index(&self, key: &P) -> Option<u32> {
-        self.keys.position(key).map(|index| index as u32)
+    fn index(&self, key: &P) -> Option<u32> {
+        self.position(key).map(|index| index as u32)
     }
 
-    /// Returns the cached quorum value for this participant set.
-    pub fn quorum(&self) -> u32 {
-        self.quorum
-    }
-
-    /// Returns the cached maximum number of faults tolerated by this participant set.
-    pub fn max_faults(&self) -> u32 {
-        self.max_faults
-    }
-}
-
-impl<P: PublicKey> Deref for Participants<P> {
-    type Target = [P];
-
-    fn deref(&self) -> &Self::Target {
-        self.keys.as_ref()
-    }
-}
-
-impl<P: PublicKey> From<Set<P>> for Participants<P> {
-    fn from(keys: Set<P>) -> Self {
-        Self::new(keys)
-    }
-}
-
-impl<P: PublicKey> From<Vec<P>> for Participants<P> {
-    fn from(keys: Vec<P>) -> Self {
-        Self::new(keys.into())
+    fn key(&self, index: u32) -> Option<&P> {
+        self.get(index as usize)
     }
 }
 
@@ -972,25 +985,18 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from matching notarize votes, if enough are present.
-    pub fn from_notarizes(scheme: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
-        if notarizes.is_empty() {
-            return None;
-        }
+    /// Builds a notarization certificate from notarize votes for the same proposal.
+    pub fn from_notarizes<'a>(
+        scheme: &S,
+        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+    ) -> Option<Self> {
+        let mut iter = notarizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
-        let proposal = notarizes[0].proposal.clone();
-
-        // All votes must endorse the same proposal to be aggregated into a single certificate.
-        if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
-            return None;
-        }
-
-        let notarization_certificate =
-            scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
-
-        Some(Notarization {
+        Some(Self {
             proposal,
-            certificate: notarization_certificate,
+            certificate,
         })
     }
 
@@ -1117,6 +1123,11 @@ impl<S: Scheme> Nullify<S> {
             &self.vote,
         )
     }
+
+    /// Returns the round associated with this nullify vote.
+    pub fn round(&self) -> Round {
+        self.round
+    }
 }
 
 impl<S: Scheme> Write for Nullify<S> {
@@ -1176,26 +1187,21 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
-    /// Builds a nullification certificate from matching nullify votes.
-    pub fn from_nullifies(scheme: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
-        if nullifies.is_empty() {
-            return None;
-        }
+    /// Builds a nullification certificate from nullify votes from the same round.
+    pub fn from_nullifies<'a>(
+        scheme: &S,
+        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+    ) -> Option<Self> {
+        let mut iter = nullifies.into_iter().peekable();
+        let round = iter.peek()?.round;
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
-        let round = nullifies[0].round;
+        Some(Self { round, certificate })
+    }
 
-        // Nullify votes must all target the same round.
-        if nullifies.iter().skip(1).any(|n| n.round != round) {
-            return None;
-        }
-
-        let nullification_certificate =
-            scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
-
-        Some(Nullification {
-            round,
-            certificate: nullification_certificate,
-        })
+    /// Returns the round associated with this nullification.
+    pub fn round(&self) -> Round {
+        self.round
     }
 }
 
@@ -1393,25 +1399,18 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from matching finalize votes, if enough are present.
-    pub fn from_finalizes(scheme: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
-        if finalizes.is_empty() {
-            return None;
-        }
+    /// Builds a finalization certificate from finalize votes for the same proposal.
+    pub fn from_finalizes<'a>(
+        scheme: &S,
+        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
+    ) -> Option<Self> {
+        let mut iter = finalizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|f| f.vote.clone()))?;
 
-        let proposal = finalizes[0].proposal.clone();
-
-        // Finalize votes must agree on the exact proposal that is being committed.
-        if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
-            return None;
-        }
-
-        let finalization_certificate =
-            scheme.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
-
-        Some(Finalization {
+        Some(Self {
             proposal,
-            certificate: finalization_certificate,
+            certificate,
         })
     }
 
@@ -1738,33 +1737,39 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 ///
-/// Some activities issued by consensus are not verified. To determine if an activity has been verified,
-/// use the `verified` method.
+/// # Verification
 ///
-/// # Warning
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed
+/// to produce a minimum quorum certificate). Use [`Activity::verified`] to check if an activity may not be verified,
+/// and [`Activity::verify`] to perform verification.
 ///
-/// Certain signing schemes produce aggregated artifacts that do not expose every contributor.
-/// Unless the scheme provides attributable signatures, do not use unverified activities for
-/// incentives, an attacker may be able to synthesize contributions for offline participants.
+/// # Activity Filtering
+///
+/// For **non-attributable** schemes like [`crate::simplex::signing_scheme::bls12381_threshold`], exposing
+/// per-validator activity as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
+/// be used to forge a partial signature for any player.
+///
+/// Use [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to automatically filter and
+/// verify activities based on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
-    /// A validator's notarize vote over a proposal
+    /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
-    /// A recovered certificate for a notarization (scheme-specific)
+    /// A recovered certificate for a notarization (scheme-specific).
     Notarization(Notarization<S, D>),
-    /// A validator's nullify vote used to skip the current view
+    /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
-    /// A recovered certificate for a nullification (scheme-specific)
+    /// A recovered certificate for a nullification (scheme-specific).
     Nullification(Nullification<S>),
-    /// A validator's finalize vote over a proposal
+    /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
-    /// A recovered certificate for a finalization (scheme-specific)
+    /// A recovered certificate for a finalization (scheme-specific).
     Finalization(Finalization<S, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior).
     ConflictingNotarize(ConflictingNotarize<S, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior).
     ConflictingFinalize(ConflictingFinalize<S, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
+    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
@@ -1831,7 +1836,7 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Activity<S, D> {
-    /// Indicates whether the activity has been verified by consensus.
+    /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
             Activity::Notarize(_) => false,
@@ -1843,6 +1848,25 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Activity::ConflictingNotarize(_) => false,
             Activity::ConflictingFinalize(_) => false,
             Activity::NullifyFinalize(_) => false,
+        }
+    }
+
+    /// Verifies the validity of this activity against the signing scheme.
+    ///
+    /// This method **always** performs verification regardless of whether the activity has been
+    /// previously verified. Callers can use [`Activity::verified`] to check if verification is
+    /// necessary before calling this method.
+    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+        match self {
+            Activity::Notarize(n) => n.verify(scheme, namespace),
+            Activity::Notarization(n) => n.verify(rng, scheme, namespace),
+            Activity::Nullify(n) => n.verify::<D>(scheme, namespace),
+            Activity::Nullification(n) => n.verify::<R, D>(rng, scheme, namespace),
+            Activity::Finalize(f) => f.verify(scheme, namespace),
+            Activity::Finalization(f) => f.verify(rng, scheme, namespace),
+            Activity::ConflictingNotarize(c) => c.verify(scheme, namespace),
+            Activity::ConflictingFinalize(c) => c.verify(scheme, namespace),
+            Activity::NullifyFinalize(c) => c.verify(scheme, namespace),
         }
     }
 }
@@ -2314,47 +2338,50 @@ mod tests {
     fn generate_bls12381_threshold_schemes(
         n: u32,
         seed: u64,
-    ) -> Vec<bls12381_threshold::Scheme<MinSig>> {
+    ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, MinSig>> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .collect();
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
 
         shares
             .into_iter()
-            .map(|share| bls12381_threshold::Scheme::new(&vec![0; n as usize], &polynomial, share))
+            .map(|share| {
+                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
+            })
             .collect()
     }
 
     fn generate_bls12381_threshold_verifier(
         n: u32,
         seed: u64,
-    ) -> bls12381_threshold::Scheme<MinSig> {
+    ) -> bls12381_threshold::Scheme<EdPublicKey, MinSig> {
         let mut rng = StdRng::seed_from_u64(seed);
         let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .collect();
+
         let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-        bls12381_threshold::Scheme::verifier(&vec![0; n as usize], &polynomial)
+        bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 
-    fn generate_ed25519_schemes(n: usize) -> Vec<ed25519::Scheme> {
-        let mut private_keys: Vec<_> = (0..n)
-            .map(|idx| EdPrivateKey::from_seed(idx as u64))
-            .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<EdPublicKey> =
-            private_keys.iter().map(|key| key.public_key()).collect();
+    fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
+
+        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+
         private_keys
             .into_iter()
             .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
             .collect()
-    }
-
-    fn generate_ed25519_verifier_with_offset(n: usize, offset: u64) -> ed25519::Scheme {
-        let mut private_keys: Vec<_> = (0..n)
-            .map(|idx| EdPrivateKey::from_seed(idx as u64 + offset))
-            .collect();
-        private_keys.sort_by_key(|key| key.public_key());
-        let participants: Vec<_> = private_keys.iter().map(|key| key.public_key()).collect();
-        ed25519::Scheme::verifier(participants)
     }
 
     #[test]
@@ -2382,7 +2409,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 0);
         notarize_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 0);
         notarize_encode_decode(&ed_schemes);
     }
 
@@ -2405,7 +2432,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 1);
         notarization_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 1);
         notarization_encode_decode(&ed_schemes);
     }
 
@@ -2423,7 +2450,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 2);
         nullify_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 2);
         nullify_encode_decode(&ed_schemes);
     }
 
@@ -2446,7 +2473,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 3);
         nullification_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 3);
         nullification_encode_decode(&ed_schemes);
     }
 
@@ -2465,7 +2492,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 4);
         finalize_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 4);
         finalize_encode_decode(&ed_schemes);
     }
 
@@ -2489,7 +2516,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 5);
         finalization_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 5);
         finalization_encode_decode(&ed_schemes);
     }
 
@@ -2528,7 +2555,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 6);
         backfiller_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 6);
         backfiller_encode_decode(&ed_schemes);
     }
 
@@ -2580,7 +2607,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 7);
         response_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 7);
         response_encode_decode(&ed_schemes);
     }
 
@@ -2603,7 +2630,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 8);
         conflicting_notarize_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 8);
         conflicting_notarize_encode_decode(&ed_schemes);
     }
 
@@ -2626,7 +2653,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 9);
         conflicting_finalize_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 9);
         conflicting_finalize_encode_decode(&ed_schemes);
     }
 
@@ -2649,7 +2676,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 10);
         nullify_finalize_encode_decode(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 10);
         nullify_finalize_encode_decode(&ed_schemes);
     }
 
@@ -2667,7 +2694,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 220);
         notarize_verify_wrong_namespace(&bls_threshold_schemes[0]);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 220);
         notarize_verify_wrong_namespace(&ed_schemes[0]);
     }
 
@@ -2686,9 +2713,9 @@ mod tests {
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 501);
         notarize_verify_wrong_scheme(&bls_threshold_schemes[0], &bls_threshold_wrong_scheme);
 
-        let ed_schemes = generate_ed25519_schemes(5);
-        let ed_wrong_scheme = generate_ed25519_verifier_with_offset(5, 100);
-        notarize_verify_wrong_scheme(&ed_schemes[0], &ed_wrong_scheme);
+        let ed_schemes = generate_ed25519_schemes(5, 221);
+        let ed_wrong_scheme = generate_ed25519_schemes(5, 321);
+        notarize_verify_wrong_scheme(&ed_schemes[0], &ed_wrong_scheme[0]);
     }
 
     fn notarization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
@@ -2716,9 +2743,9 @@ mod tests {
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 502);
         notarization_verify_wrong_scheme(&bls_threshold_schemes, &bls_threshold_wrong_scheme);
 
-        let ed_schemes = generate_ed25519_schemes(5);
-        let ed_wrong_scheme = generate_ed25519_verifier_with_offset(5, 200);
-        notarization_verify_wrong_scheme(&ed_schemes, &ed_wrong_scheme);
+        let ed_schemes = generate_ed25519_schemes(5, 222);
+        let ed_wrong_scheme = generate_ed25519_schemes(5, 422);
+        notarization_verify_wrong_scheme(&ed_schemes, &ed_wrong_scheme[0]);
     }
 
     fn notarization_verify_wrong_namespace<S: Scheme>(schemes: &[S]) {
@@ -2745,7 +2772,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 223);
         notarization_verify_wrong_namespace(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 223);
         notarization_verify_wrong_namespace(&ed_schemes);
     }
 
@@ -2771,7 +2798,7 @@ mod tests {
         let bls_threshold_schemes = generate_bls12381_threshold_schemes(5, 224);
         notarization_recover_insufficient_signatures(&bls_threshold_schemes);
 
-        let ed_schemes = generate_ed25519_schemes(5);
+        let ed_schemes = generate_ed25519_schemes(5, 224);
         notarization_recover_insufficient_signatures(&ed_schemes);
     }
 
@@ -2795,9 +2822,9 @@ mod tests {
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 503);
         conflicting_notarize_detection(&bls_threshold_schemes[0], &bls_threshold_wrong_scheme);
 
-        let ed_schemes = generate_ed25519_schemes(5);
-        let ed_wrong_scheme = generate_ed25519_verifier_with_offset(5, 300);
-        conflicting_notarize_detection(&ed_schemes[0], &ed_wrong_scheme);
+        let ed_schemes = generate_ed25519_schemes(5, 225);
+        let ed_wrong_scheme = generate_ed25519_schemes(5, 425);
+        conflicting_notarize_detection(&ed_schemes[0], &ed_wrong_scheme[0]);
     }
 
     fn nullify_finalize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
@@ -2819,9 +2846,9 @@ mod tests {
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 504);
         nullify_finalize_detection(&bls_threshold_schemes[0], &bls_threshold_wrong_scheme);
 
-        let ed_schemes = generate_ed25519_schemes(5);
-        let ed_wrong_scheme = generate_ed25519_verifier_with_offset(5, 400);
-        nullify_finalize_detection(&ed_schemes[0], &ed_wrong_scheme);
+        let ed_schemes = generate_ed25519_schemes(5, 226);
+        let ed_wrong_scheme = generate_ed25519_schemes(5, 426);
+        nullify_finalize_detection(&ed_schemes[0], &ed_wrong_scheme[0]);
     }
 
     fn finalization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
@@ -2849,9 +2876,9 @@ mod tests {
         let bls_threshold_wrong_scheme = generate_bls12381_threshold_verifier(5, 505);
         finalization_verify_wrong_scheme(&bls_threshold_schemes, &bls_threshold_wrong_scheme);
 
-        let ed_schemes = generate_ed25519_schemes(5);
-        let ed_wrong_scheme = generate_ed25519_verifier_with_offset(5, 500);
-        finalization_verify_wrong_scheme(&ed_schemes, &ed_wrong_scheme);
+        let ed_schemes = generate_ed25519_schemes(5, 227);
+        let ed_wrong_scheme = generate_ed25519_schemes(5, 427);
+        finalization_verify_wrong_scheme(&ed_schemes, &ed_wrong_scheme[0]);
     }
 
     // Helper to create a Notarize message for any signing scheme
@@ -2953,7 +2980,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_add_notarize() {
         batch_verifier_add_notarize(generate_bls12381_threshold_schemes(5, 123));
-        batch_verifier_add_notarize(generate_ed25519_schemes(5));
+        batch_verifier_add_notarize(generate_ed25519_schemes(5, 123));
     }
 
     fn batch_verifier_set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -2987,7 +3014,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_set_leader() {
         batch_verifier_set_leader(generate_bls12381_threshold_schemes(5, 124));
-        batch_verifier_set_leader(generate_ed25519_schemes(5));
+        batch_verifier_set_leader(generate_ed25519_schemes(5, 124));
     }
 
     fn batch_verifier_ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3050,7 +3077,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_ready_and_verify_notarizes() {
         batch_verifier_ready_and_verify_notarizes(generate_bls12381_threshold_schemes(5, 125));
-        batch_verifier_ready_and_verify_notarizes(generate_ed25519_schemes(5));
+        batch_verifier_ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
     }
 
     fn batch_verifier_add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3071,7 +3098,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_add_nullify() {
         batch_verifier_add_nullify(generate_bls12381_threshold_schemes(5, 127));
-        batch_verifier_add_nullify(generate_ed25519_schemes(5));
+        batch_verifier_add_nullify(generate_ed25519_schemes(5, 127));
     }
 
     fn batch_verifier_ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3106,7 +3133,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_ready_and_verify_nullifies() {
         batch_verifier_ready_and_verify_nullifies(generate_bls12381_threshold_schemes(5, 128));
-        batch_verifier_ready_and_verify_nullifies(generate_ed25519_schemes(5));
+        batch_verifier_ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
     }
 
     fn batch_verifier_add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3142,7 +3169,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_add_finalize() {
         batch_verifier_add_finalize(generate_bls12381_threshold_schemes(5, 129));
-        batch_verifier_add_finalize(generate_ed25519_schemes(5));
+        batch_verifier_add_finalize(generate_ed25519_schemes(5, 129));
     }
 
     fn batch_verifier_ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3182,7 +3209,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_ready_and_verify_finalizes() {
         batch_verifier_ready_and_verify_finalizes(generate_bls12381_threshold_schemes(5, 130));
-        batch_verifier_ready_and_verify_finalizes(generate_ed25519_schemes(5));
+        batch_verifier_ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
     fn batch_verifier_quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3230,7 +3257,7 @@ mod tests {
     #[test]
     fn test_batch_verifier_quorum_none() {
         batch_verifier_quorum_none(generate_bls12381_threshold_schemes(3, 200));
-        batch_verifier_quorum_none(generate_ed25519_schemes(3));
+        batch_verifier_quorum_none(generate_ed25519_schemes(3, 200));
     }
 
     fn batch_verifier_leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3267,7 +3294,7 @@ mod tests {
         batch_verifier_leader_proposal_filters_messages(generate_bls12381_threshold_schemes(
             3, 201,
         ));
-        batch_verifier_leader_proposal_filters_messages(generate_ed25519_schemes(3));
+        batch_verifier_leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
     }
 
     fn batch_verifier_set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3285,7 +3312,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_batch_verifier_set_leader_twice_panics_ed() {
-        batch_verifier_set_leader_twice_panics(generate_ed25519_schemes(3));
+        batch_verifier_set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
 
     fn batch_verifier_add_recovered_message_panics<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3304,7 +3331,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "should not be adding recovered messages to partial verifier")]
     fn test_batch_verifier_add_recovered_message_panics_ed() {
-        batch_verifier_add_recovered_message_panics(generate_ed25519_schemes(3));
+        batch_verifier_add_recovered_message_panics(generate_ed25519_schemes(3, 214));
     }
 
     fn batch_verifier_notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3335,7 +3362,7 @@ mod tests {
     #[test]
     fn test_ready_notarizes_behavior_with_force_flag() {
         batch_verifier_notarizes_force_flag(generate_bls12381_threshold_schemes(3, 203));
-        batch_verifier_notarizes_force_flag(generate_ed25519_schemes(3));
+        batch_verifier_notarizes_force_flag(generate_ed25519_schemes(3, 203));
     }
 
     fn batch_verifier_ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3368,7 +3395,7 @@ mod tests {
     #[test]
     fn test_ready_notarizes_without_leader_or_proposal() {
         batch_verifier_ready_notarizes_without_leader(generate_bls12381_threshold_schemes(3, 204));
-        batch_verifier_ready_notarizes_without_leader(generate_ed25519_schemes(3));
+        batch_verifier_ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
     }
 
     fn batch_verifier_ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3400,7 +3427,7 @@ mod tests {
     #[test]
     fn test_ready_finalizes_without_leader_or_proposal() {
         batch_verifier_ready_finalizes_without_leader(generate_bls12381_threshold_schemes(3, 205));
-        batch_verifier_ready_finalizes_without_leader(generate_ed25519_schemes(3));
+        batch_verifier_ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
     }
 
     fn batch_verifier_verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3417,7 +3444,7 @@ mod tests {
     #[test]
     fn test_verify_notarizes_empty_pending_when_forced() {
         batch_verifier_verify_notarizes_empty(generate_bls12381_threshold_schemes(3, 206));
-        batch_verifier_verify_notarizes_empty(generate_ed25519_schemes(3));
+        batch_verifier_verify_notarizes_empty(generate_ed25519_schemes(3, 206));
     }
 
     fn batch_verifier_verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3435,7 +3462,7 @@ mod tests {
     #[test]
     fn test_verify_nullifies_empty_pending() {
         batch_verifier_verify_nullifies_empty(generate_bls12381_threshold_schemes(3, 207));
-        batch_verifier_verify_nullifies_empty(generate_ed25519_schemes(3));
+        batch_verifier_verify_nullifies_empty(generate_ed25519_schemes(3, 207));
     }
 
     fn batch_verifier_verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3454,7 +3481,7 @@ mod tests {
     #[test]
     fn test_verify_finalizes_empty_pending() {
         batch_verifier_verify_finalizes_empty(generate_bls12381_threshold_schemes(3, 208));
-        batch_verifier_verify_finalizes_empty(generate_ed25519_schemes(3));
+        batch_verifier_verify_finalizes_empty(generate_ed25519_schemes(3, 208));
     }
 
     fn batch_verifier_ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3487,7 +3514,7 @@ mod tests {
     #[test]
     fn test_ready_notarizes_exact_quorum() {
         batch_verifier_ready_notarizes_exact_quorum(generate_bls12381_threshold_schemes(5, 209));
-        batch_verifier_ready_notarizes_exact_quorum(generate_ed25519_schemes(5));
+        batch_verifier_ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
     }
 
     fn batch_verifier_ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3509,7 +3536,7 @@ mod tests {
     #[test]
     fn test_ready_nullifies_exact_quorum() {
         batch_verifier_ready_nullifies_exact_quorum(generate_bls12381_threshold_schemes(5, 210));
-        batch_verifier_ready_nullifies_exact_quorum(generate_ed25519_schemes(5));
+        batch_verifier_ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
     }
 
     fn batch_verifier_ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -3533,7 +3560,7 @@ mod tests {
     #[test]
     fn test_ready_finalizes_exact_quorum() {
         batch_verifier_ready_finalizes_exact_quorum(generate_bls12381_threshold_schemes(5, 211));
-        batch_verifier_ready_finalizes_exact_quorum(generate_ed25519_schemes(5));
+        batch_verifier_ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
     }
 
     fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(
@@ -3577,7 +3604,9 @@ mod tests {
         batch_verifier_ready_notarizes_quorum_already_met_by_verified(
             generate_bls12381_threshold_schemes(5, 212),
         );
-        batch_verifier_ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(5));
+        batch_verifier_ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(
+            5, 212,
+        ));
     }
 
     fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(
@@ -3615,7 +3644,9 @@ mod tests {
         batch_verifier_ready_nullifies_quorum_already_met_by_verified(
             generate_bls12381_threshold_schemes(5, 213),
         );
-        batch_verifier_ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(5));
+        batch_verifier_ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(
+            5, 213,
+        ));
     }
 
     fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(
@@ -3658,6 +3689,49 @@ mod tests {
         batch_verifier_ready_finalizes_quorum_already_met_by_verified(
             generate_bls12381_threshold_schemes(5, 214),
         );
-        batch_verifier_ready_finalizes_quorum_already_met_by_verified(generate_ed25519_schemes(5));
+        batch_verifier_ready_finalizes_quorum_already_met_by_verified(generate_ed25519_schemes(
+            5, 214,
+        ));
+    }
+
+    struct MockAttributable(u32);
+
+    impl Attributable for MockAttributable {
+        fn signer(&self) -> u32 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_attributable_vec() {
+        let mut vec = AttributableVec::new(5);
+        assert_eq!(vec.len(), 0);
+        assert!(vec.is_empty());
+
+        assert!(vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 1);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(vec.push(MockAttributable(1)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(!vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
     }
 }

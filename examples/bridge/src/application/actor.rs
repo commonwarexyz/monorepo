@@ -17,7 +17,7 @@ use commonware_cryptography::{
         poly,
         variant::{MinSig, Variant},
     },
-    Hasher, PublicKey,
+    Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
@@ -41,10 +41,7 @@ pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: St
 
 impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new<P: PublicKey>(
-        context: R,
-        config: Config<H, Si, St, P>,
-    ) -> (Self, Scheme, Mailbox<H::Digest>) {
+    pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -56,7 +53,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::new(config.participants.as_ref(), &config.identity, config.share),
+            Scheme::new(config.participants, &config.identity, config.share),
             Mailbox::new(sender),
         )
     }

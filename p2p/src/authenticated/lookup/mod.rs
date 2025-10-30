@@ -67,7 +67,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, set::OrderedAssociated};
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -118,7 +118,10 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)]).await;
+//!     oracle.register(
+//!         0,
+//!         OrderedAssociated::from([(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)])
+//!     ).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -171,7 +174,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{set::OrderedAssociated, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
@@ -243,7 +246,9 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, peers.clone()).await;
+            oracle
+                .register(0, OrderedAssociated::from(peers.clone()))
+                .await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -253,8 +258,6 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let peers = peers.clone();
-            // All public keys (except self) sorted
             let mut public_keys = peers
                 .iter()
                 .filter_map(|(pk, _)| {
@@ -268,6 +271,7 @@ mod tests {
             public_keys.sort();
             context.with_label("agent").spawn({
                 let mut complete_sender = complete_sender.clone();
+                let peers = peers.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
                     let receiver = context.with_label("receiver").spawn(move |_| async move {
@@ -513,9 +517,14 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
-                oracle.register(0, vec![peers[0].clone()]).await;
                 oracle
-                    .register(1, vec![peers[1].clone(), peers[2].clone()])
+                    .register(0, OrderedAssociated::from([peers[0].clone()]))
+                    .await;
+                oracle
+                    .register(
+                        1,
+                        OrderedAssociated::from([peers[1].clone(), peers[2].clone()]),
+                    )
                     .await;
                 oracle
                     .register(2, peers.iter().skip(2).cloned().collect())
@@ -588,10 +597,10 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((peer_sk, peer_pk, peer_addr));
             }
-            let peers = peers_and_sks
+            let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect::<Vec<_>>();
+                .collect();
 
             // Create network
             let (sk, _, addr) = peers_and_sks[0].clone();
@@ -617,7 +626,7 @@ mod tests {
             context.fill(&mut msg[..]);
 
             // Send message
-            let recipient = Recipients::One(peers[1].0.clone());
+            let recipient = Recipients::One(peers[1].clone());
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
@@ -641,10 +650,10 @@ mod tests {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 peers_and_sks.push((sk, pk, addr));
             }
-            let peers = peers_and_sks
+            let peers: OrderedAssociated<_, _> = peers_and_sks
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), *addr))
-                .collect::<Vec<_>>();
+                .collect();
             let (sk0, _, addr0) = peers_and_sks[0].clone();
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 

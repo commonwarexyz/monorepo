@@ -106,7 +106,7 @@ fn bench_update(c: &mut Criterion) {
                                     mmr.update_leaf_batched(&mut h, &updates).unwrap();
                                 }
                             }
-                            mmr.sync(&mut h);
+                            mmr.merkleize(&mut h);
 
                             start.elapsed()
                         });

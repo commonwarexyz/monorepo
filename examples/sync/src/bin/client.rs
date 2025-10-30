@@ -85,10 +85,10 @@ where
                             debug!("sync client disconnected, terminating target update task");
                             return Ok(());
                         }
-                        Err(e) => {
-                            warn!(error = %e, "failed to send target update to sync client");
+                        Err(err) => {
+                            warn!(?err, "failed to send target update to sync client");
                             return Err(Error::TargetUpdateChannel {
-                                reason: e.to_string(),
+                                reason: err.to_string(),
                             });
                         }
                     }
@@ -96,8 +96,8 @@ where
                     debug!(current_target = ?current_target, "target unchanged");
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "failed to get sync target from server");
+            Err(err) => {
+                warn!(?err, "failed to get sync target from server");
             }
         }
     }
@@ -395,8 +395,8 @@ fn main() {
             DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
         };
 
-        if let Err(e) = result {
-            error!(error = %e, "❌ continuous sync failed");
+        if let Err(err) = result {
+            error!(?err, "❌ continuous sync failed");
             std::process::exit(1);
         }
     });

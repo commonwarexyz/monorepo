@@ -1,17 +1,45 @@
 //! Signing scheme implementations for `simplex`.
+//!
+//! # Attributable Schemes and Liveness/Fault Evidence
+//!
+//! Signing schemes differ in whether per-validator activities can be used as evidence of either
+//! liveness or of committing a fault:
+//!
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be presented
+//!   to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
+//!   indices alongside individual signatures, enabling secure per-validator activity tracking and
+//!   conflict detection.
+//!
+//! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
+//!   to some third party as evidence of either liveness or of committing a fault because they can be forged
+//!   by other players (often after some quorum of partial signatures are collected). With [`bls12381_threshold`],
+//!   possession of any `t` valid partial signatures can be used to forge a partial signature for any other player.
+//!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
+//!   but can't be used by an external observer.
+//!
+//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely
+//! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
+//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
+//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
 
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+      pub mod reporter;
+    }
+}
+
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
-use commonware_cryptography::Digest;
-use commonware_utils::union;
+use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::{set::Ordered, union};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
@@ -21,13 +49,32 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// quorum certificates, checks recovered certificates and, when available, derives a randomness
 /// seed for leader rotation. Implementations may override the provided defaults to take advantage
 /// of scheme-specific batching strategies.
+///
+/// # Identity Keys vs Consensus Keys
+///
+/// A participant may supply both an identity key and a consensus key. The identity key
+/// is used for assigning a unique order to the committee and authenticating connections whereas the consensus key
+/// is used for actually signing and verifying votes/certificates.
+///
+/// This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
+/// (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
+/// for an example of a scheme that uses the same key for both purposes.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
+    /// Public key type for participant identity used to order and index the committee.
+    type PublicKey: PublicKey;
     /// Vote signature emitted by individual validators.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Quorum certificate recovered from a set of votes.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
+
+    /// Returns the index of "self" in the participant set, if available.
+    /// Returns `None` if the scheme is a verifier-only instance.
+    fn me(&self) -> Option<u32>;
+
+    /// Returns the ordered set of participant public identity keys managed by the scheme.
+    fn participants(&self) -> &Ordered<Self::PublicKey>;
 
     /// Signs a vote for the given context using the supplied namespace for domain separation.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
@@ -115,6 +162,15 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Extracts randomness seed, if provided by the scheme, derived from the certificate
     /// for the given round.
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+
+    /// Returns whether per-validator fault evidence can be safely exposed.
+    ///
+    /// Schemes where individual signatures can be safely reported as fault evidence should
+    /// return `true`.
+    ///
+    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
+    /// activities.
+    fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

@@ -2,12 +2,12 @@ use crate::{
     adb::{
         any::variable::sync::{get_size, init_journal},
         immutable,
+        operation::variable::Operation,
         sync::{self, Journal as _},
         Error,
     },
-    journal::variable,
+    journal::segmented::variable,
     mmr::{Location, StandardHasher as Standard},
-    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -26,7 +26,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    type Op = Variable<K, V>;
+    type Op = Operation<K, V>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
     type Config = immutable::Config<T, V::Cfg>;
@@ -105,17 +105,17 @@ where
         config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
-        let size = journal.size().await.map_err(crate::adb::Error::from)?;
+        let size = journal.size().await;
 
         if size <= range.start {
             // Close existing journal and create new one
             journal.into_inner().destroy().await?;
             Self::create_journal(context, config, range).await
         } else {
-            // Extract the Variable journal to perform section-based pruning
+            // Extract the Operation journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();
 
-            // Use Variable journal's section-based pruning
+            // Use Operation journal's section-based pruning
             let items_per_section = config.log_items_per_section.get();
             let lower_section = *range.start / items_per_section;
             variable_journal
@@ -154,7 +154,7 @@ where
 
     /// The [immutable::Immutable]'s log of operations. It has elements within the range.
     /// Reports the range start as its pruning boundary (oldest retained operation index).
-    pub log: variable::Journal<E, Variable<K, V>>,
+    pub log: variable::Journal<E, Operation<K, V>>,
 
     /// Sync range - operations outside this range are pruned or not synced.
     pub range: Range<Location>,
@@ -176,6 +176,7 @@ mod tests {
     use crate::{
         adb::{
             immutable,
+            operation::variable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -183,7 +184,6 @@ mod tests {
             },
         },
         mmr::{Location, StandardHasher as Standard},
-        store::operation::Variable,
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
@@ -245,13 +245,13 @@ mod tests {
 
     /// Create n random Set operations.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    fn create_test_ops(n: usize) -> Vec<Variable<sha256::Digest, sha256::Digest>> {
+    fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut ops = Vec::new();
         for _i in 0..n {
             let key = sha256::Digest::random(&mut rng);
             let value = sha256::Digest::random(&mut rng);
-            ops.push(Variable::Set(key, value));
+            ops.push(Operation::Set(key, value));
         }
         ops
     }
@@ -259,14 +259,14 @@ mod tests {
     /// Applies the given operations to the database.
     async fn apply_ops(
         db: &mut ImmutableSyncTest,
-        ops: Vec<Variable<sha256::Digest, sha256::Digest>>,
+        ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
     ) {
         for op in ops {
             match op {
-                Variable::Set(key, value) => {
+                Operation::Set(key, value) => {
                     db.set(key, value).await.unwrap();
                 }
-                Variable::Commit(metadata) => {
+                Operation::Commit(metadata) => {
                     db.commit(metadata).await.unwrap();
                 }
                 _ => {}
@@ -298,7 +298,7 @@ mod tests {
             // Capture target database state before moving into config
             let mut expected_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
             for op in &target_db_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     expected_kvs.insert(*key, *value);
                 }
             }
@@ -342,7 +342,7 @@ mod tests {
             for _i in 0..expected_kvs.len() {
                 let key = sha256::Digest::random(&mut rng);
                 let value = sha256::Digest::random(&mut rng);
-                new_ops.push(Variable::Set(key, value));
+                new_ops.push(Operation::Set(key, value));
                 new_kvs.insert(key, value);
             }
 
@@ -485,7 +485,7 @@ mod tests {
 
             // Verify data integrity
             for op in &target_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     let stored_value = reopened_db.get(key).await.unwrap();
                     assert_eq!(stored_value, Some(*value));
                 }
@@ -550,7 +550,7 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size().await.unwrap();
+                    let log_size = client.journal().size().await;
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -587,7 +587,7 @@ mod tests {
             // Verify all expected operations are present in the synced database
             let all_ops = [initial_ops, additional_ops].concat();
             for op in &all_ops {
-                if let Variable::Set(key, value) = op {
+                if let Operation::Set(key, value) = op {
                     let synced_value = synced_db.get(key).await.unwrap();
                     assert_eq!(synced_value, Some(*value));
                 }

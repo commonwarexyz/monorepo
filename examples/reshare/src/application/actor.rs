@@ -1,9 +1,10 @@
 use crate::{
-    application::{types::genesis_block, Block, Mailbox, Message, Scheme},
+    application::{types::genesis_block, Block, Mailbox, Message},
     dkg, BLOCKS_PER_EPOCH,
 };
 use commonware_consensus::{
     marshal,
+    simplex::signing_scheme::Scheme,
     types::Round,
     utils::{epoch, last_block_in_epoch},
 };
@@ -22,27 +23,29 @@ use std::{future, marker::PhantomData, sync::Arc, time::Duration};
 use tracing::{info, warn};
 
 /// The application [Actor].
-pub struct Actor<E, H, C, V>
+pub struct Actor<E, H, C, V, S>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
+    S: Scheme,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<H>>,
 
-    _phantom: PhantomData<(C, V)>,
+    _phantom: PhantomData<(C, V, S)>,
 }
 
-impl<E, H, C, V> Actor<E, H, C, V>
+impl<E, H, C, V, S> Actor<E, H, C, V, S>
 where
     E: Rng + Spawner + Metrics + Clock,
     H: Hasher,
     C: Signer,
     V: Variant,
+    S: Scheme,
 {
     /// Create a new application [Actor] and its associated [Mailbox].
-    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H>) {
+    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(mailbox_size);
 
         (
@@ -59,7 +62,7 @@ where
     /// Start the application.
     pub fn start(
         mut self,
-        marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
+        marshal: marshal::Mailbox<S, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(marshal, dkg).await)
@@ -68,7 +71,7 @@ where
     /// Application control loop
     async fn run(
         mut self,
-        mut marshal: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
+        mut marshal: marshal::Mailbox<S, Block<H, C, V>>,
         dkg: dkg::Mailbox<H, C, V>,
     ) {
         let genesis = genesis_block();
@@ -122,10 +125,18 @@ where
                             // Re-propose the parent block if it's already at the last height in the epoch.
                             if parent.height == last_block_in_epoch(BLOCKS_PER_EPOCH, round.epoch())
                             {
-                                let result = response.send(parent.digest());
+                                // Set the built block to the parent block
+                                let digest = parent.digest();
+                                {
+                                    let mut built = built.lock().await;
+                                    *built = Some((round.view(), parent));
+                                }
+
+                                // Send the digest to the consensus
+                                let result = response.send(digest);
                                 info!(
                                     ?round,
-                                    digest = ?parent.digest(),
+                                    ?digest,
                                     success = result.is_ok(),
                                     "re-proposed parent block at epoch boundary"
                                 );

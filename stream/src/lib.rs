@@ -74,7 +74,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -86,7 +86,7 @@ pub enum Error {
     HandshakeError(HandshakeError),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
-    #[error("peer rejected: {0:X?}")]
+    #[error("peer rejected: {}", hex(_0))]
     PeerRejected(Vec<u8>),
     #[error("recv failed")]
     RecvFailed(RuntimeError),

@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::current::{Config, Current},
+    adb::current::{unordered::Current, Config},
     mmr::{hasher::Hasher as MmrHasher, Location, Position, Proof, StandardHasher as Standard},
     translator::TwoCap,
 };
@@ -68,6 +68,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: usize = 88;
 const PAGE_CACHE_SIZE: usize = 8;
+const MMR_ITEMS_PER_BLOB: u64 = 11;
+const LOG_ITEMS_PER_BLOB: u64 = 7;
+const WRITE_BUFFER_SIZE: usize = 1024;
 
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
@@ -77,11 +80,11 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
+            mmr_items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
+            mmr_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             log_journal_partition: "fuzz_current_log_journal".into(),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
+            log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
+            log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),

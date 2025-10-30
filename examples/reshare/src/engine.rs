@@ -1,11 +1,16 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{self, Block, Scheme, SchemeProvider},
-    dkg, orchestrator, BLOCKS_PER_EPOCH,
+    application::{self, Block, EpochSchemeProvider, SchemeProvider},
+    dkg, orchestrator,
+    setup::ParticipantConfig,
+    BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
-use commonware_consensus::marshal::{self, ingress::handler};
+use commonware_consensus::{
+    marshal::{self, ingress::handler},
+    simplex::signing_scheme::Scheme,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
     Hasher, Signer,
@@ -18,7 +23,7 @@ use commonware_utils::{quorum, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero};
+use std::{marker::PhantomData, num::NonZero, path::PathBuf};
 use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -47,46 +52,52 @@ where
     pub blocker: B,
     pub namespace: Vec<u8>,
 
-    pub polynomial: Public<V>,
+    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
+    pub polynomial: Option<Public<V>>,
     pub share: Option<group::Share>,
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
     pub dkg_rate_limit: governor::Quota,
+    pub orchestrator_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
 }
 
-pub struct Engine<E, C, B, H, V>
+pub struct Engine<E, C, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
+    S: Scheme<PublicKey = C::PublicKey>,
+    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     config: Config<C, B, V>,
     dkg: dkg::Actor<E, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    application: application::Actor<E, H, C, V>,
+    application: application::Actor<E, H, C, V, S>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
-    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<V>, Scheme<V>>,
-    marshal_mailbox: marshal::Mailbox<Scheme<V>, Block<H, C, V>>,
-    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H>>,
+    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
+    marshal_mailbox: marshal::Mailbox<S, Block<H, C, V>>,
+    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C::PublicKey>, S>,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
-impl<E, C, B, H, V> Engine<E, C, B, H, V>
+impl<E, C, B, H, V, S> Engine<E, C, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
+    S: Scheme<PublicKey = C::PublicKey>,
+    SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
@@ -97,6 +108,7 @@ where
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
+                participant_config: config.participant_config.clone(),
                 namespace: dkg_namespace,
                 signer: config.signer.clone(),
                 num_participants_per_epoch: config.num_participants_per_epoch,
@@ -121,8 +133,7 @@ where
             },
         );
 
-        let scheme_provider = SchemeProvider::default();
-
+        let scheme_provider = SchemeProvider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
@@ -154,13 +165,13 @@ where
             context.with_label("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                signer: config.signer.clone(),
                 application: application_mailbox.clone(),
                 scheme_provider,
                 marshal: marshal_mailbox.clone(),
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
+                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );
@@ -181,7 +192,7 @@ where
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         pending: (
@@ -204,7 +215,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        orchestrator: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -217,13 +232,14 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                backfill_network
+                orchestrator,
+                marshal
             )
             .await
         )
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn run(
         self,
         pending: (
@@ -246,7 +262,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        backfill_network: (
+        orchestrator: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
@@ -263,10 +283,12 @@ where
             .application
             .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
-        let marshal_handle =
-            self.marshal
-                .start(self.dkg_mailbox, self.buffered_mailbox, backfill_network);
-        let orchestrator_handle = self.orchestrator.start(pending, recovered, resolver);
+        let marshal_handle = self
+            .marshal
+            .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
+        let orchestrator_handle =
+            self.orchestrator
+                .start(pending, recovered, resolver, orchestrator);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

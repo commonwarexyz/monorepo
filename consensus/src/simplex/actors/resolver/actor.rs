@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -21,10 +21,12 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::set::Set;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::{
+    encoding::{EncodeLabelSet, EncodeLabelValue},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
+};
 use rand::{seq::IteratorRandom, CryptoRng, Rng};
 use std::{
     cmp::Ordering,
@@ -34,10 +36,30 @@ use std::{
 use tracing::{debug, warn};
 
 /// Task in the required set.
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, EncodeLabelValue)]
 enum Task {
     Notarization,
     Nullification,
+}
+
+/// Metric label that indicates the type of task.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TaskLabel {
+    task: Task,
+}
+
+impl TaskLabel {
+    fn notarization() -> &'static Self {
+        &Self {
+            task: Task::Notarization,
+        }
+    }
+
+    fn nullification() -> &'static Self {
+        &Self {
+            task: Task::Nullification,
+        }
+    }
 }
 
 /// Entry in the required set.
@@ -59,6 +81,89 @@ impl Ord for Entry {
 impl PartialOrd for Entry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// Tracks required entries with metrics by task type.
+struct Required {
+    entries: BTreeSet<Entry>,
+    unfulfilled: Family<TaskLabel, Gauge>,
+}
+
+impl Required {
+    fn new(metrics: &impl Metrics) -> Self {
+        let unfulfilled = Family::default();
+        metrics.register(
+            "unfulfilled",
+            "unfulfilled notarizations/nullifications",
+            unfulfilled.clone(),
+        );
+
+        Self {
+            entries: BTreeSet::new(),
+            unfulfilled,
+        }
+    }
+
+    fn insert(&mut self, task: Task, view: View) -> bool {
+        let inserted = self.entries.insert(Entry { task, view });
+        if inserted {
+            let label = match task {
+                Task::Notarization => TaskLabel::notarization(),
+                Task::Nullification => TaskLabel::nullification(),
+            };
+            self.unfulfilled.get_or_create(label).inc();
+        }
+        inserted
+    }
+
+    fn remove(&mut self, task: Task, view: View) -> bool {
+        let removed = self.entries.remove(&Entry { task, view });
+        if removed {
+            let label = match task {
+                Task::Notarization => TaskLabel::notarization(),
+                Task::Nullification => TaskLabel::nullification(),
+            };
+            self.unfulfilled.get_or_create(label).dec();
+        }
+        removed
+    }
+
+    fn prune(&mut self, min_view: View) {
+        let mut removed_notarizations = 0;
+        let mut removed_nullifications = 0;
+
+        self.entries.retain(|entry| {
+            let retain = entry.view >= min_view;
+            if !retain {
+                match entry.task {
+                    Task::Notarization => removed_notarizations += 1,
+                    Task::Nullification => removed_nullifications += 1,
+                }
+            }
+            retain
+        });
+
+        if removed_notarizations > 0 {
+            self.unfulfilled
+                .get_or_create(TaskLabel::notarization())
+                .dec_by(removed_notarizations);
+        }
+        if removed_nullifications > 0 {
+            self.unfulfilled
+                .get_or_create(TaskLabel::nullification())
+                .dec_by(removed_nullifications);
+        }
+    }
+
+    fn sample<R: Rng>(&self, inflight: &Inflight, rng: &mut R, count: usize) -> Vec<Entry> {
+        // We assume nothing about the usefulness (or existence) of any given entry, so we sample
+        // the iterator to ensure we eventually try to fetch everything requested.
+        self.entries
+            .iter()
+            .filter(|entry| !inflight.contains(entry))
+            .cloned()
+            .choose_multiple(rng, count)
     }
 }
 
@@ -103,7 +208,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
     P: PublicKey,
-    S: Scheme,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
 > {
@@ -119,7 +224,7 @@ pub struct Actor<
     nullifications: BTreeMap<View, Nullification<S>>,
     activity_timeout: u64,
 
-    required: BTreeSet<Entry>,
+    required: Required,
     inflight: Inflight,
     retry: Option<SystemTime>,
 
@@ -130,46 +235,47 @@ pub struct Actor<
     fetch_concurrent: usize,
     requester: requester::Requester<E, P>,
 
-    unfulfilled: Gauge,
     outstanding: Gauge,
-    served: Counter,
+    served: Family<TaskLabel, Counter>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
         P: PublicKey,
-        S: Scheme,
+        S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
     > Actor<E, P, S, B, D>
 {
-    pub fn new(context: E, cfg: Config<P, S, B>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
+        let participants = cfg.scheme.participants();
+        let me = cfg
+            .scheme
+            .me()
+            .and_then(|index| participants.key(index))
+            .cloned();
+
         let config = requester::Config {
-            public_key: cfg.me,
+            me,
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
         };
         let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        let participants: Set<_> = cfg.participants.into_iter().collect();
         requester.reconcile(participants.as_ref());
 
         // Initialize metrics
-        let unfulfilled = Gauge::default();
         let outstanding = Gauge::default();
-        let served = Counter::default();
-        context.register(
-            "unfulfilled",
-            "unfulfilled notarizations/nullifications",
-            unfulfilled.clone(),
-        );
+        let served = Family::default();
         context.register("outstanding", "outstanding requests", outstanding.clone());
         context.register(
             "served",
             "served notarizations/nullifications",
             served.clone(),
         );
+
+        let required = Required::new(&context);
 
         // Initialize mailbox
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -187,7 +293,7 @@ impl<
                 nullifications: BTreeMap::new(),
                 activity_timeout: cfg.activity_timeout,
 
-                required: BTreeSet::new(),
+                required,
                 inflight: Inflight::new(),
                 retry: None,
 
@@ -198,7 +304,6 @@ impl<
                 fetch_concurrent: cfg.fetch_concurrent,
                 requester,
 
-                unfulfilled,
                 outstanding,
                 served,
             },
@@ -222,13 +327,10 @@ impl<
                 return;
             }
 
-            // We assume nothing about the usefulness (or existence) of any given entry, so we sample
-            // the iterator to ensure we eventually try to fetch everything requested.
-            let entries = self
-                .required
-                .iter()
-                .filter(|entry| !self.inflight.contains(entry))
-                .choose_multiple(&mut self.context, self.max_fetch_count);
+            // Randomly sample entries to request
+            let entries =
+                self.required
+                    .sample(&self.inflight, &mut self.context, self.max_fetch_count);
             if entries.is_empty() {
                 return;
             }
@@ -331,7 +433,6 @@ impl<
         let mut finalized_view = 0;
         loop {
             // Record outstanding metric
-            self.unfulfilled.set(self.required.len() as i64);
             self.outstanding.set(self.requester.len() as i64);
 
             // Set timeout for retry
@@ -371,11 +472,11 @@ impl<
                         Message::Fetch { notarizations, nullifications } => {
                             // Add to all outstanding required
                             for view in notarizations {
-                                self.required.insert(Entry { task: Task::Notarization, view });
+                                self.required.insert(Task::Notarization, view);
                                 debug!(?view, "notarization required");
                             }
                             for view in nullifications {
-                                self.required.insert(Entry { task: Task::Nullification, view });
+                                self.required.insert(Task::Nullification, view);
                                 debug!(?view, "nullification required");
                             }
 
@@ -392,7 +493,7 @@ impl<
                             }
 
                             // If waiting for this notarization, remove it
-                            self.required.remove(&Entry { task: Task::Notarization, view });
+                            self.required.remove(Task::Notarization, view);
 
                             // Add notarization to cache
                             self.notarizations.insert(view, notarization);
@@ -407,7 +508,7 @@ impl<
                             }
 
                             // If waiting for this nullification, remove it
-                            self.required.remove(&Entry { task: Task::Nullification, view });
+                            self.required.remove(Task::Nullification, view);
 
                             // Add nullification to cache
                             self.nullifications.insert(view, nullification);
@@ -424,7 +525,7 @@ impl<
                             }
 
                             // Remove outstanding
-                            self.required.retain(|entry| entry.view >= view);
+                            self.required.prune(view);
 
                             // Set prune depth
                             if view < self.activity_timeout {
@@ -472,7 +573,7 @@ impl<
                                 if let Some(notarization) = self.notarizations.get(&view) {
                                     notarizations.push(view);
                                     notarizations_found.push(notarization.clone());
-                                    self.served.inc();
+                                    self.served.get_or_create(TaskLabel::notarization()).inc();
                                 } else {
                                     missing_notarizations.push(view);
                                 }
@@ -483,7 +584,7 @@ impl<
                                 if let Some(nullification) = self.nullifications.get(&view) {
                                     nullifications.push(view);
                                     nullifications_found.push(nullification.clone());
-                                    self.served.inc();
+                                    self.served.get_or_create(TaskLabel::nullification()).inc();
                                 } else {
                                     missing_nullifications.push(view);
                                 }
@@ -527,8 +628,7 @@ impl<
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
-                                let entry = Entry { task: Task::Notarization, view };
-                                if !self.required.remove(&entry) {
+                                if !self.required.remove(Task::Notarization, view) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
@@ -539,8 +639,7 @@ impl<
                             let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
                                 let view = nullification.view();
-                                let entry = Entry { task: Task::Nullification, view };
-                                if !self.required.remove(&entry) {
+                                if !self.required.remove(Task::Nullification, view) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }

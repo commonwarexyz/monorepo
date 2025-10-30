@@ -6,8 +6,8 @@ use std::time::Duration;
 
 /// Configuration for the requester.
 pub struct Config<P: PublicKey> {
-    /// Cryptographic primitives.
-    pub public_key: P,
+    /// Local identity of the participant (if any).
+    pub me: Option<P>,
 
     /// Rate limit for requests per participant.
     pub rate_limit: Quota,

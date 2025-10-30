@@ -1,41 +1,50 @@
 //! Ed25519 implementation of the [`Scheme`] trait for `simplex`.
+//!
+//! [`Scheme`] is **attributable**: individual signatures can be safely
+//! presented to some third party as evidence of either liveness or of committing a fault. Certificates
+//! contain signer indices alongside individual signatures, enabling secure
+//! per-validator activity tracking and fault detection.
 
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{Participants, Vote, VoteContext, VoteVerification},
+        types::{OrderedExt, Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
-    ed25519::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature},
+    ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
+use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
 #[derive(Clone, Debug)]
 pub struct Scheme {
-    /// Participant set (sorted) used for signer indexing and batch verification.
-    participants: Participants<PublicKey>,
-    /// Optional local signing key paired with its participant index.
-    signer: Option<(u32, PrivateKey)>,
+    /// Participants in the committee.
+    participants: Ordered<ed25519::PublicKey>,
+    /// Key used for generating signatures.
+    signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
 impl Scheme {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// * `participants` - ordered validator set used for verification.
-    /// * `private_key` - optional secret key enabling signing capabilities.
-    pub fn new(participants: impl Into<Participants<PublicKey>>, private_key: PrivateKey) -> Self {
-        let participants = participants.into();
-
+    /// Participants use the same key for both identity and consensus.
+    ///
+    /// If the provided private key does not match any consensus key in the committee,
+    /// the instance will act as a verifier (unable to generate signatures).
+    pub fn new(
+        participants: Ordered<ed25519::PublicKey>,
+        private_key: ed25519::PrivateKey,
+    ) -> Self {
         let signer = participants
-            .index(&private_key.public_key())
-            .map(|index| (index, private_key));
+            .position(&private_key.public_key())
+            .map(|index| (index as u32, private_key));
 
         Self {
             participants,
@@ -43,10 +52,12 @@ impl Scheme {
         }
     }
 
-    /// Builds a pure verifier that can authenticate votes without signing.
-    pub fn verifier(participants: impl Into<Participants<PublicKey>>) -> Self {
+    /// Builds a verifier that can authenticate votes without generating signatures.
+    ///
+    /// Participants use the same key for both identity and consensus.
+    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
-            participants: participants.into(),
+            participants,
             signer: None,
         }
     }
@@ -77,7 +88,7 @@ impl Scheme {
         // Add the certificate to the batch.
         let (namespace, message) = vote_namespace_and_message(namespace, context);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(signer) else {
+            let Some(public_key) = self.participants.get(signer as usize) else {
                 return false;
             };
 
@@ -93,13 +104,12 @@ impl Scheme {
     }
 }
 
-/// Certificate formed by collecting Ed25519 signatures plus their signer indices.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate {
     /// Bitmap of validator indices that contributed signatures.
     pub signers: Signers,
     /// Ed25519 signatures emitted by the respective validators ordered by signer index.
-    pub signatures: Vec<Ed25519Signature>,
+    pub signatures: Vec<ed25519::Signature>,
 }
 
 impl Write for Certificate {
@@ -127,7 +137,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "consensus::simplex::signing_scheme::ed25519::Certificate",
@@ -143,9 +153,18 @@ impl Read for Certificate {
 }
 
 impl signing_scheme::Scheme for Scheme {
-    type Signature = Ed25519Signature;
+    type PublicKey = ed25519::PublicKey;
+    type Signature = ed25519::Signature;
     type Certificate = Certificate;
     type Seed = ();
+
+    fn me(&self) -> Option<u32> {
+        self.signer.as_ref().map(|(index, _)| *index)
+    }
+
+    fn participants(&self) -> &Ordered<Self::PublicKey> {
+        &self.participants
+    }
 
     fn sign_vote<D: Digest>(
         &self,
@@ -169,7 +188,7 @@ impl signing_scheme::Scheme for Scheme {
         context: VoteContext<'_, D>,
         vote: &Vote<Self>,
     ) -> bool {
-        let Some(public_key) = self.participants.get(vote.signer) else {
+        let Some(public_key) = self.participants.get(vote.signer as usize) else {
             return false;
         };
 
@@ -196,7 +215,7 @@ impl signing_scheme::Scheme for Scheme {
         let mut batch = Batch::new();
 
         for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.get(vote.signer) else {
+            let Some(public_key) = self.participants.get(vote.signer as usize) else {
                 invalid.insert(vote.signer);
                 continue;
             };
@@ -302,6 +321,10 @@ impl signing_scheme::Scheme for Scheme {
         None
     }
 
+    fn is_attributable(&self) -> bool {
+        true
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.participants.len()
     }
@@ -316,36 +339,31 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
+            mocks::fixtures::{ed25519, Fixture},
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },
         types::Round,
     };
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, PrivateKeyExt, Sha256};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
     use commonware_utils::quorum;
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::{
+        rngs::{OsRng, StdRng},
+        thread_rng, SeedableRng,
+    };
 
     const NAMESPACE: &[u8] = b"ed25519-signing-scheme";
 
-    fn generate_private_keys(n: usize) -> Vec<PrivateKey> {
-        let mut keys: Vec<_> = (0..n).map(|i| PrivateKey::from_seed(i as u64)).collect();
-        keys.sort_by_key(|key| key.public_key());
-        keys
-    }
+    fn setup_signers(n: u32, seed: u64) -> (Vec<Scheme>, Ordered<ed25519::PublicKey>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519(&mut rng, n);
 
-    fn participants(keys: &[PrivateKey]) -> Vec<PublicKey> {
-        keys.iter().map(|key| key.public_key()).collect()
-    }
-
-    fn schemes(n: usize) -> (Vec<Scheme>, Vec<PublicKey>) {
-        let keys = generate_private_keys(n);
-        let participants = participants(&keys);
-        let schemes = keys
-            .into_iter()
-            .map(|key| Scheme::new(participants.clone(), key))
-            .collect();
-        (schemes, participants)
+        (schemes, participants.into())
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -358,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_sign_vote_roundtrip_for_each_context() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let scheme = &schemes[0];
 
         let proposal = sample_proposal(0, 2, 1);
@@ -413,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_verify_votes_filters_bad_signers() {
-        let (schemes, _) = schemes(5);
+        let (schemes, _) = setup_signers(5, 42);
         let quorum = quorum(schemes.len() as u32) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
@@ -474,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_sorts_signers() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 7, 4);
 
         let votes = [
@@ -515,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_requires_quorum() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 9, 5);
 
         let votes: Vec<_> = schemes
@@ -538,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate_rejects_out_of_range_signer() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 13, 7);
 
         let mut votes: Vec<_> = schemes
@@ -563,7 +581,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate signer index: 2")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 25, 13);
 
         let mut votes: Vec<_> = schemes
@@ -588,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_detects_corruption() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 15, 8);
 
         let votes: Vec<_> = schemes
@@ -610,7 +628,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants.clone());
+        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -634,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_certificate_codec_roundtrip() {
-        let (schemes, _) = schemes(4);
+        let (schemes, _) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 17, 9);
 
         let votes: Vec<_> = schemes
@@ -662,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let signer = schemes[0].clone();
         let proposal = sample_proposal(0, 21, 11);
 
@@ -678,7 +696,7 @@ mod tests {
             "signer should produce votes"
         );
 
-        let verifier = Scheme::verifier(participants.clone());
+        let verifier = Scheme::verifier(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -694,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_certificate_decode_validation() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes
@@ -751,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 21, 11);
 
         let votes: Vec<_> = schemes
@@ -786,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_sub_quorum() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
@@ -827,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_unknown_signer() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 25, 13);
 
         let votes: Vec<_> = schemes
@@ -869,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 26, 14);
 
         let votes: Vec<_> = schemes
@@ -919,7 +937,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_mismatched_signature_count() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal = sample_proposal(0, 27, 14);
 
         let votes: Vec<_> = schemes
@@ -955,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificates_batch_detects_failure() {
-        let (schemes, participants) = schemes(4);
+        let (schemes, participants) = setup_signers(4, 42);
         let proposal_a = sample_proposal(0, 23, 12);
         let proposal_b = sample_proposal(1, 24, 13);
 

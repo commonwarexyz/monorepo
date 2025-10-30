@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _,
 };
-use commonware_storage::journal::fixed::Journal;
+use commonware_storage::journal::contiguous::fixed::Journal;
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;

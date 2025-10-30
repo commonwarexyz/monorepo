@@ -60,8 +60,9 @@ use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
+    future::BoxFuture,
     task::{waker, ArcWake},
-    Future,
+    Future, FutureExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -82,7 +83,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::trace;
+use tracing::{info_span, trace, Instrument};
 
 #[derive(Debug)]
 struct Metrics {
@@ -362,6 +363,13 @@ pub struct Checkpoint {
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     catch_panics: bool,
+}
+
+impl Checkpoint {
+    /// Get a reference to the [Auditor].
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.auditor.clone()
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -763,6 +771,7 @@ pub struct Context {
     storage: Arc<Storage>,
     tree: Arc<Tree>,
     execution: Execution,
+    instrumented: bool,
 }
 
 impl Clone for Context {
@@ -776,6 +785,7 @@ impl Clone for Context {
 
             tree: child,
             execution: Execution::default(),
+            instrumented: false,
         }
     }
 }
@@ -825,6 +835,7 @@ impl Context {
                 storage: Arc::new(storage),
                 tree: Tree::root(),
                 execution: Execution::default(),
+                instrumented: false,
             },
             executor,
             panicked,
@@ -880,6 +891,7 @@ impl Context {
                 storage: checkpoint.storage,
                 tree: Tree::root(),
                 execution: Execution::default(),
+                instrumented: false,
             },
             executor,
             panicked,
@@ -913,6 +925,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn instrumented(mut self) -> Self {
+        self.instrumented = true;
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -924,7 +941,9 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
+        let is_instrumented = self.instrumented;
         self.execution = Execution::default();
+        self.instrumented = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -933,7 +952,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = f(self);
+        let future: BoxFuture<T> = if is_instrumented {
+            f(self)
+                .instrument(info_span!(parent: None, "task", name = %label.name()))
+                .boxed()
+        } else {
+            f(self).boxed()
+        };
         let (f, handle) = Handle::init(
             future,
             metric,

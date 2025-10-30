@@ -190,7 +190,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{set::OrderedAssociated, NZU32};
     use governor::Quota;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -269,7 +269,9 @@ mod tests {
 
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
-            oracle.register(0, vec![(pk.clone(), addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(pk.clone(), addr)]))
+                .await;
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -296,7 +298,9 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
-            oracle.register(0, vec![(pk1.clone(), addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(pk1.clone(), addr)]))
+                .await;
             context.sleep(Duration::from_millis(10)).await;
 
             oracle.block(pk1.clone()).await;
@@ -351,7 +355,10 @@ mod tests {
             oracle
                 .register(
                     0,
-                    vec![(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)],
+                    OrderedAssociated::from([
+                        (peer_pk.clone(), peer_addr),
+                        (peer_pk2.clone(), peer_addr2),
+                    ]),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
@@ -382,7 +389,9 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.register(0, vec![(peer_pk.clone(), peer_addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.listenable(peer_pk.clone()).await);
@@ -415,7 +424,9 @@ mod tests {
                 mut oracle,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            oracle.register(0, vec![(boot_pk.clone(), boot_addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .await;
 
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.len(), 1);
@@ -437,7 +448,9 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
-            oracle.register(0, vec![(boot_pk.clone(), boot_addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(boot_pk.clone(), boot_addr)]))
+                .await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());
@@ -472,7 +485,9 @@ mod tests {
             // 2) Register & connect an authorized peer
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
-            oracle.register(0, vec![(peer_pk.clone(), peer_addr)]).await;
+            oracle
+                .register(0, OrderedAssociated::from([(peer_pk.clone(), peer_addr)]))
+                .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
@@ -523,7 +538,10 @@ mod tests {
 
             // Register set with myself and one other peer
             oracle
-                .register(0, vec![(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)])
+                .register(
+                    0,
+                    OrderedAssociated::from([(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)]),
+                )
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -542,7 +560,9 @@ mod tests {
             mailbox.connect(my_pk.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
-            oracle.register(1, vec![(pk_2.clone(), addr_2)]).await;
+            oracle
+                .register(1, OrderedAssociated::from([(pk_2.clone(), addr_2)]))
+                .await;
 
             // Wait for a listener update
             let registered_ips = listener_receiver.next().await.unwrap();

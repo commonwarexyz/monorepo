@@ -1,10 +1,9 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    adb::{self, any::fixed::unordered::Any},
+    adb::{self, any::fixed::unordered::Any, operation::fixed::unordered::Operation},
     index::Unordered as Index,
-    journal::fixed,
+    journal::contiguous::fixed,
     mmr::{Location, Position, StandardHasher},
-    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
@@ -24,8 +23,8 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = Fixed<K, V>;
-    type Journal = fixed::Journal<E, Fixed<K, V>>;
+    type Op = Operation<K, V>;
+    type Journal = fixed::Journal<E, Operation<K, V>>;
     type Hasher = H;
     type Config = adb::any::fixed::Config<T>;
     type Digest = H::Digest;
@@ -80,7 +79,7 @@ where
 
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
-        let log_size = log.size().await?;
+        let log_size = log.size().await;
         for i in *mmr.leaves()..log_size {
             let op = log.read(i).await?;
             mmr.add_batched(&mut hasher, &op.encode()).await?;
@@ -122,7 +121,7 @@ where
         config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, adb::Error> {
-        let size = journal.size().await?;
+        let size = journal.size().await;
 
         if size <= range.start {
             // Create a new journal with the new bounds
@@ -163,7 +162,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 
     let mut journal =
         fixed::Journal::<E, A>::init(context.with_label("journal"), cfg.clone()).await?;
-    let journal_size = journal.size().await?;
+    let journal_size = journal.size().await;
     let journal = if journal_size <= range.start {
         debug!(
             journal_size,
@@ -185,7 +184,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
             journal_size,
         )));
     };
-    let journal_size = journal.size().await?;
+    let journal_size = journal.size().await;
     assert!(journal_size <= range.end);
     assert!(journal_size >= range.start);
     Ok(journal)
@@ -278,6 +277,7 @@ mod tests {
                 },
                 Any,
             },
+            operation::fixed::{unordered::Operation, FixedOperation as _},
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -285,9 +285,8 @@ mod tests {
                 Engine, Target,
             },
         },
-        journal::{self, fixed},
+        journal,
         mmr::iterator::nodes_to_pin,
-        store::operation::{Fixed, FixedOperation as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{
@@ -343,7 +342,7 @@ mod tests {
                 .unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_log_size = target_db.log.size().await.unwrap();
+            let target_log_size = target_db.log.size().await;
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
@@ -356,17 +355,17 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Fixed::Update(key, _) => {
+                    Operation::Update(key, _) => {
                         if let Some((value, loc)) = target_db.get_key_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Fixed::Delete(key) => {
+                    Operation::Delete(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    Fixed::CommitFloor(_) => {
+                    Operation::CommitFloor(_) => {
                         // Ignore
                     }
                 }
@@ -394,7 +393,7 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
+            assert_eq!(got_db.log.size().await, target_log_size);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
@@ -416,7 +415,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Fixed::Update(key, value));
+                new_ops.push(Operation::Update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -437,7 +436,7 @@ mod tests {
 
             // Capture the database state before closing
             let final_synced_op_count = got_db.op_count();
-            let final_synced_log_size = got_db.log.size().await.unwrap();
+            let final_synced_log_size = got_db.log.size().await;
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_root = got_db.root(&mut hasher);
 
@@ -453,7 +452,7 @@ mod tests {
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor
             );
-            assert_eq!(reopened_db.log.size().await.unwrap(), final_synced_log_size);
+            assert_eq!(reopened_db.log.size().await, final_synced_log_size);
             assert_eq!(
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor,
@@ -640,8 +639,8 @@ mod tests {
             );
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
             assert_eq!(
-                sync_db.log.size().await.unwrap(),
-                target_db.read().await.log.size().await.unwrap()
+                sync_db.log.size().await,
+                target_db.read().await.log.size().await
             );
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
@@ -736,10 +735,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.op_count(), target_db.op_count());
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(
-                sync_db.log.size().await.unwrap(),
-                target_db.log.size().await.unwrap()
-            );
+            assert_eq!(sync_db.log.size().await, target_db.log.size().await);
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
@@ -1136,7 +1132,7 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size().await.unwrap();
+                    let log_size = client.journal().size().await;
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -1319,9 +1315,9 @@ mod tests {
     pub fn test_from_sync_result_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = journal::fixed::Journal::<Context, Fixed<Digest, Digest>>::init(
+            let log = fixed::Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
-                journal::fixed::Config {
+                fixed::Config {
                     partition: "sync_basic_log".into(),
                     items_per_blob: NZU64!(1000),
                     write_buffer: NZUsize!(1024),
@@ -1345,7 +1341,7 @@ mod tests {
             // Verify database state
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(synced_db.log.size().await.unwrap(), 0);
+            assert_eq!(synced_db.log.size().await, 0);
             assert_eq!(synced_db.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
@@ -1434,10 +1430,7 @@ mod tests {
             assert_eq!(db.op_count(), upper_bound);
             assert_eq!(db.inactivity_floor_loc, lower_bound);
             assert_eq!(db.mmr.size(), source_db.mmr.size());
-            assert_eq!(
-                db.log.size().await.unwrap(),
-                source_db.log.size().await.unwrap()
-            );
+            assert_eq!(db.log.size().await, source_db.log.size().await);
 
             // Verify the root digest matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
@@ -1446,10 +1439,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1529,7 +1522,7 @@ mod tests {
                 .unwrap();
 
                 // Verify database state
-                assert_eq!(db.log.size().await.unwrap(), upper_bound);
+                assert_eq!(db.log.size().await, upper_bound);
                 assert_eq!(
                     db.mmr.size(),
                     Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
@@ -1541,10 +1534,10 @@ mod tests {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..upper_bound as usize] {
-                    if let Fixed::Update(key, value) = op {
+                    if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Fixed::Delete(key) = op {
+                    } else if let Operation::Delete(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1606,7 +1599,7 @@ mod tests {
             // Capture target db state for comparison
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
-            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_log_size = target_db.log.size().await;
             let target_db_mmr_size = target_db.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
@@ -1634,7 +1627,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.log.size().await, target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
 
             // Verify the root digest matches the target
@@ -1644,10 +1637,10 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1681,7 +1674,7 @@ mod tests {
             let sync_upper_bound = db.op_count();
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
-            let target_db_log_size = db.log.size().await.unwrap();
+            let target_db_log_size = db.log.size().await;
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
@@ -1715,7 +1708,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.log.size().await, target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
 
             sync_db.destroy().await.unwrap();
@@ -1743,7 +1736,7 @@ mod tests {
                     .expect("Failed to initialize journal with sync boundaries");
 
             // Verify the journal is initialized at the lower bound
-            assert_eq!(sync_journal.size().await.unwrap(), lower_bound);
+            assert_eq!(sync_journal.size().await, lower_bound);
             assert_eq!(sync_journal.oldest_retained_pos().await.unwrap(), None);
 
             // Verify the journal structure matches expected state
@@ -1793,7 +1786,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let journal_size = journal.size().await.unwrap();
+            let journal_size = journal.size().await;
             assert_eq!(journal_size, 20);
             journal.close().await.unwrap();
 
@@ -1807,7 +1800,7 @@ mod tests {
                 .expect("Failed to initialize journal with overlap");
 
             // Verify the journal size matches the original (no rewind needed)
-            assert_eq!(journal.size().await.unwrap(), journal_size);
+            assert_eq!(journal.size().await, journal_size);
 
             // Verify the journal has been pruned to the lower bound
             assert_eq!(
@@ -1862,7 +1855,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let initial_size = journal.size().await.unwrap();
+            let initial_size = journal.size().await;
             assert_eq!(initial_size, 20);
             journal.close().await.unwrap();
 
@@ -1876,7 +1869,7 @@ mod tests {
                 .expect("Failed to initialize journal with exact match");
 
             // Verify the journal size remains the same (no rewinding needed)
-            assert_eq!(journal.size().await.unwrap(), initial_size);
+            assert_eq!(journal.size().await, initial_size);
 
             // Verify the journal has been pruned to the lower bound
             assert_eq!(
@@ -1931,7 +1924,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let initial_size = journal.size().await.unwrap();
+            let initial_size = journal.size().await;
             assert_eq!(initial_size, 30);
             journal.close().await.unwrap();
 
@@ -1992,7 +1985,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 0");
 
-                assert_eq!(journal.size().await.unwrap(), 0);
+                assert_eq!(journal.size().await, 0);
                 assert_eq!(journal.tail_index, 0);
                 assert_eq!(journal.blobs.len(), 0);
                 assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
@@ -2010,7 +2003,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 10");
 
-                assert_eq!(journal.size().await.unwrap(), 10);
+                assert_eq!(journal.size().await, 10);
                 assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
                 assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Tail is empty
@@ -2035,7 +2028,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 7");
 
-                assert_eq!(journal.size().await.unwrap(), 7);
+                assert_eq!(journal.size().await, 7);
                 assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
                                                     // Tail blob should have 2 items worth of space (7 % 5 = 2)
@@ -2067,7 +2060,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 23");
 
-                assert_eq!(journal.size().await.unwrap(), 23);
+                assert_eq!(journal.size().await, 23);
                 assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
                 assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(20)); // First item in tail blob
