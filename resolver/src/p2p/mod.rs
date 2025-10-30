@@ -66,7 +66,10 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+        Manager,
+    };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
@@ -97,7 +100,7 @@ mod tests {
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
-        let (network, oracle) = Network::new(
+        let (network, mut oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -112,6 +115,7 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+        oracle.update(0, peers.clone().into()).await;
 
         let mut connections = Vec::new();
         for peer in &peers {
