@@ -97,7 +97,7 @@ where
             ctx.with_label("storage"),
             storage_partition,
             round_info.round(),
-            round_info.max_read_size(),
+            round_info.max_read_size().get(),
         )
         .await;
         let mut ctx = ContextCell::new(ctx);
