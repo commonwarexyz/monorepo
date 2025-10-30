@@ -380,6 +380,16 @@ mod tests {
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
+
+            // Ensure tracking works for static peers
+            let deleted = directory.add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr)]));
+            assert_eq!(deleted.len(), 1);
+            assert!(deleted.contains(&pk_2));
+
+            // Ensure tracking works for dynamic peers
+            let deleted = directory.add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
+            assert_eq!(deleted.len(), 1);
+            assert!(deleted.contains(&pk_1));
         });
     }
 
