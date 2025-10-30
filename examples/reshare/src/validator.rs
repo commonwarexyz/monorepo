@@ -54,12 +54,12 @@ where
         serde_json::from_str(&peers_str).expect("Failed to deserialize peers configuration");
 
     let threshold = peer_config.threshold();
-    let polynomial = config.polynomial(threshold);
+    let output = config.output(threshold);
 
     info!(
         public_key = %config.signing_key.public_key(),
         share = ?config.share,
-        ?polynomial,
+        ?output,
         "Loaded participant configuration"
     );
 
@@ -122,12 +122,11 @@ where
             blocker: oracle.clone(),
             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
             participant_config: Some((args.config_path, config.clone())),
-            polynomial,
+            output: output,
             share: config.share,
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch as usize,
-            dkg_rate_limit: dkg_limit,
             orchestrator_rate_limit: orchestrator_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
@@ -609,7 +608,6 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
@@ -730,7 +728,6 @@ mod test {
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
@@ -891,7 +888,6 @@ mod test {
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len(),
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
@@ -962,27 +958,25 @@ mod test {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: Some(share),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
+            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                context.with_label("engine"),
+                engine::Config {
+                    signer: signer.clone(),
+                    blocker: oracle.control(public_key.clone()),
+                    manager: oracle.manager(),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: Some(share),
+                    active_participants: validators.clone(),
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: validators.len(),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1135,7 +1129,6 @@ mod test {
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len(),
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
@@ -1206,27 +1199,25 @@ mod test {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine_0"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: Some(share),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
+            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: Some(share),
+                    active_participants: validators.clone(),
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: validators.len(),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1391,7 +1382,6 @@ mod test {
                             active_participants: validators[1..].to_vec(),
                             inactive_participants: validators[..1].to_vec(),
                             num_participants_per_epoch: validators.len() - 1,
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
@@ -1463,31 +1453,25 @@ mod test {
             // in the first epoch.
             let signer = signers[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine_0"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: None,
-                        active_participants: validators[1..].to_vec(),
-                        inactive_participants: validators[..1].to_vec(),
-                        num_participants_per_epoch: validators.len() - 1,
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
-
-            // Get networking
-            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
-                registrations.remove(&public_key).unwrap();
+            let engine = engine::Engine::<_, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: None,
+                    active_participants: validators[1..].to_vec(),
+                    inactive_participants: validators[..1].to_vec(),
+                    num_participants_per_epoch: validators.len() - 1,
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: format!("validator_{idx}"),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+                registrations.remove(&public_key).unwrap(),
+            );
 
             // Start engine
             engine.start(
@@ -1645,7 +1629,6 @@ mod test {
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
                                 num_participants_per_epoch: validators.len(),
-                                dkg_rate_limit: Quota::per_second(NZU32!(128)),
                                 orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                                 partition_prefix: format!("validator_{idx}"),
                                 freezer_table_initial_size: 1024, // 1mb
