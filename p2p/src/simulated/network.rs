@@ -193,7 +193,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
-            ingress::Message::Register { peer_set, peers } => {
+            ingress::Message::Update { peer_set, peers } => {
                 let Some(tracked_peer_sets) = self.tracked_peer_sets else {
                     warn!("attempted to register peer set when tracking is disabled");
                     return;
@@ -260,7 +260,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
             }
-            ingress::Message::RegisterComms {
+            ingress::Message::Register {
                 channel,
                 public_key,
                 result,

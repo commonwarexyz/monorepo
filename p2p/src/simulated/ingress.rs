@@ -10,11 +10,11 @@ use rand_distr::Normal;
 use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
-    Register {
+    Update {
         peer_set: u64,
         peers: Ordered<P>,
     },
-    RegisterComms {
+    Register {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
@@ -192,7 +192,7 @@ impl<P: PublicKey> crate::Manager for Oracle<P> {
 
     async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
         self.sender
-            .send(Message::Register { peer_set, peers })
+            .send(Message::Update { peer_set, peers })
             .await
             .unwrap();
     }
@@ -234,7 +234,7 @@ impl<P: PublicKey> Control<P> {
     pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(Message::RegisterComms {
+            .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
                 result: tx,
