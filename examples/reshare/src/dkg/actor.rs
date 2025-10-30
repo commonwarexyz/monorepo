@@ -222,18 +222,18 @@ where
             .await;
 
         // Register the initial set of peers.
-        let players_after_next = Self::choose_from_all(
-            &all_participants,
-            self.num_participants_per_epoch,
-            current_epoch + 1,
-        );
-        let next_epoch_peers = dealers
-            .clone()
-            .into_iter()
-            .chain(players.clone())
-            .chain(players_after_next)
-            .collect::<Ordered<_>>();
-        self.manager.update(current_epoch, next_epoch_peers).await;
+        self.manager
+            .update(
+                current_epoch,
+                dealers.clone().into_iter().collect::<Ordered<_>>(),
+            )
+            .await;
+        self.manager
+            .update(
+                current_epoch + 1,
+                players.clone().into_iter().collect::<Ordered<_>>(),
+            )
+            .await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -420,16 +420,12 @@ where
                             &all_participants,
                             self.num_participants_per_epoch,
                             next_epoch + 1,
-                        );
-
-                        // Register the set of peers for the next epoch.
-                        let next_epoch_peers = next_participants
-                            .clone()
-                            .into_iter()
-                            .chain(next_players.clone())
-                            .chain(next_epoch_players)
-                            .collect::<Ordered<_>>();
-                        self.manager.update(next_epoch, next_epoch_peers).await;
+                        )
+                        .into_iter()
+                        .collect::<Ordered<_>>();
+                        self.manager
+                            .update(next_epoch + 1, next_epoch_players)
+                            .await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
