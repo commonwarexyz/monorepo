@@ -158,7 +158,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         .await?;
 
         // Build snapshot from the log
-        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
 
         let db = Self {
             mmr,
