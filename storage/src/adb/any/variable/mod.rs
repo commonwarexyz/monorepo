@@ -87,13 +87,8 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHas
     /// `log`.
     mmr: Mmr<E, H>,
 
-    /// A log of all operations applied to the db in order of occurrence. The _location_ of an
-    /// operation is its position in this log, and corresponds to its leaf number in the MMR.
-    ///
-    /// # Invariant
-    ///
-    /// An operation's location is always equal to the number of the MMR leaf storing the digest of
-    /// the operation.
+    /// A (pruned) log of all operations applied to the db in order of occurrence. The _location_
+    /// of an operation is its position in this log, and corresponds to its location in the MMR.
     log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
@@ -281,9 +276,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
-            let op_count = (*mmr_leaves - *log_size) as usize;
-            warn!(op_count, "popping uncommitted MMR operations");
-            self.mmr.pop(op_count).await?;
+            let leaves_to_pop = (*mmr_leaves - *log_size) as usize;
+            warn!(leaves_to_pop, "popping uncommitted MMR operations");
+            self.mmr.pop(leaves_to_pop).await?;
         }
 
         // Confirm post-conditions hold.
