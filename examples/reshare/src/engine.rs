@@ -84,7 +84,7 @@ where
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
     marshal_mailbox: marshal::Mailbox<S, Block<H, C, V>>,
-    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H>, S>,
+    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C::PublicKey>, S>,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }

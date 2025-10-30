@@ -19,7 +19,7 @@ pub struct Engine<
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D>,
+    A: Automaton<Context = Context<D, P>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -41,7 +41,7 @@ impl<
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
+        A: Automaton<Context = Context<D, P>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Engine<E, P, S, B, D, A, R, F>

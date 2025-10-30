@@ -15,9 +15,11 @@ use std::{collections::HashSet, fmt::Debug, hash::Hash};
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
 #[derive(Clone)]
-pub struct Context<D: Digest> {
+pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
+    /// Leader of the current round.
+    pub leader: P,
     /// Parent the payload is built on.
     ///
     /// If there is a gap between the current view and the parent view, the participant
@@ -27,7 +29,7 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
-impl<D: Digest> Epochable for Context<D> {
+impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -35,7 +37,7 @@ impl<D: Digest> Epochable for Context<D> {
     }
 }
 
-impl<D: Digest> Viewable for Context<D> {
+impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     type View = View;
 
     fn view(&self) -> View {

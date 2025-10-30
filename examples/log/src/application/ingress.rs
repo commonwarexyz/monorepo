@@ -1,7 +1,7 @@
 use commonware_consensus::{
     simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{ed25519::PublicKey, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -34,7 +34,7 @@ impl<D: Digest> Mailbox<D> {
 
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
-    type Context = Context<Self::Digest>;
+    type Context = Context<Self::Digest, PublicKey>;
 
     async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
@@ -45,7 +45,10 @@ impl<D: Digest> Au for Mailbox<D> {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, _: Context<Self::Digest>) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        _: Context<Self::Digest, PublicKey>,
+    ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
@@ -58,7 +61,7 @@ impl<D: Digest> Au for Mailbox<D> {
 
     async fn verify(
         &mut self,
-        _: Context<Self::Digest>,
+        _: Context<Self::Digest, PublicKey>,
         _: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // Digests are already verified by consensus, so we don't need to check they are valid.

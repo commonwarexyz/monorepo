@@ -45,7 +45,7 @@ where
     S: Scheme,
 {
     /// Create a new application [Actor] and its associated [Mailbox].
-    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H>) {
+    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(mailbox_size);
 
         (
