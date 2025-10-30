@@ -18,7 +18,7 @@ where
     type Op = Op;
     type Error = Error;
 
-    async fn size(&self) -> Result<u64, Self::Error> {
+    async fn size(&self) -> u64 {
         contiguous::fixed::Journal::size(self).await
     }
 

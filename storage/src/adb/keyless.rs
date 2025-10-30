@@ -333,7 +333,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.sync().await?;
             mmr.pop((aligned_size - valid_size) as usize).await?;
         }
-        assert_eq!(mmr.leaves(), locations.size().await?);
+        assert_eq!(mmr.leaves(), locations.size().await);
 
         // Apply operations from the log at indices beyond the `aligned_size` to the MMR and locations journal.
         //
@@ -368,7 +368,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
         assert_eq!(size, mmr.leaves());
-        assert_eq!(size, locations.size().await?);
+        assert_eq!(size, locations.size().await);
 
         Ok(Self {
             mmr,

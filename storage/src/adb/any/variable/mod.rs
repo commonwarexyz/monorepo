@@ -194,7 +194,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
         let last_commit = locations
             .size()
-            .await?
+            .await
             .checked_sub(1)
             .map(Location::new_unchecked);
 
@@ -359,7 +359,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Confirm post-conditions hold.
         assert_eq!(self.log_size, self.mmr.leaves());
-        assert_eq!(self.log_size, self.locations.size().await?);
+        assert_eq!(self.log_size, self.locations.size().await);
 
         debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
@@ -1544,7 +1544,7 @@ pub(super) mod test {
                 Location::try_from(db.mmr.size()).ok(),
                 Some(Location::new_unchecked(1960))
             );
-            assert_eq!(db.locations.size().await.unwrap(), 1960);
+            assert_eq!(db.locations.size().await, 1960);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(755));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
@@ -1563,7 +1563,7 @@ pub(super) mod test {
                 Location::try_from(db.mmr.size()).ok(),
                 Some(Location::new_unchecked(1960))
             );
-            assert_eq!(db.locations.size().await.unwrap(), 1960);
+            assert_eq!(db.locations.size().await, 1960);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(755));
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),

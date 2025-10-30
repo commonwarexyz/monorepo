@@ -62,7 +62,7 @@ where
     J: Contiguous<Item = u64> + Send + 'static,
 {
     let journal = factory("empty".to_string()).await.unwrap();
-    assert_eq!(journal.size().await.unwrap(), 0);
+    assert_eq!(journal.size().await, 0);
     journal.destroy().await.unwrap();
 }
 
@@ -156,7 +156,7 @@ where
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
     assert_eq!(pos3, 2);
-    assert_eq!(journal.size().await.unwrap(), 3);
+    assert_eq!(journal.size().await, 3);
 
     // Verify values can be read back
     assert_eq!(journal.read(0).await.unwrap(), 100);
@@ -179,7 +179,7 @@ where
         assert_eq!(pos, i);
     }
 
-    assert_eq!(journal.size().await.unwrap(), 25);
+    assert_eq!(journal.size().await, 25);
 
     for i in 0..25u64 {
         assert_eq!(journal.read(i).await.unwrap(), i * 10);
@@ -262,21 +262,21 @@ where
         journal.append(i).await.unwrap();
     }
 
-    let size_before = journal.size().await.unwrap();
+    let size_before = journal.size().await;
     journal.prune(10).await.unwrap();
-    let size_after = journal.size().await.unwrap();
+    let size_after = journal.size().await;
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
 
     journal.prune(20).await.unwrap();
-    let size_after_all = journal.size().await.unwrap();
+    let size_after_all = journal.size().await;
     assert_eq!(size_after, size_after_all);
 
     journal.close().await.unwrap();
 
     let journal = factory("prune_retains_size".to_string()).await.unwrap();
-    let size_after_close = journal.size().await.unwrap();
+    let size_after_close = journal.size().await;
     assert_eq!(size_after_close, size_after_all);
 
     journal.destroy().await.unwrap();
@@ -296,7 +296,7 @@ where
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
 
-    let size = Contiguous::size(&journal).await.unwrap();
+    let size = Contiguous::size(&journal).await;
     assert_eq!(size, 2);
 
     journal.destroy().await.unwrap();
@@ -361,7 +361,7 @@ where
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
 
-    let size = journal.size().await.unwrap();
+    let size = journal.size().await;
     assert_eq!(size, 11);
 
     journal.destroy().await.unwrap();
@@ -436,7 +436,7 @@ where
     assert_eq!(pos, 5);
     assert_eq!(journal.read(5).await.unwrap(), 100);
 
-    let size = journal.size().await.unwrap();
+    let size = journal.size().await;
     assert_eq!(size, 6);
 
     journal.destroy().await.unwrap();
@@ -477,7 +477,7 @@ where
         journal.append(i).await.unwrap();
     }
 
-    let size = journal.size().await.unwrap();
+    let size = journal.size().await;
 
     {
         let stream = journal.replay(size, NZUsize!(1024)).await.unwrap();
@@ -512,7 +512,7 @@ where
     assert!(pruned1);
     assert!(!pruned2); // Second prune should return false (nothing to prune)
 
-    let size = journal.size().await.unwrap();
+    let size = journal.size().await;
     assert_eq!(size, 20);
     assert_eq!(journal.read(10).await.unwrap(), 10);
     assert_eq!(journal.read(19).await.unwrap(), 19);
@@ -536,7 +536,7 @@ where
     journal.prune(100).await.unwrap();
 
     // Verify journal still works
-    let size = journal.size().await.unwrap();
+    let size = journal.size().await;
     assert_eq!(size, 10);
 
     let pos = journal.append(999).await.unwrap();
@@ -563,7 +563,7 @@ where
             assert_eq!(pos, i);
         }
 
-        let size = journal.size().await.unwrap();
+        let size = journal.size().await;
         assert_eq!(size, 15);
 
         journal.close().await.unwrap();
@@ -573,7 +573,7 @@ where
     {
         let journal = factory(test_name.clone()).await.unwrap();
 
-        let size = journal.size().await.unwrap();
+        let size = journal.size().await;
         assert_eq!(size, 15);
 
         // Verify reads work after persistence
@@ -622,7 +622,7 @@ where
         let pruned = journal.prune(10).await.unwrap();
         assert!(pruned);
 
-        let size = journal.size().await.unwrap();
+        let size = journal.size().await;
         assert_eq!(size, 25);
 
         journal.close().await.unwrap();
@@ -633,7 +633,7 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         // Size should still be 25
-        let size = journal.size().await.unwrap();
+        let size = journal.size().await;
         assert_eq!(size, 25);
 
         // Verify pruned positions cannot be read
@@ -750,7 +750,7 @@ where
     // Rewind to 12 items
     journal.rewind(12).await.unwrap();
 
-    assert_eq!(journal.size().await.unwrap(), 12);
+    assert_eq!(journal.size().await, 12);
 
     // Verify first 12 items are still readable
     for i in 0..12u64 {
@@ -787,7 +787,7 @@ where
 
     journal.rewind(0).await.unwrap();
 
-    assert_eq!(journal.size().await.unwrap(), 0);
+    assert_eq!(journal.size().await, 0);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
     // Next append should get position 0
@@ -811,7 +811,7 @@ where
 
     // Rewind to current size should be no-op
     journal.rewind(10).await.unwrap();
-    assert_eq!(journal.size().await.unwrap(), 10);
+    assert_eq!(journal.size().await, 10);
 
     journal.destroy().await.unwrap();
 }
@@ -905,13 +905,13 @@ where
     journal.rewind(0).await.unwrap();
 
     // Verify journal is empty
-    assert_eq!(journal.size().await.unwrap(), 0);
+    assert_eq!(journal.size().await, 0);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
     // Append should work
     let pos = journal.append(42).await.unwrap();
     assert_eq!(pos, 0);
-    assert_eq!(journal.size().await.unwrap(), 1);
+    assert_eq!(journal.size().await, 1);
     assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
@@ -938,7 +938,7 @@ where
 
     // Rewind to position 20 (still in retained range)
     journal.rewind(20).await.unwrap();
-    assert_eq!(journal.size().await.unwrap(), 20);
+    assert_eq!(journal.size().await, 20);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
 
     // Verify items in range [oldest, 20) are still readable
@@ -951,7 +951,7 @@ where
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     // Verify journal state is unchanged after failed rewind
-    assert_eq!(journal.size().await.unwrap(), 20);
+    assert_eq!(journal.size().await, 20);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
 
     // Append should continue from position 20
@@ -979,12 +979,12 @@ where
     }
 
     // Verify we're at a section boundary
-    assert_eq!(journal.size().await.unwrap(), 10);
+    assert_eq!(journal.size().await, 10);
 
     // Append one more item to cross the boundary
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.size().await.unwrap(), 11);
+    assert_eq!(journal.size().await, 11);
 
     // Prune exactly at the section boundary
     journal.prune(10).await.unwrap();
@@ -998,18 +998,18 @@ where
     // Append another item to move past the boundary
     let pos = journal.append(888).await.unwrap();
     assert_eq!(pos, 11);
-    assert_eq!(journal.size().await.unwrap(), 12);
+    assert_eq!(journal.size().await, 12);
 
     // Rewind to exactly the section boundary (position 10)
     // This leaves size=10, oldest=10, making the journal fully pruned
     journal.rewind(10).await.unwrap();
-    assert_eq!(journal.size().await.unwrap(), 10);
+    assert_eq!(journal.size().await, 10);
     assert!(journal.oldest_retained_pos().await.unwrap().is_none());
 
     // Append after rewinding to boundary should continue from position 10
     let pos = journal.append(777).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.size().await.unwrap(), 11);
+    assert_eq!(journal.size().await, 11);
     assert_eq!(journal.read(10).await.unwrap(), 777);
     assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
 
@@ -1036,7 +1036,7 @@ where
         }
 
         journal.prune(10).await.unwrap();
-        assert_eq!(journal.size().await.unwrap(), 20);
+        assert_eq!(journal.size().await, 20);
         let oldest = journal.oldest_retained_pos().await.unwrap();
         assert!(oldest.is_some());
 
@@ -1049,7 +1049,7 @@ where
         let journal = factory(test_name.clone()).await.unwrap();
 
         // Journal should be completely empty, not contain previous data
-        assert_eq!(journal.size().await.unwrap(), 0);
+        assert_eq!(journal.size().await, 0);
         assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
         // Replay should yield no items

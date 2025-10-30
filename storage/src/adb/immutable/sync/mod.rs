@@ -105,7 +105,7 @@ where
         config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
-        let size = journal.size().await.map_err(crate::adb::Error::from)?;
+        let size = journal.size().await;
 
         if size <= range.start {
             // Close existing journal and create new one
@@ -550,7 +550,7 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size().await.unwrap();
+                    let log_size = client.journal().size().await;
                     if log_size > initial_lower_bound {
                         break client;
                     }
