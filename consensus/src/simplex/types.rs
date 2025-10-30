@@ -1123,6 +1123,11 @@ impl<S: Scheme> Nullify<S> {
             &self.vote,
         )
     }
+
+    /// Returns the round associated with this nullify vote.
+    pub fn round(&self) -> Round {
+        self.round
+    }
 }
 
 impl<S: Scheme> Write for Nullify<S> {

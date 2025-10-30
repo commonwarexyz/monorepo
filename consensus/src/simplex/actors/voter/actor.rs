@@ -779,12 +779,12 @@ impl<
         self.outbound_messages
             .get_or_create(metrics::Outbound::nullify())
             .inc();
+        debug!(round=?nullify.round(), "broadcasting nullify");
         let msg = Voter::Nullify(nullify);
         pending_sender
             .send(Recipients::All, msg, true)
             .await
             .unwrap();
-        debug!(view = self.view, "broadcasted nullify");
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
@@ -1353,6 +1353,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
+            debug!(round=?notarize.round(), proposal=?notarize.proposal, "broadcasting notarize");
             let msg = Voter::Notarize(notarize);
             pending_sender
                 .send(Recipients::All, msg, true)
@@ -1500,7 +1501,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = Voter::Finalize(finalize.clone());
+            debug!(round=?finalize.round(), proposal=?finalize.proposal, "broadcasting finalize");
+            let msg = Voter::Finalize(finalize);
             pending_sender
                 .send(Recipients::All, msg, true)
                 .await
