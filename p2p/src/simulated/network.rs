@@ -99,7 +99,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     transmitter: transmitter::State<P>,
 
     // Subscribers to peer set updates
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>)>>,
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -256,7 +257,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Notify all subscribers about the new peer set
-                let notification = (peer_set, peers);
+                let all = self.peer_refs.keys().cloned().collect();
+                let notification = (peer_set, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
             }
@@ -308,7 +310,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
-                    let notification = (*index, peers.clone());
+                    let all = self.peer_refs.keys().cloned().collect();
+                    let notification = (*index, peers.clone(), all);
                     let _ = sender.unbounded_send(notification);
                 }
 

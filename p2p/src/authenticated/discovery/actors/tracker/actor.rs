@@ -50,7 +50,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     directory: Directory<E, C::PublicKey>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>)>>,
+    #[allow(clippy::type_complexity)]
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -141,8 +142,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 self.directory.add_set(index, peers.clone());
 
                 // Notify all subscribers about the new peer set
-                self.subscribers
-                    .retain(|subscriber| subscriber.unbounded_send((index, peers.clone())).is_ok());
+                self.subscribers.retain(|subscriber| {
+                    subscriber
+                        .unbounded_send((index, peers.clone(), self.directory.tracked()))
+                        .is_ok()
+                });
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
@@ -155,7 +159,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.unbounded_send((latest_set_id, latest_set)).ok();
+                    sender
+                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
+                        .ok();
                 }
 
                 self.subscribers.push(sender);

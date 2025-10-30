@@ -30,7 +30,8 @@ pub enum Message<C: PublicKey> {
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
         /// One-shot channel to send the subscription receiver.
-        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<C>)>>,
+        #[allow(clippy::type_complexity)]
+        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<C>, Ordered<C>)>>,
     },
 
     // ---------- Used by blocker ----------
@@ -207,7 +208,9 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
         receiver.await.unwrap()
     }
 
-    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)> {
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe { responder: sender })

@@ -25,7 +25,8 @@ pub enum Message<P: PublicKey> {
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     Subscribe {
-        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>)>>,
+        #[allow(clippy::type_complexity)]
+        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -209,7 +210,9 @@ impl<P: PublicKey> crate::Manager for Oracle<P> {
         receiver.await.unwrap()
     }
 
-    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)> {
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe { response: sender })

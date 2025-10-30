@@ -2273,7 +2273,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, _, _) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 1);
 
             // Register second peer set
@@ -2282,7 +2282,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, _, _) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 2);
 
             // Register third peer set
@@ -2291,7 +2291,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _) = subscription.next().await.unwrap();
+            let (peer_set_id, _, _) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 3);
         });
     }
@@ -2325,9 +2325,9 @@ mod tests {
                 .await;
 
             // Verify all subscriptions receive the notification
-            let (id1, _) = subscription1.next().await.unwrap();
-            let (id2, _) = subscription2.next().await.unwrap();
-            let (id3, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.next().await.unwrap();
+            let (id2, _, _) = subscription2.next().await.unwrap();
+            let (id3, _, _) = subscription3.next().await.unwrap();
 
             assert_eq!(id1, 1);
             assert_eq!(id2, 1);
@@ -2342,8 +2342,8 @@ mod tests {
                 .await;
 
             // Verify remaining subscriptions still receive notifications
-            let (id1, _) = subscription1.next().await.unwrap();
-            let (id3, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.next().await.unwrap();
+            let (id3, _, _) = subscription3.next().await.unwrap();
 
             assert_eq!(id1, 2);
             assert_eq!(id3, 2);
