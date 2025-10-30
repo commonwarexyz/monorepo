@@ -98,12 +98,12 @@ where
         self.root(hasher)
     }
 
-    async fn op_count(&self) -> Result<Location, adb::Error> {
-        Ok(self.op_count())
+    fn op_count(&self) -> Location {
+        self.op_count()
     }
 
-    async fn lower_bound(&self) -> Result<Location, adb::Error> {
-        Ok(self.inactivity_floor_loc())
+    fn lower_bound(&self) -> Location {
+        self.inactivity_floor_loc()
     }
 
     fn historical_proof(

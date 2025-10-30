@@ -157,8 +157,8 @@ where
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound().await?,
-            database.op_count().await?,
+            database.lower_bound(),
+            database.op_count(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
@@ -187,7 +187,7 @@ where
     let database = state.database.read().await;
 
     // Check if we have enough operations
-    let db_size = database.op_count().await?;
+    let db_size = database.op_count();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -387,7 +387,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = ?database.op_count().await?,
+        op_count = ?database.op_count(),
         root = %root_hex,
         "{} database ready",
         DB::name()

@@ -105,14 +105,13 @@ where
         self.root(hasher)
     }
 
-    async fn op_count(&self) -> Result<Location, adb::Error> {
-        Ok(self.op_count())
+    fn op_count(&self) -> Location {
+        self.op_count()
     }
 
-    async fn lower_bound(&self) -> Result<Location, adb::Error> {
-        Ok(self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap()))
+    fn lower_bound(&self) -> Location {
+        self.oldest_retained_loc()
+            .unwrap_or(Location::new(0).unwrap())
     }
 
     fn historical_proof(
