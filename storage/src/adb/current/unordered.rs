@@ -628,8 +628,8 @@ impl<
         const N: usize,
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
-    async fn op_count(&self) -> Result<Location, store::Error> {
-        Ok(self.op_count())
+    fn op_count(&self) -> Location {
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {

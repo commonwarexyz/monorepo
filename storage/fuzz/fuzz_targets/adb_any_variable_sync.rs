@@ -216,7 +216,7 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    let op_count = db.op_count().await.unwrap();
+                    let op_count = db.op_count();
                     historical_roots.insert(op_count, db.root(&mut hasher));
                     has_uncommitted = false;
                 }
@@ -232,7 +232,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::GetLoc { loc_offset } => {
-                    let op_count = db.op_count().await.unwrap();
+                    let op_count = db.op_count();
                     if op_count > 0 {
                         let loc = *loc_offset as u64 % *op_count;
                         let loc = Location::new(loc).unwrap();
@@ -249,11 +249,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    let op_count = db.op_count().await.unwrap();
+                    let op_count = db.op_count();
                     let oldest_retained_loc = db
                         .oldest_retained_loc()
-                        .await
-                        .unwrap()
                         .unwrap_or(Location::new(0).unwrap());
                     if op_count > 0 && !has_uncommitted {
                         if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
@@ -273,7 +271,7 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
-                    let op_count = db.op_count().await.unwrap();
+                    let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let op_count = Location::new(*size % *op_count).unwrap() + 1;
 
@@ -296,7 +294,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc().await;
+                    let _ = db.oldest_retained_loc();
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -304,7 +302,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count().await;
+                    let _ = db.op_count();
                 }
 
                 Operation::Root => {

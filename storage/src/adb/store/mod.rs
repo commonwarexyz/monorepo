@@ -159,7 +159,7 @@ pub struct Config<T: Translator, C> {
 pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
-    fn op_count(&self) -> impl Future<Output = Result<Location, Error>>;
+    fn op_count(&self) -> Location;
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -847,8 +847,8 @@ where
     V: Codec,
     T: Translator,
 {
-    async fn op_count(&self) -> Result<Location, Error> {
-        Ok(self.op_count())
+    fn op_count(&self) -> Location {
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {

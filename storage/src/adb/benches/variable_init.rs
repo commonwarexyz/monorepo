@@ -129,7 +129,7 @@ fn bench_variable_init(c: &mut Criterion) {
                         let start = Instant::now();
                         for _ in 0..iters {
                             let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
-                            assert_ne!(db.op_count().await.unwrap(), 0);
+                            assert_ne!(db.op_count(), 0);
                             db.close().await.unwrap();
                         }
 
