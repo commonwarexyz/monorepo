@@ -40,7 +40,7 @@ use tracing::info;
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
 pub struct Config<C, P> {
-    pub peer_set_manager: P,
+    pub manager: P,
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
@@ -60,7 +60,7 @@ where
     V: Variant,
 {
     context: ContextCell<E>,
-    peer_set_manager: P,
+    manager: P,
     participant_config: Option<(PathBuf, ParticipantConfig)>,
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
@@ -119,7 +119,7 @@ where
         (
             Self {
                 context,
-                peer_set_manager: config.peer_set_manager,
+                manager: config.manager,
                 participant_config: config.participant_config,
                 namespace: config.namespace,
                 mailbox,
@@ -233,9 +233,7 @@ where
             .chain(players.clone())
             .chain(players_after_next)
             .collect::<Ordered<_>>();
-        self.peer_set_manager
-            .update(current_epoch, next_epoch_peers)
-            .await;
+        self.manager.update(current_epoch, next_epoch_peers).await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -431,9 +429,7 @@ where
                             .chain(next_players.clone())
                             .chain(next_epoch_players)
                             .collect::<Ordered<_>>();
-                        self.peer_set_manager
-                            .update(next_epoch, next_epoch_peers)
-                            .await;
+                        self.manager.update(next_epoch, next_epoch_peers).await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {

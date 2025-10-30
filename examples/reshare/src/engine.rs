@@ -50,7 +50,7 @@ where
     V: Variant,
 {
     pub signer: C,
-    pub peer_set_manager: P,
+    pub manager: P,
     pub blocker: B,
     pub namespace: Vec<u8>,
 
@@ -112,7 +112,7 @@ where
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
-                peer_set_manager: config.peer_set_manager.clone(),
+                manager: config.manager.clone(),
                 participant_config: config.participant_config.clone(),
                 namespace: dkg_namespace,
                 signer: config.signer.clone(),
