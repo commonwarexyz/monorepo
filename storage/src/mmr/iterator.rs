@@ -65,20 +65,17 @@ impl PeakIterator {
     ///
     /// This is an O(log2(n)) operation using binary search on the number of leaves.
     ///
-    /// # Algorithm
-    ///
-    /// A valid MMR size corresponds to a specific number of leaves N, where:
-    /// `mmr_size(N) = 2*N - popcount(N)`
-    ///
-    /// This formula comes from the fact that N leaves require N-1 internal nodes, but merging
-    /// creates popcount(N)-1 additional nodes. We binary search for the largest N where
-    /// mmr_size(N) <= size.
-    ///
     /// # Panics
     ///
     /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
         assert!(size <= crate::mmr::MAX_POSITION, "size exceeds MAX_POSITION");
+
+        // Algorithm: A valid MMR size corresponds to a specific number of leaves N, where:
+        // mmr_size(N) = 2*N - popcount(N)
+        // This formula comes from the fact that N leaves require N-1 internal nodes, but merging
+        // creates popcount(N)-1 additional nodes. We binary search for the largest N where
+        // mmr_size(N) <= size.
 
         if size == 0 {
             return size;
@@ -287,15 +284,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "size exceeds MAX_POSITION")]
     fn test_to_nearest_size_panic() {
-        PeakIterator::to_nearest_size(crate::mmr::MAX_POSITION + Position::new(1));
+        PeakIterator::to_nearest_size(crate::mmr::MAX_POSITION + 1);
     }
 
     #[test]
     fn test_to_nearest_size() {
-        // Test edge cases
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(0)), 0);
-        assert_eq!(PeakIterator::to_nearest_size(Position::new(1)), 1);
-
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
         let mut mmr: Mmr<Sha256> = Mmr::new();
         let mut hasher = Standard::<Sha256>::new();
@@ -304,7 +297,7 @@ mod tests {
         for _ in 0..1000 {
             let current_size = mmr.size();
 
-            // Test all positions from previous size to current size
+            // Test positions from current size up to current size + 10
             for test_pos in *current_size..=*current_size + 10 {
                 let rounded = PeakIterator::to_nearest_size(Position::new(test_pos));
 
@@ -329,8 +322,7 @@ mod tests {
                 // Verify rounded is the largest valid size <= test_pos
                 if rounded < test_pos {
                     assert!(
-                        !Position::new(rounded.as_u64() + 1).is_mmr_size()
-                            || rounded.as_u64() + 1 > test_pos,
+                        !(rounded + 1).is_mmr_size(),
                         "rounded {} should be largest valid size <= {} (current: {})",
                         rounded,
                         test_pos,
@@ -345,7 +337,11 @@ mod tests {
 
     #[test]
     fn test_to_nearest_size_specific_cases() {
-        // Test edge cases including maximum allowed input
+        // Test edge cases
+        assert_eq!(PeakIterator::to_nearest_size(Position::new(0)), 0);
+        assert_eq!(PeakIterator::to_nearest_size(Position::new(1)), 1);
+
+        // Test consecutive values
         let mut expected = Position::new(0);
         for size in 0..=20 {
             let rounded = PeakIterator::to_nearest_size(Position::new(size));
