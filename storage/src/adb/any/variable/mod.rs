@@ -147,7 +147,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         let log = Journal::init(
             context.with_label("log"),
             JournalConfig {
-                partition: cfg.log_partition.clone(),
+                partition: cfg.log_partition,
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
@@ -192,7 +192,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             Some(loc) => loc,
             None => self.log.size(),
         };
-
         // The number of operations in the log.
         let mut log_size = Location::new_unchecked(start_loc);
         // The location of the first operation to follow the last known commit point.
@@ -275,8 +274,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
                 log_size = *end_loc,
                 "rewinding over uncommitted operations at end of log"
             );
-            self.log.rewind(*end_loc).await.map_err(Error::Journal)?;
-            self.log.sync().await.map_err(Error::Journal)?;
+            self.log.rewind(*end_loc).await?;
+            self.log.sync().await?;
             log_size = end_loc;
         }
 
@@ -293,9 +292,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
 
         // Update the inactivity floor location and last commit
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit = (*log_size).checked_sub(1).map(Location::new_unchecked);
+        self.last_commit = log_size.checked_sub(1);
 
-        debug!(log_size = *log_size, "build_snapshot_from_log complete");
+        debug!(?log_size, "build_snapshot_from_log complete");
 
         Ok(self)
     }
@@ -396,7 +395,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             return Err(Error::LocationOutOfBounds(loc, op_count));
         }
 
-        let op = self.get_op(loc).await?;
+        let op = self.log.read(*loc).await?;
         let Operation::Update(k, v) = op else {
             return Err(Error::UnexpectedData(loc));
         };
@@ -404,11 +403,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             return Ok(None);
         }
         Ok(Some(v))
-    }
-
-    /// Get the operation at location `loc` in the log.
-    async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        self.log.read(*loc).await.map_err(Error::Journal)
     }
 
     /// Get the number of operations that have been applied to this db, including those that are not
@@ -572,7 +566,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             .await?;
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
         for loc in *start_loc..*end_loc {
-            let op = self.log.read(loc).await.map_err(Error::Journal)?;
+            let op = self.log.read(loc).await?;
             ops.push(op);
         }
 
@@ -628,7 +622,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             return Ok(None);
         };
 
-        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
+        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
             unreachable!("last commit should be a commit floor operation");
         };
 
@@ -695,14 +689,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
         // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
-        let mut op = self.get_op(self.inactivity_floor_loc).await?;
+        let mut op = self.log.read(*self.inactivity_floor_loc).await?;
         while self
             .move_op_if_active(op, self.inactivity_floor_loc)
             .await?
             .is_none()
         {
             self.inactivity_floor_loc += 1;
-            op = self.get_op(self.inactivity_floor_loc).await?;
+            op = self.log.read(*self.inactivity_floor_loc).await?;
         }
 
         // Increment the floor to the next operation since we know the current one is inactive.
@@ -793,7 +787,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         write_limit: usize,
     ) -> Result<(), Error> {
         if sync_log {
-            self.log.sync().await.map_err(Error::Journal)?;
+            self.log.sync().await?;
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
