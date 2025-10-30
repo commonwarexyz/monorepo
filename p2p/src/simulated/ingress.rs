@@ -186,7 +186,7 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
-impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
+impl<P: PublicKey> crate::Manager for Oracle<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 

@@ -232,7 +232,7 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
+impl<C: PublicKey> crate::Manager for Oracle<C> {
     type PublicKey = C;
     type Peers = Ordered<C>;
 

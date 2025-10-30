@@ -889,7 +889,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PeerSetManager, Receiver as _, Recipients, Sender as _};
+    use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};

@@ -210,7 +210,7 @@ mod tests {
     use crate::{
         authenticated::lookup::actors::peer,
         Blocker,
-        PeerSetManager,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_cryptography::{

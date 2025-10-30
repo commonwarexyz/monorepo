@@ -12,7 +12,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_p2p::{authenticated, PeerSetManager};
+use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, quorum, set::Ordered, union, NZUsize, NZU32};

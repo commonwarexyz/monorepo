@@ -109,7 +109,7 @@ mod tests {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::requester,
-        PeerSetManager,
+        Manager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};

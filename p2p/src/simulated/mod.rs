@@ -59,7 +59,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{PeerSetManager, simulated::{Config, Link, Network}};
+//! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use std::time::Duration;
@@ -180,7 +180,7 @@ pub use network::{Config, Network, Receiver, Sender};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PeerSetManager, Receiver, Recipients, Sender};
+    use crate::{Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},

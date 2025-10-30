@@ -17,7 +17,7 @@ use commonware_cryptography::{
     },
     Hasher, Signer,
 };
-use commonware_p2p::{utils::mux::Muxer, PeerSetManager, Receiver, Sender};
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
@@ -54,7 +54,7 @@ pub struct Config<C, P> {
 pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -75,7 +75,7 @@ where
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     H: Hasher,
     C: Signer,
     V: Variant,

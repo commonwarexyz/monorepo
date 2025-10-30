@@ -265,7 +265,7 @@ mod tests {
             Mailbox,
         },
         Blocker,
-        PeerSetManager,
+        Manager,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};

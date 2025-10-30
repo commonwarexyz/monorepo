@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, PeerSetManager};
+use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
 use commonware_utils::{set::Ordered, union, NZUsize, NZU32};
 use governor::Quota;

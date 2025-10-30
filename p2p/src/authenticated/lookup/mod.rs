@@ -64,7 +64,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::lookup::{self, Network}, PeerSetManager, Sender, Recipients};
+//! use commonware_p2p::{authenticated::lookup::{self, Network}, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::{NZU32, set::OrderedAssociated};
@@ -168,7 +168,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PeerSetManager, Receiver, Recipients, Sender};
+    use crate::{Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{

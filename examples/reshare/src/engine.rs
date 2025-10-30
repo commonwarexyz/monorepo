@@ -15,7 +15,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
     Hasher, Signer,
 };
-use commonware_p2p::{Blocker, PeerSetManager, Receiver, Sender};
+use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
@@ -45,7 +45,7 @@ const MAX_REPAIR: u64 = 50;
 pub struct Config<C, P, B, V>
 where
     C: Signer,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -71,7 +71,7 @@ pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -96,7 +96,7 @@ impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     C: Signer,
-    P: PeerSetManager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
