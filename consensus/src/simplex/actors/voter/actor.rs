@@ -608,29 +608,25 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
-        let leader = {
-            let round = self.views.get_mut(&self.view).unwrap();
-            let leader = round.leader?;
-            if !Self::is_me(&self.scheme, leader) {
-                return None;
-            }
+        let round = self.views.get_mut(&self.view).unwrap();
+        let leader = round.leader?;
+        if !Self::is_me(&self.scheme, leader) {
+            return None;
+        }
 
-            // Check if we have already requested a proposal
-            if round.requested_proposal_build {
-                return None;
-            }
+        // Check if we have already requested a proposal
+        if round.requested_proposal_build {
+            return None;
+        }
 
-            // Check if we have already proposed
-            if round.proposal.is_some() {
-                return None;
-            }
+        // Check if we have already proposed
+        if round.proposal.is_some() {
+            return None;
+        }
 
-            // Set that we requested a proposal even if we don't end up finding a parent
-            // to prevent frequent scans.
-            round.requested_proposal_build = true;
-
-            leader
-        };
+        // Set that we requested a proposal even if we don't end up finding a parent
+        // to prevent frequent scans.
+        round.requested_proposal_build = true;
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
