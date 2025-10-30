@@ -77,7 +77,7 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Send + Sync,
         H: CHasher,
         T: Translator,
         const N: usize,
@@ -624,7 +624,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Send + Sync,
         H: CHasher,
         T: Translator,
         const N: usize,
