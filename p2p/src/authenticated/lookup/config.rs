@@ -27,7 +27,8 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
-    /// Whether or not to attempt handshakes with unregistered IP addresses.
+    /// Whether or not to attempt handshakes on incoming connections
+    /// from unregistered IP addresses.
     pub attempt_unregistered_handshakes: bool,
 
     /// Maximum size allowed for messages over any connection.
