@@ -7,8 +7,8 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
+            Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -84,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: Vec<Notarize<S, D>>,
+    notarizes: AttributableVec<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Vec<Nullify<S>>,
+    nullifies: AttributableVec<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: Vec<Finalize<S, D>>,
+    finalizes: AttributableVec<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -112,10 +112,14 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
-        let participants = scheme.participants();
-        let notarizes = Vec::with_capacity(participants.len());
-        let nullifies = Vec::with_capacity(participants.len());
-        let finalizes = Vec::with_capacity(participants.len());
+        // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
+        // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
+        // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
+        // to ensure we only count a message from a given signer once.
+        let participants = scheme.participants().len();
+        let notarizes = AttributableVec::new(participants);
+        let nullifies = AttributableVec::new(participants);
+        let finalizes = AttributableVec::new(participants);
 
         Self {
             start: context.current(),
@@ -265,7 +269,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.scheme, &self.notarizes)
+        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.iter())
             .expect("failed to recover notarization certificate");
         timer.observe();
 
@@ -294,7 +298,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.scheme, &self.nullifies)
+        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.iter())
             .expect("failed to recover nullification certificate");
         timer.observe();
 
@@ -338,7 +342,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
         // Construct finalization
         let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.scheme, &self.finalizes)
+        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.iter())
             .expect("failed to recover finalization certificate");
         timer.observe();
 

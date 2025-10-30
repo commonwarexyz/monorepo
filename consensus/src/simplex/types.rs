@@ -50,6 +50,52 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
+/// AttributableVec is a vector of [Attributable] items where a given [Attributable::signer()]
+/// can add at most one item.
+pub struct AttributableVec<T: Attributable> {
+    data: Vec<Option<T>>,
+    added: usize,
+}
+
+impl<T: Attributable> AttributableVec<T> {
+    /// Creates a new [AttributableVec] with the given number of participants.
+    pub fn new(participants: usize) -> Self {
+        // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
+        let mut data = Vec::with_capacity(participants);
+        data.resize_with(participants, || None);
+
+        Self { data, added: 0 }
+    }
+
+    /// Adds an item to the [AttributableVec] if it has not been added yet.
+    ///
+    /// Returns `true` if the item was added, `false` if it was already added.
+    pub fn push(&mut self, item: T) -> bool {
+        let index = item.signer() as usize;
+        if self.data[index].is_some() {
+            return false;
+        }
+        self.data[index] = Some(item);
+        self.added += 1;
+        true
+    }
+
+    /// Returns the number of items in the [AttributableVec].
+    pub fn len(&self) -> usize {
+        self.added
+    }
+
+    /// Returns `true` if the [AttributableVec] is empty.
+    pub fn is_empty(&self) -> bool {
+        self.added == 0
+    }
+
+    /// Returns an ordered iterator over [Attributable::signer()]s in the [AttributableVec].
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.data.iter().filter_map(|o| o.as_ref())
+    }
+}
+
 /// Identifies the signing domain for a vote or certificate.
 ///
 /// Implementations use the context to derive domain-separated message bytes for both
@@ -937,25 +983,18 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from matching notarize votes, if enough are present.
-    pub fn from_notarizes(scheme: &S, notarizes: &[Notarize<S, D>]) -> Option<Self> {
-        if notarizes.is_empty() {
-            return None;
-        }
+    /// Builds a notarization certificate from notarize votes for the same proposal.
+    pub fn from_notarizes<'a>(
+        scheme: &S,
+        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+    ) -> Option<Self> {
+        let mut iter = notarizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
-        let proposal = notarizes[0].proposal.clone();
-
-        // All votes must endorse the same proposal to be aggregated into a single certificate.
-        if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
-            return None;
-        }
-
-        let notarization_certificate =
-            scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;
-
-        Some(Notarization {
+        Some(Self {
             proposal,
-            certificate: notarization_certificate,
+            certificate,
         })
     }
 
@@ -1141,26 +1180,16 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
-    /// Builds a nullification certificate from matching nullify votes.
-    pub fn from_nullifies(scheme: &S, nullifies: &[Nullify<S>]) -> Option<Self> {
-        if nullifies.is_empty() {
-            return None;
-        }
+    /// Builds a nullification certificate from nullify votes from the same round.
+    pub fn from_nullifies<'a>(
+        scheme: &S,
+        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+    ) -> Option<Self> {
+        let mut iter = nullifies.into_iter().peekable();
+        let round = iter.peek()?.round;
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
 
-        let round = nullifies[0].round;
-
-        // Nullify votes must all target the same round.
-        if nullifies.iter().skip(1).any(|n| n.round != round) {
-            return None;
-        }
-
-        let nullification_certificate =
-            scheme.assemble_certificate(nullifies.iter().map(|n| n.vote.clone()))?;
-
-        Some(Nullification {
-            round,
-            certificate: nullification_certificate,
-        })
+        Some(Self { round, certificate })
     }
 }
 
@@ -1358,25 +1387,18 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from matching finalize votes, if enough are present.
-    pub fn from_finalizes(scheme: &S, finalizes: &[Finalize<S, D>]) -> Option<Self> {
-        if finalizes.is_empty() {
-            return None;
-        }
+    /// Builds a finalization certificate from finalize votes for the same proposal.
+    pub fn from_finalizes<'a>(
+        scheme: &S,
+        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
+    ) -> Option<Self> {
+        let mut iter = finalizes.into_iter().peekable();
+        let proposal = iter.peek()?.proposal.clone();
+        let certificate = scheme.assemble_certificate(iter.map(|f| f.vote.clone()))?;
 
-        let proposal = finalizes[0].proposal.clone();
-
-        // Finalize votes must agree on the exact proposal that is being committed.
-        if finalizes.iter().skip(1).any(|f| f.proposal != proposal) {
-            return None;
-        }
-
-        let finalization_certificate =
-            scheme.assemble_certificate(finalizes.iter().map(|n| n.vote.clone()))?;
-
-        Some(Finalization {
+        Some(Self {
             proposal,
-            certificate: finalization_certificate,
+            certificate,
         })
     }
 
@@ -3658,5 +3680,46 @@ mod tests {
         batch_verifier_ready_finalizes_quorum_already_met_by_verified(generate_ed25519_schemes(
             5, 214,
         ));
+    }
+
+    struct MockAttributable(u32);
+
+    impl Attributable for MockAttributable {
+        fn signer(&self) -> u32 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_attributable_vec() {
+        let mut vec = AttributableVec::new(5);
+        assert_eq!(vec.len(), 0);
+        assert!(vec.is_empty());
+
+        assert!(vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 1);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(vec.push(MockAttributable(1)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
+
+        assert!(!vec.push(MockAttributable(3)));
+        assert_eq!(vec.len(), 2);
+        assert!(!vec.is_empty());
+        let mut iter = vec.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(iter.next().is_none());
+        drop(iter);
     }
 }
