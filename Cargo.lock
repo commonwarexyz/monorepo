@@ -1382,6 +1382,7 @@ dependencies = [
 name = "commonware-reshare"
 version = "0.0.63"
 dependencies = [
+ "anyhow",
  "bytes",
  "clap",
  "commonware-broadcast",
@@ -1401,6 +1402,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
 ]
