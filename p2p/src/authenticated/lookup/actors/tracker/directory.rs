@@ -2,7 +2,7 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::set::OrderedAssociated;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -40,7 +40,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     peers: HashMap<C, Record>,
 
     /// The peer sets
-    sets: BTreeMap<u64, Vec<C>>,
+    sets: BTreeMap<u64, Ordered<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
@@ -135,8 +135,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             };
             record.increment();
         }
-        let peers: Vec<_> = peers.into_iter().map(|(peer, _)| peer).collect();
-        self.sets.insert(index, peers);
+        self.sets.insert(index, peers.into_keys());
 
         // Remove oldest entries if necessary
         let mut deleted_peers = Vec::new();
@@ -156,6 +155,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
         deleted_peers
+    }
+
+    /// Gets a peer set by index.
+    pub fn get_set(&self, index: &u64) -> Option<&Ordered<C>> {
+        self.sets.get(index)
+    }
+
+    /// Returns the latest peer set index.
+    pub fn latest_set_index(&self) -> Option<u64> {
+        self.sets.keys().last().copied()
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -181,6 +190,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     // ---------- Getters ----------
+
+    /// Returns all tracked peers.
+    pub fn tracked(&self) -> Ordered<C> {
+        self.peers.keys().cloned().collect()
+    }
 
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C) -> bool {

@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
 use commonware_utils::{set::Ordered, union, NZUsize, NZU32};
 use governor::Quota;
@@ -165,7 +165,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.register(0, validators.clone()).await;
+        oracle.update(0, validators.clone()).await;
 
         // Register consensus channels
         //

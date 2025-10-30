@@ -5,17 +5,33 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::OrderedAssociated;
-use futures::channel::oneshot;
+use commonware_utils::set::{Ordered, OrderedAssociated};
+use futures::channel::{mpsc, oneshot};
 use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
+#[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     Register {
         index: u64,
         peers: OrderedAssociated<C, SocketAddr>,
+    },
+
+    // ---------- Used by peer set provider ----------
+    /// Fetch the peer set at a given index.
+    PeerSet {
+        /// The index of the peer set to fetch.
+        index: u64,
+        /// One-shot channel to send the peer set.
+        responder: oneshot::Sender<Option<Ordered<C>>>,
+    },
+    /// Subscribe to notifications when new peer sets are added.
+    Subscribe {
+        /// One-shot channel to send the subscription receiver.
+        #[allow(clippy::type_complexity)]
+        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<C>, Ordered<C>)>>,
     },
 
     // ---------- Used by blocker ----------
@@ -153,7 +169,7 @@ impl<C: PublicKey> Releaser<C> {
 ///
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -162,6 +178,11 @@ impl<C: PublicKey> Oracle<C> {
     pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
+}
+
+impl<C: PublicKey> crate::Manager for Oracle<C> {
+    type PublicKey = C;
+    type Peers = OrderedAssociated<C, SocketAddr>;
 
     /// Register a set of authorized peers at a given index.
     ///
@@ -172,8 +193,29 @@ impl<C: PublicKey> Oracle<C> {
     /// * `peers` - Vector of authorized peers at an `index`.
     ///   Each element is a tuple containing the public key and the socket address of the peer.
     ///   The peer must be dialable at and dial from the given socket address.
-    pub async fn register(&mut self, index: u64, peers: OrderedAssociated<C, SocketAddr>) {
+    async fn update(&mut self, index: u64, peers: Self::Peers) {
         let _ = self.sender.send(Message::Register { index, peers });
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::PeerSet {
+                index: id,
+                responder: sender,
+            })
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Subscribe { responder: sender })
+            .unwrap();
+        receiver.await.unwrap()
     }
 }
 

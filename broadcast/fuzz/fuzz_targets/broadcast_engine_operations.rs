@@ -157,6 +157,7 @@ fn fuzz(input: FuzzInput) {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
+                tracked_peer_sets: None,
             },
         );
         network.start();
@@ -171,7 +172,11 @@ fn fuzz(input: FuzzInput) {
             peers.push(public_key.clone());
 
             // Create channel
-            let (sender, receiver) = oracle.register(public_key.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(public_key.clone())
+                .register(0)
+                .await
+                .unwrap();
 
             // Create mailbox
             let config = Config {

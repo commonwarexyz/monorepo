@@ -1,6 +1,7 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -9,11 +10,23 @@ use rand_distr::Normal;
 use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
+    Update {
+        peer_set: u64,
+        peers: Ordered<P>,
+    },
     Register {
-        public_key: P,
         channel: Channel,
+        public_key: P,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+    },
+    PeerSet {
+        index: u64,
+        response: oneshot::Sender<Option<Ordered<P>>>,
+    },
+    Subscribe {
+        #[allow(clippy::type_complexity)]
+        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -64,7 +77,7 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Oracle<P: PublicKey> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
@@ -91,27 +104,6 @@ impl<P: PublicKey> Oracle<P> {
             .await
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Register a new peer with the network that can interact over a given channel.
-    ///
-    /// By default, the peer will not be linked to any other peers. If a peer is already
-    /// registered on a given channel, it will return an error.
-    pub async fn register(
-        &mut self,
-        public_key: P,
-        channel: Channel,
-    ) -> Result<(Sender<P>, Receiver<P>), Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Register {
-                public_key,
-                channel,
-                result: sender,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 
     /// Set bandwidth limits for a peer.
@@ -195,14 +187,65 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
+impl<P: PublicKey> crate::Manager for Oracle<P> {
+    type PublicKey = P;
+    type Peers = Ordered<Self::PublicKey>;
+
+    async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
+        self.sender
+            .send(Message::Update { peer_set, peers })
+            .await
+            .unwrap();
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::PeerSet {
+                index: id,
+                response: sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Subscribe { response: sender })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+}
+
 /// Individual control interface for a peer in the simulated network.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Control<P: PublicKey> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
     sender: mpsc::UnboundedSender<Message<P>>,
+}
+
+impl<P: PublicKey> Control<P> {
+    /// Register the communication interfaces for the peer over a given [Channel].
+    pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(Message::Register {
+                channel,
+                public_key: self.me.clone(),
+                result: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
 }
 
 impl<P: PublicKey> crate::Blocker for Control<P> {

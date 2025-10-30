@@ -133,6 +133,7 @@ mod tests {
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -196,13 +197,14 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = participants[1].clone();
-            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(me.clone(), 1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.register(peer.clone(), 0).await.unwrap();
+                oracle.control(peer.clone()).register(0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.register(peer.clone(), 1).await.unwrap();
+                oracle.control(peer.clone()).register(1).await.unwrap();
             oracle
                 .add_link(
                     me.clone(),
@@ -396,6 +398,7 @@ mod tests {
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -458,13 +461,14 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = participants[1].clone();
-            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(me.clone(), 1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.register(peer.clone(), 0).await.unwrap();
+                oracle.control(peer.clone()).register(0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.register(peer.clone(), 1).await.unwrap();
+                oracle.control(peer.clone()).register(1).await.unwrap();
             oracle
                 .add_link(
                     me.clone(),
@@ -699,11 +703,12 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -764,9 +769,10 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(me.clone(), 1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             voter.start(
@@ -853,11 +859,12 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: None
                 },
             );
             network.start();
@@ -918,9 +925,9 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) = oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(me.clone(), 1).await.unwrap();
+                oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             let handle = voter.start(
@@ -1012,9 +1019,9 @@ mod tests {
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) = oracle.register(me.clone(), 2).await.unwrap();
+            let (pending_sender, _pending_receiver) = oracle.control(me.clone()).register(2).await.unwrap();
             let (recovered_sender, recovered_receiver) =
-                oracle.register(me.clone(), 3).await.unwrap();
+                oracle.control(me.clone()).register(3).await.unwrap();
 
             // Start the actor
             voter.start(
