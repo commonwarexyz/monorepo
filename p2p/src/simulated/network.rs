@@ -314,8 +314,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let notification = (*index, peers.clone(), all);
                     let _ = sender.unbounded_send(notification);
                 }
-
                 self.subscribers.push(sender);
+
+                // Return the receiver to the caller
                 let _ = response.send(receiver);
             }
             ingress::Message::LimitBandwidth {

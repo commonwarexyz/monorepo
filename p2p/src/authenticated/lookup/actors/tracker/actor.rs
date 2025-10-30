@@ -145,8 +145,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                         .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
                         .ok();
                 }
-
                 self.subscribers.push(sender);
+
+                // Return the receiver to the caller
                 let _ = responder.send(receiver);
             }
             Message::Connect {
