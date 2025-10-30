@@ -157,6 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
+                attempt_unregistered_handshakes: self.cfg.attempt_unregistered_handshakes,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
