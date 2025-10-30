@@ -494,7 +494,7 @@ where
                     // share is stored securely.
                     if let Some((path, config)) = self.participant_config.take() {
                         config.update_and_write(path.as_path(), |config| {
-                            config.polynomial = Some(hex(output.encode().as_ref()));
+                            config.output = Some(hex(output.encode().as_ref()));
                             config.share = Some(share);
                         });
                     }

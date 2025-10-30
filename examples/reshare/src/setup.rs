@@ -1,19 +1,18 @@
 //! Local network setup.
-
 use commonware_codec::{Decode, Encode, RangeCfg};
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
-        primitives::{
-            group::Share,
-            poly::{self, Public},
-            variant::MinSig,
-        },
+        dkg2::{deal, Output},
+        primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum, NZU32};
+use commonware_utils::{
+    from_hex, hex, quorum,
+    set::{Ordered, OrderedAssociated},
+    NZU32,
+};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -32,8 +31,8 @@ pub struct ParticipantConfig {
     /// The bootstrapper node identities.
     #[serde(with = "serde_peer_map")]
     pub bootstrappers: HashMap<PublicKey, SocketAddr>,
-    /// The group polynomial, as a hex-encoded string.
-    pub polynomial: Option<String>,
+    /// The output (containing public information) as a hex string.
+    pub output: Option<String>,
     /// The validator's ed25519 signing key.
     ///
     /// Used for P2P, and in the DKG bootstrap phase, for consensus message signing.
@@ -46,10 +45,10 @@ pub struct ParticipantConfig {
 
 impl ParticipantConfig {
     /// Get the polynomial commitment for the DKG.
-    pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
-        self.polynomial.as_ref().map(|raw| {
+    pub fn output(&self, threshold: u32) -> Option<Output<MinSig, PublicKey>> {
+        self.output.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
-            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &RangeCfg::exact(NZU32!(threshold)))
+            Output::<MinSig, PublicKey>::decode_cfg(&mut bytes.as_slice(), &NZU32!(threshold))
                 .expect("failed to decode polynomial")
         })
     }
@@ -133,42 +132,41 @@ fn generate_identities(
     is_dkg: bool,
     num_peers: u32,
     num_participants_per_epoch: u32,
-) -> (Option<Public<MinSig>>, Vec<(PrivateKey, Option<Share>)>) {
-    // Generate consensus key
-    let threshold = quorum(num_participants_per_epoch);
-    let (polynomial, shares) = if is_dkg {
-        (None, Vec::new())
-    } else {
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(
-            &mut OsRng,
-            None,
-            num_participants_per_epoch,
-            threshold,
-        );
-        info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
-        (Some(polynomial), shares)
-    };
-
-    // Assign shares to peers (those not participating in the first epoch get no share.)
-    let mut shares = shares.into_iter().map(Some).collect::<Vec<_>>();
-    shares.resize(num_peers as usize, None);
-
+) -> (
+    Option<Output<MinSig, PublicKey>>,
+    Vec<(PrivateKey, Option<Share>)>,
+) {
     // Generate p2p private keys
-    let mut peer_signers = (0..num_peers)
+    let peer_signers = (0..num_peers)
         .map(|_| PrivateKey::from_rng(&mut OsRng))
         .collect::<Vec<_>>();
-    peer_signers.sort_by_key(|signer| signer.public_key());
-
-    let identities = peer_signers.into_iter().zip(shares).collect::<Vec<_>>();
-
+    // Generate consensus key
+    let threshold = quorum(num_participants_per_epoch);
+    let (output, shares) = if is_dkg {
+        (None, OrderedAssociated::from([]))
+    } else {
+        let (output, shares) = deal(
+            OsRng,
+            peer_signers.iter().map(|s| s.public_key()),
+            threshold,
+        );
+        (Some(output), shares)
+    };
     info!(num_peers, threshold, "generated participant identities");
-    (polynomial, identities)
+    let identities = peer_signers
+        .into_iter()
+        .map(|s| {
+            let share = shares.get_value(&s.public_key()).cloned();
+            (s, share)
+        })
+        .collect::<Vec<_>>();
+    (output, identities)
 }
 
 /// Generates all [ParticipantConfig] files from the provided identities.
 fn generate_configs(
     args: &super::SetupArgs,
-    polynomial: Option<&Public<MinSig>>,
+    output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
     let bootstrappers = identities
@@ -190,7 +188,7 @@ fn generate_configs(
         let participant_config = ParticipantConfig {
             port: args.base_port + index as u16,
             bootstrappers: bootstrappers.clone(),
-            polynomial: polynomial.map(|polynomial| hex(polynomial.encode().as_ref())),
+            output: output.map(|o| hex(o.encode().as_ref())),
             signing_key: signer.clone(),
             share: share.clone(),
         };
