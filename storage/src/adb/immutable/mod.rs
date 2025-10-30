@@ -383,7 +383,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Confirm post-conditions hold.
         assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
-        assert_eq!(log_size, locations.size().await?);
+        assert_eq!(log_size, locations.size().await);
 
         let oldest_retained_loc = oldest_retained_loc.unwrap_or(Location::new_unchecked(0));
         Ok((log_size, oldest_retained_loc))

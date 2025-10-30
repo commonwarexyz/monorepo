@@ -78,8 +78,8 @@ where
     type Op = Operation<K, V>;
     type Error = crate::journal::Error;
 
-    async fn size(&self) -> Result<u64, Self::Error> {
-        Ok(self.size)
+    async fn size(&self) -> u64 {
+        self.size
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {

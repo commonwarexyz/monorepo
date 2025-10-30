@@ -109,7 +109,7 @@ pub(crate) async fn init_mmr_and_log<
     .await?;
 
     // Back up over / discard any uncommitted operations in the log.
-    let mut log_size: Location = log.size().await?.into();
+    let mut log_size: Location = log.size().await.into();
     let mut rewind_leaf_num = log_size;
     let mut inactivity_floor_loc = Location::new_unchecked(0);
     while rewind_leaf_num > 0 {
@@ -158,7 +158,7 @@ pub(crate) async fn init_mmr_and_log<
     }
 
     // At this point the MMR and log should be consistent.
-    assert_eq!(log.size().await?, mmr.leaves());
+    assert_eq!(log.size().await, mmr.leaves());
 
     Ok((inactivity_floor_loc, mmr, log))
 }
@@ -237,7 +237,7 @@ where
     O: FixedOperation,
     H: CHasher,
 {
-    let size = Location::new_unchecked(log.size().await?);
+    let size = Location::new_unchecked(log.size().await);
     if op_count > size {
         return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
     }
@@ -399,7 +399,7 @@ where
         // Find the snapshot entry corresponding to the operation.
         if cursor.find(|&loc| *loc == old_loc) {
             // Update the operation's snapshot location to point to tip.
-            let tip_loc = Location::new_unchecked(self.log.size().await?);
+            let tip_loc = Location::new_unchecked(self.log.size().await);
             cursor.update(tip_loc);
             drop(cursor);
 
@@ -431,7 +431,7 @@ where
         //
         // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
         loop {
-            let tip_loc = Location::new_unchecked(self.log.size().await?);
+            let tip_loc = Location::new_unchecked(self.log.size().await);
             assert!(
                 *inactivity_floor_loc < tip_loc,
                 "no active operations above the inactivity floor"

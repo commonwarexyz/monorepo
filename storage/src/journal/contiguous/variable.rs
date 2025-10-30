@@ -484,7 +484,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
-            let size = offsets.size().await?;
+            let size = offsets.size().await;
 
             if !data.blobs.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
@@ -556,7 +556,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
                 // This can happen if we pruned all data, then appended new data, synced the
                 // data journal, but crashed before syncing the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
-                let offsets_size = offsets.size().await?;
+                let offsets_size = offsets.size().await;
                 if offsets_size != data_oldest_pos {
                     return Err(Error::Corruption(format!(
                         "offsets journal empty: size ({offsets_size}) != data oldest pos ({data_oldest_pos})"
@@ -569,7 +569,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             }
         }
 
-        let offsets_size = offsets.size().await?;
+        let offsets_size = offsets.size().await;
         if offsets_size > data_size {
             // We must have crashed after writing offsets but before writing data.
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
@@ -580,7 +580,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
             Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
         }
 
-        assert_eq!(offsets.size().await?, data_size);
+        assert_eq!(offsets.size().await, data_size);
         // Oldest retained position is always Some because the data journal is non-empty.
         assert_eq!(offsets.oldest_retained_pos().await?, Some(data_oldest_pos));
 
@@ -663,8 +663,8 @@ impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> 
         Journal::append(self, item).await
     }
 
-    async fn size(&self) -> Result<u64, Error> {
-        Ok(Journal::size(self))
+    async fn size(&self) -> u64 {
+        Journal::size(self)
     }
 
     async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
@@ -1167,7 +1167,7 @@ mod tests {
             }
 
             // Offsets journal should be fully rebuilt to match data journal
-            assert_eq!(variable.offsets.size().await.unwrap(), 20);
+            assert_eq!(variable.offsets.size().await, 20);
 
             variable.destroy().await.unwrap();
         });
@@ -1288,7 +1288,7 @@ mod tests {
             }
 
             // Verify offsets journal fully rebuilt
-            assert_eq!(variable.offsets.size().await.unwrap(), 25);
+            assert_eq!(variable.offsets.size().await, 25);
 
             // Verify next append gets position 25
             let pos = variable.append(2500).await.unwrap();

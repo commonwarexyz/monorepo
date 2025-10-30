@@ -302,11 +302,11 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
-    pub async fn size(&self) -> Result<u64, Error> {
+    pub async fn size(&self) -> u64 {
         let size = self.tail.size().await;
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let items_in_blob = size / Self::CHUNK_SIZE_U64;
-        Ok(items_in_blob + self.cfg.items_per_blob.get() * self.tail_index)
+        items_in_blob + self.cfg.items_per_blob.get() * self.tail_index
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
@@ -371,7 +371,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed from newest to oldest.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        match size.cmp(&self.size().await?) {
+        match size.cmp(&self.size().await) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
@@ -467,7 +467,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        assert!(start_pos <= self.size().await?);
+        assert!(start_pos <= self.size().await);
 
         // Collect all blobs to replay paired with their index.
         let items_per_blob = self.cfg.items_per_blob.get();
@@ -629,7 +629,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> super::Contigu
         Journal::append(self, item).await
     }
 
-    async fn size(&self) -> Result<u64, Error> {
+    async fn size(&self) -> u64 {
         Journal::size(self).await
     }
 
@@ -815,7 +815,7 @@ mod tests {
                 .await
                 .expect("failed to max-prune journal");
             let buffer = context.encode();
-            let size = journal.size().await.unwrap();
+            let size = journal.size().await;
             assert_eq!(size, 10);
             assert_eq!(journal.oldest_blob_index(), 5);
             assert_eq!(journal.tail_index, 5);
@@ -1067,7 +1067,7 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            assert_eq!(journal.size().await.unwrap(), item_count);
+            assert_eq!(journal.size().await, item_count);
             journal.close().await.expect("Failed to close journal");
 
             // Truncate the tail blob by one byte, which should result in the 3rd item being
@@ -1093,7 +1093,7 @@ mod tests {
                 .unwrap();
 
             // Confirm 2 items were trimmed.
-            assert_eq!(journal.size().await.unwrap(), item_count - 2);
+            assert_eq!(journal.size().await, item_count - 2);
 
             // Corrupt the last item, ensuring last blob is trimmed to empty state.
             let (blob, size) = context
@@ -1108,7 +1108,7 @@ mod tests {
                 .unwrap();
 
             // Confirm last item in blob was trimmed.
-            assert_eq!(journal.size().await.unwrap(), item_count - 3);
+            assert_eq!(journal.size().await, item_count - 3);
 
             // Cleanup.
             journal.destroy().await.expect("Failed to destroy journal");
@@ -1201,7 +1201,7 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            assert_eq!(journal.size().await.unwrap(), 5);
+            assert_eq!(journal.size().await, 5);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
@@ -1220,7 +1220,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
-            assert_eq!(journal.size().await.unwrap(), 4);
+            assert_eq!(journal.size().await, 4);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
@@ -1234,13 +1234,13 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
-            assert_eq!(journal.size().await.unwrap(), 3);
+            assert_eq!(journal.size().await, 3);
             let buffer = context.encode();
             // Even though it was deleted, tail blob should be re-created and left empty by the
             // recovery code. This means we have 2 blobs total, with 3 items in the first, and none
             // in the tail.
             assert!(buffer.contains("tracked 2"));
-            assert_eq!(journal.size().await.unwrap(), 3);
+            assert_eq!(journal.size().await, 3);
 
             journal.destroy().await.unwrap();
         });
@@ -1260,7 +1260,7 @@ mod tests {
                 .append(test_digest(0))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.size().await, 1);
             journal.close().await.expect("Failed to close journal");
 
             // Manually truncate most recent blob to simulate a partial write.
@@ -1279,14 +1279,14 @@ mod tests {
 
             // Since there was only a single item appended which we then corrupted, recovery should
             // leave us in the state of an empty journal.
-            assert_eq!(journal.size().await.unwrap(), 0);
+            assert_eq!(journal.size().await, 0);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
             // Make sure journal still works for appending.
             journal
                 .append(test_digest(0))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.size().await, 1);
 
             journal.destroy().await.unwrap();
         });
@@ -1307,7 +1307,7 @@ mod tests {
                 .append(test_digest(0))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.size().await, 1);
             journal.close().await.expect("Failed to close journal");
 
             // Manually extend the blob by an amount at least some multiple of the chunk size to
@@ -1328,7 +1328,7 @@ mod tests {
                 .expect("Failed to re-initialize journal");
 
             // Ensure we've recovered to the state of a single item.
-            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.size().await, 1);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
 
             // Make sure journal still works for appending.
@@ -1336,7 +1336,7 @@ mod tests {
                 .append(test_digest(1))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size().await.unwrap(), 2);
+            assert_eq!(journal.size().await, 2);
 
             // Get the value of the first item
             let item = journal.read(0).await.unwrap();
@@ -1370,10 +1370,10 @@ mod tests {
                 .append(test_digest(0))
                 .await
                 .expect("failed to append data 0");
-            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.size().await, 1);
             assert!(matches!(journal.rewind(1).await, Ok(()))); // should be no-op
             assert!(matches!(journal.rewind(0).await, Ok(())));
-            assert_eq!(journal.size().await.unwrap(), 0);
+            assert_eq!(journal.size().await, 0);
 
             // append 7 items
             for i in 0..7 {
@@ -1385,11 +1385,11 @@ mod tests {
             }
             let buffer = context.encode();
             assert!(buffer.contains("tracked 4"));
-            assert_eq!(journal.size().await.unwrap(), 7);
+            assert_eq!(journal.size().await, 7);
 
             // rewind back to item #4, which should prune 2 blobs
             assert!(matches!(journal.rewind(4).await, Ok(())));
-            assert_eq!(journal.size().await.unwrap(), 4);
+            assert_eq!(journal.size().await, 4);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 3"));
 
@@ -1397,7 +1397,7 @@ mod tests {
             assert!(matches!(journal.rewind(0).await, Ok(())));
             let buffer = context.encode();
             assert!(buffer.contains("tracked 1"));
-            assert_eq!(journal.size().await.unwrap(), 0);
+            assert_eq!(journal.size().await, 0);
 
             // stress test: add 100 items, rewind 49, repeat x10.
             for _ in 0..10 {
@@ -1407,13 +1407,10 @@ mod tests {
                         .await
                         .expect("failed to append data");
                 }
-                journal
-                    .rewind(journal.size().await.unwrap() - 49)
-                    .await
-                    .unwrap();
+                journal.rewind(journal.size().await - 49).await.unwrap();
             }
             const ITEMS_REMAINING: u64 = 10 * (100 - 49);
-            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+            assert_eq!(journal.size().await, ITEMS_REMAINING);
 
             journal.close().await.expect("Failed to close journal");
 
@@ -1430,12 +1427,9 @@ mod tests {
                         .await
                         .expect("failed to append data");
                 }
-                journal
-                    .rewind(journal.size().await.unwrap() - 49)
-                    .await
-                    .unwrap();
+                journal.rewind(journal.size().await - 49).await.unwrap();
             }
-            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+            assert_eq!(journal.size().await, ITEMS_REMAINING);
 
             journal.close().await.expect("Failed to close journal");
 
@@ -1443,11 +1437,11 @@ mod tests {
             let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
-            assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));
+            assert_eq!(journal.size().await, 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
             journal.prune(300).await.expect("pruning failed");
-            assert_eq!(journal.size().await.unwrap(), ITEMS_REMAINING);
+            assert_eq!(journal.size().await, ITEMS_REMAINING);
             // Rewinding prior to our prune point should fail.
             assert!(matches!(
                 journal.rewind(299).await,
@@ -1456,7 +1450,7 @@ mod tests {
             // Rewinding to the prune point should work.
             // always remain in the journal.
             assert!(matches!(journal.rewind(300).await, Ok(())));
-            assert_eq!(journal.size().await.unwrap(), 300);
+            assert_eq!(journal.size().await, 300);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
             journal.destroy().await.unwrap();
