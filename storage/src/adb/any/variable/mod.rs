@@ -386,6 +386,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
+    /// Returns [Error::UnexpectedData] if the location does not reference an Update operation.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
@@ -396,16 +397,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         }
 
         let op = self.get_op(loc).await?;
-        match op {
-            Operation::Update(k, v) => {
-                if k != *key {
-                    Ok(None)
-                } else {
-                    Ok(Some(v))
-                }
-            }
-            _ => Ok(None),
+        let Operation::Update(k, v) = op else {
+            return Err(Error::UnexpectedData(loc));
+        };
+        if k != *key {
+            return Ok(None);
         }
+        Ok(Some(v))
     }
 
     /// Get the operation at location `loc` in the log.
@@ -419,7 +417,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log
             .size()
             .await
-            .map(|s| Location::new_unchecked(s))
+            .map(Location::new_unchecked)
             .map_err(Error::Journal)
     }
 
@@ -433,7 +431,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log
             .oldest_retained_pos()
             .await
-            .map(|opt| opt.map(Location::new_unchecked))
+            .map(|loc| loc.map(Location::new_unchecked))
             .map_err(Error::Journal)
     }
 
