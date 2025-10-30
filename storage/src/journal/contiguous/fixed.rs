@@ -620,9 +620,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> super::Contiguous
-    for Journal<E, A>
-{
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {

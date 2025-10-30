@@ -119,7 +119,7 @@ impl<C> Config<C> {
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
-pub struct Journal<E: Storage + Metrics, V: Codec> {
+pub struct Journal<E: Storage + Metrics, V: Codec + Send> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -804,7 +804,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send> Contiguous for Journal<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
