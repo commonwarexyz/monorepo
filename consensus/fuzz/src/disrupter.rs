@@ -24,6 +24,7 @@ use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use std::time::Duration;
+use commonware_consensus::simplex::types::OrderedExt;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 

@@ -14,7 +14,7 @@ use commonware_consensus::{
         config,
         mocks::{
             application,
-            fixtures::{bls_multisig_fixture, bls_threshold_fixture, ed25519_fixture, Fixture},
+            fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             relay, reporter,
         },
         signing_scheme::{
@@ -26,11 +26,7 @@ use commonware_consensus::{
     types::View,
     Monitor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
-    sha256::Digest as Sha256Digest,
-    Sha256, Signer as _,
-};
+use commonware_cryptography::{ed25519::{PublicKey as Ed25519PublicKey}, bls12381::primitives::variant::{MinPk, MinSig}, sha256::Digest as Sha256Digest, PublicKey, Sha256, Signer as _};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU32};
@@ -80,47 +76,47 @@ impl Simplex for SimplexEd25519 {
     type Scheme = simplex_ed25519::Scheme;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519_fixture(context, n)
+        ed25519(context, n)
     }
 }
 
 pub struct SimplexBls12381MinPk;
 
 impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold::Scheme<MinPk>;
+    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls_threshold_fixture::<MinPk, _>(context, n)
+        bls12381_threshold::<MinPk, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold::Scheme<MinSig>;
+    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls_threshold_fixture::<MinSig, _>(context, n)
+        bls12381_threshold::<MinSig, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MultisigMinPk;
 
 impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = bls12381_multisig::Scheme<MinPk>;
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls_multisig_fixture::<MinPk, _>(context, n)
+        bls12381_multisig::<MinPk, _>(context, n)
     }
 }
 
 pub struct SimplexBls12381MultisigMinSig;
 
 impl Simplex for SimplexBls12381MultisigMinSig {
-    type Scheme = bls12381_multisig::Scheme<MinSig>;
+    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
 
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls_multisig_fixture::<MinSig, _>(context, n)
+        bls12381_multisig::<MinSig, _>(context, n)
     }
 }
 
@@ -169,8 +165,13 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         network.start();
 
         // Register participants
-        let (validator_keys, validators, signing_schemes, _) = P::fixture(&mut context, n);
-        let mut registrations = register_validators(&mut oracle, &validators).await;
+        //let (validator_keys, validators, signing_schemes, _) = P::fixture(&mut context, n);
+        let Fixture {
+            participants,
+            schemes,
+            verifier
+        } = P::fixture(&mut context, n);
+        let mut registrations = register_validators(&mut oracle, &participants).await;
 
         // Link validators.
         // The first validator is byzantine.
@@ -182,7 +183,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
 
         link_peers(
             &mut oracle,
-            &validators,
+            &participants,
             Action::Link(link),
             input.partition.create(),
         )
@@ -193,13 +194,13 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
         let mut reporters = Vec::new();
 
         for i in 0..f as usize {
-            let private_key = validator_keys[i].clone();
-            let scheme = signing_schemes[i].clone();
-            let validator = validators[i].clone();
-            let context = context.with_label(&format!("validator-{}", private_key.public_key()));
+            let private_key = schemes[i].clone();
+            let scheme = schemes[i].clone();
+            let validator = participants[i].clone();
+            let context = context.with_label(&format!("validator-{}", validator));
             let reporter_config = reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
+                participants: participants.clone().into(),
                 scheme: scheme.clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -220,13 +221,14 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
 
         // Start regular consensus engines for the remaining correct validators.
         for i in (f as usize)..(n as usize) {
-            let private_key = &validator_keys[i];
-            let validator = validators[i].clone();
-            let context = context.with_label(&format!("validator-{}", private_key.public_key()));
+            let private_key = &schemes[i];
+            let scheme = schemes[i].clone();
+            let validator = participants[i].clone();
+            let context = context.with_label(&format!("validator-{}", validator));
             let reporter_config = reporter::Config {
                 namespace: namespace.clone(),
-                participants: validators.clone().into(),
-                scheme: signing_schemes[i].clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[i].clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_config);
             reporters.push(reporter.clone());
@@ -237,7 +239,7 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
             let application_cfg = application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
-                participant: validator.clone(),
+                me: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
@@ -246,10 +248,8 @@ fn run_fuzz<P: Simplex>(input: FuzzInput) {
             actor.start();
             let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
-                me: validator.clone(),
                 blocker,
-                participants: validators.clone().into(),
-                scheme: signing_schemes[i].clone(),
+                scheme: schemes[i].clone(),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),

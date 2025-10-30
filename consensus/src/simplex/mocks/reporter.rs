@@ -38,7 +38,7 @@ pub struct Config<P: PublicKey, S: Scheme> {
 #[derive(Clone)]
 pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
-    participants: Ordered<P>,
+    pub participants: Ordered<P>,
     scheme: S,
 
     namespace: Vec<u8>,
