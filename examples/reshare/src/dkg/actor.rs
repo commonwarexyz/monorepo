@@ -333,6 +333,7 @@ where
                 .report(orchestrator::Message::Enter(transition))
                 .await;
 
+            dbg!(&state.epoch, &output, &dealers, &players);
             let round_info = RoundInfo::new(state.epoch, output.clone(), dealers, players)
                 .expect("round info configuration should be correct");
             let (to_players, from_dealers) = dkg_mux

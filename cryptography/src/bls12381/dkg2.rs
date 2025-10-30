@@ -828,11 +828,10 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
 pub fn deal<V: Variant, P: PublicKey>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
-    t: u32,
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
-    assert!(t >= 1, "threshold must be at least 1");
-    let private = poly::new_from(t - 1, &mut rng);
     let players = Ordered::from_iter(players.into_iter());
+    let t = quorum(players.len() as u32);
+    let private = poly::new_from(t - 1, &mut rng);
     let shares: OrderedAssociated<_, _> = players
         .iter()
         .enumerate()

@@ -255,7 +255,7 @@ mod test {
     fn generate_test_participants(
         rng: impl CryptoRngCore,
         n: u32,
-        threshold: u32,
+        active: u32,
     ) -> (
         Vec<PrivateKey>,
         Vec<PublicKey>,
@@ -273,7 +273,7 @@ mod test {
         validators.sort();
         signers.sort_by_key(|s| s.public_key());
 
-        let (output, shares) = deal(rng, validators.clone(), threshold);
+        let (output, shares) = deal(rng, validators.iter().take(active as usize).cloned());
 
         (signers, validators, output, shares)
     }
@@ -319,7 +319,6 @@ mod test {
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
         // Create context
-        let threshold = quorum(n_active);
         let cfg = deterministic::Config::default().with_seed(seed);
         let executor = Runner::from(cfg);
         executor.start(|mut context| async move {
@@ -338,7 +337,7 @@ mod test {
 
             // Generate participants and shares
             let (signers, validators, output, shares) =
-                generate_test_participants(&mut context, n, threshold);
+                generate_test_participants(&mut context, n, n);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators
@@ -544,7 +543,6 @@ mod test {
         // Create context
         let n = 6;
         let active = 4;
-        let threshold = quorum(active);
         let initial_container_required = BLOCKS_PER_EPOCH / 2;
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
@@ -566,7 +564,7 @@ mod test {
             network.start();
 
             let (signers, validators, output, shares) =
-                generate_test_participants(&mut context, n, threshold);
+                generate_test_participants(&mut context, n, active);
 
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
@@ -800,7 +798,6 @@ mod test {
     {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let initial_container_required = BLOCKS_PER_EPOCH / 2 + 1;
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
@@ -823,7 +820,7 @@ mod test {
 
             // Generate participants and shares
             let (signers, validators, output, shares) =
-                generate_test_participants(&mut context, n, threshold);
+                generate_test_participants(&mut context, n, n);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators (except 0)
@@ -1029,7 +1026,6 @@ mod test {
     {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let initial_container_required = BLOCKS_PER_EPOCH + (BLOCKS_PER_EPOCH / 2);
         let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
@@ -1052,7 +1048,7 @@ mod test {
 
             // Generate participants and shares
             let (signers, validators, output, shares) =
-                generate_test_participants(&mut context, n, threshold);
+                generate_test_participants(&mut context, n, n);
             let mut registrations = register_validators(&context, &mut oracle, &validators).await;
 
             // Link all validators (except 0)

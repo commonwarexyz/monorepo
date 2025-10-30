@@ -143,8 +143,10 @@ fn generate_identities(
     } else {
         let (output, shares) = deal(
             OsRng,
-            peer_signers.iter().map(|s| s.public_key()),
-            threshold,
+            peer_signers
+                .iter()
+                .take(num_participants_per_epoch as usize)
+                .map(|s| s.public_key()),
         );
         (Some(output), shares)
     };
