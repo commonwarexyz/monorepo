@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use blake3::Hasher as RefBlake3;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    blake3::{hash as our_hash, Blake3 as OurBlake3, Digest},
+    blake3::{Blake3 as OurBlake3, Digest},
     Hasher,
 };
 use libfuzzer_sys::fuzz_target;
@@ -79,7 +79,7 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = our_hash(data);
+    let our_hash_result = OurBlake3::hash(data);
     let mut ref_hasher = RefBlake3::new();
     assert_eq!(
         our_hash_result.as_ref(),
@@ -91,7 +91,7 @@ fn fuzz_digest_operations(data: &[u8]) {
     let empty_digest = OurBlake3::empty();
     assert_eq!(empty_digest.len(), 32);
 
-    let hash_result = our_hash(data);
+    let hash_result = OurBlake3::hash(data);
     let digest_from_hash = hash_result;
 
     let slice_ref: &[u8] = &digest_from_hash;
@@ -148,7 +148,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(slice, our_digest.as_ref());
 
     // Verify the conversion worked correctly
-    let our_hash = our_hash(data);
+    let our_hash = OurBlake3::hash(data);
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 
