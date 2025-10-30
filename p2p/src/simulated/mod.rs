@@ -2254,7 +2254,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(2),
                 },
             );
             network.start();
@@ -2273,8 +2273,10 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 1);
+            assert_eq!(peer_set, vec![pk1.clone(), pk2.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone()].into());
 
             // Register second peer set
             oracle
@@ -2282,8 +2284,10 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 2);
+            assert_eq!(peer_set, vec![pk2.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
 
             // Register third peer set
             oracle
@@ -2291,8 +2295,21 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, _, _) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
             assert_eq!(peer_set_id, 3);
+            assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
+
+            // Register fourth peer set
+            oracle
+                .update(4, vec![pk1.clone(), pk3.clone()].into())
+                .await;
+
+            // Verify we receive the notification
+            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            assert_eq!(peer_set_id, 4);
+            assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].into());
+            assert_eq!(all, vec![pk1.clone(), pk3.clone()].into());
         });
     }
 
