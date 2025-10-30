@@ -1483,7 +1483,7 @@ pub(super) mod test {
 
             // Repeat, though this time sync the log.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(true, false, 10).await.unwrap();
+            db.simulate_failure(true, false, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -1499,7 +1499,7 @@ pub(super) mod test {
 
             // Repeat, though this time partially sync mmr.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(false, true, 10).await.unwrap();
+            db.simulate_failure(false, false, 10).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -1568,7 +1568,7 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate failure (sync only the mmr).
             apply_ops(&mut db).await;
-            db.simulate_failure(false, false, 0).await.unwrap();
+            db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher), root);
