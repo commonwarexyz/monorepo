@@ -88,9 +88,8 @@ impl PeakIterator {
         let mut high = size_val; // MMR size >= leaf count, so N <= size
 
         while low < high {
-            // Use (low + high + 1) / 2 for upper-biased midpoint in binary search
-            #[allow(clippy::manual_div_ceil)]
-            let mid = (low + high + 1) / 2;
+            // Use div_ceil for upper-biased midpoint in binary search
+            let mid = (low + high).div_ceil(2);
             let mmr_size = 2 * mid - mid.count_ones() as u64;
 
             if mmr_size <= size_val {
