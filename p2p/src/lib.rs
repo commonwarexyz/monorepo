@@ -13,6 +13,7 @@
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
+use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
@@ -87,8 +88,13 @@ pub trait PeerSetManager: Debug + Clone + Send + 'static {
         id: u64,
     ) -> impl Future<Output = Option<Ordered<Self::PublicKey>>> + Send;
 
-    /// Fetch the latest peer set ID.
-    fn latest_peer_set(&mut self) -> impl Future<Output = Option<u64>> + Send;
+    /// Subscribe to notifications when new peer sets are added.
+    ///
+    /// Returns a receiver that will receive the peer set ID whenever a new peer set
+    /// is registered via `update`.
+    fn subscribe(
+        &mut self,
+    ) -> impl Future<Output = mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)>> + Send;
 }
 
 /// Interface for blocking other peers.

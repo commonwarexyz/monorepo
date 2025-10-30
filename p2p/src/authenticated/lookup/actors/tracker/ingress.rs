@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::{Ordered, OrderedAssociated};
-use futures::channel::oneshot;
+use futures::channel::{mpsc, oneshot};
 use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
@@ -27,10 +27,10 @@ pub enum Message<C: PublicKey> {
         /// One-shot channel to send the peer set.
         responder: oneshot::Sender<Option<Ordered<C>>>,
     },
-    /// Fetch the latest peer set index.
-    LatestPeerSet {
-        /// One-shot channel to send the latest peer set index.
-        responder: oneshot::Sender<Option<u64>>,
+    /// Subscribe to notifications when new peer sets are added.
+    Subscribe {
+        /// One-shot channel to send the subscription receiver.
+        responder: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<C>)>>,
     },
 
     // ---------- Used by blocker ----------
@@ -207,10 +207,10 @@ impl<C: PublicKey> crate::PeerSetManager for Oracle<C> {
         receiver.await.unwrap()
     }
 
-    async fn latest_peer_set(&mut self) -> Option<u64> {
+    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::LatestPeerSet { responder: sender })
+            .send(Message::Subscribe { responder: sender })
             .unwrap();
         receiver.await.unwrap()
     }

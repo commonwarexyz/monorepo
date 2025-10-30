@@ -199,7 +199,7 @@ mod tests {
         let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            peer_provider: oracle.clone(),
+            manager: oracle.clone(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -264,7 +264,7 @@ mod tests {
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: 3,
+                tracked_peer_sets: Some(3),
             },
         );
         network.start();

@@ -178,7 +178,7 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3].into()).await;
+//!     oracle.update(0, vec![signer.public_key(), peer1, peer2, peer3].into()).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;

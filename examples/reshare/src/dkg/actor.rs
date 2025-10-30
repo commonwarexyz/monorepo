@@ -222,13 +222,10 @@ where
             .await;
 
         // Register the initial set of peers.
-        let players_after_next = Ordered::from_iter(
-            Self::choose_from_all(
-                &all_participants,
-                self.num_participants_per_epoch,
-                current_epoch + 1,
-            )
-            .into_iter(),
+        let players_after_next = Self::choose_from_all(
+            &all_participants,
+            self.num_participants_per_epoch,
+            current_epoch + 1,
         );
         let next_epoch_peers = dealers
             .clone()
@@ -421,13 +418,10 @@ where
 
                         // Select the players for the epoch after next to allow them to sync two epochs prior
                         // to their participation.
-                        let next_epoch_players = Ordered::from_iter(
-                            Self::choose_from_all(
-                                &all_participants,
-                                self.num_participants_per_epoch,
-                                next_epoch + 1,
-                            )
-                            .into_iter(),
+                        let next_epoch_players = Self::choose_from_all(
+                            &all_participants,
+                            self.num_participants_per_epoch,
+                            next_epoch + 1,
                         );
 
                         // Register the set of peers for the next epoch.

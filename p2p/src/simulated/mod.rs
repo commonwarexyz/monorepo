@@ -76,7 +76,7 @@
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
 //!     disconnect_on_block: true,
-//!     tracked_peer_sets: 3,
+//!     tracked_peer_sets: Some(3),
 //! };
 //!
 //! // Start context
@@ -204,7 +204,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -322,7 +322,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -364,7 +364,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -403,7 +403,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -430,7 +430,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -471,7 +471,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -548,7 +548,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -602,7 +602,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -675,7 +675,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -864,7 +864,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -957,7 +957,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1108,7 +1108,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1167,7 +1167,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1274,7 +1274,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1358,7 +1358,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1443,7 +1443,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1534,7 +1534,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1675,7 +1675,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1771,7 +1771,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1869,7 +1869,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -1960,7 +1960,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -2036,7 +2036,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
@@ -2112,19 +2112,18 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
 
-            assert_eq!(oracle.latest_peer_set().await, None);
-            assert_eq!(oracle.peer_set(0).await, None);
+            assert_eq!(oracle.peer_set(0).await, Some([].into()));
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            oracle.update(0xFF, vec![pk1, pk2].into()).await;
+            oracle.update(0xFF, [pk1.clone(), pk2.clone()].into()).await;
 
-            assert_eq!(oracle.latest_peer_set().await.unwrap(), 0xFF);
+            assert_eq!(oracle.peer_set(0xFF).await.unwrap(), [pk1, pk2].into());
         });
     }
 
@@ -2137,7 +2136,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 2, // Only track 2 peer sets
+                    tracked_peer_sets: Some(2), // Only track 2 peer sets
                 },
             );
             network.start();
@@ -2232,9 +2231,6 @@ mod tests {
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
-            // Verify latest peer set
-            assert_eq!(oracle.latest_peer_set().await.unwrap(), 3);
-
             // Verify peer set contents
             let peer_set_2 = oracle.peer_set(2).await.unwrap();
             assert!(peer_set_2.as_ref().contains(&pk2));
@@ -2246,6 +2242,111 @@ mod tests {
 
             // Peer set 1 should no longer exist
             assert!(oracle.peer_set(1).await.is_none());
+        });
+    }
+
+    #[test]
+    fn test_subscribe_to_peer_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            // Subscribe to peer set updates
+            let mut subscription = oracle.subscribe().await;
+
+            // Create peers
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let pk3 = PrivateKey::from_seed(3).public_key();
+
+            // Register first peer set
+            oracle
+                .update(1, vec![pk1.clone(), pk2.clone()].into())
+                .await;
+
+            // Verify we receive the notification
+            let (peer_set_id, _) = subscription.next().await.unwrap();
+            assert_eq!(peer_set_id, 1);
+
+            // Register second peer set
+            oracle
+                .update(2, vec![pk2.clone(), pk3.clone()].into())
+                .await;
+
+            // Verify we receive the notification
+            let (peer_set_id, _) = subscription.next().await.unwrap();
+            assert_eq!(peer_set_id, 2);
+
+            // Register third peer set
+            oracle
+                .update(3, vec![pk1.clone(), pk3.clone()].into())
+                .await;
+
+            // Verify we receive the notification
+            let (peer_set_id, _) = subscription.next().await.unwrap();
+            assert_eq!(peer_set_id, 3);
+        });
+    }
+
+    #[test]
+    fn test_multiple_subscriptions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            // Create multiple subscriptions
+            let mut subscription1 = oracle.subscribe().await;
+            let mut subscription2 = oracle.subscribe().await;
+            let mut subscription3 = oracle.subscribe().await;
+
+            // Create peers
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+
+            // Register a peer set
+            oracle
+                .update(1, vec![pk1.clone(), pk2.clone()].into())
+                .await;
+
+            // Verify all subscriptions receive the notification
+            let (id1, _) = subscription1.next().await.unwrap();
+            let (id2, _) = subscription2.next().await.unwrap();
+            let (id3, _) = subscription3.next().await.unwrap();
+
+            assert_eq!(id1, 1);
+            assert_eq!(id2, 1);
+            assert_eq!(id3, 1);
+
+            // Drop one subscription
+            drop(subscription2);
+
+            // Register another peer set
+            oracle
+                .update(2, vec![pk1.clone(), pk2.clone()].into())
+                .await;
+
+            // Verify remaining subscriptions still receive notifications
+            let (id1, _) = subscription1.next().await.unwrap();
+            let (id3, _) = subscription3.next().await.unwrap();
+
+            assert_eq!(id1, 2);
+            assert_eq!(id3, 2);
         });
     }
 }

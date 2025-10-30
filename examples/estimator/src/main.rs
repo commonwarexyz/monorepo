@@ -297,7 +297,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
         Config {
             max_size: usize::MAX,
             disconnect_on_block: true,
-                tracked_peer_sets: 3,
+            tracked_peer_sets: None,
         },
     );
     network.start();

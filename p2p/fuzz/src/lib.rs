@@ -326,9 +326,7 @@ impl NetworkScheme for Lookup {
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
-            oracle
-                .update(index as u64, peer_list.clone().into())
-                .await;
+            oracle.update(index as u64, peer_list.clone().into()).await;
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS

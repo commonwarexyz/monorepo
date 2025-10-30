@@ -100,7 +100,7 @@ where
     // Create a static resolver for marshal
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
-        peer_provider: oracle.clone(),
+        manager: oracle.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
@@ -218,7 +218,7 @@ mod test {
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),
-                peer_provider: oracle.clone(),
+                manager: oracle.clone(),
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     me: Some(validator.clone()),
@@ -298,7 +298,7 @@ mod test {
                 context.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                     max_size: 1024 * 1024,
                 },
             );
@@ -504,7 +504,7 @@ mod test {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -641,7 +641,7 @@ mod test {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -781,7 +781,7 @@ mod test {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -1022,7 +1022,7 @@ mod test {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -1276,7 +1276,7 @@ mod test {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: 3,
+                    tracked_peer_sets: Some(3),
                 },
             );
 
@@ -1538,7 +1538,7 @@ mod test {
                     simulated::Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
-                        tracked_peer_sets: 3,
+                        tracked_peer_sets: Some(3),
                     },
                 );
 

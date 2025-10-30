@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    peer_provider: D,
+    manager: D,
 
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
@@ -121,7 +121,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                peer_provider: cfg.peer_provider,
+                manager: cfg.manager,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -148,23 +148,10 @@ impl<
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
         let mut shutdown = self.context.stopped();
+        let peer_set_subscription = &mut self.manager.subscribe().await;
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
-
-        // Set initial peer set.
-        self.last_peer_set_id = self.peer_provider.latest_peer_set().await;
-        if let Some(peer_set_id) = self.last_peer_set_id {
-            self.fetcher.reconcile(
-                self.peer_provider
-                    .peer_set(peer_set_id)
-                    .await
-                    .expect("peer set must exist")
-                    .as_ref(),
-            );
-        } else {
-            debug!("no initial peer set");
-        }
 
         loop {
             // Update metrics
@@ -178,21 +165,6 @@ impl<
                 .peers_blocked
                 .set(self.fetcher.len_blocked() as i64);
             self.metrics.serve_processing.set(self.serves.len() as i64);
-
-            // Update peer list if-and-only-if it might have changed.
-            let peer_set_id = self.peer_provider.latest_peer_set().await;
-            if self.last_peer_set_id != peer_set_id {
-                self.last_peer_set_id = peer_set_id;
-                if let Some(peer_set_id) = peer_set_id {
-                    self.fetcher.reconcile(
-                        self.peer_provider
-                            .peer_set(peer_set_id)
-                            .await
-                            .expect("peer set must exist")
-                            .as_ref(),
-                    );
-                }
-            }
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
@@ -212,6 +184,19 @@ impl<
                     debug!("shutdown");
                     self.serves.cancel_all();
                     return;
+                },
+
+                // Handle peer set updates
+                peer_set_update = peer_set_subscription.next() => {
+                    let Some((id, set)) = peer_set_update else {
+                        debug!("peer set subscription closed");
+                        return;
+                    };
+
+                    if self.last_peer_set_id < Some(id) {
+                        self.last_peer_set_id = Some(id);
+                        self.fetcher.reconcile(set.as_ref());
+                    }
                 },
 
                 // Handle mailbox messages

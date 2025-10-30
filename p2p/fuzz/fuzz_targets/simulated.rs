@@ -108,7 +108,7 @@ fn fuzz(input: FuzzInput) {
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
         disconnect_on_block: false,
-                tracked_peer_sets: 3,
+        tracked_peer_sets: Some(3),
     };
 
     let executor = deterministic::Runner::seeded(input.seed);

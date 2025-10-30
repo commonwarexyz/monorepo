@@ -19,7 +19,7 @@ pub struct Config<P: PublicKey, C: PeerSetManager<PublicKey = P>> {
     pub public_key: P,
 
     /// The provider of peers that can be consulted for fetching data.
-    pub peer_provider: C,
+    pub manager: C,
 
     /// The size of the request mailbox backlog.
     pub mailbox_size: usize,
@@ -59,7 +59,7 @@ where
     let (resolver_engine, resolver) = p2p::Engine::new(
         ctx.with_label("resolver"),
         p2p::Config {
-            peer_provider: config.peer_provider,
+            manager: config.manager,
             consumer: handler.clone(),
             producer: handler,
             mailbox_size: config.mailbox_size,

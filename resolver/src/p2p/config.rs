@@ -14,7 +14,7 @@ pub struct Config<
     Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers
-    pub peer_provider: D,
+    pub manager: D,
 
     /// The consumer that gets notified when data is available
     pub consumer: Con,

@@ -24,8 +24,8 @@ pub enum Message<P: PublicKey> {
         index: u64,
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
-    LatestPeerSet {
-        response: oneshot::Sender<Option<u64>>,
+    Subscribe {
+        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>)>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -209,10 +209,10 @@ impl<P: PublicKey> crate::PeerSetManager for Oracle<P> {
         receiver.await.unwrap()
     }
 
-    async fn latest_peer_set(&mut self) -> Option<u64> {
+    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::LatestPeerSet { response: sender })
+            .send(Message::Subscribe { response: sender })
             .await
             .unwrap();
         receiver.await.unwrap()

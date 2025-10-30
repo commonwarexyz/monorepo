@@ -102,7 +102,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: 3,
+                tracked_peer_sets: Some(3),
             },
         );
         network.start();
@@ -115,11 +115,7 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle
-                .control(peer.clone())
-                .register(0)
-                .await
-                .unwrap();
+            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
             connections.push((sender, receiver));
         }
 
@@ -155,7 +151,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                peer_provider: oracle.clone(),
+                manager: oracle.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,

@@ -12,6 +12,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
+use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -43,6 +44,9 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
+
+    /// Subscribers to peer set updates.
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -84,6 +88,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 directory,
                 listener: cfg.listener,
                 mailboxes: HashMap::new(),
+                subscribers: Vec::new(),
             },
             mailbox,
             oracle,
@@ -115,13 +120,29 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                 // Send the updated registered IP addresses to the listener.
                 let _ = self.listener.send(self.directory.registered()).await;
+
+                // Notify all subscribers about the new peer set
+                let new_set = self.directory.get_set(&index).cloned().unwrap();
+                self.subscribers.retain(|subscriber| {
+                    subscriber.unbounded_send((index, new_set.clone())).is_ok()
+                });
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
                 let _ = responder.send(self.directory.get_set(&index).cloned());
             }
-            Message::LatestPeerSet { responder } => {
-                let _ = responder.send(self.directory.latest_set_index());
+            Message::Subscribe { responder } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded();
+
+                // Send the current peer sets immediately
+                if let Some(latest_set_id) = self.directory.latest_set_index() {
+                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    sender.unbounded_send((latest_set_id, latest_set)).ok();
+                }
+
+                self.subscribers.push(sender);
+                let _ = responder.send(receiver);
             }
             Message::Connect {
                 public_key,
