@@ -159,8 +159,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader = select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
-        self.leader = Some(leader);
+        let (leader, leader_idx) =
+            select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
+        self.leader = Some(leader_idx);
+
+        debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
     }
 
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
@@ -260,12 +263,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.notarizes.len() < quorum {
             return None;
         }
-        let proposal = self.proposal.as_ref().unwrap().clone();
-        debug!(
-            ?proposal,
-            verified = self.verified_proposal,
-            "broadcasting notarization"
-        );
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
@@ -294,7 +291,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.nullifies.len() < quorum {
             return None;
         }
-        debug!(round = ?self.round, "broadcasting nullification");
 
         // Construct nullification
         let mut timer = self.recover_latency.timer();
@@ -324,18 +320,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.finalizes.len() < quorum {
             return None;
         }
-        let proposal = self.proposal.as_ref().unwrap().clone();
-        debug!(
-            ?proposal,
-            verified = self.verified_proposal,
-            "broadcasting finalization"
-        );
 
         // It is not possible to have a finalization that does not match the notarization proposal. If this
         // is detected, there is a critical bug or there has been a safety violation.
         if let Some(notarization) = &self.notarization {
+            let proposal = self.proposal.as_ref().unwrap();
             assert_eq!(
-                notarization.proposal, proposal,
+                notarization.proposal, *proposal,
                 "finalization proposal does not match notarization"
             );
         }
@@ -771,12 +762,12 @@ impl<
         self.outbound_messages
             .get_or_create(metrics::Outbound::nullify())
             .inc();
+        debug!(round=?nullify.round(), "broadcasting nullify");
         let msg = Voter::Nullify(nullify);
         pending_sender
             .send(Recipients::All, msg, true)
             .await
             .unwrap();
-        debug!(view = self.view, "broadcasted nullify");
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
@@ -942,7 +933,6 @@ impl<
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
-                debug!(view, reason = "view missing", "dropping verified proposal");
                 return false;
             }
         };
@@ -950,7 +940,7 @@ impl<
         // Ensure we haven't timed out
         if round.broadcast_nullify {
             debug!(
-                view,
+                round=?round.round,
                 reason = "view timed out",
                 "dropping verified proposal"
             );
@@ -962,7 +952,7 @@ impl<
         round.verified_proposal = true;
 
         // Indicate that verification is done
-        debug!(view, "verified proposal");
+        debug!(round=?round.round, proposal=?round.proposal, "verified proposal");
         true
     }
 
@@ -1345,6 +1335,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
+            debug!(round=?notarize.round(), proposal=?notarize.proposal, "broadcasting notarize");
             let msg = Voter::Notarize(notarize);
             pending_sender
                 .send(Recipients::All, msg, true)
@@ -1384,6 +1375,7 @@ impl<
                 .await;
 
             // Broadcast the notarization
+            debug!(proposal=?notarization.proposal, "broadcasting notarization");
             let msg = Voter::Notarization(notarization.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
@@ -1418,6 +1410,7 @@ impl<
                 .await;
 
             // Broadcast the nullification
+            debug!(round=?nullification.round(), "broadcasting nullification");
             let msg = Voter::Nullification(nullification.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
@@ -1492,7 +1485,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = Voter::Finalize(finalize.clone());
+            debug!(round=?finalize.round(), proposal=?finalize.proposal, "broadcasting finalize");
+            let msg = Voter::Finalize(finalize);
             pending_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -1531,6 +1525,7 @@ impl<
                 .await;
 
             // Broadcast the finalization
+            debug!(proposal=?finalization.proposal, "broadcasting finalization");
             let msg = Voter::Finalization(finalization.clone());
             recovered_sender
                 .send(Recipients::All, msg, true)
