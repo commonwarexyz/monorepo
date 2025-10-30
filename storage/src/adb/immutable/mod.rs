@@ -235,7 +235,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         // The number of operations in the log.
         let mut log_size = Location::new_unchecked(start_loc);
         // The location of the first operation to follow the last known commit point.
-        let mut after_last_commit: Option<Location> = None;
+        let mut after_last_commit = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
         let mut uncommitted_ops = Vec::new();
 
@@ -331,12 +331,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
         self.log.prune(*loc).await?;
 
         // Get the oldest retained location based on what the log actually pruned.
-        let pruning_boundary = match self.log.oldest_retained_pos() {
-            Some(pos) => Location::new_unchecked(pos),
-            None => {
-                let size = self.log.size();
-                Location::new_unchecked(size)
-            }
+        let pruning_boundary = match self.oldest_retained_loc() {
+            Some(loc) => loc,
+            None => self.op_count(),
         };
 
         // Prune the MMR up to the oldest retained item in the log after pruning.
@@ -538,8 +535,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        let log_size = self.op_count();
-        self.last_commit = Some(log_size);
+        self.last_commit = Some(self.op_count());
         let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
 
@@ -836,8 +832,7 @@ pub(super) mod test {
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
             let max_ops = NZU64!(5);
-            let op_count = db.op_count();
-            for i in 0..*op_count {
+            for i in 0..*db.op_count() {
                 let (proof, log) = db.proof(Location::new_unchecked(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,

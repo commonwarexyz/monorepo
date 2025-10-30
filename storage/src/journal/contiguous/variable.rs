@@ -436,6 +436,7 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
+    // TODO(#2056): Disambiguate between pruning boundary and oldest retained position.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
