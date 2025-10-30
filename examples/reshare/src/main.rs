@@ -14,6 +14,7 @@ mod application;
 mod dkg;
 mod engine;
 mod orchestrator;
+mod self_channel;
 mod setup;
 mod validator;
 

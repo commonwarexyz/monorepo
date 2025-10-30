@@ -11,6 +11,8 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/resha
 documentation = "https://docs.rs/commonware-reshare"
 
 [dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 commonware-broadcast.workspace = true
