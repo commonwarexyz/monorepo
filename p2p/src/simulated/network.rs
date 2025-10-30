@@ -87,7 +87,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     peer_sets: BTreeMap<u64, Ordered<P>>,
 
     // Reference count for each peer (number of peer sets they belong to)
-    peer_refs: HashMap<P, usize>,
+    peer_refs: BTreeMap<P, usize>,
 
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
@@ -138,7 +138,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
-                peer_refs: HashMap::new(),
+                peer_refs: BTreeMap::new(),
                 blocks: HashSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -436,10 +436,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if self.peer_sets.is_empty() {
                     self.peers.keys().cloned().collect()
                 } else {
-                    // Sort keys for deterministic ordering (peer_refs is a HashMap)
-                    let mut keys: Vec<_> = self.peer_refs.keys().cloned().collect();
-                    keys.sort();
-                    keys
+                    self.peer_refs.keys().cloned().collect()
                 }
             }
             Recipients::Some(keys) => keys,
