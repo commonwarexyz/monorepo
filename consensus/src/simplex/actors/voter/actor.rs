@@ -268,12 +268,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.notarizes.len() < quorum {
             return None;
         }
-        let proposal = self.proposal.as_ref().unwrap().clone();
-        debug!(
-            ?proposal,
-            verified = self.verified_proposal,
-            "broadcasting notarization"
-        );
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
