@@ -24,7 +24,6 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::NZUsize;
@@ -126,15 +125,13 @@ pub(crate) async fn init_mmr_and_log<
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit floor operation.
 /// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(crate) async fn align_mmr_and_log<
-    E: Storage + Clock + Metrics,
-    O: Keyed + FixedSize,
-    H: CHasher,
->(
+pub(crate) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H: CHasher>(
     mmr: &mut Mmr<E, H>,
-    log: &mut Journal<E, O>,
+    log: &mut impl Contiguous<Item = O>,
     hasher: &mut Standard<H>,
-) -> Result<Location, Error> {
+) -> Result<Location, Error>
+where
+{
     // Back up over / discard any uncommitted operations in the log.
     let mut log_size: Location = log.size().await.into();
     let mut rewind_leaf_num = log_size;

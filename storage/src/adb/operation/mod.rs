@@ -5,7 +5,7 @@
 //! implement [commonware_codec::CodecFixed].
 
 use crate::mmr::Location;
-use commonware_codec::{Error as CodecError, Read, Write};
+use commonware_codec::{Codec, Error as CodecError, Read, Write};
 use commonware_utils::Array;
 use std::fmt::Debug;
 use thiserror::Error;
@@ -40,7 +40,7 @@ pub enum Error {
 }
 
 /// Methods common to operation types for keyed databases.
-pub trait Keyed: Read<Cfg = ()> + Write {
+pub trait Keyed: Codec + Read<Cfg = ()> + Write {
     /// The key type for this operation.
     type Key: Array;
 
