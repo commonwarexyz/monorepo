@@ -29,8 +29,6 @@ use std::{
 };
 use tracing::{debug, warn};
 
-pub mod sync;
-
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
