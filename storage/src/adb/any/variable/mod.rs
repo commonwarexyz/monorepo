@@ -387,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
     /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
     /// Returns [Error::UnexpectedData] if the location does not reference an Update operation.
-    pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if !loc.is_valid() {
             return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
         }
@@ -619,7 +619,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Tr
             self.mmr.merkleize(&mut self.hasher);
             Ok::<(), Error>(())
         };
-        try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
+        try_join!(self.log.sync_data().map_err(Error::Journal), mmr_fut)?;
 
         debug!(log_size = ?op_count, "commit complete");
 
