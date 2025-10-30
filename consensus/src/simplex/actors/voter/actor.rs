@@ -944,7 +944,6 @@ impl<
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
-                debug!(view, reason = "view missing", "dropping verified proposal");
                 return false;
             }
         };
@@ -952,7 +951,7 @@ impl<
         // Ensure we haven't timed out
         if round.broadcast_nullify {
             debug!(
-                view,
+                round=?round.round,
                 reason = "view timed out",
                 "dropping verified proposal"
             );
@@ -964,7 +963,7 @@ impl<
         round.verified_proposal = true;
 
         // Indicate that verification is done
-        debug!(view, "verified proposal");
+        debug!(round=?round.round, proposal=?round.proposal, "verified proposal");
         true
     }
 
