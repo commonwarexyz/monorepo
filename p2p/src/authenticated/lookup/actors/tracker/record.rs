@@ -74,7 +74,7 @@ impl Record {
 
     /// Update the record with a new address.
     pub fn update(&mut self, socket: SocketAddr) {
-        if matches!(self.address, Address::Myself(_)) {
+        if matches!(self.address, Address::Myself(_) | Address::Blocked) {
             return;
         }
         self.address = Address::Known(socket);
