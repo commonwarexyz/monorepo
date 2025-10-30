@@ -14,7 +14,10 @@ use commonware_consensus::{
     types::ViewDelta,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
+    bls12381::{
+        dkg2::Output,
+        primitives::{group, variant::Variant},
+    },
     Hasher, PrivateKey,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
@@ -58,12 +61,11 @@ where
     pub namespace: Vec<u8>,
 
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
-    pub polynomial: Option<Public<V>>,
+    pub output: Option<Output<V, C::PublicKey>>,
     pub share: Option<group::Share>,
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: u32,
-    pub dkg_rate_limit: governor::Quota,
     pub orchestrator_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
@@ -364,7 +366,7 @@ where
         ),
     ) {
         let dkg_handle = self.dkg.start(
-            todo!(),
+            self.config.output.zip(self.config.share),
             self.config.active_participants,
             self.config.inactive_participants,
             self.orchestrator_mailbox,

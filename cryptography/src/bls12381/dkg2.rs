@@ -7,10 +7,14 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    PrivateKey, PublicKey,
+    Digest, PrivateKey, PublicKey,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
-use commonware_utils::{max_faults, quorum, set::Ordered, NZUsize};
+use commonware_utils::{
+    max_faults, quorum,
+    set::{Ordered, OrderedAssociated},
+    NZUsize,
+};
 use core::num::NonZeroUsize;
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
@@ -821,6 +825,35 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
         };
         Ok((output, share))
     }
+}
+
+/// Simply distribute shares at random, instead of performing a distributed protocol.
+pub fn deal<V: Variant, P: PublicKey>(
+    mut rng: impl CryptoRngCore,
+    players: impl IntoIterator<Item = P>,
+    t: u32,
+) -> (Output<V, P>, OrderedAssociated<P, Share>) {
+    assert!(t >= 1, "threshold must be at least 1");
+    let private = poly::new_from(t - 1, &mut rng);
+    let players = Ordered::from_iter(players.into_iter());
+    let shares: OrderedAssociated<_, _> = players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let eval = private.evaluate(i as u32);
+            let share = Share {
+                index: eval.index,
+                private: eval.value,
+            };
+            (p.clone(), share)
+        })
+        .collect();
+    let output = Output {
+        hash: Summary::random(&mut rng),
+        players,
+        public: Poly::commit(private),
+    };
+    (output, shares)
 }
 
 #[cfg(test)]
