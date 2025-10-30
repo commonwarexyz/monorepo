@@ -54,7 +54,7 @@ pub struct Mailbox<D: Digest> {
 }
 
 impl<D: Digest> Mailbox<D> {
-    /// Create a new mailbox with a default certify function that always returns true.
+    /// Create a new mailbox.
     pub(super) fn new(sender: mpsc::Sender<Message<D>>) -> Self {
         Self { sender }
     }
@@ -137,7 +137,8 @@ enum Waiter<D: Digest> {
     Certify(Context<D>, oneshot::Sender<bool>),
 }
 
-pub struct Config<H: Hasher, P: PublicKey> {
+pub struct Config<H: Hasher, P: PublicKey, CertFn: Fn(Context<H::Digest>) -> bool + Send + 'static>
+{
     pub hasher: H,
 
     pub relay: Arc<Relay<H::Digest, P>>,
@@ -151,9 +152,18 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub propose_latency: Latency,
     pub verify_latency: Latency,
     pub certify_latency: Latency,
+
+    /// Predicate to determine whether a payload should be certified.
+    /// Returning true means certify, false means reject.
+    pub should_certify: CertFn,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<
+    E: Clock + RngCore + Spawner,
+    H: Hasher,
+    P: PublicKey,
+    CertFn: Fn(Context<H::Digest>) -> bool + Send + 'static,
+> {
     context: ContextCell<E>,
     hasher: H,
     me: P,
@@ -167,13 +177,21 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     verify_latency: Normal<f64>,
     certify_latency: Normal<f64>,
 
+    should_certify: CertFn,
+
     pending: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
-    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
+impl<
+        E: Clock + RngCore + Spawner,
+        H: Hasher,
+        P: PublicKey,
+        CertFn: Fn(Context<H::Digest>) -> bool + Send + 'static,
+    > Application<E, H, P, CertFn>
+{
+    pub fn new(context: E, cfg: Config<H, P, CertFn>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());
 
@@ -202,6 +220,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
+
+                should_certify: cfg.should_certify,
             },
             Mailbox::new(sender),
         )
@@ -286,11 +306,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // TODO: pass in a function to determine if the payload should be certified.
-        if (context.round.view() % 11) >= 9 {
-            return false;
-        }
-        true
+        // Use configured predicate to determine certification
+        (self.should_certify)(context)
     }
 
     async fn broadcast(&mut self, payload: H::Digest) {

@@ -268,6 +268,7 @@ mod tests {
         simplex::{
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::seed_namespace,
+            types::Context,
         },
         types::Round,
         Monitor,
@@ -278,7 +279,7 @@ mod tests {
             primitives::variant::{MinPk, MinSig, Variant},
             tle::{decrypt, encrypt, Block},
         },
-        ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        ed25519, sha256, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -452,6 +453,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -716,6 +718,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -879,6 +882,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -1064,6 +1068,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1184,6 +1189,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
+                should_certify: |context| (context.round.view() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1321,6 +1327,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1560,6 +1567,8 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
+                let should_certify =
+                    |context: Context<sha256::Digest>| (context.round.view() % 11) < 9;
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1568,6 +1577,7 @@ mod tests {
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
                         certify_latency: (10_000.0, 5.0),
+                        should_certify,
                     }
                 } else {
                     mocks::application::Config {
@@ -1577,6 +1587,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify,
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1747,6 +1758,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1954,6 +1966,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2161,6 +2174,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2372,6 +2386,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2547,6 +2562,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2723,6 +2739,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2890,6 +2907,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3054,6 +3072,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3232,6 +3251,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3378,6 +3398,7 @@ mod tests {
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
                     certify_latency: (50.0, 40.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3534,6 +3555,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3698,6 +3720,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3888,6 +3911,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
