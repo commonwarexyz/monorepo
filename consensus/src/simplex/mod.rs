@@ -244,7 +244,11 @@ pub(crate) fn interesting(
 /// # Panics
 ///
 /// Panics if `participants` is empty.
-pub fn select_leader<S, P>(participants: &[P], round: Round, seed: Option<S::Seed>) -> u32
+pub fn select_leader<S, P: Clone>(
+    participants: &[P],
+    round: Round,
+    seed: Option<S::Seed>,
+) -> (P, u32)
 where
     S: Scheme,
 {
@@ -257,8 +261,9 @@ where
     } else {
         (round.epoch().wrapping_add(round.view())) as usize % participants.len()
     };
+    let leader = participants[idx].clone();
 
-    idx as u32
+    (leader, idx as u32)
 }
 
 #[cfg(test)]

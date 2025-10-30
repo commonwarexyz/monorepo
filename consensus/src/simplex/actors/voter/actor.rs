@@ -159,15 +159,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let leader_idx =
+        let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
         self.leader = Some(leader_idx);
 
-        let leader = self
-            .scheme
-            .participants()
-            .key(leader_idx)
-            .expect("leader not found");
         debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
     }
 
