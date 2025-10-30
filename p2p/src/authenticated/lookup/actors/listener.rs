@@ -33,7 +33,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub allow_unregistered_ips: bool,
+    pub attempt_unregistered_handshakes: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
@@ -47,7 +47,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    allow_unregistered_ips: bool,
+    attempt_unregistered_handshakes: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
@@ -94,7 +94,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            allow_unregistered_ips: cfg.allow_unregistered_ips,
+            attempt_unregistered_handshakes: cfg.attempt_unregistered_handshakes,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
@@ -198,7 +198,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
                     // Check whether the IP is registered
                     let ip = address.ip();
-                    if !self.allow_unregistered_ips && !self.registered_ips.contains(&ip) {
+                    if !self.attempt_unregistered_handshakes && !self.registered_ips.contains(&ip) {
                         self.handshakes_blocked.inc();
                         debug!(?address, "rejecting unregistered address");
                         continue;
@@ -302,7 +302,7 @@ mod tests {
                     address,
                     stream_cfg,
                     max_concurrent_handshakes: NZU32!(8),
-                    allow_unregistered_ips: false,
+                    attempt_unregistered_handshakes: false,
                     allowed_handshake_rate_per_ip,
                     allowed_handshake_rate_per_subnet,
                 },
@@ -468,7 +468,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
-                    allow_unregistered_ips: false,
+                    attempt_unregistered_handshakes: false,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
@@ -548,7 +548,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
-                    allow_unregistered_ips: true,
+                    attempt_unregistered_handshakes: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),

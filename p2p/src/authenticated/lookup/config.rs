@@ -28,7 +28,7 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
 
     /// Whether or not to attempt handshakes with unregistered IP addresses.
-    pub allow_unregistered_ips: bool,
+    pub attempt_unregistered_handshakes: bool,
 
     /// Maximum size allowed for messages over any connection.
     ///
@@ -110,7 +110,7 @@ impl<C: Signer> Config<C> {
             dialable,
 
             allow_private_ips: false,
-            allow_unregistered_ips: false,
+            attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -148,7 +148,7 @@ impl<C: Signer> Config<C> {
             dialable,
 
             allow_private_ips: true,
-            allow_unregistered_ips: false,
+            attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -175,7 +175,7 @@ impl<C: Signer> Config<C> {
             dialable: listen,
 
             allow_private_ips: true,
-            allow_unregistered_ips: false,
+            attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
