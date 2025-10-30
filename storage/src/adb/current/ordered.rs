@@ -98,7 +98,7 @@ pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()> + Send + Sync,
+        V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
         const N: usize,
@@ -769,7 +769,7 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()> + Send + Sync,
+        V: CodecFixed<Cfg = ()>,
         H: CHasher,
         T: Translator,
         const N: usize,
