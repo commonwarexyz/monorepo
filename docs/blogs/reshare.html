@@ -126,8 +126,13 @@
             Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
         </p>
         <p>
-            Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will sign in the next epoch.
-            Dealers publish encrypted shares, Feldman commitments, and optional complaints to the log. Players acknowledge or challenge those shares, and any misbehavior is
+            Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will hold shares in the next epoch.
+            Dealers generate shares for all new players (based on their share from the current epoch to maintain the same shared secret across epochs) and send them to players
+            over <code>commonware-p2p</code>'s encrypted, point-to-point channels. Players validate the received shares and send acknowledgements back to dealers, if correct.
+            After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from players that they received shares against that commitment,
+            and any revealed secret shares for players that didn't acknowledge receipt and publish it to the log.
+
+            Players acknowledge or challenge those shares, and any misbehavior is
             surfaced as evidence. Once the outcomes converge, the orchestrator packages the transcript into a compact <code>Outcome</code> object and proposes it alongside normal blocks.
         </p>
         <p>
