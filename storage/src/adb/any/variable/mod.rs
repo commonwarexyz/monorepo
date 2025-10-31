@@ -6,7 +6,7 @@
 
 use crate::{
     adb::{
-        any::{delete_key, update_loc},
+        any::{delete_key, historical_proof, prune_db, update_loc},
         operation::variable::Operation,
         store::{self, Db},
         Error,
@@ -15,7 +15,7 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Position, Proof, StandardHasher as Standard,
+        Location, Proof, StandardHasher as Standard,
     },
     translator::Translator,
 };
@@ -300,8 +300,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= [Self::op_count].
     /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    ///
-    /// # Panics
+    /// # Warning
     ///
     /// Panics if there are uncommitted operations.
     pub async fn proof(
@@ -334,25 +333,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        if op_count > self.op_count() {
-            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
-        }
-        if start_loc >= op_count {
-            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
-        }
-        let mmr_size = Position::try_from(op_count)?;
-        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let proof = self
-            .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
-            .await?;
-        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
-        for loc in *start_loc..*end_loc {
-            let op = self.log.read(loc).await?;
-            ops.push(op);
-        }
-
-        Ok((proof, ops))
+        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -411,12 +392,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
-            self.log.sync().map_err(Error::Journal),
-        )?;
-
-        Ok(())
+        self.as_shared().sync().await
     }
 
     /// Prune historical operations. This does not affect the db's root or current snapshot.
@@ -426,48 +402,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        if target_prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondInactivityFloor(
-                target_prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(oldest) => oldest,
-            None => self.op_count(),
-        };
-        if target_prune_loc <= pruning_boundary {
-            return Ok(());
-        }
-
-        // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-        // the operations between the MMR tip and the log pruning boundary.
-        self.mmr.sync(&mut self.hasher).await?;
-
-        // Prune the log up to the requested location. The log will prune at section boundaries,
-        // so the actual oldest retained location may be less than requested. We always prune the
-        // log first, and then prune the MMR based on the log's actual pruning boundary. This
-        // procedure ensures all log operations always have corresponding MMR entries, even in the
-        // event of failures, with no need for special recovery.
-        self.log
-            .prune(*target_prune_loc)
-            .await
-            .map_err(Error::Journal)?;
-
-        let oldest_retained_loc = match self.log.oldest_retained_pos() {
-            Some(oldest) => Location::new_unchecked(oldest),
-            None => self.op_count(),
-        };
-
-        // Prune the MMR up to the oldest retained item in the log after pruning.
-        self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(oldest_retained_loc)?)
-            .await?;
-
-        debug!(?target_prune_loc, ?oldest_retained_loc, "pruned database");
-
-        Ok(())
+        let op_count = self.op_count();
+        prune_db(
+            &mut self.mmr,
+            &mut self.log,
+            &mut self.hasher,
+            target_prune_loc,
+            self.inactivity_floor_loc,
+            op_count,
+        )
+        .await
     }
 
     /// Close the db. Operations that have not been committed will be lost.
