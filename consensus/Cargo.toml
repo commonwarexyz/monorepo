@@ -31,10 +31,18 @@ prometheus-client = { workspace = true }
 governor = { workspace = true }
 rand_distr = { workspace = true }
 tracing = { workspace = true }
+# websocket reporter dependencies
+futures-util = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]
 commonware-resolver = { workspace = true, features = ["mocks"] }
 tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+websocket-reporter = ["dep:futures-util", "dep:tokio", "dep:tokio-tungstenite"]
 
 [lib]
 bench = false

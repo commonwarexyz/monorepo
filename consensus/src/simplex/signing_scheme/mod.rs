@@ -17,21 +17,15 @@
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
 //!
-//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely
-//! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
-//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
-//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
+//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely exposed. For applications only
+//! interested in collecting evidence for liveness/faults, use [`crate::simplex::reporters::AttributableReporter`] which
+//! automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable).
+//! If full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
-
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-      pub mod reporter;
-    }
-}
 
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
@@ -168,8 +162,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
     ///
-    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
-    /// activities.
+    /// This is used by [`crate::simplex::reporters::AttributableReporter`] to safely expose
+    /// consensus activities.
     fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.

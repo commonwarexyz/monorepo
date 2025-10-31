@@ -1749,8 +1749,8 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
 /// per-validator activity as fault evidence is not safe: with threshold cryptography, any `t` valid partial signatures can
 /// be used to forge a partial signature for any player.
 ///
-/// Use [`crate::simplex::signing_scheme::reporter::AttributableReporter`] to automatically filter and
-/// verify activities based on [`Scheme::is_attributable`].
+/// Use [`crate::simplex::reporters::AttributableReporter`] to automatically filter and verify activities based
+/// on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
