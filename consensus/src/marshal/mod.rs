@@ -76,15 +76,15 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
 }
 
-/// An update reported to the application, either a new tip or a finalized block.
+/// An update reported to the application, either a new finalized tip or a finalized block.
 ///
-/// Tips are reported as soon as known, whether or not we hold all blocks to that height.
-/// Finalized blocks are reported to the application in monotonically increasing order.
+/// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
+/// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
 pub enum Update<B: Block> {
-    /// A new tip.
+    /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A finalized block.
+    /// A new finalized block.
     Block(B),
 }
 
