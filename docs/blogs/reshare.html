@@ -94,7 +94,7 @@
             to determine who is eligible to notarize a block, the network risks a halt or a safety failure (as participants may consider votes from different validators to be useless).
         </p>
         <p>
-            What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a>, a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas,
+            What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a> — a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas —
             offers a consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a sequence of segments broken into epochs where we simply "ignore" blocks that exceed some configured epoch length whether
             finalized or not. Practically speaking, the validator enters a new epoch as soon as they process a finalized block at the epoch boundary (entering the next epoch with a synchronized view of the finalized state
             where they can update the validator set safely).
