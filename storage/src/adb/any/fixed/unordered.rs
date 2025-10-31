@@ -84,7 +84,7 @@ impl<
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
+        super::super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
             .await?;
 
         let db = Any {
@@ -162,7 +162,7 @@ impl<
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res = super::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = super::super::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.as_shared().apply_op(op).await?;
@@ -177,7 +177,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let r = super::delete_key(&mut self.snapshot, &self.log, &key).await?;
+        let r = super::super::delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
@@ -405,7 +405,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::fixed::build_snapshot_from_log,
+            any::build_snapshot_from_log,
             operation::{fixed::unordered::Operation, Keyed as _},
             verify_proof,
         },

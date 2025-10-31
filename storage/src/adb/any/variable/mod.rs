@@ -21,17 +21,10 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-};
-use tracing::{debug, warn};
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
+use commonware_utils::Array;
+use futures::{future::TryFutureExt, try_join};
+use std::num::{NonZeroU64, NonZeroUsize};
+use tracing::debug;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -121,7 +114,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
-        let mmr = Mmr::init(
+        let mut mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -135,7 +128,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let log = Journal::init(
+        let mut log = Journal::init(
             context.with_label("log"),
             JournalConfig {
                 partition: cfg.log_partition,
@@ -148,157 +141,24 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        // Build snapshot from the log
-        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let inactivity_floor_loc =
+            super::align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
 
-        let db = Self {
+        // Build snapshot from the log
+        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
+            .await?;
+        let last_commit = log.size().checked_sub(1).map(Location::new_unchecked);
+
+        Ok(Self {
             mmr,
             log,
-            inactivity_floor_loc: Location::new_unchecked(0),
+            inactivity_floor_loc,
             steps: 0,
-            last_commit: None,
+            last_commit,
             snapshot,
             hasher,
-        };
-
-        db.build_snapshot_from_log().await
-    }
-
-    /// Builds the database's `snapshot` by replaying the log from inception, while also:
-    ///   - trimming any uncommitted operations from the log,
-    ///   - adding log operations to the MMR if they are missing,
-    ///   - removing any elements from the MMR that don't remain in the log after trimming.
-    ///
-    /// # Post-condition
-    ///
-    /// * The number of operations in the log and the number of leaves in the MMR are equal.
-    /// * `last_commit` is set to the location of the last commit operation.
-    /// * `inactivity_floor_loc` is set to the inactivity floor.
-    async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        // The number of leaves (operations) in the MMR.
-        let mut mmr_leaves = self.mmr.leaves();
-        // The first location in the log.
-        let start_loc = match self.log.oldest_retained_pos() {
-            Some(loc) => loc,
-            None => self.log.size(),
-        };
-        // The number of operations in the log.
-        let mut log_size = Location::new_unchecked(start_loc);
-        // The location of the first operation to follow the last known commit point.
-        let mut after_last_commit: Option<Location> = None;
-        // The set of operations that have not yet been committed.
-        let mut uncommitted_ops = HashMap::new();
-        // The inactivity floor location from the last commit.
-        let mut inactivity_floor_loc = Location::new_unchecked(0);
-
-        // Replay the log from the start to build the snapshot, keeping track of any uncommitted
-        // operations that must be rolled back, and any log operations that need to be re-added to the MMR.
-        {
-            let stream = self
-                .log
-                .replay(start_loc, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
-                .await?;
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                let (loc, op) = result?;
-
-                let loc = Location::new_unchecked(loc); // location of the current operation.
-                if after_last_commit.is_none() {
-                    after_last_commit = Some(loc);
-                }
-
-                log_size = loc + 1;
-
-                if log_size > mmr_leaves {
-                    warn!(?loc, "operation was missing from MMR");
-                    self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                    mmr_leaves += 1;
-                }
-
-                match op {
-                    Operation::Delete(key) => {
-                        let result = self.get_key_loc(&key).await?;
-                        if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), None));
-                        } else {
-                            uncommitted_ops.remove(&key);
-                        }
-                    }
-                    Operation::Update(key, _) => {
-                        let result = self.get_key_loc(&key).await?;
-                        if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
-                        } else {
-                            uncommitted_ops.insert(key, (None, Some(loc)));
-                        }
-                    }
-                    Operation::CommitFloor(_, floor_loc) => {
-                        inactivity_floor_loc = floor_loc;
-
-                        // Apply all uncommitted operations.
-                        for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
-                            if let Some(old_loc) = old_loc {
-                                if let Some(new_loc) = new_loc {
-                                    Self::update_loc(&mut self.snapshot, key, *old_loc, *new_loc);
-                                } else {
-                                    Self::delete_loc(&mut self.snapshot, key, *old_loc);
-                                }
-                            } else {
-                                assert!(new_loc.is_some());
-                                self.snapshot.insert(key, new_loc.unwrap());
-                            }
-                        }
-                        uncommitted_ops.clear();
-                        after_last_commit = None;
-                    }
-                    _ => unreachable!("unexpected operation type at location {loc}"),
-                }
-            }
-        }
-
-        // Rewind the operations log if necessary.
-        if let Some(end_loc) = after_last_commit {
-            assert!(!uncommitted_ops.is_empty());
-            warn!(
-                op_count = uncommitted_ops.len(),
-                log_size = *end_loc,
-                "rewinding over uncommitted operations at end of log"
-            );
-            self.log.rewind(*end_loc).await?;
-            self.log.sync().await?;
-            log_size = end_loc;
-        }
-
-        // Pop any MMR elements that are ahead of the last log commit point.
-        if mmr_leaves > log_size {
-            let leaves_to_pop = (*mmr_leaves - *log_size) as usize;
-            warn!(leaves_to_pop, "popping uncommitted MMR operations");
-            self.mmr.pop(leaves_to_pop).await?;
-        }
-
-        // Confirm post-conditions hold.
-        assert_eq!(log_size, Location::try_from(self.mmr.size()).unwrap());
-        assert_eq!(*log_size, self.log.size());
-
-        // Update the inactivity floor location and last commit
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit = log_size.checked_sub(1);
-
-        debug!(?log_size, "build_snapshot_from_log complete");
-
-        Ok(self)
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            if let Some(v) = self.get_from_loc(key, loc).await? {
-                return Ok(Some(v));
-            }
-        }
-
-        Ok(None)
+        })
     }
 
     /// Get the value of the operation with location `loc` in the db.
@@ -434,6 +294,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            if let Some(v) = self.get_from_loc(key, loc).await? {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
     ///
@@ -442,7 +314,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// is closed without committing.
     pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
     where
-        V: Default,
+        V: Codec + Default,
     {
         let mut value = self.get(&key).await?.unwrap_or_default();
         update(&mut value);
@@ -848,7 +720,7 @@ pub(super) mod test {
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZUsize, NZU64};
     use std::collections::HashMap;
 
     const PAGE_SIZE: usize = 77;
