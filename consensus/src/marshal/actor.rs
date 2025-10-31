@@ -35,7 +35,6 @@ use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
-    cmp::max,
     collections::{btree_map::Entry, BTreeMap},
     time::Instant,
 };
@@ -95,6 +94,8 @@ pub struct Actor<
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
+    // Last finalized height
+    last_finalized_height: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -238,6 +239,7 @@ impl<
                 block_codec_config: config.block_codec_config,
                 partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
+                last_finalized_height: 0,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
@@ -295,6 +297,7 @@ impl<
         if let Some((height, commitment)) = tip {
             application.report(Update::Tip(height, commitment)).await;
             self.finalized_height.set(height as i64);
+            self.last_finalized_height = height;
         }
 
         // Handle messages
@@ -778,10 +781,12 @@ impl<
         let _ = notifier.try_send(());
 
         // Update metrics and send tip update to application
-        let new_value: i64 = height as i64;
-        let old_value: i64 = self.finalized_height.get();
-        if new_value > old_value {
-            self.finalized_height.set(max(new_value, old_value));
+        if height > self.last_finalized_height {
+            self.finalized_height.set(height as i64);
+
+            // We use a separate variable here because the `finalized_height` metric is capped
+            // at i64::MAX.
+            self.last_finalized_height = height;
             application.report(Update::Tip(height, commitment)).await;
         }
     }
