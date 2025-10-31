@@ -3,7 +3,7 @@
 use commonware_consensus::{
     simplex::types::Context,
     types::{Epoch, Round, View},
-    Automaton, Epochable, Relay,
+    Automaton, Relay,
 };
 use commonware_cryptography::{Hasher, PublicKey};
 use futures::{
@@ -76,7 +76,7 @@ where
     type Digest = H::Digest;
     type Context = Context<Self::Digest, P>;
 
-    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })

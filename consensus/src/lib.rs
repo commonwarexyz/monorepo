@@ -19,25 +19,20 @@ pub mod simplex;
 pub mod types;
 pub mod utils;
 
+use types::{Epoch, View};
+
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
 pub trait Epochable {
-    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
-    /// validators is constant.
-    type Epoch;
-
     /// Returns the epoch associated with this object.
-    fn epoch(&self) -> Self::Epoch;
+    fn epoch(&self) -> Epoch;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
-    /// View is the type used to indicate the in-progress consensus decision.
-    type View;
-
     /// Returns the view associated with this object.
-    fn view(&self) -> Self::View;
+    fn view(&self) -> View;
 }
 
 /// Block is the interface for a block in the blockchain.
@@ -73,13 +68,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context: Epochable;
+            type Context;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
