@@ -203,9 +203,17 @@ where
                 }
 
                 let start = Instant::now();
-                let built_block = application
-                    .build(r_ctx.with_label("app_build"), parent_commitment, parent)
-                    .await;
+                let Some(built_block) = application
+                    .build(r_ctx.with_label("app_build"), context.clone())
+                    .await
+                else {
+                    warn!(
+                        ?parent_commitment,
+                        reason = "block building returned nothing",
+                        "skipping proposal"
+                    );
+                    return;
+                };
                 build_duration.set(start.elapsed().as_millis() as i64);
 
                 let digest = built_block.commitment();

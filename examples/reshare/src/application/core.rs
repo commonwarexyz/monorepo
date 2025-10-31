@@ -4,7 +4,12 @@ use crate::{
     application::{genesis_block, Block},
     dkg,
 };
-use commonware_consensus::{simplex::types::Context, Block as _, VerifyingApplication};
+use commonware_consensus::{
+    marshal::{self},
+    simplex::{signing_scheme::Scheme, types::Context},
+    types::Round,
+    Block as _, Epochable, VerifyingApplication,
+};
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
 };
@@ -13,35 +18,40 @@ use rand::Rng;
 use std::{marker::PhantomData, time::Duration};
 
 #[derive(Clone)]
-pub struct Application<E, H, C, V>
+pub struct Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
+    marshal: marshal::Mailbox<S, Block<H, C, V>>,
     dkg: dkg::Mailbox<H, C, V>,
     _marker: PhantomData<E>,
 }
 
-impl<E, H, C, V> Application<E, H, C, V>
+impl<E, S, H, C, V> Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
-    pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
+    pub fn new(marshal: marshal::Mailbox<S, Block<H, C, V>>, dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
+            marshal,
             dkg,
             _marker: PhantomData,
         }
     }
 }
 
-impl<E, H, C, V> commonware_consensus::Application<E> for Application<E, H, C, V>
+impl<E, S, H, C, V> commonware_consensus::Application<E> for Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -53,19 +63,31 @@ where
         genesis_block::<H, C, V>()
     }
 
-    async fn build(
-        &mut self,
-        context: E,
-        parent_commitment: <Self::Block as Committable>::Commitment,
-        parent_block: Self::Block,
-    ) -> Self::Block {
+    async fn build(&mut self, r_context: E, context: Self::Context) -> Option<Self::Block> {
+        let genesis = genesis_block::<H, C, V>();
+
+        // Fetch the parent block from marshal.
+        let (parent_view, parent_commitment) = context.parent;
+        let parent_block = if parent_commitment == genesis.commitment() {
+            genesis
+        } else {
+            self.marshal
+                .subscribe(
+                    Some(Round::new(context.epoch(), parent_view)),
+                    parent_commitment,
+                )
+                .await
+                .await
+                .ok()?
+        };
+
         // Ask the DKG actor for a result to include
         //
         // This approach does allow duplicate commitments to be proposed, but
         // the arbiter handles this by choosing the first commitment it sees
         // from any given dealer.
         let mut dkg_mailbox = self.dkg.clone();
-        let reshare = context
+        let reshare = r_context
             .timeout(
                 Duration::from_millis(5),
                 async move { dkg_mailbox.act().await },
@@ -75,7 +97,11 @@ where
             .flatten();
 
         // Create a new block
-        Block::new(parent_commitment, parent_block.height() + 1, reshare)
+        Some(Block::new(
+            parent_commitment,
+            parent_block.height() + 1,
+            reshare,
+        ))
     }
 
     async fn finalize(&mut self, _: Self::Block) {
@@ -83,9 +109,10 @@ where
     }
 }
 
-impl<E, H, C, V> VerifyingApplication<E> for Application<E, H, C, V>
+impl<E, S, H, C, V> VerifyingApplication<E> for Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
     H: Hasher,
     C: Signer,
     V: Variant,

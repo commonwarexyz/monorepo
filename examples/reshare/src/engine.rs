@@ -93,7 +93,7 @@ where
         V,
         C,
         H,
-        EpochedApplication<E, S, Application<E, H, C, V>, Block<H, C, V>>,
+        EpochedApplication<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
@@ -173,7 +173,7 @@ where
 
         let application = EpochedApplication::new(
             context.with_label("application"),
-            Application::new(dkg_mailbox.clone()),
+            Application::new(marshal_mailbox.clone(), dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             BLOCKS_PER_EPOCH,
         );

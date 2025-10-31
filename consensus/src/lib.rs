@@ -117,13 +117,13 @@ cfg_if::cfg_if! {
             /// Payload used to initialize the consensus engine in the first epoch.
             fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-            /// Build a new block on top of the provided parent commitment / block.
+            /// Build a new block on top of the provided parent commitment. If the build job fails,
+            /// returns [None].
             fn build(
                 &mut self,
-                context: E,
-                parent_commitment: <Self::Block as Committable>::Commitment,
-                parent_block: Self::Block,
-            ) -> impl Future<Output = Self::Block> + Send;
+                r_context: E,
+                context: Self::Context,
+            ) -> impl Future<Output = Option<Self::Block>> + Send;
 
             /// Receive a finalized block from [crate::marshal].
             fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
