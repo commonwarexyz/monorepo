@@ -31,9 +31,7 @@ pub(crate) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H:
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error>
-where
-{
+) -> Result<Location, Error> {
     // Back up over / discard any uncommitted operations in the log.
     let mut log_size: Location = log.size().await.into();
     let mut rewind_leaf_num = log_size;
