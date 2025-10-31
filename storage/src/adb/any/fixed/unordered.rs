@@ -4,8 +4,8 @@ use crate::{
     adb::{
         any::{
             build_snapshot_from_log, delete_key,
-            fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
-            update_loc, Shared,
+            fixed::{init_mmr_and_log, Config},
+            historical_proof, prune_db, update_loc, Shared,
         },
         operation::fixed::unordered::Operation,
         store::{self, Db},
@@ -409,7 +409,7 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::PoolRef,
@@ -424,7 +424,7 @@ pub(super) mod test {
     use std::collections::{HashMap, HashSet};
     use tracing::warn;
 
-    const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    const SHA256_SIZE: usize = <Sha256 as Hasher>::Digest::SIZE;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: usize = 101;
@@ -647,7 +647,7 @@ pub(super) mod test {
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
-            let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
+            let d3 = <Sha256 as Hasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await, 9);
             db.sync().await.unwrap();
