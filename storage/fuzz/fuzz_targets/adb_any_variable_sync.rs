@@ -36,12 +36,6 @@ enum Operation {
     Get {
         key: [u8; 32],
     },
-    GetLoc {
-        loc_offset: u32,
-    },
-    GetKeyLoc {
-        key: [u8; 32],
-    },
     GetMetadata,
     Proof {
         start_loc: Location,
@@ -91,17 +85,9 @@ impl<'a> Arbitrary<'a> for Operation {
                 Ok(Operation::Commit { metadata_bytes })
             }
             3 => Ok(Operation::Prune),
-            4 => {
+            4..=6 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
-            }
-            5 => {
-                let loc_offset = u.arbitrary()?;
-                Ok(Operation::GetLoc { loc_offset })
-            }
-            6 => {
-                let key = u.arbitrary()?;
-                Ok(Operation::GetKeyLoc { key })
             }
             7 => Ok(Operation::GetMetadata),
             8 => {
@@ -228,19 +214,6 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Get { key } => {
                     let _ = db.get(&Key::new(*key)).await;
-                }
-
-                Operation::GetLoc { loc_offset } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 {
-                        let loc = *loc_offset as u64 % *op_count;
-                        let loc = Location::new(loc).unwrap();
-                        let _ = db.get_loc(loc).await;
-                    }
-                }
-
-                Operation::GetKeyLoc { key } => {
-                    let _ = db.get_key_loc(&Key::new(*key)).await;
                 }
 
                 Operation::GetMetadata => {

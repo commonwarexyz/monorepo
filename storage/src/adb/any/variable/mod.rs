@@ -6,11 +6,12 @@
 
 use crate::{
     adb::{
+        any::{delete_key, update_loc},
         operation::variable::Operation,
         store::{self, Db},
         Error,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -18,7 +19,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _, Read};
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
@@ -103,6 +104,10 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     pub(super) hasher: Standard<H>,
 }
 
+/// Type alias for the shared state wrapper used by this Any database variant.
+type SharedState<'a, E, K, V, H, T> =
+    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
@@ -161,74 +166,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         })
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
-    /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-        let op_count = self.op_count();
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(loc, op_count));
-        }
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(oldest) => oldest,
-            None => op_count,
-        };
-        if loc < pruning_boundary {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        let op = self.log.read(*loc).await.map_err(Error::Journal)?;
-        Ok(op.into_value())
-    }
-
-    /// Returns the location of the operation that set the key's current value, or None if the key
-    /// isn't currently assigned any value.
-    pub async fn get_key_loc(&self, key: &K) -> Result<Option<Location>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            if self.get_from_loc(key, loc).await?.is_some() {
-                return Ok(Some(loc));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Remove the location `delete_loc` from the snapshot if it's associated with `key`.
-    fn delete_loc(snapshot: &mut Index<T, Location>, key: &K, delete_loc: Location) {
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return;
-        };
-
-        if cursor.find(|&loc| loc == delete_loc) {
-            cursor.delete();
-        }
-    }
-
-    /// Update the location associated with `key` with value `old_loc` to `new_loc`. If there is no
-    /// such key or value, this is a no-op.
-    fn update_loc(
-        snapshot: &mut Index<T, Location>,
-        key: &K,
-        old_loc: Location,
-        new_loc: Location,
-    ) {
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return;
-        };
-
-        if cursor.find(|&loc| loc == old_loc) {
-            cursor.update(new_loc);
-        }
-    }
-
     /// Get the value of the operation with location `loc` in the db if it matches `key`.
     ///
     /// # Errors
@@ -281,15 +218,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
-        if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
-            self.steps += 1;
-        } else {
-            self.snapshot.insert(&key, new_loc);
-        };
+        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
-        self.apply_op(op).await?;
+        self.as_shared().apply_op(op).await?;
+        if res.is_some() {
+            self.steps += 1;
+        }
 
         Ok(())
     }
@@ -304,6 +239,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         Ok(None)
+    }
+
+    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+        SharedState {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
+        }
     }
 
     /// Updates the value associated with the given key in the store, inserting a default value if
@@ -324,15 +268,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
+    /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_key_loc(&key).await? else {
-            return Ok(());
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_some() {
+            self.as_shared().apply_op(Operation::Delete(key)).await?;
+            self.steps += 1;
         };
-
-        Self::delete_loc(&mut self.snapshot, &key, old_loc);
-        self.apply_op(Operation::Delete(key)).await?;
-        self.steps += 1;
 
         Ok(())
     }
@@ -344,28 +286,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
         self.mmr.root(hasher)
-    }
-
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        let encoded_op = op.encode();
-
-        // Create a future that appends the operation to the log
-        let log_fut = async {
-            self.log.append(op).await.map_err(Error::Journal)?;
-            Ok::<(), Error>(())
-        };
-
-        // Run the log update future in parallel with adding the operation to the MMR.
-        try_join!(
-            log_fut,
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
-        )?;
-
-        Ok(())
     }
 
     /// Generate and return:
@@ -436,8 +356,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Caller can
-    /// associate an arbitrary `metadata` value with the commit.
+    /// this function. Also raises the inactivity floor according to the schedule.
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
@@ -450,27 +369,24 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         } else {
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
-                self.raise_floor().await?;
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
             }
         }
         self.steps = 0;
 
-        // Apply the commit operation with the new inactivity floor.
-        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
-            .await?;
         let op_count = self.op_count();
-        self.last_commit = Some(op_count - 1);
+        self.last_commit = Some(op_count);
 
-        // Sync the log and merkleize the MMR updates in parallel.
-        let mmr_fut = async {
-            self.mmr.merkleize(&mut self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync_data().map_err(Error::Journal), mmr_fut)?;
+        // Apply the commit operation with the new inactivity floor.
+        let loc = self.inactivity_floor_loc;
+        let mut shared = self.as_shared();
+        shared
+            .apply_op(Operation::CommitFloor(metadata, loc))
+            .await?;
 
-        debug!(log_size = ?op_count, "commit complete");
-
-        Ok(())
+        // Sync the log and process the updates to the MMR.
+        shared.sync_and_process_updates().await
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -499,70 +415,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.log.sync().map_err(Error::Journal),
         )?;
-
-        Ok(())
-    }
-
-    // Moves the given operation to the tip of the log if it is active, rendering its old location
-    // inactive. If the operation was not active, then this is a no-op. Returns the old location
-    // of the operation if it was active.
-    pub(super) async fn move_op_if_active(
-        &mut self,
-        op: Operation<K, V>,
-        old_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.key() else {
-            // `op` is not a key-related operation, so it is not active.
-            return Ok(None);
-        };
-        let new_loc = self.op_count();
-        let Some(mut cursor) = self.snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-
-        // Iterate over all conflicting keys in the snapshot.
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                // Update the location of the operation in the snapshot.
-                cursor.update(new_loc);
-                drop(cursor);
-
-                // Apply the moved operation.
-                self.apply_op(op).await?;
-                return Ok(Some(old_loc));
-            }
-        }
-
-        // The operation is not active, so this is a no-op.
-        Ok(None)
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one.
-    ///
-    /// # Errors
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and returns Error
-    /// otherwise.
-    async fn raise_floor(&mut self) -> Result<(), Error> {
-        // Search for the first active operation above the inactivity floor and move it to tip.
-        //
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
-        let mut op = self.log.read(*self.inactivity_floor_loc).await?;
-        while self
-            .move_op_if_active(op, self.inactivity_floor_loc)
-            .await?
-            .is_none()
-        {
-            self.inactivity_floor_loc += 1;
-            op = self.log.read(*self.inactivity_floor_loc).await?;
-        }
-
-        // Increment the floor to the next operation since we know the current one is inactive.
-        self.inactivity_floor_loc += 1;
 
         Ok(())
     }
@@ -1449,41 +1301,6 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
             assert_ne!(db.root(&mut hasher), root);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_db_get_loc_out_of_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let mut db = open_db(context.clone()).await;
-
-            // Test getting from empty database
-            let result = db.get_loc(Location::new_unchecked(0)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
-            );
-
-            // Add some operations
-            db.update(Digest::random(&mut context), vec![10]).await.unwrap();
-            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
-            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
-            db.commit(None).await.unwrap();
-
-            // Test getting valid locations succeeds
-            assert!(db.get_loc(Location::new_unchecked(0)).await.unwrap().is_some());
-            assert!(db.get_loc(Location::new_unchecked(1)).await.unwrap().is_some());
-            assert!(db.get_loc(Location::new_unchecked(2)).await.unwrap().is_some());
-
-            // Test getting exactly at boundary
-            let op_count = *db.op_count();
-            let result = db.get_loc(Location::new_unchecked(op_count)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size))
-                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
-            );
 
             db.destroy().await.unwrap();
         });

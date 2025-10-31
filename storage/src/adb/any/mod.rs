@@ -5,12 +5,12 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{journaled::Mmr, Location, StandardHasher},
+    mmr::{bitmap::BitMap, journaled::Mmr, Location, StandardHasher},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
-use futures::{pin_mut, StreamExt as _};
+use futures::{pin_mut, try_join, StreamExt as _, TryFutureExt as _};
 use tracing::warn;
 
 pub mod fixed;
@@ -214,4 +214,167 @@ where
     }
 
     Ok(None)
+}
+
+/// A wrapper of DB state required for invoking operations shared across variants.
+pub(crate) struct Shared<
+    'a,
+    E: Storage + Clock + Metrics,
+    I: Index<Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
+    H: Hasher,
+> {
+    pub snapshot: &'a mut I,
+    pub mmr: &'a mut Mmr<E, H>,
+    pub log: &'a mut C,
+    pub hasher: &'a mut StandardHasher<H>,
+}
+
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
+where
+    E: Storage + Clock + Metrics,
+    I: Index<Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
+    H: Hasher,
+{
+    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
+    /// until the next successful `commit`.
+    pub(crate) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
+        let encoded_op = op.encode();
+
+        // Append operation to the log and update the MMR in parallel.
+        try_join!(
+            self.mmr
+                .add_batched(self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            self.log.append(op).map_err(Into::into)
+        )?;
+
+        Ok(())
+    }
+
+    /// Moves the given operation to the tip of the log if it is active, rendering its old location
+    /// inactive. If the operation was not active, then this is a no-op. Returns the old location of
+    /// the operation if it was active.
+    pub(crate) async fn move_op_if_active(
+        &mut self,
+        op: O,
+        old_loc: Location,
+    ) -> Result<Option<Location>, Error> {
+        // If the translated key is not in the snapshot, get a cursor to look for the key.
+        let Some(key) = op.key() else {
+            return Ok(None); // operations without keys cannot be active
+        };
+        let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            return Ok(None);
+        };
+
+        // Find the snapshot entry corresponding to the operation.
+        if cursor.find(|&loc| *loc == old_loc) {
+            // Update the operation's snapshot location to point to tip.
+            let tip_loc = Location::new_unchecked(self.log.size().await);
+            cursor.update(tip_loc);
+            drop(cursor);
+
+            // Apply the operation at tip.
+            self.apply_op(op).await?;
+            return Ok(Some(old_loc));
+        }
+
+        // The operation is not active, so this is a no-op.
+        Ok(None)
+    }
+
+    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
+    /// active operation above the inactivity floor, moving it to tip, and then setting the
+    /// inactivity floor to the location following the moved operation. This method is therefore
+    /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
+    ///
+    /// # Panics
+    ///
+    /// Expects there is at least one active operation above the inactivity floor, and panics otherwise.
+    async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
+    where
+        E: Storage + Clock + Metrics,
+        I: Index<Value = Location>,
+        H: Hasher,
+        O: Keyed,
+    {
+        // Search for the first active operation above the inactivity floor and move it to tip.
+        //
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
+        loop {
+            let tip_loc = Location::new_unchecked(self.log.size().await);
+            assert!(
+                *inactivity_floor_loc < tip_loc,
+                "no active operations above the inactivity floor"
+            );
+            let old_loc = inactivity_floor_loc;
+            inactivity_floor_loc += 1;
+            let op = self.log.read(*old_loc).await?;
+            if self.move_op_if_active(op, old_loc).await?.is_some() {
+                return Ok(inactivity_floor_loc);
+            }
+        }
+    }
+
+    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
+    /// operation above the inactivity floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is not at least one active operation above the inactivity floor.
+    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
+        &mut self,
+        status: &mut BitMap<H, N>,
+        mut inactivity_floor_loc: Location,
+    ) -> Result<Location, Error>
+    where
+        E: Storage + Clock + Metrics,
+        I: Index<Value = Location>,
+        O: Keyed,
+        H: Hasher,
+    {
+        // Use the status bitmap to find the first active operation above the inactivity floor.
+        while !status.get_bit(*inactivity_floor_loc) {
+            inactivity_floor_loc += 1;
+        }
+
+        // Move the active operation to tip.
+        let op = self.log.read(*inactivity_floor_loc).await?;
+        let loc = self
+            .move_op_if_active(op, inactivity_floor_loc)
+            .await?
+            .expect("op should be active based on status bitmap");
+        status.set_bit(*loc, false);
+        status.push(true);
+
+        // Advance inactivity floor above the moved operation since we know it's inactive.
+        inactivity_floor_loc += 1;
+
+        Ok(inactivity_floor_loc)
+    }
+
+    /// Sync the log and process the updates to the MMR in parallel.
+    async fn sync_and_process_updates(&mut self) -> Result<(), Error> {
+        let mmr_fut = async {
+            self.mmr.merkleize(self.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(self.log.sync().map_err(Into::into), mmr_fut)?;
+
+        Ok(())
+    }
+
+    /// Sync the log and the MMR to disk.
+    async fn sync(&mut self) -> Result<(), Error> {
+        try_join!(
+            self.log.sync().map_err(Error::Journal),
+            self.mmr.sync(self.hasher).map_err(Into::into)
+        )?;
+
+        Ok(())
+    }
 }

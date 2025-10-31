@@ -5,7 +5,7 @@ use crate::{
         any::{
             build_snapshot_from_log, delete_key,
             fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
-            update_loc,
+            update_loc, Shared,
         },
         operation::fixed::unordered::Operation,
         store::{self, Db},
@@ -13,11 +13,11 @@ use crate::{
     },
     index::{Index as _, Unordered as Index},
     journal::contiguous::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
+    mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{try_join, TryFutureExt as _};
@@ -30,7 +30,7 @@ pub struct Any<
     E: Storage + Clock + Metrics,
     K: Array,
     V: CodecFixed<Cfg = ()>,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
 > {
     /// An MMR over digests of the operations applied to the db.
@@ -69,23 +69,22 @@ pub struct Any<
     pub(crate) steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(crate) hasher: Standard<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Any<E, K, V, H, T>
+/// Type alias for the shared state wrapper used by this Any database variant.
+type SharedState<'a, E, K, V, H, T> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
         build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
@@ -190,10 +189,8 @@ impl<
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(
-        &mut self,
-    ) -> super::Shared<'_, E, Index<T, Location>, Operation<K, V>, H> {
-        super::Shared {
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+        Shared {
             snapshot: &mut self.snapshot,
             mmr: &mut self.mmr,
             log: &mut self.log,
@@ -206,7 +203,7 @@ impl<
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
         self.mmr.root(hasher)
     }
 
@@ -353,13 +350,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Db<E, K, V, T> for Any<E, K, V, H, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
