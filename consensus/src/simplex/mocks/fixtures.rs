@@ -111,6 +111,54 @@ where
     (ed25519_keys, ed25519_public, schemes, verifier)
 }
 
+pub fn ed25519_fixture_2<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
+where
+    R: RngCore + CryptoRng,
+{
+    assert!(n > 0);
+
+    let twin_scheme = ed25519::PrivateKey::from_seed(3_u64); // Same seed as node 3
+    // For registration, we need a unique public key for the twin
+    // We'll use a different seed just for generating a unique validator ID
+    let twin_registration_key = ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
+    let twin_validator_id = twin_registration_key.public_key();
+
+    let twin_2 = ed25519::PrivateKey::from_seed(3_u64).public_key();
+
+    println!("twin original {:?}", twin_2);
+
+    let mut ed25519_keys: Vec<_> = (0..n-1)
+        .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+        .collect();
+    ed25519_keys.push(twin_scheme);
+    ed25519_keys.sort_by_key(|k| k.public_key());
+
+
+    let mut ed25519_public = ed25519_keys
+        .iter()
+        .map(|k| k.public_key())
+        .collect::<Vec<_>>();
+
+    let index = ed25519_public.iter().position(|pk| *pk == twin_2).unwrap();
+    // replace one of them with the twin_validator_id
+    ed25519_public[index] = twin_validator_id;
+
+    let schemes = ed25519_keys
+        .iter()
+        .cloned()
+        .map(|sk| ed_scheme::Scheme::new(ed25519_public.clone(), sk))
+        .collect();
+    let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
+
+    //ed25519_public[index] = twin_validator_id;
+
+    println!("private keys {:?}", ed25519_keys);
+    println!("public keys {:?}", ed25519_public);
+    println!("schemes {:?}", schemes);
+
+    (ed25519_keys, ed25519_public, schemes, verifier)
+}
+
 pub fn ed25519_fixture_twins<R>(_rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
@@ -155,28 +203,78 @@ where
     // The consensus participants should be the 4 original nodes (not including twin ID)
     // Get the original public keys for nodes 0,1,2,3
     let mut ed25519_public = Vec::new();
-    for i in 0..4 {
+    for i in 0..3 {
         ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
     }
     ed25519_public.sort();
-
-    // Create schemes for all 5 nodes
-    for i in 0..4 {
-        schemes.push(ed_scheme::Scheme::new(ed25519_public.clone(), ed25519::PrivateKey::from_seed(i as u64)));
-    }
-
-    println!("ed25519_public {:?}", ed25519_public);
-    
-    // Twin uses new_twins constructor to sign as node 3
-    let node3_public_key = ed25519::PrivateKey::from_seed(3_u64).public_key();
-    let node3_index = ed25519_public.iter().position(|pk| *pk == node3_public_key).expect("node 3 must be in participants") as u32;
-    
-    schemes.push(ed_scheme::Scheme::new_twins(
-        ed25519_public.clone(), 
-        Some((node3_index, twin_scheme))
+    ed25519_public.push(ed25519::PrivateKey::from_seed(3_u64).public_key());
+    schemes.push(ed_scheme::Scheme::new(
+        ed25519_public,
+        ed25519::PrivateKey::from_seed(0)
     ));
 
+    let mut ed25519_public = Vec::new();
+    for i in 0..3 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
+    ed25519_public.sort();
+    ed25519_public.push(ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed).public_key());
+    schemes.push(ed_scheme::Scheme::new(
+        ed25519_public,
+        ed25519::PrivateKey::from_seed(1)
+    ));
+
+    let mut ed25519_public = Vec::new();
+    for i in 0..3 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
+    ed25519_public.sort();
+    ed25519_public.push(ed25519::PrivateKey::from_seed(3_u64).public_key());
+    schemes.push(ed_scheme::Scheme::new(
+        ed25519_public,
+        ed25519::PrivateKey::from_seed(2)
+    ));
+
+    let mut ed25519_public = Vec::new();
+    for i in 0..3 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
+    ed25519_public.sort();
+    ed25519_public.push(ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed).public_key());
+    schemes.push(ed_scheme::Scheme::new(
+        ed25519_public,
+        ed25519::PrivateKey::from_seed(3)
+    ));
+
+    let mut ed25519_public = Vec::new();
+    for i in 0..3 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
+    ed25519_public.sort();
+    ed25519_public.push(ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed).public_key());
+    schemes.push(ed_scheme::Scheme::new(
+        ed25519_public,
+        ed25519::PrivateKey::from_seed(3)
+    ));
+
+
+    //Create schemes for all 5 nodes
+    //for i in 0..4 {
+    //    schemes.push(ed_scheme::Scheme::new(ed25519_public.clone(), ed25519::PrivateKey::from_seed(i as u64)));
+    //}
+
+
+
+    
+    // Twin uses new_twins constructor to sign as node 3
+
+
     println!("schemes {:?}", schemes);
+
+    let mut ed25519_public = Vec::new();
+    for i in 0..4 {
+        ed25519_public.push(ed25519::PrivateKey::from_seed(i as u64).public_key());
+    }
 
     let verifier = ed_scheme::Scheme::verifier(ed25519_public.clone());
 

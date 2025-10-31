@@ -22,6 +22,7 @@ impl Signers {
     pub fn from(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
         for signer in signers.into_iter() {
+            println!("signer: {}", signer);
             assert!(
                 !bitmap.get(signer as u64),
                 "duplicate signer index: {signer}",

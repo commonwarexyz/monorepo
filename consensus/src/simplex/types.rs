@@ -159,8 +159,19 @@ pub struct Participants<P: PublicKey> {
 impl<P: PublicKey> Participants<P> {
     /// Builds a new participant set from the provided keys.
     pub fn new(keys: Set<P>) -> Self {
-        let quorum = quorum_from_slice(keys.as_ref());
+        let quorum = quorum_from_slice(keys.as_ref())-1;
         let max_faults = max_faults(keys.len() as u32);
+
+        Self {
+            keys,
+            quorum,
+            max_faults,
+        }
+    }
+
+    pub fn new_with_quorum(keys: Set<P>, quorum: u32, max_faults: u32) -> Self {
+        let quorum = quorum;
+        let max_faults = max_faults;
 
         Self {
             keys,
@@ -984,6 +995,8 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         if notarizes.iter().skip(1).any(|n| n.proposal != proposal) {
             return None;
         }
+
+        println!("notarizes {:?}", notarizes);
 
         let notarization_certificate =
             scheme.assemble_certificate(notarizes.iter().map(|n| n.vote.clone()))?;

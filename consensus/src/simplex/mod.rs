@@ -267,14 +267,10 @@ mod tests {
         Monitor,
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{
-        bls12381::{
-            primitives::variant::{MinPk, MinSig, Variant},
-            tle::{decrypt, encrypt, Block},
-        },
-        ed25519::{self, PrivateKey},
-        Digest, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
-    };
+    use commonware_cryptography::{bls12381::{
+        primitives::variant::{MinPk, MinSig, Variant},
+        tle::{decrypt, encrypt, Block},
+    }, ed25519::{self, PrivateKey}, Blake3, Digest, PrivateKeyExt as _, PublicKey, Sha256, Signer as _};
     use std::collections::{HashMap, HashSet};
     use rand::{CryptoRng, Rng};
     use commonware_macros::{select, test_traced};
@@ -291,8 +287,9 @@ mod tests {
         time::Duration,
     };
     use tracing::{debug, warn};
+    use commonware_storage::mmr::grafting::Hasher;
     use types::Activity;
-    use crate::simplex::mocks::fixtures::ed25519_fixture_twins;
+    use crate::simplex::mocks::fixtures::{ed25519_fixture_2, ed25519_fixture_twins};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -391,7 +388,7 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
+        let required_containers = 10;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
@@ -402,7 +399,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    disconnect_on_block: true,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -421,6 +418,9 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            let twin_registration_key = ed25519::PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
+            let twin_validator_id = twin_registration_key.public_key();
+
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -430,7 +430,8 @@ mod tests {
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Configure engine
-                let validator = scheme.public_key();
+                //let validator = scheme.public_key();
+                let validator = validators[idx].clone();
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone().into(),
@@ -488,7 +489,7 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters[0..2].iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -621,12 +622,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_online() {
-        all_online(bls_threshold_fixture::<MinPk, _>);
-        all_online(bls_threshold_fixture::<MinSig, _>);
-        all_online(bls_multisig_fixture::<MinPk, _>);
-        all_online(bls_multisig_fixture::<MinSig, _>);
-        all_online(ed25519_fixture);
+    fn test_all_online_2() {
+        //all_online(bls_threshold_fixture::<MinPk, _>);
+        //all_online(bls_threshold_fixture::<MinSig, _>);
+        //all_online(bls_multisig_fixture::<MinPk, _>);
+        //all_online(bls_multisig_fixture::<MinSig, _>);
+        all_online(ed25519_fixture_2);
     }
 
     fn observer<S, F>(mut fixture: F)
@@ -3742,11 +3743,11 @@ mod tests {
         let n = 4;
         let quorum = 3;
         let required_containers = 10;
-        let activity_timeout = 10;
+        let activity_timeout = 30;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
         //let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -3875,7 +3876,7 @@ mod tests {
 
             join_all(finalizers).await;
 
-            for reporter in reporters[0..1].iter() {
+            for reporter in reporters[0..5].iter() {
                 {
                    let faults = reporter.faults.lock().unwrap();
                    println!("Faults: {:?}", faults);

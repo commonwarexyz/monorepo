@@ -268,6 +268,7 @@ impl<E: Clock, P: PublicKey, S: Scheme, D: Digest> Round<E, P, S, D> {
 
         // Construct notarization
         let mut timer = self.recover_latency.timer();
+        println!("notarizable");
         let notarization = Notarization::from_notarizes(&self.scheme, &self.notarizes)
             .expect("failed to recover notarization certificate");
         timer.observe();

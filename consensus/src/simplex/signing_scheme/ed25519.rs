@@ -260,6 +260,8 @@ impl signing_scheme::Scheme for Scheme {
             return None;
         }
 
+        println!("votes {:?}", entries);
+
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
