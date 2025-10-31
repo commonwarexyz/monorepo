@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_online_2() {
+    fn test_all_online() {
         //all_online(bls_threshold_fixture::<MinPk, _>);
         //all_online(bls_threshold_fixture::<MinSig, _>);
         //all_online(bls_multisig_fixture::<MinPk, _>);
