@@ -253,8 +253,6 @@ impl<V: Variant> Epochable for Seed<V> {
 }
 
 impl<V: Variant> Viewable for Seed<V> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }

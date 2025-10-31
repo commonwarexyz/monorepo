@@ -36,8 +36,6 @@ impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }
@@ -111,8 +109,6 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 impl<D: Digest> Viewable for VoteContext<'_, D> {
-    type View = View;
-
     fn view(&self) -> View {
         match self {
             VoteContext::Notarize { proposal } => proposal.view(),
@@ -781,8 +777,6 @@ impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Voter<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         match self {
             Voter::Notarize(v) => v.view(),
@@ -854,8 +848,6 @@ impl<D: Digest> Epochable for Proposal<D> {
 }
 
 impl<D: Digest> Viewable for Proposal<D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }
@@ -956,8 +948,6 @@ impl<S: Scheme, D: Digest> Epochable for Notarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Notarize<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1063,8 +1053,6 @@ impl<S: Scheme, D: Digest> Epochable for Notarization<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Notarization<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1157,8 +1145,6 @@ impl<S: Scheme> Epochable for Nullify<S> {
 }
 
 impl<S: Scheme> Viewable for Nullify<S> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }
@@ -1258,8 +1244,6 @@ impl<S: Scheme> Epochable for Nullification<S> {
 }
 
 impl<S: Scheme> Viewable for Nullification<S> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }
@@ -1362,8 +1346,6 @@ impl<S: Scheme, D: Digest> Epochable for Finalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Finalize<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1469,8 +1451,6 @@ impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Finalization<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1979,8 +1959,6 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         match self {
             Activity::Notarize(v) => v.view(),
@@ -2052,8 +2030,6 @@ impl<S: Scheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.notarize_1.view()
     }
@@ -2149,8 +2125,6 @@ impl<S: Scheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.finalize_1.view()
     }
@@ -2244,8 +2218,6 @@ impl<S: Scheme, D: Digest> Epochable for NullifyFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Viewable for NullifyFinalize<S, D> {
-    type View = View;
-
     fn view(&self) -> View {
         self.nullify.view()
     }

@@ -19,7 +19,7 @@ pub mod simplex;
 pub mod types;
 pub mod utils;
 
-use types::Epoch;
+use types::{Epoch, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -31,11 +31,8 @@ pub trait Epochable {
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
-    /// View is the type used to indicate the in-progress consensus decision.
-    type View;
-
     /// Returns the view associated with this object.
-    fn view(&self) -> Self::View;
+    fn view(&self) -> View;
 }
 
 /// Block is the interface for a block in the blockchain.
