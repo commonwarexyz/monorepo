@@ -26,7 +26,7 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    /// A request for the [Actor]'s next [IdentifiedLog] for inclusion within a block.
+    /// A request for the [Actor]'s next [SignedDealerLog] for inclusion within a block.
     ///
     /// [Actor]: super::Actor
     Act {
