@@ -80,10 +80,9 @@
             <div class="date">October 15, 2025</div>
         </div>
         <p>
-            Most production consensus stacks&mdash;including classical BFT protocols like
-            <a href="https://docs.tendermint.com">Tendermint</a>, <a href="https://arxiv.org/abs/1803.05069">HotStuff</a>, and our own
-            <a href="/blogs/minimmit.html"><code>minimmit</code></a>&mdash;are described under a permissioned model where every validator is fixed and known ahead of time.
-            Safely transitioning from one committee to the next, while the system keeps producing blocks, is usually left as an exercise to the reader.
+            Most consensus protocols, from <a href="https://arxiv.org/abs/1807.04938">Tendermint</a> and <a href="https://arxiv.org/abs/1803.05069">HotStuff</a> to our own
+            <a href="https://arxiv.org/abs/2508.10862"><code>minimmit</code></a>, are defined under a "permissioned" model where the validator set is fixed and known ahead of time
+            by all participants. Safely transitioning from one committee to the next, while the system keeps producing blocks, is usually left as an exercise to the reader.
         </p>
         <p>
             Tendermint-style protocols make the transition straightforward: replicas only build height <code>h + 1</code> once height <code>h</code> is finalized,
