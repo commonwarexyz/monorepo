@@ -215,10 +215,10 @@ where
 
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
-    pub(crate) steps: u64,
+    steps: u64,
 
     /// The location of the last commit operation (if any exists).
-    pub(crate) last_commit: Option<Location>,
+    last_commit: Option<Location>,
 }
 
 impl<E, K, V, T> Store<E, K, V, T>
@@ -408,7 +408,6 @@ where
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await?;
-
         Ok(())
     }
 
@@ -428,15 +427,12 @@ where
         }
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested. We always prune the log first. This procedure ensures
-        // all log operations are always accessible, even in the event of failures, with no need
-        // for special recovery.
+        // location may be less than requested.
         self.log.prune(*target_prune_loc).await?;
 
-        let oldest_retained_loc = self.oldest_retained_loc();
         debug!(
             log_size = ?self.log_size,
-            ?oldest_retained_loc,
+            oldest_retained_loc = ?self.oldest_retained_loc(),
             ?target_prune_loc,
             "pruned inactive ops"
         );
@@ -466,16 +462,6 @@ where
     /// via [Store::commit].
     pub async fn close(self) -> Result<(), Error> {
         self.log.close().await?;
-
-        Ok(())
-    }
-
-    /// Simulates a commit failure by avoiding syncing the log.
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
-        if sync_log {
-            self.log.sync().await?;
-        }
 
         Ok(())
     }
@@ -597,11 +583,8 @@ where
         Ok(None)
     }
 
-    /// Builds the database's snapshot from the log of operations. Any operations that sit above
+    /// Builds the database's snapshot from the log of operations. Any operations after
     /// the latest commit operation are removed.
-    ///
-    /// Returns the number of operations that were applied to the store, the oldest retained
-    /// location, and the inactivity floor location.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         // Rewind log to remove uncommitted operations
         let new_log_size = Self::rewind_uncommitted(&mut self.log).await?;
@@ -1171,7 +1154,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
+            drop(db);
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), 0);
 
@@ -1195,7 +1178,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
+            drop(db);
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
@@ -1223,7 +1206,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
+            drop(db);
             let db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
