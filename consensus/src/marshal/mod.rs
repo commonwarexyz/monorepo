@@ -424,6 +424,14 @@ mod tests {
                         finished = false;
                         break;
                     }
+                    let Some((height, _)) = app.tip() else {
+                        finished = false;
+                        break;
+                    };
+                    if height < NUM_BLOCKS {
+                        finished = false;
+                        break;
+                    }
                 }
             }
 
