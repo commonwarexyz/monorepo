@@ -2,7 +2,7 @@ use crate::Scheme;
 use commonware_consensus::{
     simplex::types::{Activity, Context},
     types::{Epoch, Round},
-    Automaton as Au, Epochable, Relay as Re, Reporter,
+    Automaton as Au, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use futures::{
@@ -45,7 +45,7 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
 
-    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })

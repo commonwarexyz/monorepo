@@ -30,8 +30,6 @@ pub struct Context<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
@@ -770,8 +768,6 @@ impl<S: Scheme, D: Digest> Read for Voter<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         match self {
             Voter::Notarize(v) => v.epoch(),
@@ -852,8 +848,6 @@ impl<D: Digest> EncodeSize for Proposal<D> {
 }
 
 impl<D: Digest> Epochable for Proposal<D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
@@ -956,8 +950,6 @@ impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Notarize<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
     }
@@ -1065,8 +1057,6 @@ impl<S: Scheme, D: Digest> Read for Notarization<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Notarization<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
     }
@@ -1161,8 +1151,6 @@ impl<S: Scheme> Attributable for Nullify<S> {
 }
 
 impl<S: Scheme> Epochable for Nullify<S> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
@@ -1264,8 +1252,6 @@ impl<S: Scheme> Read for Nullification<S> {
 }
 
 impl<S: Scheme> Epochable for Nullification<S> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
@@ -1370,8 +1356,6 @@ impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Finalize<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
     }
@@ -1479,8 +1463,6 @@ impl<S: Scheme, D: Digest> Read for Finalization<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
     }
@@ -1981,8 +1963,6 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         match self {
             Activity::Notarize(v) => v.epoch(),
@@ -2066,8 +2046,6 @@ impl<S: Scheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.notarize_1.epoch()
     }
@@ -2165,8 +2143,6 @@ impl<S: Scheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.finalize_1.epoch()
     }
@@ -2262,8 +2238,6 @@ impl<S: Scheme, D: Digest> Attributable for NullifyFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Epochable for NullifyFinalize<S, D> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.nullify.epoch()
     }

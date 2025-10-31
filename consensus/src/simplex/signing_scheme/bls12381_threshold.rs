@@ -247,8 +247,6 @@ impl<V: Variant> Seed<V> {
 }
 
 impl<V: Variant> Epochable for Seed<V> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
