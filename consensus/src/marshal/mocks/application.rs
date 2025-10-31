@@ -8,6 +8,7 @@ use std::{
 #[derive(Clone)]
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<u64, B>>>,
+    #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(u64, B::Commitment)>>>,
 }
 
@@ -28,7 +29,7 @@ impl<B: Block> Application<B> {
 
     /// Returns the tip.
     pub fn tip(&self) -> Option<(u64, B::Commitment)> {
-        self.tip.lock().unwrap().clone()
+        *self.tip.lock().unwrap()
     }
 }
 
