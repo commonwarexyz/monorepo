@@ -87,7 +87,7 @@
         </p>
         <p>
             Tendermint-style protocols make the transition straightforward: replicas only start voting on height <code>h + 1</code> once height <code>h</code> is finalized,
-            so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>consensus::simplex</code>), however, begin casting votes for the next
+            so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>commonware-consensus::simplex</code>), however, begin casting votes for the next
             height immediately after the previous height is notarized (when there exists 2f+1 <code>PREVOTE</code>s but before there exist 2f+1 <code>PRECOMMIT</code>s in
             <a href="https://decentralizedthoughts.github.io/2025-06-18-simplex/">Tendermint parlance</a>). While this approach minimizes block time (and thus transaction confirmation
             latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators use their "local view" of the finalize tip
@@ -153,7 +153,7 @@
         </div>
         <p>
             The trusted path is great for local testing and CI: the setup tool deterministically samples the group key, splits it into shares, and writes configs for each validator.
-            The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>consensus::simplex</code>).
+            The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>commonware-consensus::simplex</code>).
             A bootstrap committee uses ED25519 <code>commonware-consensus::simplex</code> to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
             are used by the initial participants in the first epoch (from there the built-in resharing mechanism handles all future key material updates).
         </p>
