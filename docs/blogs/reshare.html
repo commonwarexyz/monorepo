@@ -111,6 +111,10 @@
             </div>
         </div>
         <h2>Resharing: Piggybacking on Consensus</h2>
+        <p>
+            In the threshold setting, changing the validator set means more than just changing the list of participants. You also need to ensure all new participants receive
+            a share of the threshold secret to sign votes. Our existing VRF example (TODO: link) from a year ago demonstrates how to do this but uses a central arbiter to ensure all participants see the same commitments, acknowledgements, and reveals. To do this right, we need to remove this arbiter.
+        </p>
         <h2>A refresher on threshold <code>consensus::simplex</code> and <code>examples/vrf</code></h2>
         <p>
             The threshold <code>consensus::simplex</code> module utilizes BLS threshold signatures so that a group of
@@ -122,10 +126,6 @@
             showcases a continuous key reshare process to generate randomness, but with one caveat: participants trust a
             central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>"
             to ensure all participants see the same commitments, acknowledgements, and reveals.
-        </p>
-        <p>
-            In the threshold setting, changing the validator set means more than just changing the list of participants. You also need to ensure all new participants receive
-            a share of the threshold secret to sign votes. Our existing VRF example (TODO: link) from a year ago demonstrates how to do this but uses a central arbiter to ensure all participants see the same commitments, acknowledgements, and reveals. To do this right, we need to remove this arbiter.
         </p>
         <p>
             Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>reshare</code></a> example
