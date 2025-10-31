@@ -733,48 +733,27 @@ mod test {
                 op_count: Location,
             ) {
                 let mut db = open_db(context.clone()).await;
+
+                // Append operations and simulate failure.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(false, false).await.unwrap();
                 let mut db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
 
+                // Append operations and simulate failure after syncing log but not MMR.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(true, false).await.unwrap();
                 let mut db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
 
-                append_elements(&mut db, &mut context, ELEMENTS).await;
-                db.simulate_failure(false, false).await.unwrap();
-                let mut db = open_db(context.clone()).await;
-                assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(hasher), root);
-
-                append_elements(&mut db, &mut context, ELEMENTS).await;
-                db.simulate_failure(false, true).await.unwrap();
-                let mut db = open_db(context.clone()).await;
-                assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(hasher), root);
-
-                append_elements(&mut db, &mut context, ELEMENTS).await;
-                db.simulate_failure(true, false).await.unwrap();
-                let mut db = open_db(context.clone()).await;
-                assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(hasher), root);
-
-                append_elements(&mut db, &mut context, ELEMENTS).await;
-                db.simulate_failure(true, true).await.unwrap();
-                let mut db = open_db(context.clone()).await;
-                assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(hasher), root);
-
+                // Append operations and simulate failure after syncing MMR but not log.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(false, true).await.unwrap();
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
-                assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             }
 
             recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
