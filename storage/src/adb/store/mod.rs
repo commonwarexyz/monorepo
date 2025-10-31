@@ -237,7 +237,7 @@ where
     ) -> Result<Self, Error> {
         let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
 
-        let log = Journal::init(
+        let mut log = Journal::init(
             context.with_label("log"),
             JournalConfig {
                 partition: cfg.log_partition,
@@ -250,12 +250,15 @@ where
         )
         .await?;
 
+        // Rewind log to remove uncommitted operations.
+        let log_size = Self::rewind_uncommitted(&mut log).await?;
+
         let db = Self {
             log,
             snapshot,
             inactivity_floor_loc: Location::new_unchecked(0),
             steps: 0,
-            last_commit: None,
+            last_commit: log_size.checked_sub(1).map(Location::new_unchecked),
         };
 
         db.build_snapshot_from_log().await
@@ -545,12 +548,6 @@ where
     /// Builds the database's snapshot from the log of operations. Any operations after
     /// the latest commit operation are removed.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        // Rewind log to remove uncommitted operations.
-        let log_size = Self::rewind_uncommitted(&mut self.log).await?;
-
-        // Last operation, if any, is always a CommitFloor operation.
-        self.last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
-
         let pruning_boundary = self.oldest_retained_loc().unwrap_or(self.op_count());
 
         {
