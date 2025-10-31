@@ -96,61 +96,21 @@
             log as a number of segmented logs (each of epoch length) and work on finalizing each (transitioning to the next epoch when the some block at the epoch boundary
             is directly finalized).
         </p>
+        <p>
+            With an eye towards supporting multiple consensus protocols (TODO: link to Minimmit) in the Commonware Library, we opted to implement this generic technique.
+            Recently, we added support for height-based epoching in <code>consensus::simplex</code>. This
+            feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition
+            to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the
+            perfect platform to perform progressive BLS key reshare to reconfigure the committee, defining an
+            in-protocol border between different committees' active block heights.
+        </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
             <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance,
                 if this hasn't happened yet we repropose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
             </div>
         </div>
-        <p>
-            With an eye towards supporting multiple consensus protocols (TODO: link to Minimmit) in the Commonware Library, we opted to implement this generic technique.
-        </p>
-        <h2>Resharing</h2>
-        <p>
-            In the threshold setting, changing the validator set means more than just changing the list of participants. You also need to ensure all new participants receive
-            a share of the threshold secret to sign votes.
-        </p>
-
-        Epoching (Motivated by Faster-than-Finality View) -> Resharing -> Bootstrapping -> Example
-        <p>
-            (TODO: not implied because most readers assume tendermint which has reconfiguration at each height) An ongoing challenge with maintaining distributed validator sets is reconfiguring the validator committee
-            (adding and removing validators), (TODO: not implied because most networks don't need to deal with this) and in turn, refreshing secret key material amongst active participants.
-            Networks need to expand and contract the committee without pausing; Validator committees are rarely static
-            in practice, e.g. to allow for staking/unstaking on Proof of Stake networks, or rotating the authorities on
-            Proof of Authority networks.
-        </p>
-        <p>
-            In many modern blockchains, reconfiguring the committee still means injecting out-of-band key material,
-            with each validator responsible for the secure generation and safekeeping of their own signing keys. Some
-            validators may have done their due diligence, but some may have not, hindering the security properties of
-            the network at large. What if there was a way to enforce validators to refresh their key material on a
-            rolling basis?
-        </p>
-        <p>
-            Enter <a href="https://link.springer.com/chapter/10.1007/3-540-46416-6_47">DKG (Distributed Key Generation)</a>.
-            DKG protocols allow a group of participants to jointly generate a public/private key pair, where each
-            participant holds a share of the private key. No single participant ever has access to the full key. This
-            process can also be ran as a sidecar to consensus, requiring the active committee to periodically run the
-            DKG protocol as a means of <b>resharing</b> keys and/or changing the members of the committee.
-        </p>
-        <p>
-            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>reshare</code></a> example
-            puts these ideas together, driving a DKG protocol with BLS12-381 keys through the replicated log of a
-            blockchain. Validators are required to refresh their key material every epoch (a predefined
-            interval of blocks) and can generate new shares for fresh participants, providing a blueprint for chains
-            users of threshold <code>consensus::simplex</code> to reconfigure the validator committee securely.
-        </p>
-        <div class="image-container">
-            <img src="/imgs/reshare.png" alt="Reshare Flow" />
-            <div class="image-caption">Figure 1: Validator committees reshare their keys in preparation for a committee switchover at each epoch boundary.</div>
-        </div>
-        <p>
-            The example combines <code>cryptography::bls12381::dkg</code>, <code>p2p::authenticated</code> and
-            threshold <code>consensus::simplex</code> into a single demonstration that you can run end to end. Because
-            every interaction in the reshare is in the log, each participant has a transcript of who proposed what,
-            which shares of the secret were acknowledged, and how the next committee was formed.
-        </p>
-
+        <h2>Resharing: Piggybacking on Consensus</h2>
         <h2>A refresher on threshold <code>consensus::simplex</code> and <code>examples/vrf</code></h2>
         <p>
             The threshold <code>consensus::simplex</code> module utilizes BLS threshold signatures so that a group of
@@ -163,22 +123,17 @@
             central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>"
             to ensure all participants see the same commitments, acknowledgements, and reveals.
         </p>
-
-        <h2>Epoching</h2>
         <p>
-            Recently, we added support for height-based epoching in threshold <code>consensus::simplex</code>. This
-            feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition
-            to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the
-            perfect platform to perform progressive BLS key reshare to reconfigure the committee, defining an
-            in-protocol border between different committees' active block heights.
+            In the threshold setting, changing the validator set means more than just changing the list of participants. You also need to ensure all new participants receive
+            a share of the threshold secret to sign votes. Our existing VRF example (TODO: link) from a year ago demonstrates how to do this but uses a central arbiter to ensure all participants see the same commitments, acknowledgements, and reveals. To do this right, we need to remove this arbiter.
         </p>
         <p>
-            This approach was derived from <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to
-                    Proof-of-Stake Consensus</i></a> by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
-            Roughgarden and Ertem Nusret Tas.
+            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>reshare</code></a> example
+            puts these ideas together, driving a DKG protocol with BLS12-381 keys through the replicated log of a
+            blockchain. Validators are required to refresh their key material every epoch (a predefined
+            interval of blocks) and can generate new shares for fresh participants, providing a blueprint for chains
+            users of threshold <code>consensus::simplex</code> to reconfigure the validator committee securely.
         </p>
-
-        <h2>Piggybacking on Consensus</h2>
         <p>
             To safely reconfigure the validator committee in a threshold <code>consensus::simplex</code> engine,
             we use <code>cryptography::bls12381::dkg</code> to securely generate new shares for the next committee.
@@ -209,7 +164,6 @@
             <li><b>recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channeled communication.</li>
         </ol>
         </p>
-
         <h2>Bootstrapping a Threshold Committee</h2>
         <p>
             To bootstrap the initial threshold committee, the example offers two paths: a trusted setup, where a central
