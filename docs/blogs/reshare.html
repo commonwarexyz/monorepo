@@ -174,14 +174,12 @@ $ cargo run --bin commonware-reshare setup --with-dkg
             and prints one or two <code>mprocs</code> invocations. For the DKG flow, run the first command to complete the ceremony,
             shut everything down, and then run the second command to launch the threshold committee that was just minted.
         </p>
-
-        <h2>What Comes Next</h2>
         <p>
-            We expect builders to use their own selection rules, plug the reshare transcript into application state,
-            and experiment with various reconfiguration cadences. If you take the example in a new direction, or uncover
-            interesting corner cases, let us know. Validator networks should be able to evolve securely in real time,
-            and this example is an invitation to make that the default.
+            With an end-to-end solution for bootstrapping and maintaining a threshold secret over a dynamic validator set, we've now paved the road
+            for integrating <a href="blogs/commonware-cryptography.html">Seeds, Links, and Views</a> into applications building on the Commonware Library.
         </p>
+        <p>
+            Next up, <a href="https://x.com/_patrickogrady/status/1973859090016395621">commonware-constantinople</a>!
     </div>
 
     <div id="footer-placeholder"></div>
