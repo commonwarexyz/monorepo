@@ -28,13 +28,13 @@ enum Operation {
     Prune,
     OpCount,
     InactivityFloorLoc,
-    SimulateFailure { sync_log: bool },
+    SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 12 {
+        match choice % 11 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -70,10 +70,7 @@ impl<'a> Arbitrary<'a> for Operation {
             7 => Ok(Operation::Prune),
             8 => Ok(Operation::OpCount),
             9 => Ok(Operation::InactivityFloorLoc),
-            10 | 11 => {
-                let sync_log: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure { sync_log })
-            }
+            10 => Ok(Operation::SimulateFailure),
             _ => unreachable!(),
         }
     }
@@ -176,11 +173,8 @@ fn fuzz(input: FuzzInput) {
                     let _ = store.inactivity_floor_loc();
                 }
 
-                Operation::SimulateFailure { sync_log } => {
-                    store
-                        .simulate_failure(*sync_log)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure => {
+                    drop(store);
 
                     store = Store::<_, Key, Value, TwoCap>::init(
                         context.clone(),
