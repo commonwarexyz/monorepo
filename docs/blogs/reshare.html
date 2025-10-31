@@ -85,10 +85,11 @@
             by all participants. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer.
         </p>
         <p>
-            Tendermint-style protocols make the transition straightforward: replicas only build height <code>h + 1</code> once height <code>h</code> is finalized,
-            so swapping the validator list during finalization is safe. Newer protocols, like <code>consensus::simplex</code>,
-            begin casting votes for the next height immediately after the previous height is notarized. That faster-than-finality pipeline drives latency down,
-            but it complicates reconfiguration. If validators disagree about who is eligible to notarize a block, the network risks a halt or a safety failure.
+            Tendermint-style protocols make the transition straightforward: replicas only start voting on height <code>h + 1</code> once height <code>h</code> is finalized,
+            so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>consensus::simplex</code>), however, begin casting votes for the next
+            height immediately after the previous height is notarized (when there exists 2f+1 <code>PREVOTE</code>s but before there exist 2f+1 <code>PRECOMMIT</code>s in
+            <a href="https://decentralizedthoughts.github.io/2025-06-18-simplex/">Tendermint parlance</a>). While this approach minimizes block time (and thus transaction confirmation
+            latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators disagree about who is eligible to notarize a block, the network risks a halt or a safety failure.
         </p>
         <p>
             So how do we reconfigure without pausing? A recent formulation by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu,
