@@ -207,7 +207,7 @@ where
                 // Attempt to build a new block from the application.
                 //
                 // If the receiver passed to consensus is dropped, we will
-                // cancel the request to the application.
+                // drop the request to the application.
                 let start = Instant::now();
                 let built_block = select! {
                     built_block = application
@@ -321,7 +321,7 @@ where
                 // Attempt to verify the block with the application.
                 //
                 // If the receiver passed to consensus is dropped, we will
-                // cancel the request to the application.
+                // drop the request to the application.
                 select! {
                     application_valid = application
                         .verify(r_ctx.with_label("app_verify"), parent, block.clone()) => {
