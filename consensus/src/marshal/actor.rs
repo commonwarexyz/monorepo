@@ -94,7 +94,7 @@ pub struct Actor<
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
-    // Tip height and commitment
+    // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
