@@ -9,7 +9,7 @@ use commonware_consensus::{
     utils::{epoch, last_block_in_epoch},
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use futures::{
@@ -26,7 +26,7 @@ use tracing::{info, warn};
 pub struct Actor<E, H, C, V, S>
 where
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
     S: Scheme,
 {
@@ -40,7 +40,7 @@ impl<E, H, C, V, S> Actor<E, H, C, V, S>
 where
     E: Rng + Spawner + Metrics + Clock,
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
     S: Scheme,
 {

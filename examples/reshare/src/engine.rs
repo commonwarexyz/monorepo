@@ -2,8 +2,9 @@
 
 use crate::{
     application::{self, Block, EpochSchemeProvider, SchemeProvider},
-    dkg, orchestrator,
-    setup::ParticipantConfig,
+    dkg::{self, UpdateCallBack},
+    orchestrator,
+    setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
@@ -12,18 +13,21 @@ use commonware_consensus::{
     simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Public, variant::Variant},
-    Hasher, Signer,
+    bls12381::{
+        dkg2::Output,
+        primitives::{group, variant::Variant},
+    },
+    Hasher, PrivateKey,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
+use commonware_utils::{set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf};
+use std::{marker::PhantomData, num::NonZero};
 use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -44,8 +48,8 @@ const MAX_REPAIR: u64 = 50;
 
 pub struct Config<C, P, B, V>
 where
-    C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
 {
@@ -53,16 +57,10 @@ where
     pub manager: P,
     pub blocker: B,
     pub namespace: Vec<u8>,
-
-    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
-    pub polynomial: Option<Public<V>>,
+    pub output: Option<Output<V, C::PublicKey>>,
     pub share: Option<group::Share>,
-    pub active_participants: Vec<C::PublicKey>,
-    pub inactive_participants: Vec<C::PublicKey>,
-    pub num_participants_per_epoch: usize,
-    pub dkg_rate_limit: governor::Quota,
+    pub peer_config: PeerConfig<C::PublicKey>,
     pub orchestrator_rate_limit: governor::Quota,
-
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
 }
@@ -70,7 +68,7 @@ where
 pub struct Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: Signer,
+    C: PrivateKey,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -95,7 +93,7 @@ where
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
-    C: Signer,
+    C: PrivateKey,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -106,20 +104,16 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let dkg_namespace = union(&config.namespace, b"_DKG");
-        let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
+        let threshold = config.peer_config.threshold() as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
-                participant_config: config.participant_config.clone(),
-                namespace: dkg_namespace,
                 signer: config.signer.clone(),
-                num_participants_per_epoch: config.num_participants_per_epoch,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.dkg_rate_limit,
                 partition_prefix: config.partition_prefix.clone(),
+                peer_config: config.peer_config.clone(),
             },
         )
         .await;
@@ -228,6 +222,7 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
+        update_cb: UpdateCallBack<V, C::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -238,7 +233,8 @@ where
                 broadcast,
                 dkg,
                 orchestrator,
-                marshal
+                marshal,
+                update_cb
             )
             .await
         )
@@ -275,14 +271,14 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
+        update_cb: UpdateCallBack<V, C::PublicKey>,
     ) {
         let dkg_handle = self.dkg.start(
-            self.config.polynomial,
+            self.config.output,
             self.config.share,
-            self.config.active_participants,
-            self.config.inactive_participants,
             self.orchestrator_mailbox,
             dkg,
+            update_cb,
         );
         let application_handle = self
             .application

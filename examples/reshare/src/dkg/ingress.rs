@@ -2,9 +2,12 @@
 //!
 //! [Actor]: super::Actor
 
-use crate::{application::Block, dkg::DealOutcome};
+use crate::application::Block;
 use commonware_consensus::{marshal::Update, Reporter};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{
+    bls12381::{dkg2::SignedDealerLog, primitives::variant::Variant},
+    Hasher, PrivateKey,
+};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -17,14 +20,14 @@ use futures::{
 pub enum Message<H, C, V>
 where
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
-    /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
+    /// A request for the [Actor]'s next [SignedDealerLog] for inclusion within a block.
     ///
     /// [Actor]: super::Actor
     Act {
-        response: oneshot::Sender<Option<DealOutcome<C, V>>>,
+        response: oneshot::Sender<Option<SignedDealerLog<V, C>>>,
     },
 
     /// A new block has been finalized.
@@ -41,7 +44,7 @@ where
 pub struct Mailbox<H, C, V>
 where
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     sender: mpsc::Sender<Message<H, C, V>>,
@@ -50,7 +53,7 @@ where
 impl<H, C, V> Mailbox<H, C, V>
 where
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     /// Create a new mailbox.
@@ -61,7 +64,7 @@ where
     /// Request the [Actor]'s next payload for inclusion within a block.
     ///
     /// [Actor]: super::Actor
-    pub async fn act(&mut self) -> Option<DealOutcome<C, V>> {
+    pub async fn act(&mut self) -> Option<SignedDealerLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
         let message = Message::Act {
             response: response_tx,
@@ -75,7 +78,7 @@ where
 impl<H, C, V> Reporter for Mailbox<H, C, V>
 where
     H: Hasher,
-    C: Signer,
+    C: PrivateKey,
     V: Variant,
 {
     type Activity = Update<Block<H, C, V>>;
