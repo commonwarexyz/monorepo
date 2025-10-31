@@ -14,10 +14,13 @@ documentation = "https://docs.rs/commonware-coding"
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+num-rational = { workspace = true }
 reed-solomon-simd = "3.0.1"
 rand_core = { workspace = true }
+rand = { workspace = true }
 
 [lib]
 bench = false
@@ -26,6 +29,7 @@ bench = false
 criterion = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "coding_scheme_times"

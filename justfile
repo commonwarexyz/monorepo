@@ -49,10 +49,10 @@ check-docs *args='':
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items $@
 
 # Run all fuzz tests in a given directory
-fuzz fuzz_dir max_time='60' nightly_version='+nightly':
+fuzz fuzz_dir max_time='60' nightly_version='+nightly' max_mem='4000':
     #!/usr/bin/env bash
-    for target in $(cargo {{ nightly_version }} fuzz list --fuzz-dir {{ fuzz_dir }}); do
-      cargo {{ nightly_version }} fuzz run $target --fuzz-dir {{ fuzz_dir }} -- -max_total_time={{ max_time }}
+    for target in $(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
+        cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
     done
 
 # Check for unused dependencies
