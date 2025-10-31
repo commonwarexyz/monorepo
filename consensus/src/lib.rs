@@ -51,7 +51,10 @@ cfg_if::cfg_if! {
         use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+        use commonware_runtime::{Spawner, Metrics, Clock};
+        use rand::Rng;
 
+        pub mod application;
         pub mod marshal;
         mod reporter;
         pub use reporter::*;
@@ -95,6 +98,55 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
+
+        /// Application is the interface responsible for building new blocks on top of consensus-provided parent
+        /// commitments as well as receiving finalized updates from [crate::marshal].
+        pub trait Application<E>: Clone + Send + 'static
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// Context is metadata provided by the consensus engine associated with a given payload.
+            ///
+            /// This often includes things like the proposer, view number, the height, or the epoch.
+            type Context: Epochable;
+
+            /// The block type produced by the application's builder.
+            type Block: Block;
+
+            /// Payload used to initialize the consensus engine in the first epoch.
+            fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+            /// Build a new block on top of the provided parent commitment / block.
+            fn build(
+                &mut self,
+                context: E,
+                parent_commitment: <Self::Block as Committable>::Commitment,
+                parent_block: Self::Block,
+            ) -> impl Future<Output = Self::Block> + Send;
+
+            /// Receive a finalized block from [crate::marshal].
+            fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
+        }
+
+        /// An extension of [Application] that can verify blocks produced by its builder
+        /// for the sake of driving [Automaton::verify].
+        ///
+        /// Some [Application]s may not require this functionality - i.e. when employing
+        /// erasure coding, verification only serves to verify the integrity of the
+        /// received shard relative to the consensus commitment, and can therefore be
+        /// hidden from the application.
+        pub trait VerifyingApplication<E>: Application<E>
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// Verify a block produced by the application's builder, relative to its parent.
+            fn verify(
+                &mut self,
+                context: E,
+                parent: Self::Block,
+                block: Self::Block,
+            ) -> impl Future<Output = bool> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.

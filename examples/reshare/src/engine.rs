@@ -1,13 +1,14 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{self, Block, EpochSchemeProvider, SchemeProvider},
+    application::{Application, Block, EpochSchemeProvider, SchemeProvider},
     dkg, orchestrator,
     setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
+    application::epoched::EpochedApplication,
     marshal::{self, ingress::handler},
     simplex::signing_scheme::Scheme,
 };
@@ -82,12 +83,19 @@ where
     config: Config<C, P, B, V>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    application: application::Actor<E, H, C, V, S>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
-    marshal_mailbox: marshal::Mailbox<S, Block<H, C, V>>,
-    orchestrator: orchestrator::Actor<E, B, V, C, H, application::Mailbox<H, C::PublicKey>, S>,
+    #[allow(clippy::type_complexity)]
+    orchestrator: orchestrator::Actor<
+        E,
+        B,
+        V,
+        C,
+        H,
+        EpochedApplication<E, S, Application<E, H, C, V>, Block<H, C, V>>,
+        S,
+    >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
     _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
@@ -123,9 +131,6 @@ where
             },
         )
         .await;
-
-        let (application, application_mailbox) =
-            application::Actor::new(context.with_label("application"), MAILBOX_SIZE);
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.with_label("buffer"),
@@ -166,11 +171,18 @@ where
         )
         .await;
 
+        let application = EpochedApplication::new(
+            context.with_label("application"),
+            Application::new(dkg_mailbox.clone()),
+            marshal_mailbox.clone(),
+            BLOCKS_PER_EPOCH,
+        );
+
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.with_label("orchestrator"),
             orchestrator::Config {
                 oracle: config.blocker.clone(),
-                application: application_mailbox.clone(),
+                application,
                 scheme_provider,
                 marshal: marshal_mailbox.clone(),
                 namespace: consensus_namespace,
@@ -186,11 +198,9 @@ where
             config,
             dkg,
             dkg_mailbox,
-            application,
             buffer,
             buffered_mailbox,
             marshal,
-            marshal_mailbox,
             orchestrator,
             orchestrator_mailbox,
             _phantom: core::marker::PhantomData,
@@ -284,9 +294,6 @@ where
             self.orchestrator_mailbox,
             dkg,
         );
-        let application_handle = self
-            .application
-            .start(self.marshal_mailbox, self.dkg_mailbox.clone());
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle = self
             .marshal
@@ -297,7 +304,6 @@ where
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
-            application_handle,
             buffer_handle,
             marshal_handle,
             orchestrator_handle,

@@ -3,11 +3,8 @@
 mod types;
 pub use types::*;
 
-mod actor;
-pub use actor::Actor;
-
-mod ingress;
-pub use ingress::{Mailbox, Message};
+mod core;
+pub use core::Application;
 
 mod scheme;
 pub use scheme::{EdScheme, EpochSchemeProvider, SchemeProvider, ThresholdScheme};
