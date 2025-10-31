@@ -13,10 +13,7 @@ use crate::{
         Error,
     },
     index::{Cursor, Index},
-    journal::contiguous::{
-        fixed::{Config as JConfig, Journal},
-        Contiguous,
-    },
+    journal::contiguous::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::BitMap,
         journaled::{Config as MmrConfig, Mmr},
@@ -26,10 +23,9 @@ use crate::{
 };
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::NZUsize;
 use futures::{
     future::{try_join_all, TryFutureExt as _},
-    pin_mut, try_join, StreamExt as _,
+    try_join,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
@@ -37,10 +33,6 @@ use tracing::debug;
 pub mod ordered;
 pub mod sync;
 pub mod unordered;
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -117,46 +109,6 @@ pub(crate) async fn init_mmr_and_log<
     let inactivity_floor_loc = super::align_mmr_and_log(&mut mmr, &mut log, hasher).await?;
 
     Ok((inactivity_floor_loc, mmr, log))
-}
-
-/// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
-/// the log and mmr have the same number of operations and are not pruned beyond the inactivity
-/// floor. The callback is invoked for each replayed operation, indicating activity status updates.
-/// The first argument of the callback is the activity status of the operation, and the second
-/// argument is the location of the operation it inactivates (if any).
-pub(crate) async fn build_snapshot_from_log<O, I, F>(
-    inactivity_floor_loc: Location,
-    log: &impl Contiguous<Item = O>,
-    snapshot: &mut I,
-    mut callback: F,
-) -> Result<(), Error>
-where
-    O: Keyed + FixedSize,
-    I: Index<Value = Location>,
-    F: FnMut(bool, Option<Location>),
-{
-    let stream = log
-        .replay(*inactivity_floor_loc, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
-        .await?;
-    pin_mut!(stream);
-    let last_commit_loc = log.size().await.saturating_sub(1);
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Some(key) = op.key() {
-            if op.is_delete() {
-                let old_loc = delete_key(snapshot, log, key).await?;
-                callback(false, old_loc);
-            } else if op.is_update() {
-                let new_loc = Location::new_unchecked(loc);
-                let old_loc = update_loc(snapshot, log, key, new_loc).await?;
-                callback(true, old_loc);
-            }
-        } else if op.commit_floor().is_some() {
-            callback(loc == last_commit_loc, None);
-        }
-    }
-
-    Ok(())
 }
 
 /// Common implementation for pruning an Any database.
@@ -257,83 +209,6 @@ where
         .for_each(|op| ops.push(op));
 
     Ok((proof, ops))
-}
-
-/// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
-/// it if the key isn't already present.
-async fn update_loc<I: Index<Value = Location>, O>(
-    snapshot: &mut I,
-    log: &impl Contiguous<Item = O>,
-    key: &<O as Keyed>::Key,
-    new_loc: Location,
-) -> Result<Option<Location>, Error>
-where
-    O: Keyed + FixedSize,
-{
-    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-    // cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-        return Ok(None);
-    };
-
-    // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op(log, &mut cursor, key).await? {
-        assert!(new_loc > loc);
-        cursor.update(new_loc);
-        return Ok(Some(loc));
-    }
-
-    // The key wasn't in the snapshot, so add it to the cursor.
-    cursor.insert(new_loc);
-
-    Ok(None)
-}
-
-/// Delete `key` from the snapshot if it exists, returning the location that was previously
-/// associated with it.
-async fn delete_key<I, O>(
-    snapshot: &mut I,
-    log: &impl Contiguous<Item = O>,
-    key: &O::Key,
-) -> Result<Option<Location>, Error>
-where
-    I: Index<Value = Location>,
-    O: Keyed + FixedSize,
-{
-    // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut(key) else {
-        return Ok(None);
-    };
-
-    // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op(log, &mut cursor, key).await? else {
-        return Ok(None);
-    };
-    cursor.delete();
-
-    Ok(Some(loc))
-}
-
-/// Find and return the location of the update operation for `key`, if it exists. The cursor is
-/// positioned at the matching location, and can be used to update or delete the key.
-async fn find_update_op<C, O>(
-    log: &impl Contiguous<Item = O>,
-    cursor: &mut C,
-    key: &<O as Keyed>::Key,
-) -> Result<Option<Location>, Error>
-where
-    C: Cursor<Value = Location>,
-    O: Keyed + FixedSize,
-{
-    while let Some(&loc) = cursor.next() {
-        let op = log.read(*loc).await?;
-        let k = op.key().expect("operation without key");
-        if *k == *key {
-            return Ok(Some(loc));
-        }
-    }
-
-    Ok(None)
 }
 
 /// A wrapper of DB state required for invoking operations shared across variants.
