@@ -156,6 +156,10 @@
             A bootstrap committee uses ED25519 <code>commonware-consensus::simplex</code> to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
             are used by the initial participants in the first epoch (from there the built-in resharing mechanism handles all future key material updates).
         </p>
+        <p>
+            With an end-to-end solution for bootstrapping and maintaining a threshold secret over a dynamic validator set, the road is now paved
+            for integrating <a href="blogs/commonware-cryptography.html">Seeds, Links, and Views</a> into applications building on the Commonware Library.
+        </p>
         <h2>Trying It Locally</h2>
         <p>
             You can run the example by generating participant configurations and launching the validators with the
@@ -173,10 +177,6 @@ $ cargo run --bin commonware-reshare setup --with-dkg
             The setup step writes per-validator configuration files under the chosen <code>--datadir</code> (default <code>./data</code>)
             and prints one or two <code>mprocs</code> invocations. For the DKG flow, run the first command to complete the ceremony,
             shut everything down, and then run the second command to launch the threshold committee that was just minted.
-        </p>
-        <p>
-            With an end-to-end solution for bootstrapping and maintaining a threshold secret over a dynamic validator set, we've now paved the road
-            for integrating <a href="blogs/commonware-cryptography.html">Seeds, Links, and Views</a> into applications building on the Commonware Library.
         </p>
         <p>
             Next up, <a href="https://x.com/_patrickogrady/status/1973859090016395621">commonware-constantinople</a>!
