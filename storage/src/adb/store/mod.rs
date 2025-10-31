@@ -210,9 +210,6 @@ where
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
 
-    /// The total number of operations that have been applied to the store.
-    log_size: Location,
-
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
     steps: u64,
@@ -257,7 +254,6 @@ where
             log,
             snapshot,
             inactivity_floor_loc: Location::new_unchecked(0),
-            log_size: Location::new_unchecked(0),
             steps: 0,
             last_commit: None,
         };
@@ -369,8 +365,6 @@ where
         // Sync the log data to ensure durability.
         self.log.sync_data().await?;
 
-        debug!(log_size = ?self.log_size, "commit complete");
-
         Ok(())
     }
 
@@ -431,7 +425,7 @@ where
         self.log.prune(*target_prune_loc).await?;
 
         debug!(
-            log_size = ?self.log_size,
+            log_size = ?self.op_count(),
             oldest_retained_loc = ?self.oldest_retained_loc(),
             ?target_prune_loc,
             "pruned inactive ops"
@@ -550,7 +544,7 @@ where
     /// the latest commit operation are removed.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         // Rewind log to remove uncommitted operations
-        self.log_size = Location::new_unchecked(Self::rewind_uncommitted(&mut self.log).await?);
+        Self::rewind_uncommitted(&mut self.log).await?;
 
         // Replay operations to build snapshot
         {
@@ -587,27 +581,14 @@ where
         }
 
         // After rewinding, the last operation (if any) is always a CommitFloor
-        self.last_commit = if *self.log_size == 0 {
-            None
-        } else {
-            Some(Location::new_unchecked(*self.log_size - 1))
-        };
-
-        debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
-
+        self.last_commit = self.op_count().checked_sub(1);
         Ok(self)
     }
 
     /// Append the operation to the log. The `commit` method must be called to make any applied operation
     /// persistent & recoverable.
     async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        // Append the operation to the log and get its position.
-        let pos = self.log.append(op).await?;
-        assert_eq!(pos, *self.log_size);
-
-        // Update the log size to match the journal's size.
-        self.log_size = Location::new_unchecked(self.log.size());
-
+        self.log.append(op).await?;
         Ok(())
     }
 
@@ -689,7 +670,7 @@ where
         };
 
         // Get the new location before borrowing snapshot mutably.
-        let new_loc = self.log_size;
+        let new_loc = self.op_count();
 
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
@@ -849,7 +830,7 @@ mod test {
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
 
-            assert_eq!(store.log_size, 1);
+            assert_eq!(store.op_count(), 1);
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Fetch the value
@@ -863,14 +844,14 @@ mod test {
             let mut store = create_test_store(ctx.with_label("store")).await;
 
             // Ensure the re-opened store removed the uncommitted operations
-            assert_eq!(store.log_size, 0);
+            assert_eq!(store.op_count(), 0);
             assert_eq!(store.inactivity_floor_loc, 0);
             assert!(store.get_metadata().await.unwrap().is_none());
 
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
 
-            assert_eq!(store.log_size, 1);
+            assert_eq!(store.op_count(), 1);
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
@@ -884,14 +865,14 @@ mod test {
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
             // retained.
-            assert_eq!(store.log_size, 3);
+            assert_eq!(store.op_count(), 3);
             assert_eq!(store.inactivity_floor_loc, 1);
 
             // Re-open the store
             let mut store = create_test_store(ctx.with_label("store")).await;
 
             // Ensure the re-opened store retained the committed operations
-            assert_eq!(store.log_size, 3);
+            assert_eq!(store.op_count(), 3);
             assert_eq!(store.inactivity_floor_loc, 1);
 
             // Fetch the value, ensuring it is still present
@@ -904,7 +885,7 @@ mod test {
             store.update(k1, v1.clone()).await.unwrap();
             store.update(k2, v2.clone()).await.unwrap();
 
-            assert_eq!(store.log_size, 5);
+            assert_eq!(store.op_count(), 5);
             assert_eq!(store.inactivity_floor_loc, 1);
 
             // Make sure we can still get metadata.
@@ -919,7 +900,7 @@ mod test {
                 Some((Location::new_unchecked(6), None))
             );
 
-            assert_eq!(store.log_size, 7);
+            assert_eq!(store.op_count(), 7);
             assert_eq!(store.inactivity_floor_loc, 2);
 
             // Ensure all keys can be accessed, despite the first section being pruned.
@@ -961,7 +942,7 @@ mod test {
             assert_eq!(iter.count(), 1);
 
             // 100 operations were applied, each triggering one step, plus the commit op.
-            assert_eq!(store.log_size, UPDATES * 2 + 1);
+            assert_eq!(store.op_count(), UPDATES * 2 + 1);
             // Only the highest `Update` operation is active, plus the commit operation above it.
             let expected_floor = UPDATES * 2 - 1;
             assert_eq!(store.inactivity_floor_loc, expected_floor);
