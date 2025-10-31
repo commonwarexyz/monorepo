@@ -105,13 +105,10 @@
             </div>
         </div>
         <p>
-            To avoid reinventing the wheel each time we introduce a new consensus protocol, we opted to implement this consensus-agnostic approach in the Commonware Library.
-
-            including
-            <a href="/blogs/minimmit.html"><code>minimmit</code></a> and <a href="/blogs/threshold-simplex.html"><code>consensus::simplex</code></a>&mdash;we implemented this approach.
-            Height-based epoching in <code>consensus::simplex</code> adds an explicit <code>epoch</code> field to every message and lets an orchestrator advance epochs
-            once the last block in the current epoch is directly finalized. Epoch boundaries give us the perfect place to reshare BLS key material and hand the signing
-            authority to the next committee without introducing side channels.
+            To avoid reinventing the wheel each time a new consensus protocol is added to the Commonware Library, we opted to implement this reusable technique. This means you can now
+            implement any permissioned consensus protocol, as described, and not worry about how to uniquely extend it for reconfiguration (including not having to implement mechanisms required to synchronize
+            missing blocks across epochs, update peer sets, etc.). Check out <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> for a concrete example
+            that uses this implementation to drive a BLS12-381 threshold reshare process each epoch.
         </p>
         <h2>Resharing: Piggybacking on Consensus</h2>
         <p>
