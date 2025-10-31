@@ -79,11 +79,19 @@ where
         Some(Block::new(parent_commitment, parent.height() + 1, reshare))
     }
 
-    async fn verify(&mut self, _: E, parent: Self::Block, block: Self::Block) -> bool {
-        block.height() == parent.height() + 1 && block.parent() == parent.digest()
-    }
-
     async fn finalize(&mut self, _: Self::Block) {
         // no-op: the reshare application does not process finalized blocks
+    }
+}
+
+impl<E, H, C, V> commonware_consensus::VerifyingApplication<E> for Application<E, H, C, V>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    async fn verify(&mut self, _: E, parent: Self::Block, block: Self::Block) -> bool {
+        block.height() == parent.height() + 1 && block.parent() == parent.digest()
     }
 }

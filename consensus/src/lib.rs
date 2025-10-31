@@ -126,6 +126,21 @@ cfg_if::cfg_if! {
                 context: Self::Context,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
 
+            /// Receive a finalized block from [crate::marshal].
+            fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
+        }
+
+        /// An extension of [Application] that can verify blocks produced by its builder
+        /// for the sake of driving [Automaton::verify].
+        ///
+        /// Some [Application]s may not require this functionality - i.e. when employing
+        /// erasure coding, verification only serves to verify the integrity of the
+        /// received shard relative to the consensus commitment, and can therefore be
+        /// hidden from the application.
+        pub trait VerifyingApplication<E>: Application<E>
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
             /// Verify a block produced by the application's builder, relative to its parent.
             fn verify(
                 &mut self,
@@ -133,9 +148,6 @@ cfg_if::cfg_if! {
                 parent: Self::Block,
                 block: Self::Block,
             ) -> impl Future<Output = bool> + Send;
-
-            /// Receive a finalized block from [crate::marshal].
-            fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.

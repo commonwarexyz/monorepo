@@ -37,7 +37,7 @@ use crate::{
     marshal,
     simplex::{signing_scheme::Scheme, types::Context},
     types::{Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter,
+    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::{
@@ -108,7 +108,7 @@ impl<E, S, A, B> Automaton for EpochedApplication<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: VerifyingApplication<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
 {
     type Digest = B::Commitment;
