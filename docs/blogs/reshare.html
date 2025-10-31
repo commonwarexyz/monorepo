@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Once a Validator, Not Always a Validator</title>
+    <meta name="description" content="Many consensus protocols, from Tendermint and HotStuff to our own Minimmit, are defined under a permissioned model where the validator set is fixed and known ahead of time. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer.">
+    <meta name="author" content="Ben Clabby, Patrick O'Grady">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/epoching-cover.png" />
+    <meta property="og:title" content="Once a Validator, Not Always a Validator" />
+    <meta property="og:description" content="Many consensus protocols, from Tendermint and HotStuff to our own Minimmit, are defined under a permissioned model where the validator set is fixed and known ahead of time. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer." />
+    <meta property="article:author" content="https://x.com/vex_0x" />
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:published_time" content="2025-10-31T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-10-31T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <meta property="twitter:title" content="Once a Validator, Not Always a Validator" />
+    <meta property="twitter:description" content="Many consensus protocols, from Tendermint and HotStuff to our own Minimmit, are defined under a permissioned model where the validator set is fixed and known ahead of time. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/epoching-cover.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@vex_0x" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Once a Validator, Not Always a Validator</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a> and <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">October 31, 2025</div>
+        </div>
+        <p>
+            Many consensus protocols, from <a href="https://arxiv.org/abs/1807.04938">Tendermint</a> and <a href="https://arxiv.org/abs/1803.05069">HotStuff</a> to our own
+            <a href="https://arxiv.org/abs/2508.10862">Minimmit</a>, are defined under a "permissioned" model where the validator set is fixed and known ahead of time
+            by all participants. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer.
+        </p>
+        <p>
+            Tendermint-style protocols make the transition straightforward: replicas only start voting on height <code>h + 1</code> once height <code>h</code> is finalized,
+            so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>commonware-consensus::simplex</code>), however, begin casting votes for the next
+            height immediately after the previous height is notarized (when 2f+1 <code>PREVOTE</code>s exist but before 2f+1 <code>PRECOMMIT</code>s exist, in
+            <a href="https://decentralizedthoughts.github.io/2025-06-18-simplex/">Tendermint parlance</a>). While this approach minimizes block time (and thus transaction confirmation
+            latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators use their "local view" of the finalized tip
+            to determine who is eligible to notarize a block, the network risks a halt or a safety failure (as participants may consider votes from different validators to be useless).
+        </p>
+        <p>
+            What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a>—a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas—offers
+            an elegant, consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a sequence of segments broken into epochs where we simply "ignore" blocks that exceed some configured epoch length, whether
+            finalized or not. Practically speaking, the validator enters a new epoch as soon as they process a finalized block at the epoch boundary (entering the next epoch with a synchronized view of the finalized state
+            where they can update the validator set safely).
+        </p>
+        <div class="image-container">
+            <img src="/imgs/epoching.png" alt="Epoching" />
+            <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance. If this hasn't happened yet, we re-propose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
+            </div>
+        </div>
+        <p>
+            To avoid reinventing the wheel each time a new consensus protocol is added to the Commonware Library, we opted to implement this reusable technique. This means you can now
+            implement any permissioned consensus protocol, as described, and not worry about how to uniquely extend it for reconfiguration (including not having to implement mechanisms required to synchronize
+            missing blocks across epochs, update peer sets, etc.). Check out <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> for a concrete example
+            of how to incorporate reconfiguration into your application.
+        </p>
+        <h2>Resharing: Piggybacking on Consensus</h2>
+        <p>
+            When maintaining a threshold secret, changing the validator set requires more than updating a list. Whenever participants are added or removed, a new dealing of the secret must
+            be performed to ensure new participants receive a share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
+            must not be able to use shares across dealings or else it is trivial for a single malicious participant to acquire <i>f</i> shares over <i>f</i> epochs). Our original
+            <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
+            trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a> to ensure all participants received the same set of
+            commitments. Removing that trusted coordinator requires some form of reliable broadcast such that all participants can each run their own arbiter (and all arrive at the same output). Fortunately,
+            we get that out-of-the-box with a replicated log.
+        </p>
+        <p>
+            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
+            marries the DKG implementation from <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html"><code>commonware-cryptography::bls12381::dkg</code></a> with
+            threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
+            Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
+        </p>
+        <p>
+            Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will hold shares in the next epoch.
+            Dealers generate shares for all new players (based on their share from the current epoch to maintain the same shared secret across epochs) and send them to players
+            over <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html"><code>commonware-p2p::authenticated</code></a>'s encrypted, point-to-point channels. Players validate the
+            received shares and, if correct, send acknowledgements back to dealers. After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from
+            players who received shares against that commitment, and any revealed secret shares for players that didn't acknowledge receipt. They publish that outcome to the log.
+        </p>
+        <div class="image-container">
+            <img src="/imgs/reshare_actors.png" alt="Actor Interactions" />
+            <div class="image-caption">Figure 2: Dealers and Players interact with each other and the replicated log to derive the new shares and group polynomial.</div>
+        </div>
+        <p>
+            At the epoch boundary, all participants derive a new group polynomial from the submitted commitments and a share they can use to participate in the next epoch from
+            the selected dealings. Because <code>commonware-consensus::simplex</code> already ensures all participants see the same log, we know all participants will derive the
+            same group polynomial and a correct share that can be used to participate.
+        </p>
+        <h2>Generating a Threshold Secret</h2>
+        <p>
+            The example ships with two bootstrap strategies. A trusted participant can derive all shares for the initial set of participants, or the validators can run a
+            one-time DKG ceremony to generate the initial shares collectively (where no participant ever has full knowledge of the secret).
+        </p>
+        <div class="image-container">
+            <img src="/imgs/dkg_bootstrap.png" alt="DKG bootstrap" />
+            <div class="image-caption">Figure 3: The DKG ceremony is performed once, and the resulting shares are used to bootstrap the initial epoch.</div>
+        </div>
+        <p>
+            The trusted path is great for local testing and CI: the setup tool deterministically samples the group key, splits it into shares, and writes configs for each validator.
+            The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>commonware-consensus::simplex</code>).
+            A bootstrap committee uses the non-threshold dialect of <code>commonware-consensus::simplex</code> (powered by <code>commonware-cryptography::ed25519</code>) to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
+            are used by the initial participants in the first epoch. From there, the built-in resharing mechanism handles all future key material updates.
+        </p>
+        <p>
+            With an end-to-end solution for bootstrapping and maintaining a threshold secret over a dynamic validator set, the road is now paved
+            for integrating <a href="/blogs/commonware-cryptography.html">Seeds, Links, and Views</a> into applications building on the Commonware Library.
+        </p>
+        <h2>Trying It Locally</h2>
+        <p>
+            You can run the example by generating participant configurations and launching the validators with the
+            command emitted by the setup step:
+        </p>
+        <pre><code>
+$ git clone git@github.com:commonwarexyz/monorepo.git && cd monorepo
+# Trusted Setup
+$ cargo run --bin commonware-reshare setup
+# DKG Setup
+$ cargo run --bin commonware-reshare setup --with-dkg
+# Execute the `mprocs` command(s) emitted by the previous step
+        </code></pre>
+        <p>
+            The setup step writes per-validator configuration files under the chosen <code>--datadir</code> (default <code>./data</code>)
+            and prints one or two <code>mprocs</code> invocations. For the DKG flow, run the first command to complete the ceremony,
+            shut everything down, and then run the second command to launch the threshold committee that was just minted.
+        </p>
+        <p>
+            Next up, <a href="https://x.com/_patrickogrady/status/1973859090016395621"><code>commonware-constantinople</code></a>!
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+</body>
+
+</html>
