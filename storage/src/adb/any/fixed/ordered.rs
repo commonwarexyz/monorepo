@@ -6,7 +6,10 @@
 
 use crate::{
     adb::{
-        any::fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
+        any::{
+            build_snapshot_from_log,
+            fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
+        },
         operation::fixed::ordered::{KeyData, Operation},
         store::{self, Db},
         Error,
@@ -99,8 +102,7 @@ impl<
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        super::super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
-            .await?;
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
             mmr,
