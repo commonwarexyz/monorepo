@@ -99,7 +99,7 @@ impl<
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
+        super::super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
             .await?;
 
         let db = Any {

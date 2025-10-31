@@ -96,7 +96,7 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        super::build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
+        super::super::build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
 
         let mut db = Any {
             mmr,
