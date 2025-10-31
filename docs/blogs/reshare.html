@@ -88,21 +88,20 @@
         <p>
             Tendermint-style protocols make the transition straightforward: replicas only start voting on height <code>h + 1</code> once height <code>h</code> is finalized,
             so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>commonware-consensus::simplex</code>), however, begin casting votes for the next
-            height immediately after the previous height is notarized (when there exists 2f+1 <code>PREVOTE</code>s but before there exist 2f+1 <code>PRECOMMIT</code>s in
+            height immediately after the previous height is notarized (when 2f+1 <code>PREVOTE</code>s exist but before 2f+1 <code>PRECOMMIT</code>s exist, in
             <a href="https://decentralizedthoughts.github.io/2025-06-18-simplex/">Tendermint parlance</a>). While this approach minimizes block time (and thus transaction confirmation
             latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators use their "local view" of the finalized tip
             to determine who is eligible to notarize a block, the network risks a halt or a safety failure (as participants may consider votes from different validators to be useless).
         </p>
         <p>
             What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a>—a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas—offers
-            a consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a sequence of segments broken into epochs where we simply "ignore" blocks that exceed some configured epoch length whether
+            a consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a sequence of segments broken into epochs where we simply "ignore" blocks that exceed some configured epoch length, whether
             finalized or not. Practically speaking, the validator enters a new epoch as soon as they process a finalized block at the epoch boundary (entering the next epoch with a synchronized view of the finalized state
             where they can update the validator set safely).
         </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
-            <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance,
-                if this hasn't happened yet we re-propose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
+            <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance. If this hasn't happened yet, we re-propose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
             </div>
         </div>
         <p>
@@ -114,7 +113,7 @@
         <h2>Resharing: Piggybacking on Consensus</h2>
         <p>
             When maintaining a threshold secret, changing the validator set requires more than updating a list. Whenever participants are added or removed, a new dealing of the secret must
-            be performed to ensure new participants receive some share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
+            be performed to ensure new participants receive a share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
             must not be able to use shares across dealings or else it is trivial for a single malicious participant to acquire <i>f</i> shares over <i>f</i> epochs). Our original
             <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
             trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a> to ensure all participants received the same set of
@@ -129,9 +128,9 @@
         <p>
             Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will hold shares in the next epoch.
             Dealers generate shares for all new players (based on their share from the current epoch to maintain the same shared secret across epochs) and send them to players
-            over <code>commonware-p2p</code>'s encrypted, point-to-point channels. Players validate the received shares and send acknowledgements back to dealers, if correct.
-            After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from players that they received shares against that commitment,
-            and any revealed secret shares for players that didn't acknowledge receipt and publish it to the log.
+            over <code>commonware-p2p</code>'s encrypted, point-to-point channels. Players validate the received shares and, if correct, send acknowledgements back to dealers.
+            After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from players who received shares against that commitment,
+            and any revealed secret shares for players that didn't acknowledge receipt. They publish that outcome to the log.
         </p>
         <div class="image-container">
             <img src="/imgs/reshare_actors.png" alt="Actor Interactions" />
@@ -154,8 +153,8 @@
         <p>
             The trusted path is great for local testing and CI: the setup tool deterministically samples the group key, splits it into shares, and writes configs for each validator.
             The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>commonware-consensus::simplex</code>).
-            A bootstrap committee uses ED25519 <code>commonware-consensus::simplex</code> to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
-            are used by the initial participants in the first epoch (from there the built-in resharing mechanism handles all future key material updates).
+            A bootstrap committee uses the non-threshold dialect of <code>commonware-consensus::simplex</code> (powered by <code>commonware-cryptography::ed25519</code>) to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
+            are used by the initial participants in the first epoch. From there, the built-in resharing mechanism handles all future key material updates.
         </p>
         <p>
             With an end-to-end solution for bootstrapping and maintaining a threshold secret over a dynamic validator set, the road is now paved
