@@ -302,9 +302,8 @@ where
             self.snapshot.insert(&key, new_loc);
         };
 
-        self.apply_op(Operation::Update(key, value))
-            .await
-            .map(|_| ())
+        self.log.append(Operation::Update(key, value)).await?;
+        Ok(())
     }
 
     /// Updates the value associated with the given key in the store, inserting a default value
@@ -334,7 +333,8 @@ where
         Self::delete_loc(&mut self.snapshot, &key, old_loc);
         self.steps += 1;
 
-        self.apply_op(Operation::Delete(key)).await.map(|_| ())
+        self.log.append(Operation::Delete(key)).await?;
+        Ok(())
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -358,9 +358,11 @@ where
         self.steps = 0;
 
         // Apply the commit operation with the new inactivity floor.
-        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+        let last_commit_loc = self
+            .log
+            .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
-        self.last_commit = Some(self.op_count() - 1);
+        self.last_commit = Some(Location::new_unchecked(last_commit_loc));
 
         // Sync the log data to ensure durability.
         self.log.sync_data().await?;
@@ -501,11 +503,11 @@ where
         if log_size == 0 {
             return Ok(0);
         }
-        let Some(oldest_retained_pos) = log.oldest_retained_pos() else {
+        let Some(oldest_retained_loc) = log.oldest_retained_pos().map(Location::new_unchecked)
+        else {
             // Log is fully pruned
             return Ok(log_size);
         };
-        let oldest_retained_loc = Location::new_unchecked(oldest_retained_pos);
 
         // Walk backwards to find last commit
         let mut first_uncommitted = None;
@@ -543,14 +545,18 @@ where
     /// Builds the database's snapshot from the log of operations. Any operations after
     /// the latest commit operation are removed.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        // Rewind log to remove uncommitted operations
-        Self::rewind_uncommitted(&mut self.log).await?;
+        // Rewind log to remove uncommitted operations.
+        let log_size = Self::rewind_uncommitted(&mut self.log).await?;
 
-        // Replay operations to build snapshot
+        // Last operation, if any, is always a CommitFloor operation.
+        self.last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
+
+        let pruning_boundary = self.oldest_retained_loc().unwrap_or(self.op_count());
+
         {
             let stream = self
                 .log
-                .replay(0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .replay(*pruning_boundary, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
@@ -580,16 +586,7 @@ where
             }
         }
 
-        // After rewinding, the last operation (if any) is always a CommitFloor
-        self.last_commit = self.op_count().checked_sub(1);
         Ok(self)
-    }
-
-    /// Append the operation to the log. The `commit` method must be called to make any applied operation
-    /// persistent & recoverable.
-    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.log.append(op).await?;
-        Ok(())
     }
 
     /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
@@ -681,7 +678,7 @@ where
             cursor.update(new_loc);
             drop(cursor);
 
-            self.apply_op(op).await?;
+            self.log.append(op).await?;
             Ok(Some(old_loc))
         } else {
             // The operation is not active, so this is a no-op.
