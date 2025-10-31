@@ -131,27 +131,16 @@
             over <code>commonware-p2p</code>'s encrypted, point-to-point channels. Players validate the received shares and send acknowledgements back to dealers, if correct.
             After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from players that they received shares against that commitment,
             and any revealed secret shares for players that didn't acknowledge receipt and publish it to the log.
-
-            Players acknowledge or challenge those shares, and any misbehavior is
-            surfaced as evidence. Once the outcomes converge, the orchestrator packages the transcript into a compact <code>Outcome</code> object and proposes it alongside normal blocks.
-        </p>
-        <p>
-            Consensus handles the rest. When the reshare outcomes finalize, every node&mdash;whether or not it currently holds a share&mdash;derives the same commitments,
-            optional local key material, and the participant list for the next epoch. Instead of trusting an Arbiter as in the
-            <code>vrf</code> example, every player independently validates the dealers' work from the data replicated on chain.
         </p>
         <div class="image-container">
             <img src="/imgs/reshare_actors.png" alt="Actor Interactions" />
             <div class="image-caption">Figure 2: Dealers and Players interact with each other and the replicated log to derive the new shares and group polynomial.</div>
         </div>
         <p>
-            Driving resharing through the replicated log gives us three concrete properties:
+            At the epoch boundary, all participants derive a new group polynomial from the submitted commitments and a share they can use to participate in the next epoch from
+            the selected dealings. Because <code>commonware-consensus::simplex</code> already ensures all participants see the same log, we know all participants will derive the
+            same group polynomial and a correct share that can be used to participate.
         </p>
-        <ol>
-            <li><b>Accountability</b>: every dealer's encrypted share, commitment, and complaint live in the log as a durable receipt.</li>
-            <li><b>Availability</b>: the network keeps proposing blocks while it prepares the next quorum, so reconfiguration never competes with liveness.</li>
-            <li><b>Recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channel communication.</li>
-        </ol>
         <h2>Bootstrapping a Threshold Committee</h2>
         <p>
             The example ships with two bootstrap strategies. A trusted coordinator can mint the genesis key set and hand
