@@ -80,29 +80,30 @@
             <div class="date">October 15, 2025</div>
         </div>
         <p>
-            Most consensus protocols (TODO: add links) are described under the permissioned setting (where all participants are fixed and known ahead of time).
-            Safely transitioning from one permissioned set to another, as participants are added and removed, is left as an exercise for the reader.
+            Most production consensus stacks&mdash;including classical BFT protocols like
+            <a href="https://docs.tendermint.com">Tendermint</a>, <a href="https://arxiv.org/abs/1803.05069">HotStuff</a>, and our own
+            <a href="/blogs/minimmit.html"><code>minimmit</code></a>&mdash;are described under a permissioned model where every validator is fixed and known ahead of time.
+            Safely transitioning from one committee to the next, while the system keeps producing blocks, is usually left as an exercise to the reader.
         </p>
         <p>
-            Sometimes this transition is obvious, as in Tendermint. Participants only start working on another height once the previous height is finalized.
-            This makes it safe to transition as soon as finalization is observed. Newer protocols, like Simplex, that offer faster-than-finality views, begin
-            working on the next height as soon as the previous height is notarized (rather than finalized). This makes it quite challenging to actually decide
-            when to apply a new permissioned set. If it isn't known when building a block who should vote on it, divergence can lead to a halt or a safety failure.
+            Tendermint-style protocols make the transition straightforward: replicas only build height <code>h + 1</code> once height <code>h</code> is finalized,
+            so swapping the validator list during finalization is safe. Newer protocols, like <code>consensus::simplex</code>,
+            begin casting votes for the next height immediately after the previous height is notarized. That faster-than-finality pipeline drives latency down,
+            but it complicates reconfiguration. If validators disagree about who is eligible to notarize a block, the network risks a halt or a safety failure.
         </p>
         <p>
-            What do? A new formulation of this problem by y Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim
-            Roughgarden and Ertem Nusret Tas in <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a> offers a generic solution
-            to this problem by blackboxing consensus (allowing for the same technique to work no matter how the inner consensus is defined). Treat the global
-            log as a number of segmented logs (each of epoch length) and work on finalizing each (transitioning to the next epoch when the some block at the epoch boundary
-            is directly finalized).
+            So how do we reconfigure without pausing? A recent formulation by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu,
+            Tim Roughgarden, and Ertem Nusret Tas in <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a>
+            offers a protocol-agnostic answer. Treat the replicated log as a sequence of epoch-sized segments and only advance to the next segment when
+            the block at the epoch boundary is directly finalized. The technique black-boxes the inner consensus engine, so the same recipe works no matter
+            how blocks are notarized.
         </p>
         <p>
-            With an eye towards supporting multiple consensus protocols (TODO: link to Minimmit) in the Commonware Library, we opted to implement this generic technique.
-            Recently, we added support for height-based epoching in <code>consensus::simplex</code>. This
-            feature adds an <code>epoch</code> field to each consensus message, enabling an orchestrator to transition
-            to a new epoch when a direct finalization for the last block in an epoch is observed. Epochs give us the
-            perfect platform to perform progressive BLS key reshare to reconfigure the committee, defining an
-            in-protocol border between different committees' active block heights.
+            With an eye towards supporting multiple consensus protocols in the Commonware Library&mdash;including
+            <a href="/blogs/minimmit.html"><code>minimmit</code></a> and <a href="/blogs/threshold-simplex.html"><code>consensus::simplex</code></a>&mdash;we implemented this approach.
+            Height-based epoching in <code>consensus::simplex</code> adds an explicit <code>epoch</code> field to every message and lets an orchestrator advance epochs
+            once the last block in the current epoch is directly finalized. Epoch boundaries give us the perfect place to reshare BLS key material and hand the signing
+            authority to the next committee without introducing side channels.
         </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
@@ -112,68 +113,57 @@
         </div>
         <h2>Resharing: Piggybacking on Consensus</h2>
         <p>
-            In the threshold setting, changing the validator set means more than just changing the list of participants. You also need to ensure all new participants receive
-            a share of the threshold secret to sign votes. Our existing VRF example (TODO: link) from a year ago demonstrates how to do this but uses a central arbiter to ensure all participants see the same commitments, acknowledgements, and reveals. To do this right, we need to remove this arbiter.
-        </p>
-        <h2>A refresher on threshold <code>consensus::simplex</code> and <code>examples/vrf</code></h2>
-        <p>
-            The threshold <code>consensus::simplex</code> module utilizes BLS threshold signatures so that a group of
-            validators can sign consensus messages. Each active validator has a share of the signing key. A threshold
-            of these shares is required to sign a message.
+            In the threshold setting, changing the validator set means more than updating a list. Fresh participants need a share of the threshold secret to sign votes,
+            and existing participants must refresh their shares to avoid accumulating risk. Our original
+            <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>vrf</code></a> example showed a continuous reshare pipeline,
+            but it relied on a central <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>
+            to keep everyone honest. Removing that trusted coordinator requires piggybacking resharing directly on top of consensus.
         </p>
         <p>
-            <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>examples/vrf</code></a>
-            showcases a continuous key reshare process to generate randomness, but with one caveat: participants trust a
-            central "<a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>"
-            to ensure all participants see the same commitments, acknowledgements, and reveals.
+            Threshold <code>consensus::simplex</code> uses BLS threshold signatures so a committee can sign votes as a single aggregate.
+            Each validator holds a share of the private key, and as soon as <code>T</code> shares are combined the signature verifies under the group public key.
+            That structure is ideal for fast notarization, but it only works if every active validator possesses a fresh, matching share.
         </p>
         <p>
             Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>reshare</code></a> example
-            puts these ideas together, driving a DKG protocol with BLS12-381 keys through the replicated log of a
-            blockchain. Validators are required to refresh their key material every epoch (a predefined
-            interval of blocks) and can generate new shares for fresh participants, providing a blueprint for chains
-            users of threshold <code>consensus::simplex</code> to reconfigure the validator committee securely.
+            marries the DKG engine in <code>cryptography::bls12381::dkg</code> with the replicated log of a blockchain.
+            Validators refresh their key material every epoch&mdash;a configurable interval of blocks&mdash;and derive new shares for incoming participants.
+            The consensus log carries the entire transcript so that chains using threshold <code>consensus::simplex</code> can reconfigure committees without an out-of-band channel.
         </p>
         <p>
-            To safely reconfigure the validator committee in a threshold <code>consensus::simplex</code> engine,
-            we use <code>cryptography::bls12381::dkg</code> to securely generate new shares for the next committee.
+            Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will sign in the next epoch.
+            Dealers publish encrypted shares, Feldman commitments, and optional complaints to the log. Players acknowledge or challenge those shares, and any misbehavior is
+            surfaced as evidence. Once the outcomes converge, the orchestrator packages the transcript into a compact <code>Outcome</code> object and proposes it alongside normal blocks.
         </p>
         <p>
-            Each epoch begins with a set of <b>dealers</b>, the active validators in the current epoch, and
-            <b>players</b>, the active validators in the upcoming epoch. Dealers encrypt fresh shares to the
-            upcoming committee (players), players acknowledge these shares, and anyone who misbehaves is
-            flagged by participants. Those transcripts are bundled into a compact result and proposed alongside normal
-            blocks.
-        </p>
-        <p>
-            Consensus handles the rest. Once the reshare outcomes are included within finalized blocks, every
-            participant will have a consistent view of the commitments, optional local share (if part of the
-            current committee), and participant list for the next epoch. Rather than trusting a central Arbiter,
-            like in <code>examples/vrf</code>, all players can track the results published by the dealers to
-            arrive at the reshare outcome independently.
+            Consensus handles the rest. When the reshare outcomes finalize, every node&mdash;whether or not it currently holds a share&mdash;derives the same commitments,
+            optional local key material, and the participant list for the next epoch. Instead of trusting an Arbiter as in the
+            <code>vrf</code> example, every player independently validates the dealers' work from the data replicated on chain.
         </p>
         <div class="image-container">
             <img src="/imgs/reshare_actors.png" alt="Actor Interactions" />
             <div class="image-caption">Figure 2: Dealers and Players interact with each other and the replicated log to derive the new shares and group polynomial.</div>
         </div>
         <p>
-            Driving resharing through the replicated log provides:
-        <ol>
-            <li><b>accountability</b>: cryptographic receipts for every dealer's outcome are included in the replicated log.</li>
-            <li><b>availability</b>: the network keeps producing blocks while it prepares the next quorum, so reconfiguration/reshare does not compete with liveness.</li>
-            <li><b>recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channeled communication.</li>
-        </ol>
+            Driving resharing through the replicated log gives us three concrete properties:
         </p>
+        <ol>
+            <li><b>Accountability</b>: every dealer's encrypted share, commitment, and complaint live in the log as a durable receipt.</li>
+            <li><b>Availability</b>: the network keeps proposing blocks while it prepares the next quorum, so reconfiguration never competes with liveness.</li>
+            <li><b>Recoverability</b>: because dealer outcomes are persisted, any node can crash, restart, and deterministically rejoin the current epoch without side-channel communication.</li>
+        </ol>
         <h2>Bootstrapping a Threshold Committee</h2>
         <p>
-            To bootstrap the initial threshold committee, the example offers two paths: a trusted setup, where a central
-            party creates and distributes the shares, or a DKG ceremony, where all participants jointly generate the
-            initial shares without any single point of trust.
+            The example ships with two bootstrap strategies. A trusted coordinator can mint the genesis key set and hand
+            the shares to validators, or the validators can run a DKG ceremony to generate the initial shares
+            collectively.
         </p>
         <p>
-            The trusted setup is more simple, but the DKG ceremony is more secure. The DKG ceremony is facilitated
-            amongst a known set of participants using ED25519 <code>consensus::simplex</code> to agree on the DKG
-            transcript.
+            The trusted path is the quickest on-ramp for experimentation: the setup tool deterministically samples the
+            group key, splits it into shares, and writes configs for each validator. The DKG ceremony takes longer but
+            eliminates that single point of trust. A bootstrap committee uses ED25519
+            <code>consensus::simplex</code> to agree on the transcript produced by
+            <code>cryptography::bls12381::dkg</code>, and the resulting shares flow into the very first epoch.
         </p>
         <img src="/imgs/dkg_bootstrap.png" alt="DKG bootstrap" />
         <p>
@@ -196,6 +186,11 @@ $ cargo run --bin commonware-reshare setup
 $ cargo run --bin commonware-reshare setup --with-dkg
 # Execute the `mprocs` command(s) emitted by the previous step
         </code></pre>
+        <p>
+            The setup step writes per-validator configuration files under the chosen <code>--datadir</code> (default <code>./data</code>)
+            and prints one or two <code>mprocs</code> invocations. For the DKG flow, run the first command to complete the ceremony,
+            shut everything down, and then run the second command to launch the threshold committee that was just minted.
+        </p>
 
         <h2>What Comes Next</h2>
         <p>
