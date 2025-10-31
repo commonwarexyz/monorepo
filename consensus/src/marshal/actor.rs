@@ -95,8 +95,6 @@ pub struct Actor<
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
-    // Last sent tip
-    last_sent_tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -240,7 +238,6 @@ impl<
                 block_codec_config: config.block_codec_config,
                 partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
-                last_sent_tip: 0,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
@@ -297,7 +294,7 @@ impl<
         let tip = self.get_latest().await;
         if let Some((height, commitment)) = tip {
             application.report(Update::Tip(height, commitment)).await;
-            self.last_sent_tip = height;
+            self.finalized_height.set(height as i64);
         }
 
         // Handle messages
@@ -777,18 +774,15 @@ impl<
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics
-        let new_value: i64 = height as i64;
-        let old_value: i64 = self.finalized_height.get();
-        self.finalized_height.set(max(new_value, old_value));
-
         // Notify the finalizer
         let _ = notifier.try_send(());
 
-        // Send tip update to application
-        if height > self.last_sent_tip {
+        // Update metrics and send tip update to application
+        let new_value: i64 = height as i64;
+        let old_value: i64 = self.finalized_height.get();
+        if new_value > old_value {
+            self.finalized_height.set(max(new_value, old_value));
             application.report(Update::Tip(height, commitment)).await;
-            self.last_sent_tip = height;
         }
     }
 
