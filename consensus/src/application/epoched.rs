@@ -44,6 +44,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
+    future::try_join,
     lock::Mutex,
 };
 use prometheus_client::metrics::gauge::Gauge;
@@ -277,14 +278,23 @@ where
             .with_label("verify")
             .spawn(move |r_ctx| async move {
                 let (parent_view, parent_commitment) = context.parent;
-                let parent = fetch_parent(
+                let parent_request = fetch_parent(
                     parent_commitment,
                     Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
                 .await;
-                let block = marshal.subscribe(None, digest).await.await;
+                let block_request = marshal.subscribe(None, digest).await.await;
+                let requester = try_join(parent_request, block_request);
+                select! {
+                    requester = requester => {
+                        let (parent, block) = requester.unwrap();
+                    },
+                    _ = tx.closed() => {
+                        return;
+                    },
+                }
 
                 let Ok(parent) = parent else {
                     warn!(
