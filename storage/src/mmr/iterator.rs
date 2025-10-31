@@ -69,7 +69,10 @@ impl PeakIterator {
     ///
     /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(size <= crate::mmr::MAX_POSITION, "size exceeds MAX_POSITION");
+        assert!(
+            size <= crate::mmr::MAX_POSITION,
+            "size exceeds MAX_POSITION"
+        );
 
         // Algorithm: A valid MMR size corresponds to a specific number of leaves N, where:
         // mmr_size(N) = 2*N - popcount(N)
