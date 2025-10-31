@@ -42,13 +42,11 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_journal_partition: "test_partition".to_string(),
+//!         log_partition: "test_partition".to_string(),
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
-//!         locations_journal_partition: "locations_partition".to_string(),
-//!         locations_items_per_blob: NZU64!(4),
 //!         translator: TwoCap,
 //!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
@@ -88,10 +86,7 @@
 use crate::{
     adb::operation::variable::Operation,
     index::{Cursor, Index as _, Unordered as Index},
-    journal::{
-        contiguous::fixed::{Config as FConfig, Journal as FJournal},
-        segmented::variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
     translator::Translator,
 };
@@ -99,11 +94,8 @@ use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{Array, NZUsize};
 use core::future::Future;
-use futures::{pin_mut, try_join, StreamExt};
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use futures::{pin_mut, StreamExt};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
@@ -128,9 +120,9 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// The name of the [`RStorage`] partition used to persist the log of operations.
-    pub log_journal_partition: String,
+    pub log_partition: String,
 
-    /// The size of the write buffer to use for each blob in the [`VJournal`].
+    /// The size of the write buffer to use for each blob in the [Journal].
     pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
@@ -139,14 +131,8 @@ pub struct Config<T: Translator, C> {
     /// The codec configuration to use for encoding and decoding log items.
     pub log_codec_config: C,
 
-    /// The number of operations to store in each section of the [`VJournal`].
+    /// The number of operations to store in each section of the [Journal].
     pub log_items_per_section: NonZeroU64,
-
-    /// The name of the [`RStorage`] partition used for the location map.
-    pub locations_journal_partition: String,
-
-    /// The number of items to put in each blob in the location map.
-    pub locations_items_per_blob: NonZeroU64,
 
     /// The [`Translator`] used by the compressed index.
     pub translator: T,
@@ -201,7 +187,7 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
-/// An unauthenticated key-value database based off of an append-only [VJournal] of operations.
+/// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
@@ -210,29 +196,19 @@ where
     T: Translator,
 {
     /// A log of all [Operation]s that have been applied to the store.
-    log: VJournal<E, Operation<K, V>>,
+    log: Journal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// section and offset within the section containing its most recent update.
+    /// location containing its most recent update.
     ///
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
     snapshot: Index<T, Location>,
 
-    /// The number of items to store in each section of the variable journal.
-    log_items_per_section: u64,
-
-    /// A fixed-length journal that maps an operation's location to its offset within its respective
-    /// section of the log. (The section number is derived from location.)
-    locations: FJournal<E, u32>,
-
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
-
-    /// The location of the oldest operation in the log that remains readable.
-    oldest_retained_loc: Location,
 
     /// The total number of operations that have been applied to the store.
     log_size: Location,
@@ -264,25 +240,15 @@ where
     ) -> Result<Self, Error> {
         let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
 
-        let log = VJournal::init(
+        let log = Journal::init(
             context.with_label("log"),
-            VConfig {
-                partition: cfg.log_journal_partition,
+            JournalConfig {
+                partition: cfg.log_partition,
+                items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
-                buffer_pool: cfg.buffer_pool.clone(),
-                write_buffer: cfg.log_write_buffer,
-            },
-        )
-        .await?;
-
-        let locations = FJournal::init(
-            context.with_label("locations"),
-            FConfig {
-                partition: cfg.locations_journal_partition,
-                items_per_blob: cfg.locations_items_per_blob,
-                write_buffer: cfg.log_write_buffer,
                 buffer_pool: cfg.buffer_pool,
+                write_buffer: cfg.log_write_buffer,
             },
         )
         .await?;
@@ -290,10 +256,7 @@ where
         let db = Self {
             log,
             snapshot,
-            log_items_per_section: cfg.log_items_per_section.get(),
-            locations,
             inactivity_floor_loc: Location::new_unchecked(0),
-            oldest_retained_loc: Location::new_unchecked(0),
             log_size: Location::new_unchecked(0),
             steps: 0,
             last_commit: None,
@@ -323,7 +286,7 @@ where
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc < self.log_size);
+        assert!(loc < self.op_count());
         let op = self.get_op(loc).await?;
 
         Ok(op.into_value())
@@ -335,7 +298,7 @@ where
     /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.log_size;
+        let new_loc = self.op_count();
         if let Some(old_loc) = self.get_key_loc(&key).await? {
             Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
             self.steps += 1;
@@ -403,8 +366,8 @@ where
             .await?;
         self.last_commit = Some(self.op_count() - 1);
 
-        let section = self.current_section();
-        self.log.sync(section).await?;
+        // Sync the log data to ensure durability.
+        self.log.sync_data().await?;
 
         debug!(log_size = ?self.log_size, "commit complete");
 
@@ -440,16 +403,11 @@ where
         Ok(())
     }
 
-    fn current_section(&self) -> u64 {
-        *self.log_size / self.log_items_per_section
-    }
-
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        let current_section = *self.log_size / self.log_items_per_section;
-        try_join!(self.log.sync(current_section), self.locations.sync())?;
+        self.log.sync().await?;
 
         Ok(())
     }
@@ -463,37 +421,25 @@ where
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         // Calculate the target pruning position: inactivity_floor_loc.
         assert!(target_prune_loc <= self.inactivity_floor_loc);
-        if target_prune_loc <= self.oldest_retained_loc {
+
+        let pruning_boundary = self.oldest_retained_loc().unwrap_or(self.op_count());
+        if target_prune_loc <= pruning_boundary {
             return Ok(());
         }
 
-        // Sync locations so it never ends up behind the log.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1554): Extend recovery to avoid
-        // this sync.
-        self.locations.sync().await?;
+        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
+        // location may be less than requested. We always prune the log first. This procedure ensures
+        // all log operations are always accessible, even in the event of failures, with no need
+        // for special recovery.
+        self.log.prune(*target_prune_loc).await?;
 
-        // Prune the log up to the section containing the requested pruning location. We always
-        // prune the log first, and then prune the locations structure based on the log's actual
-        // pruning boundary. This procedure ensures all log operations always have corresponding
-        // location entries, even in the event of failures, with no need for special recovery.
-        let section_with_target = *target_prune_loc / self.log_items_per_section;
-        if !self.log.prune(section_with_target).await? {
-            return Ok(());
-        }
-        self.oldest_retained_loc =
-            Location::new_unchecked(section_with_target * self.log_items_per_section);
+        let oldest_retained_loc = self.oldest_retained_loc();
         debug!(
             log_size = ?self.log_size,
-            oldest_retained_loc = ?self.oldest_retained_loc,
+            ?oldest_retained_loc,
             ?target_prune_loc,
             "pruned inactive ops"
         );
-
-        // Prune the locations map up to the oldest retained item in the log after pruning.
-        self.locations
-            .prune(*self.oldest_retained_loc)
-            .await
-            .map_err(Error::Journal)?;
 
         Ok(())
     }
@@ -519,24 +465,16 @@ where
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
     /// via [Store::commit].
     pub async fn close(self) -> Result<(), Error> {
-        try_join!(self.log.close(), self.locations.close())?;
+        self.log.close().await?;
 
         Ok(())
     }
 
-    /// Simulates a commit failure by avoiding syncing either or both of the log or locations.
+    /// Simulates a commit failure by avoiding syncing the log.
     #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(
-        mut self,
-        sync_locations: bool,
-        sync_log: bool,
-    ) -> Result<(), Error> {
-        if sync_locations {
-            self.locations.sync().await?;
-        }
+    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
         if sync_log {
-            let section = self.current_section();
-            self.log.sync(section).await?;
+            self.log.sync().await?;
         }
 
         Ok(())
@@ -549,14 +487,14 @@ where
     /// This operation is irreversible. Do not call this method unless you are sure
     /// you want to delete all data associated with this store permanently!
     pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(self.log.destroy(), self.locations.destroy())?;
+        self.log.destroy().await?;
         Ok(())
     }
 
     /// Returns the number of operations that have been applied to the store, including those that
     /// are not yet committed.
     pub fn op_count(&self) -> Location {
-        self.log_size
+        Location::new_unchecked(self.log.size())
     }
 
     /// Whether the db currently has no active keys.
@@ -570,150 +508,141 @@ where
         self.inactivity_floor_loc
     }
 
+    /// Return the oldest location that remains retrievable.
+    fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Walk backwards and removes uncommitted operations after the last commit.
+    ///
+    /// Returns the log size after rewinding.
+    async fn rewind_uncommitted(log: &mut Journal<E, Operation<K, V>>) -> Result<u64, Error> {
+        let log_size = log.size();
+        if log_size == 0 {
+            return Ok(0);
+        }
+        let Some(oldest_retained_pos) = log.oldest_retained_pos() else {
+            // Log is fully pruned
+            return Ok(log_size);
+        };
+        let oldest_retained_loc = Location::new_unchecked(oldest_retained_pos);
+
+        // Walk backwards to find last commit
+        let mut first_uncommitted = None;
+        let mut loc = Location::new_unchecked(log_size - 1);
+
+        loop {
+            let op = log.read(*loc).await.map_err(Error::Journal)?;
+            match op {
+                Operation::CommitFloor(_, _) => break,
+                Operation::Update(_, _) | Operation::Delete(_) => {
+                    first_uncommitted = Some(loc);
+                }
+                Operation::Set(_, _) | Operation::Commit(_) => {
+                    unreachable!("Set and Commit operations are not used in mutable stores")
+                }
+            }
+            if loc == oldest_retained_loc {
+                break;
+            }
+            loc = Location::new_unchecked(*loc - 1);
+        }
+
+        // Rewind operations after the last commit
+        if let Some(rewind_loc) = first_uncommitted {
+            let ops_to_rewind = log_size - *rewind_loc;
+            warn!(ops_to_rewind, ?rewind_loc, "rewinding log to last commit");
+            log.rewind(*rewind_loc).await.map_err(Error::Journal)?;
+            log.sync().await.map_err(Error::Journal)?;
+            Ok(*rewind_loc)
+        } else {
+            Ok(log_size)
+        }
+    }
+
+    /// Find the last commit location by walking backwards from the end of the log.
+    async fn find_last_commit(
+        log: &Journal<E, Operation<K, V>>,
+        log_size: Location,
+    ) -> Result<Option<Location>, Error> {
+        if *log_size == 0 {
+            return Ok(None);
+        }
+        let Some(oldest_retained_pos) = log.oldest_retained_pos() else {
+            // Log is fully pruned, no commit can be found
+            return Ok(None);
+        };
+        let oldest_retained_loc = Location::new_unchecked(oldest_retained_pos);
+
+        let mut check_loc = Location::new_unchecked(*log_size - 1);
+        while check_loc >= oldest_retained_loc {
+            let op = log.read(*check_loc).await.map_err(|e| match e {
+                crate::journal::Error::ItemPruned(_) => Error::OperationPruned(check_loc),
+                e => Error::Journal(e),
+            })?;
+            match op {
+                Operation::CommitFloor(_, _) => return Ok(Some(check_loc)),
+                Operation::Update(_, _) | Operation::Delete(_) => {
+                    if check_loc == oldest_retained_loc {
+                        break;
+                    }
+                    check_loc = Location::new_unchecked(*check_loc - 1);
+                }
+                Operation::Set(_, _) | Operation::Commit(_) => {
+                    unreachable!("Set and Commit operations are not used in mutable stores")
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Builds the database's snapshot from the log of operations. Any operations that sit above
     /// the latest commit operation are removed.
     ///
     /// Returns the number of operations that were applied to the store, the oldest retained
     /// location, and the inactivity floor location.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        let mut locations_size = self.locations.size().await;
+        // Rewind log to remove uncommitted operations
+        let new_log_size = Self::rewind_uncommitted(&mut self.log).await?;
+        self.log_size = Location::new_unchecked(new_log_size);
 
-        // The location and blob-offset of the first operation to follow the last known commit point.
-        let mut after_last_commit = None;
-        // The set of operations that have not yet been committed.
-        let mut uncommitted_ops = HashMap::new();
-        let mut oldest_retained_loc_found = false;
+        // Replay operations to build snapshot (all operations are now committed)
         {
             let stream = self
                 .log
-                .replay(0, 0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .replay(0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                match result {
-                    Err(e) => {
-                        return Err(Error::Journal(e));
+                let (pos, op) = result?;
+                let loc = Location::new_unchecked(pos);
+
+                match op {
+                    Operation::Delete(key) => {
+                        if let Some(old_loc) = self.get_key_loc(&key).await? {
+                            Self::delete_loc(&mut self.snapshot, &key, old_loc);
+                        }
                     }
-                    Ok((section, offset, _, op)) => {
-                        if !oldest_retained_loc_found {
-                            self.log_size =
-                                Location::new_unchecked(section * self.log_items_per_section);
-                            self.oldest_retained_loc = self.log_size;
-                            oldest_retained_loc_found = true;
+                    Operation::Update(key, _) => {
+                        if let Some(old_loc) = self.get_key_loc(&key).await? {
+                            Self::update_loc(&mut self.snapshot, &key, old_loc, loc);
+                        } else {
+                            self.snapshot.insert(&key, loc);
                         }
-
-                        let loc = self.log_size; // location of the current operation.
-                        if after_last_commit.is_none() {
-                            after_last_commit = Some((loc, offset));
-                        }
-
-                        self.log_size += 1;
-
-                        // Consistency check: confirm the provided section matches what we expect from this operation's
-                        // index.
-                        let expected = *loc / self.log_items_per_section;
-                        assert_eq!(section, expected,
-                                "given section {section} did not match expected section {expected} from location {loc}");
-
-                        if self.log_size > locations_size {
-                            warn!(section, offset, "operation was missing from location map");
-                            self.locations.append(offset).await?;
-                            locations_size += 1;
-                        }
-
-                        match op {
-                            Operation::Delete(key) => {
-                                let result = self.get_key_loc(&key).await?;
-                                if let Some(old_loc) = result {
-                                    uncommitted_ops.insert(key, (Some(old_loc), None));
-                                } else {
-                                    uncommitted_ops.remove(&key);
-                                }
-                            }
-                            Operation::Update(key, _) => {
-                                let result = self.get_key_loc(&key).await?;
-                                if let Some(old_loc) = result {
-                                    uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
-                                } else {
-                                    uncommitted_ops.insert(key, (None, Some(loc)));
-                                }
-                            }
-                            Operation::CommitFloor(_, loc) => {
-                                self.inactivity_floor_loc = loc;
-
-                                // Apply all uncommitted operations.
-                                for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
-                                    if let Some(old_loc) = old_loc {
-                                        if let Some(new_loc) = new_loc {
-                                            Self::update_loc(
-                                                &mut self.snapshot,
-                                                key,
-                                                *old_loc,
-                                                *new_loc,
-                                            );
-                                        } else {
-                                            Self::delete_loc(&mut self.snapshot, key, *old_loc);
-                                        }
-                                    } else {
-                                        assert!(new_loc.is_some());
-                                        self.snapshot.insert(key, new_loc.unwrap());
-                                    }
-                                }
-                                uncommitted_ops.clear();
-                                after_last_commit = None;
-                            }
-                            _ => unreachable!(
-                                "unexpected operation type at offset {offset} of section {section}"
-                            ),
-                        }
+                    }
+                    Operation::CommitFloor(_, loc) => {
+                        self.inactivity_floor_loc = loc;
+                    }
+                    Operation::Set(_, _) | Operation::Commit(_) => {
+                        unreachable!("Set and Commit operations are not used in mutable stores")
                     }
                 }
             }
         }
 
-        // Rewind the operations log if necessary.
-        if let Some((end_loc, end_offset)) = after_last_commit {
-            assert!(!uncommitted_ops.is_empty());
-            warn!(
-                op_count = uncommitted_ops.len(),
-                log_size = ?end_loc,
-                end_offset,
-                "rewinding over uncommitted operations at end of log"
-            );
-            let prune_to_section = *end_loc / self.log_items_per_section;
-            self.log
-                .rewind_to_offset(prune_to_section, end_offset)
-                .await?;
-            self.log.sync(prune_to_section).await?;
-            self.log_size = end_loc;
-        }
-
-        // Pop any locations that are ahead of the last log commit point.
-        if locations_size > self.log_size {
-            warn!(
-                locations_size,
-                log_size = ?self.log_size,
-                "rewinding uncommitted locations"
-            );
-            self.locations.rewind(*self.log_size).await?;
-            self.locations.sync().await?;
-        }
-
-        // Confirm post-conditions hold.
-        assert_eq!(self.log_size, self.locations.size().await);
-        self.last_commit = self
-            .locations
-            .size()
-            .await
-            .checked_sub(1)
-            .map(Location::new_unchecked);
-        assert!(
-            self.last_commit.is_none()
-                || matches!(
-                    self.get_op(self.last_commit.unwrap()).await?,
-                    Operation::CommitFloor(_, _)
-                )
-        );
+        // Find the last commit location
+        self.last_commit = Self::find_last_commit(&self.log, self.log_size).await?;
 
         debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
@@ -722,23 +651,15 @@ where
 
     /// Append the operation to the log. The `commit` method must be called to make any applied operation
     /// persistent & recoverable.
-    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u32, Error> {
-        // Append the operation to the current section of the operations log.
-        let section = self.current_section();
-        let (offset, _) = self.log.append(section, op).await?;
+    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        // Append the operation to the log and get its position.
+        let pos = self.log.append(op).await?;
+        assert_eq!(pos, *self.log_size);
 
-        // Append the offset of the new operation to locations.
-        self.locations.append(offset).await?;
+        // Update the log size to match the journal's size.
+        self.log_size = Location::new_unchecked(self.log.size());
 
-        // Update the uncommitted operations count and increment the log size
-        self.log_size += 1;
-
-        // Maintain the invariant that all completely full sections are synced & immutable.
-        if self.current_section() != section {
-            self.log.sync(section).await?;
-        }
-
-        Ok(offset)
+        Ok(())
     }
 
     /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
@@ -765,16 +686,14 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        assert!(loc < self.log_size);
-        if loc < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc));
-        }
+        assert!(loc < self.op_count());
 
-        let section = *loc / self.log_items_per_section;
-        let offset = self.locations.read(*loc).await?;
-
-        // Get the operation from the log at the specified section and offset.
-        self.log.get(section, offset).await.map_err(Error::Journal)
+        // Get the operation from the log at the specified position.
+        // The journal will return ItemPruned if the location is pruned.
+        self.log.read(*loc).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
+            e => Error::Journal(e),
+        })
     }
 
     /// Updates the snapshot with the new operation location for the given key.
@@ -820,11 +739,12 @@ where
             return Ok(None);
         };
 
+        // Get the new location before borrowing snapshot mutably.
+        let new_loc = self.log_size;
+
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
-
-        let new_loc = self.log_size;
 
         if cursor.find(|&loc| loc == old_loc) {
             // Update the location of the operation in the snapshot.
@@ -908,13 +828,11 @@ mod test {
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
-            log_journal_partition: "journal".to_string(),
+            log_partition: "journal".to_string(),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
-            locations_journal_partition: "locations_journal".to_string(),
-            locations_items_per_blob: NZU64!(11),
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
@@ -927,7 +845,7 @@ mod test {
         executor.start(|mut context| async move {
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc, 0);
+            assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -1102,8 +1020,8 @@ mod test {
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
             assert_eq!(
-                store.oldest_retained_loc,
-                expected_floor - expected_floor % 7
+                store.oldest_retained_loc(),
+                Some(Location::new_unchecked(expected_floor - expected_floor % 7))
             );
 
             store.destroy().await.unwrap();
@@ -1253,7 +1171,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false).await.unwrap();
+            db.simulate_failure(false).await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), 0);
 
@@ -1277,7 +1195,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false).await.unwrap();
+            db.simulate_failure(false).await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
@@ -1305,7 +1223,7 @@ mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false).await.unwrap();
+            db.simulate_failure(false).await.unwrap();
             let db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
@@ -1328,7 +1246,10 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 755);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc, 755 - 755 % 7);
+            assert_eq!(
+                db.oldest_retained_loc(),
+                Some(Location::new_unchecked(755 - 755 % 7))
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
