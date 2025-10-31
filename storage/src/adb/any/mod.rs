@@ -27,7 +27,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit floor operation.
 /// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(crate) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H: Hasher>(
+pub(super) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H: Hasher>(
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
@@ -103,7 +103,7 @@ pub(crate) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H:
 /// floor. The callback is invoked for each replayed operation, indicating activity status updates.
 /// The first argument of the callback is the activity status of the operation, and the second
 /// argument is the location of the operation it inactivates (if any).
-pub(crate) async fn build_snapshot_from_log<O, I, F>(
+pub(super) async fn build_snapshot_from_log<O, I, F>(
     inactivity_floor_loc: Location,
     log: &impl Contiguous<Item = O>,
     snapshot: &mut I,
@@ -343,7 +343,7 @@ where
 {
     /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
     /// until the next successful `commit`.
-    pub(crate) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
+    pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
@@ -360,7 +360,7 @@ where
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns the old location of
     /// the operation if it was active.
-    pub(crate) async fn move_op_if_active(
+    pub(super) async fn move_op_if_active(
         &mut self,
         op: O,
         old_loc: Location,
