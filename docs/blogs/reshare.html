@@ -89,7 +89,8 @@
             so modifying the validator set between heights is safe. New faster-than-finality protocols (i.e. <code>consensus::simplex</code>), however, begin casting votes for the next
             height immediately after the previous height is notarized (when there exists 2f+1 <code>PREVOTE</code>s but before there exist 2f+1 <code>PRECOMMIT</code>s in
             <a href="https://decentralizedthoughts.github.io/2025-06-18-simplex/">Tendermint parlance</a>). While this approach minimizes block time (and thus transaction confirmation
-            latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators disagree about who is eligible to notarize a block, the network risks a halt or a safety failure.
+            latency), it complicates reconfiguration because there is no point at which validators have a synchronized view of the finalized tip. If validators use their "local view" of the finalize tip
+            to determine who is eligible to notarize a block, the network risks a halt or a safety failure (as participants may consider votes from different validators to be useless).
         </p>
         <p>
             So how do we reconfigure without pausing? A recent formulation by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu,
