@@ -81,7 +81,7 @@
         </div>
         <p>
             Most consensus protocols, from <a href="https://arxiv.org/abs/1807.04938">Tendermint</a> and <a href="https://arxiv.org/abs/1803.05069">HotStuff</a> to our own
-            <a href="https://arxiv.org/abs/2508.10862"><code>minimmit</code></a>, are defined under a "permissioned" model where the validator set is fixed and known ahead of time
+            <a href="https://arxiv.org/abs/2508.10862"><code>Minimmit</code></a>, are defined under a "permissioned" model where the validator set is fixed and known ahead of time
             by all participants. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer.
         </p>
         <p>
@@ -95,17 +95,19 @@
         <p>
             What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a>, a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas,
             offers a consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a sequence of segments broken into epochs where we simply "ignore" blocks that exceed some configured epoch length whether
-            finalized or not. Practically, the validator enters a new epoch as soon as they process a finalized block at the epoch boundary (entering the next epoch with a synchronized view of the finalized state
-            where they can modify the validator set safely).
+            finalized or not. Practically speaking, the validator enters a new epoch as soon as they process a finalized block at the epoch boundary (entering the next epoch with a synchronized view of the finalized state
+            where they can update the validator set safely).
         </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
             <div class="image-caption">Figure 1: After some configurable number of blocks is finalized, a new epoch begins. If more blocks than desired are finalized, they are dropped. Epochs require direct finalization of the last block to advance,
-                if this hasn't happened yet we repropose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
+                if this hasn't happened yet we re-propose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
             </div>
         </div>
         <p>
-            With an eye towards supporting multiple consensus protocols in the Commonware Library&mdash;including
+            To avoid reinventing the wheel each time we introduce a new consensus protocol, we opted to implement this consensus-agnostic approach in the Commonware Library.
+
+            including
             <a href="/blogs/minimmit.html"><code>minimmit</code></a> and <a href="/blogs/threshold-simplex.html"><code>consensus::simplex</code></a>&mdash;we implemented this approach.
             Height-based epoching in <code>consensus::simplex</code> adds an explicit <code>epoch</code> field to every message and lets an orchestrator advance epochs
             once the last block in the current epoch is directly finalized. Epoch boundaries give us the perfect place to reshare BLS key material and hand the signing
