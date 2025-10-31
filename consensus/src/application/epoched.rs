@@ -39,7 +39,9 @@ use crate::{
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
+use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
     lock::Mutex,
@@ -160,7 +162,7 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
             .spawn(move |r_ctx| async move {
@@ -203,18 +205,33 @@ where
                 }
 
                 let start = Instant::now();
-                let Some(built_block) = application
-                    .propose(r_ctx.with_label("app_build"), parent, context.clone())
-                    .await
-                else {
-                    warn!(
-                        ?parent_commitment,
-                        reason = "block building returned nothing",
-                        "skipping proposal"
-                    );
-                    return;
+                let built_block = select! {
+                    built_block = application
+                        .propose(r_ctx.with_label("app_build"), parent, context.clone()) => {
+                            if let Some(built_block) = built_block {
+                                Some(built_block)
+                            } else {
+                                warn!(
+                                    ?parent_commitment,
+                                    reason = "block building returned nothing",
+                                    "skipping proposal"
+                                );
+                                None
+                            }
+                        },
+                    _ = tx.closed() => {
+                            warn!(
+                                ?parent_commitment,
+                                reason = "proposal cancelled",
+                                "skipping proposal"
+                            );
+                            None
+                    },
                 };
                 build_duration.set(start.elapsed().as_millis() as i64);
+                let Some(built_block) = built_block else {
+                    return;
+                };
 
                 let digest = built_block.commitment();
                 {
@@ -251,7 +268,7 @@ where
         let mut application = self.application.clone();
         let epoch_length = self.epoch_length;
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("verify")
             .spawn(move |r_ctx| async move {
@@ -297,14 +314,21 @@ where
                     return;
                 }
 
-                let application_valid = application
-                    .verify(r_ctx.with_label("app_verify"), parent, block.clone())
-                    .await;
-
-                if application_valid {
-                    marshal.verified(context.round, block).await;
+                select! {
+                    application_valid = application
+                        .verify(r_ctx.with_label("app_verify"), parent, block.clone()) => {
+                            if application_valid {
+                                marshal.verified(context.round, block).await;
+                            }
+                            let _ = tx.send(application_valid);
+                        },
+                    _ = tx.closed() => {
+                        warn!(
+                            reason = "verification cancelled",
+                            "skipping verification"
+                        );
+                    },
                 }
-                let _ = tx.send(application_valid);
             });
         rx
     }

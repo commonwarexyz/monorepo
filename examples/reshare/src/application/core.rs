@@ -8,7 +8,7 @@ use commonware_consensus::{simplex::types::Context, Block as _};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digestible, Hasher, Signer};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use rand::Rng;
-use std::{marker::PhantomData, time::Duration};
+use std::marker::PhantomData;
 
 #[derive(Clone)]
 pub struct Application<E, H, C, V>
@@ -53,7 +53,7 @@ where
 
     async fn propose(
         &mut self,
-        r_context: E,
+        _: E,
         parent: Self::Block,
         context: Self::Context,
     ) -> Option<Self::Block> {
@@ -65,15 +65,7 @@ where
         // This approach does allow duplicate commitments to be proposed, but
         // the arbiter handles this by choosing the first commitment it sees
         // from any given dealer.
-        let mut dkg_mailbox = self.dkg.clone();
-        let reshare = r_context
-            .timeout(
-                Duration::from_millis(5),
-                async move { dkg_mailbox.act().await },
-            )
-            .await
-            .ok()
-            .flatten();
+        let reshare = self.dkg.act().await;
 
         // Create a new block
         Some(Block::new(parent_commitment, parent.height() + 1, reshare))
