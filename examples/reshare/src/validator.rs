@@ -282,14 +282,14 @@ mod test {
         }
     }
 
-    fn all_online<S>(n: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S>(n: u32, n_active: u32, seed: u64, link: Link, required: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
         // Create context
-        let threshold = quorum(n);
+        let threshold = quorum(n_active);
         let cfg = deterministic::Config::default().with_seed(seed);
         let executor = Runner::from(cfg);
         executor.start(|mut context| async move {
@@ -308,7 +308,7 @@ mod test {
 
             // Derive threshold
             let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+                ops::generate_shares::<_, MinSig>(&mut context, None, n_active, threshold);
 
             // Register participants
             let mut signers = Vec::new();
@@ -348,10 +348,10 @@ mod test {
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
-                        share: Some(shares[idx].clone()),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
+                        share: shares.get(idx).cloned(),
+                        active_participants: validators[..n_active as usize].to_vec(),
+                        inactive_participants: validators[n_active as usize..].to_vec(),
+                        num_participants_per_epoch: n_active as usize,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -389,6 +389,13 @@ mod test {
                         assert_eq!(value, 0);
                     }
 
+                    // Ensure no DKG rounds failed. Participants should be given the time
+                    // to catch up when they come back online.
+                    if metric.ends_with("_failed_rounds_total") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
                     // If ends with contiguous_height, ensure it is at least required_container
                     if metric.ends_with("_processed_height") {
                         let value = value.parse::<u64>().unwrap();
@@ -417,10 +424,10 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
             );
         }
     }
@@ -433,11 +440,22 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state =
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<ThresholdScheme<MinSig>>(
+                5,
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+            );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<ThresholdScheme<MinSig>>(
+                    5,
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1
+                )
             );
         }
     }
@@ -450,10 +468,10 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
             );
         }
     }
@@ -466,11 +484,22 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state =
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<ThresholdScheme<MinSig>>(
+                5,
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+            );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<ThresholdScheme<MinSig>>(
+                    5,
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1
+                )
             );
         }
     }
@@ -483,7 +512,18 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
+    }
+
+    #[test_traced("INFO")]
+    #[ignore]
+    fn test_1k_rotate() {
+        let link = Link {
+            latency: Duration::from_millis(80),
+            jitter: Duration::from_millis(10),
+            success_rate: 0.98,
+        };
+        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
     }
 
     fn reshare_failed(seed: u64) -> String {
