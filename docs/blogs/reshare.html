@@ -93,18 +93,9 @@
             to determine who is eligible to notarize a block, the network risks a halt or a safety failure (as participants may consider votes from different validators to be useless).
         </p>
         <p>
-            So how do we reconfigure without pausing? A recent formulation by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu,
-            Tim Roughgarden, and Ertem Nusret Tas in <a href="https://arxiv.org/pdf/2506.14124"><i>From Permissioned to Proof-of-Stake Consensus</i></a>
-            offers a protocol-agnostic answer. Treat the replicated log as a sequence of epoch-sized segments and only advance to the next segment when
-            the block at the epoch boundary is directly finalized. The technique black-boxes the inner consensus engine, so the same recipe works no matter
-            how blocks are notarized.
-        </p>
-        <p>
-            With an eye towards supporting multiple consensus protocols in the Commonware Library&mdash;including
-            <a href="/blogs/minimmit.html"><code>minimmit</code></a> and <a href="/blogs/threshold-simplex.html"><code>consensus::simplex</code></a>&mdash;we implemented this approach.
-            Height-based epoching in <code>consensus::simplex</code> adds an explicit <code>epoch</code> field to every message and lets an orchestrator advance epochs
-            once the last block in the current epoch is directly finalized. Epoch boundaries give us the perfect place to reshare BLS key material and hand the signing
-            authority to the next committee without introducing side channels.
+            What do? <a href="https://arxiv.org/pdf/2506.14124">From Permissioned to Proof-of-Stake Consensus</a>, a new paper by Jovan Komatovic, Andrew Lewis-Pye, Joachim Neu, Tim Roughgarden, and Ertem Nusret Tas,
+            offers a consensus-agnostic solution. Treat the replicated log (i.e. the blockchain) as a epoched sequence of segments where we simply "drop" any blocks that exceed the
+            configured epoch length. As soon as a participant observes a finalized block at the epoch boundary, they can enter the next epoch with a synchronized view of the finalized state.
         </p>
         <div class="image-container">
             <img src="/imgs/epoching.png" alt="Epoching" />
@@ -112,6 +103,13 @@
                 if this hasn't happened yet we repropose the same block. The last block of some epoch is treated as the genesis block of the next epoch.
             </div>
         </div>
+        <p>
+            With an eye towards supporting multiple consensus protocols in the Commonware Library&mdash;including
+            <a href="/blogs/minimmit.html"><code>minimmit</code></a> and <a href="/blogs/threshold-simplex.html"><code>consensus::simplex</code></a>&mdash;we implemented this approach.
+            Height-based epoching in <code>consensus::simplex</code> adds an explicit <code>epoch</code> field to every message and lets an orchestrator advance epochs
+            once the last block in the current epoch is directly finalized. Epoch boundaries give us the perfect place to reshare BLS key material and hand the signing
+            authority to the next committee without introducing side channels.
+        </p>
         <h2>Resharing: Piggybacking on Consensus</h2>
         <p>
             In the threshold setting, changing the validator set means more than updating a list. Fresh participants need a share of the threshold secret to sign votes,
