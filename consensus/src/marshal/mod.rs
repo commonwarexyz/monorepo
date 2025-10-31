@@ -82,7 +82,7 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Finalized blocks are reported to the application in monotonically increasing order.
 #[derive(Clone, Debug)]
 pub enum Update<B: Block> {
-    /// A new tip block.
+    /// A new tip.
     Tip(u64, B::Commitment),
     /// A finalized block.
     Block(B),
