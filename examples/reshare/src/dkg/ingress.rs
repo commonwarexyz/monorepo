@@ -3,7 +3,7 @@
 //! [Actor]: super::Actor
 
 use crate::{application::Block, dkg::DealOutcome};
-use commonware_consensus::Reporter;
+use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use futures::{
     channel::{mpsc, oneshot},
@@ -78,12 +78,16 @@ where
     C: Signer,
     V: Variant,
 {
-    type Activity = Block<H, C, V>;
+    type Activity = Update<Block<H, C, V>>;
 
-    async fn report(&mut self, block: Self::Activity) {
+    async fn report(&mut self, update: Self::Activity) {
         let (sender, receiver) = oneshot::channel();
 
         // Report the finalized block to the DKG actor on a best-effort basis.
+        let Update::Block(block) = update else {
+            // We ignore any other updates sent by marshal.
+            return;
+        };
         let _ = self
             .sender
             .send(Message::Finalized {
