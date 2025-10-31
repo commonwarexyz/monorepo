@@ -122,7 +122,7 @@
         </p>
         <p>
             Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
-            marries the DKG implementation from <code>commonware-cryptography::bls12381::dkg</code> with <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
+            marries the DKG implementation from <code>commonware-cryptography::bls12381::dkg</code> with threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
             Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
         </p>
         <p>
@@ -141,25 +141,21 @@
             the selected dealings. Because <code>commonware-consensus::simplex</code> already ensures all participants see the same log, we know all participants will derive the
             same group polynomial and a correct share that can be used to participate.
         </p>
-        <h2>Bootstrapping a Threshold Committee</h2>
+        <h2>Generating a Threshold Secret</h2>
         <p>
-            The example ships with two bootstrap strategies. A trusted coordinator can mint the genesis key set and hand
-            the shares to validators, or the validators can run a DKG ceremony to generate the initial shares
-            collectively.
+            The example ships with two bootstrap strategies. A trusted participant can derive all shares for the initial set of participants, or the validators can run a
+            one-time DKG ceremony to generate the initial shares collectively (where no participant ever has full knowledge of the secret).
         </p>
+        <div class="image-container">
+            <img src="/imgs/dkg_bootstrap.png" alt="DKG bootstrap" />
+            <div class="image-caption">Figure 3: The DKG ceremony is performed once, and the resulting shares are used to bootstrap the initial epoch.</div>
+        </div>
         <p>
-            The trusted path is the quickest on-ramp for experimentation: the setup tool deterministically samples the
-            group key, splits it into shares, and writes configs for each validator. The DKG ceremony takes longer but
-            eliminates that single point of trust. A bootstrap committee uses ED25519
-            <code>consensus::simplex</code> to agree on the transcript produced by
-            <code>cryptography::bls12381::dkg</code>, and the resulting shares flow into the very first epoch.
+            The trusted path is great for local testing and CI: the setup tool deterministically samples the group key, splits it into shares, and writes configs for each validator.
+            The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>consensus::simplex</code>).
+            A bootstrap committee uses ED25519 <code>commonware-consensus::simplex</code> to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
+            are used by the initial participants in the first epoch (from there the built-in resharing mechanism handles all future key material updates).
         </p>
-        <img src="/imgs/dkg_bootstrap.png" alt="DKG bootstrap" />
-        <p>
-            After this process is complete, the initial epoch's committee can begin producing blocks under threshold
-            <code>consensus::simplex</code>.
-        </p>
-
         <h2>Trying It Locally</h2>
         <p>
             You can run the example by generating participant configurations and launching the validators with the
