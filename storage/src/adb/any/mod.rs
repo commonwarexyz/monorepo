@@ -5,13 +5,14 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, StandardHasher},
+    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
-use futures::{pin_mut, try_join, StreamExt as _, TryFutureExt as _};
-use tracing::warn;
+use core::num::NonZeroU64;
+use futures::{future::try_join_all, pin_mut, try_join, StreamExt as _, TryFutureExt as _};
+use tracing::{debug, warn};
 
 pub mod fixed;
 pub mod variable;
@@ -135,6 +136,109 @@ where
             callback(loc == last_commit_loc, None);
         }
     }
+
+    Ok(())
+}
+
+/// Common implementation for historical_proof.
+///
+/// Generates a proof with respect to the state of the MMR when it had `op_count` operations.
+///
+/// # Errors
+///
+/// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+///   [crate::mmr::MAX_LOCATION].
+/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
+///   number of operations in the log.
+/// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+async fn historical_proof<E, O, H>(
+    mmr: &Mmr<E, H>,
+    log: &impl Contiguous<Item = O>,
+    op_count: Location,
+    start_loc: Location,
+    max_ops: NonZeroU64,
+) -> Result<(Proof<H::Digest>, Vec<O>), Error>
+where
+    E: Storage + Clock + Metrics,
+    O: Keyed,
+    H: Hasher,
+{
+    let size = Location::new_unchecked(log.size().await);
+    if op_count > size {
+        return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
+    }
+    if start_loc >= op_count {
+        return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+    }
+    let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+
+    let mmr_size = Position::try_from(op_count)?;
+    let proof = mmr
+        .historical_range_proof(mmr_size, start_loc..end_loc)
+        .await?;
+
+    let mut ops = Vec::with_capacity((end_loc.as_u64() - start_loc.as_u64()) as usize);
+    let futures = (start_loc.as_u64()..end_loc.as_u64())
+        .map(|i| log.read(i))
+        .collect::<Vec<_>>();
+    try_join_all(futures)
+        .await?
+        .into_iter()
+        .for_each(|op| ops.push(op));
+
+    Ok((proof, ops))
+}
+
+/// Common implementation for pruning an Any database.
+///
+/// # Errors
+///
+/// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
+///   [crate::mmr::MAX_LOCATION].
+/// - Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` is greater than the
+///   inactivity floor.
+async fn prune_db<E, O, H>(
+    mmr: &mut Mmr<E, H>,
+    log: &mut impl Contiguous<Item = O>,
+    hasher: &mut StandardHasher<H>,
+    target_prune_loc: Location,
+    inactivity_floor_loc: Location,
+    op_count: Location,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + Metrics,
+    O: Keyed,
+    H: Hasher,
+{
+    if target_prune_loc > inactivity_floor_loc {
+        return Err(Error::PruneBeyondInactivityFloor(
+            target_prune_loc,
+            inactivity_floor_loc,
+        ));
+    }
+    let target_prune_pos = Position::try_from(target_prune_loc)?;
+
+    if mmr.size() == 0 {
+        // DB is empty, nothing to prune.
+        return Ok(());
+    };
+
+    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
+    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+    // the operations between the MMR tip and the log pruning boundary.
+    mmr.sync(hasher).await?;
+
+    if !log.prune(target_prune_loc.as_u64()).await? {
+        return Ok(());
+    }
+
+    debug!(
+        log_size = op_count.as_u64(),
+        ?target_prune_loc,
+        "pruned inactive ops"
+    );
+
+    mmr.prune_to_pos(hasher, target_prune_pos).await?;
 
     Ok(())
 }

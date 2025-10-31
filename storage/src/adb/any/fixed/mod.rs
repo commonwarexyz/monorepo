@@ -15,15 +15,13 @@ use crate::{
     journal::contiguous::fixed::{Config as JConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Position, Proof, StandardHasher as Standard,
+        Location, StandardHasher,
     },
     translator::Translator,
 };
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::debug;
 
 pub mod ordered;
 pub mod sync;
@@ -69,12 +67,12 @@ pub struct Config<T: Translator> {
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
     O: Keyed + FixedSize,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
 >(
     context: E,
     cfg: Config<T>,
-    hasher: &mut Standard<H>,
+    hasher: &mut StandardHasher<H>,
 ) -> Result<(Location, Mmr<E, H>, Journal<E, O>), Error> {
     let mut mmr = Mmr::init(
         context.with_label("mmr"),
@@ -104,104 +102,4 @@ pub(crate) async fn init_mmr_and_log<
     let inactivity_floor_loc = super::align_mmr_and_log(&mut mmr, &mut log, hasher).await?;
 
     Ok((inactivity_floor_loc, mmr, log))
-}
-
-/// Common implementation for pruning an Any database.
-///
-/// # Errors
-///
-/// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
-///   [crate::mmr::MAX_LOCATION].
-/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `target_prune_loc` is greater than the
-///   inactivity floor.
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
-    log: &mut Journal<E, O>,
-    hasher: &mut Standard<H>,
-    target_prune_loc: Location,
-    inactivity_floor_loc: Location,
-    op_count: Location,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + Metrics,
-    O: FixedSize,
-    H: CHasher,
-{
-    if target_prune_loc > inactivity_floor_loc {
-        return Err(crate::mmr::Error::RangeOutOfBounds(target_prune_loc).into());
-    }
-    let target_prune_pos = Position::try_from(target_prune_loc)?;
-
-    if mmr.size() == 0 {
-        // DB is empty, nothing to prune.
-        return Ok(());
-    };
-
-    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-    // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
-
-    if !log.prune(target_prune_loc.as_u64()).await? {
-        return Ok(());
-    }
-
-    debug!(
-        log_size = op_count.as_u64(),
-        ?target_prune_loc,
-        "pruned inactive ops"
-    );
-
-    mmr.prune_to_pos(hasher, target_prune_pos).await?;
-
-    Ok(())
-}
-
-/// Common implementation for historical_proof.
-///
-/// Generates a proof with respect to the state of the MMR when it had `op_count` operations.
-///
-/// # Errors
-///
-/// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-///   [crate::mmr::MAX_LOCATION].
-/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
-///   number of operations in the log.
-/// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
-async fn historical_proof<E, O, H>(
-    mmr: &Mmr<E, H>,
-    log: &Journal<E, O>,
-    op_count: Location,
-    start_loc: Location,
-    max_ops: NonZeroU64,
-) -> Result<(Proof<H::Digest>, Vec<O>), Error>
-where
-    E: Storage + Clock + Metrics,
-    O: FixedSize,
-    H: CHasher,
-{
-    let size = Location::new_unchecked(log.size().await);
-    if op_count > size {
-        return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
-    }
-    if start_loc >= op_count {
-        return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
-    }
-    let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-
-    let mmr_size = Position::try_from(op_count)?;
-    let proof = mmr
-        .historical_range_proof(mmr_size, start_loc..end_loc)
-        .await?;
-
-    let mut ops = Vec::with_capacity((end_loc.as_u64() - start_loc.as_u64()) as usize);
-    let futures = (start_loc.as_u64()..end_loc.as_u64())
-        .map(|i| log.read(i))
-        .collect::<Vec<_>>();
-    try_join_all(futures)
-        .await?
-        .into_iter()
-        .for_each(|op| ops.push(op));
-
-    Ok((proof, ops))
 }

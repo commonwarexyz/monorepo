@@ -8,8 +8,8 @@ use crate::{
     adb::{
         any::{
             build_snapshot_from_log,
-            fixed::{historical_proof, init_mmr_and_log, prune_db, Config},
-            Shared,
+            fixed::{init_mmr_and_log, Config},
+            historical_proof, prune_db, Shared,
         },
         operation::fixed::ordered::{KeyData, Operation},
         store::{self, Db},
@@ -780,7 +780,7 @@ mod test {
         mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::PoolRef,
