@@ -1,6 +1,10 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    adb::{self, any::fixed::unordered::Any, operation::fixed::unordered::Operation},
+    adb::{
+        self,
+        any::{build_snapshot_from_log, fixed::unordered::Any},
+        operation::fixed::unordered::Operation,
+    },
     index::Unordered as Index,
     journal::contiguous::fixed,
     mmr::{Location, Position, StandardHasher},
@@ -96,7 +100,7 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        super::super::build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
+        build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
 
         let mut db = Any {
             mmr,
