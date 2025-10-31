@@ -64,11 +64,7 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{
-    simplex::{signing_scheme::Scheme, types::Finalization},
-    types::Epoch,
-    Block,
-};
+use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -85,11 +81,11 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Certificates are only sent for "tip" updates (the latest finalized block). All other
 /// finalized blocks are reported as blocks.
 #[derive(Clone, Debug)]
-pub enum Update<B: Block, S: Scheme> {
+pub enum Update<B: Block> {
     /// A finalized block (non-tip).
     Block(B),
     /// A finalization for the tip block.
-    Finalization(Finalization<S, B::Commitment>),
+    Tip(u64, B::Commitment),
 }
 
 #[cfg(test)]
@@ -186,7 +182,7 @@ mod tests {
         validator: K,
         scheme_provider: P,
     ) -> (
-        Application<B, S>,
+        Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
         let config = Config {
@@ -242,7 +238,7 @@ mod tests {
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
-        let application = Application::<B, S>::default();
+        let application = Application::<B>::default();
 
         // Start the application
         actor.start(application.clone(), buffer, resolver);

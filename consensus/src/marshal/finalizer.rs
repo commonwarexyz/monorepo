@@ -1,6 +1,5 @@
 use crate::{
     marshal::{ingress::orchestrator::Orchestrator, Update},
-    simplex::signing_scheme::Scheme,
     Block, Reporter,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -19,9 +18,8 @@ const LATEST_KEY: FixedBytes<1> = fixed_bytes!("00");
 /// processing from the last processed height after a restart.
 pub struct Finalizer<
     B: Block,
-    S: Scheme,
     R: Spawner + Clock + Metrics + Storage,
-    Z: Reporter<Activity = Update<B, S>>,
+    Z: Reporter<Activity = Update<B>>,
 > {
     context: ContextCell<R>,
 
@@ -38,12 +36,8 @@ pub struct Finalizer<
     metadata: Metadata<R, FixedBytes<1>, u64>,
 }
 
-impl<
-        B: Block,
-        S: Scheme,
-        R: Spawner + Clock + Metrics + Storage,
-        Z: Reporter<Activity = Update<B, S>>,
-    > Finalizer<B, S, R, Z>
+impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = Update<B>>>
+    Finalizer<B, R, Z>
 {
     /// Initialize the finalizer.
     pub async fn new(

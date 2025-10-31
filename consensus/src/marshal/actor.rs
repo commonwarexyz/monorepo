@@ -95,6 +95,8 @@ pub struct Actor<
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
+    // Last sent tip
+    last_sent_tip: Option<(u64, B::Commitment)>,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -238,6 +240,7 @@ impl<
                 block_codec_config: config.block_codec_config,
                 partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
+                last_sent_tip: None,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
@@ -252,7 +255,7 @@ impl<
     /// Start the actor.
     pub fn start<R, K>(
         mut self,
-        application: impl Reporter<Activity = Update<B, S>>,
+        application: impl Reporter<Activity = Update<B>>,
         buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
@@ -266,7 +269,7 @@ impl<
     /// Run the application actor.
     async fn run<R, K>(
         mut self,
-        application: impl Reporter<Activity = Update<B, S>>,
+        mut application: impl Reporter<Activity = Update<B>>,
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
@@ -289,6 +292,13 @@ impl<
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
+
+        // Get tip and send to application
+        let tip = self.get_latest().await;
+        if let Some((height, commitment)) = tip {
+            application.report(Update::Tip(height, commitment)).await;
+            self.last_sent_tip = Some((height, commitment));
+        }
 
         // Handle messages
         loop {
@@ -369,7 +379,7 @@ impl<
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 // If found, persist the block
                                 let height = block.height();
-                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
+                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx, &mut application).await;
                                 debug!(?round, height, "finalized block stored");
                             } else {
                                 // Otherwise, fetch the block from the network.
@@ -504,7 +514,7 @@ impl<
                                 let commitment = cursor.parent();
                                 if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                     let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
+                                    self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx, &mut application).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
                                 } else {
@@ -595,7 +605,7 @@ impl<
                                     // Persist the block, also persisting the finalization if we have it
                                     let height = block.height();
                                     let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx).await;
+                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx, &mut application).await;
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -629,7 +639,7 @@ impl<
                                     // Valid finalization received
                                     debug!(height, "received finalization");
                                     let _ = response.send(true);
-                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
+                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx, &mut application).await;
                                 },
                                 Request::Notarized { round } => {
                                     let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
@@ -670,7 +680,7 @@ impl<
                                     // the request for the block.
                                     let height = block.height();
                                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx).await;
+                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx, &mut application).await;
                                     }
 
                                     // Cache the notarization and block
@@ -746,6 +756,7 @@ impl<
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
+        application: &mut impl Reporter<Activity = Update<B>>,
     ) {
         self.notify_subscribers(commitment, &block).await;
 
@@ -773,6 +784,20 @@ impl<
 
         // Notify the finalizer
         let _ = notifier.try_send(());
+
+        // Send tip update to application
+        match self.last_sent_tip {
+            Some((last_height, _)) => {
+                if height > last_height {
+                    application.report(Update::Tip(height, commitment)).await;
+                    self.last_sent_tip = Some((height, commitment));
+                }
+            }
+            None => {
+                application.report(Update::Tip(height, commitment)).await;
+                self.last_sent_tip = Some((height, commitment));
+            }
+        }
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
