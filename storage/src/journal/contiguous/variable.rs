@@ -151,7 +151,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
+impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -475,53 +475,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    pub async fn replay(
-        &self,
-        start_pos: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<(u64, V), Error>> + Send + '_>>, Error> {
-        // Validate start position is within bounds.
-        if start_pos < self.oldest_retained_pos {
-            return Err(Error::ItemPruned(start_pos));
-        }
-        if start_pos > self.size {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-
-        // If replaying at exactly size, return empty stream
-        if start_pos == self.size {
-            return Ok(Box::pin(stream::empty()));
-        }
-
-        // Use offsets index to find offset to start from, calculate section from position
-        let start_offset = self.offsets.read(start_pos).await?;
-        let start_section = position_to_section(start_pos, self.items_per_section);
-        let data_stream = self
-            .data
-            .replay(start_section, start_offset, buffer_size)
-            .await?;
-
-        // Transform the stream to include position information
-        let transformed = data_stream.enumerate().map(move |(idx, result)| {
-            result.map(|(_section, _offset, _size, item)| {
-                // Calculate position: start_pos + items read
-                let pos = start_pos + idx as u64;
-                (pos, item)
-            })
-        });
-
-        Ok(Box::pin(transformed))
-    }
-
     /// Read the item at the given position.
     ///
     /// # Errors
@@ -803,8 +756,57 @@ impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
     }
 }
 
+impl<E: Storage + Metrics, V: Codec + Send> Journal<E, V> {
+    /// Return a stream of all items in the journal starting from `start_pos`.
+    ///
+    /// Each item is yielded as a tuple `(position, item)` where position is the item's
+    /// position in the journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
+    /// errors occur during replay.
+    pub async fn replay(
+        &self,
+        start_pos: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<(u64, V), Error>> + '_>>, Error> {
+        // Validate start position is within bounds.
+        if start_pos < self.oldest_retained_pos {
+            return Err(Error::ItemPruned(start_pos));
+        }
+        if start_pos > self.size {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+
+        // If replaying at exactly size, return empty stream
+        if start_pos == self.size {
+            return Ok(Box::pin(stream::empty()));
+        }
+
+        // Use offsets index to find offset to start from, calculate section from position
+        let start_offset = self.offsets.read(start_pos).await?;
+        let start_section = position_to_section(start_pos, self.items_per_section);
+        let data_stream = self
+            .data
+            .replay(start_section, start_offset, buffer_size)
+            .await?;
+
+        // Transform the stream to include position information
+        let transformed = data_stream.enumerate().map(move |(idx, result)| {
+            result.map(|(_section, _offset, _size, item)| {
+                // Calculate position: start_pos + items read
+                let pos = start_pos + idx as u64;
+                (pos, item)
+            })
+        });
+
+        Ok(Box::pin(transformed))
+    }
+}
+
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: Codec + Send + Sync> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send> Contiguous for Journal<E, V> {
     type Item = V;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
