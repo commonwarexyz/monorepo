@@ -39,7 +39,7 @@ where
     let mut rewind_leaf_num = log_size;
     let mut inactivity_floor_loc = Location::new_unchecked(0);
     while rewind_leaf_num > 0 {
-        let op = log.read(rewind_leaf_num.as_u64() - 1).await?;
+        let op = log.read(*rewind_leaf_num - 1).await?;
         if let Some(loc) = op.commit_floor() {
             inactivity_floor_loc = loc;
             break;
@@ -53,7 +53,7 @@ where
             ?op_count,
             "rewinding over uncommitted log operations"
         );
-        log.rewind(rewind_leaf_num.as_u64()).await?;
+        log.rewind(*rewind_leaf_num).await?;
         log.sync().await?;
         log_size = rewind_leaf_num;
     }
@@ -63,7 +63,7 @@ where
     if next_mmr_leaf_num > log_size {
         let op_count = next_mmr_leaf_num - log_size;
         warn!(?log_size, ?op_count, "popping uncommitted MMR operations");
-        mmr.pop(op_count.as_u64() as usize).await?;
+        mmr.pop(*op_count as usize).await?;
         next_mmr_leaf_num = log_size;
     }
 
@@ -76,7 +76,7 @@ where
             "MMR lags behind log, replaying log to catch up"
         );
         while next_mmr_leaf_num < log_size {
-            let op = log.read(next_mmr_leaf_num.as_u64()).await?;
+            let op = log.read(*next_mmr_leaf_num).await?;
             mmr.add_batched(hasher, &op.encode()).await?;
             next_mmr_leaf_num += 1;
         }
@@ -177,8 +177,8 @@ where
         .historical_range_proof(mmr_size, start_loc..end_loc)
         .await?;
 
-    let mut ops = Vec::with_capacity((end_loc.as_u64() - start_loc.as_u64()) as usize);
-    let futures = (start_loc.as_u64()..end_loc.as_u64())
+    let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+    let futures = (*start_loc..(*end_loc))
         .map(|i| log.read(i))
         .collect::<Vec<_>>();
     try_join_all(futures)
@@ -228,12 +228,12 @@ where
     // the operations between the MMR tip and the log pruning boundary.
     mmr.sync(hasher).await?;
 
-    if !log.prune(target_prune_loc.as_u64()).await? {
+    if !log.prune(*target_prune_loc).await? {
         return Ok(());
     }
 
     debug!(
-        log_size = op_count.as_u64(),
+        log_size = *op_count,
         ?target_prune_loc,
         "pruned inactive ops"
     );

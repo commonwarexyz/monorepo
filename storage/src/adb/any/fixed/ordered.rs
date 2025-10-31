@@ -723,13 +723,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()> + Send + Sync,
-        H: Hasher,
-        T: Translator,
-    > Db<E, K, V, T> for Any<E, K, V, H, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
