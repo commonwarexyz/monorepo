@@ -122,15 +122,16 @@
         </p>
         <p>
             Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
-            marries the DKG implementation from <code>commonware-cryptography::bls12381::dkg</code> with threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
+            marries the DKG implementation from <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html"><code>commonware-cryptography::bls12381::dkg</code></a> with
+            threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
             Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
         </p>
         <p>
             Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will hold shares in the next epoch.
             Dealers generate shares for all new players (based on their share from the current epoch to maintain the same shared secret across epochs) and send them to players
-            over <code>commonware-p2p</code>'s encrypted, point-to-point channels. Players validate the received shares and, if correct, send acknowledgements back to dealers.
-            After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from players who received shares against that commitment,
-            and any revealed secret shares for players that didn't acknowledge receipt. They publish that outcome to the log.
+            over <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html"><code>commonware-p2p</code></a>'s encrypted, point-to-point channels. Players validate the
+            received shares and, if correct, send acknowledgements back to dealers. After some number of blocks, dealers construct an outcome containing their commitment, acknowledgements from
+            players who received shares against that commitment, and any revealed secret shares for players that didn't acknowledge receipt. They publish that outcome to the log.
         </p>
         <div class="image-container">
             <img src="/imgs/reshare_actors.png" alt="Actor Interactions" />
