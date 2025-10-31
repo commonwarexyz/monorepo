@@ -141,6 +141,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             warn!(ops_to_pop, "popping excess MMR operations");
             mmr.pop(ops_to_pop).await?;
         } else if mmr_size < log_size {
+            // Should never happen because in `prune` we sync mmr before pruning log.
+            assert!(
+                log.oldest_retained_pos().is_some(),
+                "log is fully pruned but mmr_size ({mmr_size}) < log_size ({log_size})"
+            );
+
             // MMR is behind - replay missing operations
             let stream = log.replay(mmr_size, REPLAY_BUFFER_SIZE).await?;
             pin_mut!(stream);
