@@ -68,13 +68,7 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticatable key-value database based on an MMR that does not allow updates or deletions
 /// of previously set keys.
-pub struct Immutable<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec + Send,
-    H: CHasher,
-    T: Translator,
-> {
+pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -101,7 +95,7 @@ pub struct Immutable<
     last_commit: Option<Location>,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
