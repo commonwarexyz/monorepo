@@ -2,8 +2,9 @@
 
 use crate::{
     application::{Application, Block, EpochSchemeProvider, SchemeProvider},
-    dkg, orchestrator,
-    setup::{ParticipantConfig, PeerConfig},
+    dkg::{self, UpdateCallBack},
+    orchestrator,
+    setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
@@ -29,7 +30,7 @@ use commonware_utils::{set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf, time::Instant};
+use std::{marker::PhantomData, num::NonZero, time::Instant};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -59,13 +60,10 @@ where
     pub manager: P,
     pub blocker: B,
     pub namespace: Vec<u8>,
-
-    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub output: Option<Output<V, C::PublicKey>>,
     pub share: Option<group::Share>,
     pub peer_config: PeerConfig<C::PublicKey>,
     pub orchestrator_rate_limit: governor::Quota,
-
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
 }
@@ -130,7 +128,6 @@ where
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
-                participant_config: config.participant_config.clone(),
                 signer: config.signer.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
@@ -315,6 +312,7 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
+        update_cb: UpdateCallBack<V, C::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -325,7 +323,8 @@ where
                 broadcast,
                 dkg,
                 orchestrator,
-                marshal
+                marshal,
+                update_cb
             )
             .await
         )
@@ -362,12 +361,14 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
+        update_cb: UpdateCallBack<V, C::PublicKey>,
     ) {
         let dkg_handle = self.dkg.start(
             self.config.output,
             self.config.share,
             self.orchestrator_mailbox,
             dkg,
+            update_cb,
         );
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle = self

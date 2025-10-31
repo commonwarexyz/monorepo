@@ -2,6 +2,7 @@
 
 use crate::{
     application::{EpochSchemeProvider, SchemeProvider},
+    dkg::UpdateCallBack,
     engine,
     setup::{ParticipantConfig, PeerConfig},
 };
@@ -35,8 +36,11 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Run the validator node service.
-pub async fn run<S>(context: tokio::Context, args: super::ParticipantArgs)
-where
+pub async fn run<S>(
+    context: tokio::Context,
+    args: super::ParticipantArgs,
+    update_cb: UpdateCallBack<MinSig, ed25519::PublicKey>,
+) where
     S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
         EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
@@ -125,7 +129,6 @@ where
             manager: oracle.clone(),
             blocker: oracle.clone(),
             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-            participant_config: Some((args.config_path, config.clone())),
             output: output,
             share: config.share,
             orchestrator_rate_limit: orchestrator_limit,
@@ -145,6 +148,7 @@ where
         dkg,
         orchestrator,
         marshal,
+        update_cb,
     );
 
     if let Err(e) = try_join_all(vec![p2p_handle, engine_handle]).await {
@@ -157,6 +161,7 @@ mod test {
     use super::*;
     use crate::{
         application::{Block, EdScheme, ThresholdScheme},
+        dkg::PostUpdate,
         BLOCKS_PER_EPOCH,
     };
     use commonware_consensus::marshal::ingress::handler;
@@ -333,7 +338,7 @@ mod test {
         }
     }
 
-    fn all_online<S>(n: u32, n_active: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S>(n: u32, _n_active: u32, seed: u64, link: Link, required: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
@@ -379,7 +384,6 @@ mod test {
                         manager: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
                         output: Some(setup.output.clone()),
                         share: share,
                         active_participants: validators.clone(),
@@ -401,6 +405,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
             }
 
@@ -604,7 +609,6 @@ mod test {
                             manager: oracle.manager(),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
                             output: Some(setup.output.clone()),
                             share: share.clone(),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
@@ -628,6 +632,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
                 engine_handles.push(handle);
             }
@@ -717,7 +722,6 @@ mod test {
                             manager: oracle.manager(),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
                             output: Some(setup.output.clone()),
                             share,
                             peer_config: setup.peer_config.clone(),
@@ -741,6 +745,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
             }
 
@@ -861,7 +866,6 @@ mod test {
                         manager: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
                         output: Some(setup.output.clone()),
                         share: share.clone(),
                         active_participants: validators.clone(),
@@ -888,6 +892,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
             }
 
@@ -944,7 +949,6 @@ mod test {
                         blocker: oracle.control(public_key.clone()),
                         manager: oracle.manager(),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
                         output: Some(setup.output.clone()),
                         share: share.clone(),
                         peer_config: setup.peer_config.clone(),
@@ -968,6 +972,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
+                Box::new(|_| PostUpdate::Continue),
             );
 
             // Poll metrics
@@ -1086,7 +1091,6 @@ mod test {
                             manager: oracle.manager(),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
                             output: Some(setup.output.clone()),
                             share: share.clone(),
                             active_participants: validators.clone(),
@@ -1113,6 +1117,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
             }
 
@@ -1169,7 +1174,6 @@ mod test {
                         manager: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
                         output: Some(setup.output.clone()),
                         share: share.clone(),
                         peer_config: setup.peer_config.clone(),
@@ -1193,6 +1197,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
+                Box::new(|_| PostUpdate::Continue),
             );
 
             // Poll metrics
@@ -1324,7 +1329,6 @@ mod test {
                             manager: oracle.manager(),
                             blocker: oracle.control(public_key.clone()),
                             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
                             output: Some(setup.output.clone()),
                             share: share.clone(),
                             peer_config: setup.peer_config.clone(),
@@ -1348,6 +1352,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
+                    Box::new(|_| PostUpdate::Continue),
                 );
             }
 
@@ -1406,7 +1411,6 @@ mod test {
                         manager: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
                         output: Some(setup.output.clone()),
                         share: share.clone(),
                         peer_config: setup.peer_config.clone(),
@@ -1430,6 +1434,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
+                Box::new(|_| PostUpdate::Continue),
             );
 
             // Poll metrics
@@ -1552,7 +1557,6 @@ mod test {
                                 manager: oracle.manager(),
                                 blocker: oracle.control(public_key.clone()),
                                 namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                                participant_config: None,
                                 output: Some(setup.output.clone()),
                                 share: share.clone(),
                                 peer_config: setup.peer_config.clone(),
@@ -1575,6 +1579,7 @@ mod test {
                         dkg,
                         orchestrator,
                         marshal,
+                        Box::new(|_| PostUpdate::Continue),
                     );
                 }
 

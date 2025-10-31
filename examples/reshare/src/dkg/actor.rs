@@ -1,12 +1,12 @@
 use super::{Mailbox, Message};
 use crate::{
-    dkg::actor::observer::Observer,
+    dkg::{actor::observer::Observer, PostUpdate, Update, UpdateCallBack},
     orchestrator::{self, EpochTransition},
     self_channel::self_channel,
-    setup::{ParticipantConfig, PeerConfig},
+    setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::{
     types::Epoch,
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
@@ -22,12 +22,12 @@ use commonware_cryptography::{
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{hex, sequence::FixedBytes, set::Ordered, Acknowledgement, NZUsize};
+use commonware_utils::{sequence::FixedBytes, set::Ordered, Acknowledgement, NZUsize};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::num::NonZeroUsize;
 use tracing::info;
 
 mod dealer;
@@ -82,7 +82,6 @@ impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
 
 pub struct Config<C: PrivateKey, P> {
     pub manager: P,
-    pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub signer: C,
     pub mailbox_size: usize,
     pub partition_prefix: String,
@@ -99,7 +98,6 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    participant_config: Option<(PathBuf, ParticipantConfig)>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
@@ -147,7 +145,6 @@ where
             Self {
                 context,
                 manager: config.manager,
-                participant_config: config.participant_config,
                 mailbox,
                 signer: config.signer,
                 peer_config: config.peer_config,
@@ -169,13 +166,15 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        update_cb: UpdateCallBack<V, C::PublicKey>,
     ) -> Handle<()> {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
         // cryptographic operations.
         spawn_cell!(
             self.context,
-            self.run(output, share, orchestrator, dkg_chan).await
+            self.run(output, share, orchestrator, dkg_chan, update_cb)
+                .await
         )
     }
 
@@ -188,6 +187,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
+        mut update_cb: UpdateCallBack<V, C::PublicKey>,
     ) {
         let is_dkg = output.is_none();
 
@@ -410,45 +410,36 @@ where
             let epoch_state = EpochState {
                 epoch: next_epoch,
                 output: next_output.clone(),
-                share: next_share,
+                share: next_share.clone(),
             };
             self.epoch_metadata
                 .put_sync(FixedBytes::new([]), epoch_state)
                 .await
                 .expect("epoch metadata must update");
 
-            // If this is a DKG, we don't want to proceed to the next round.
-            if success && is_dkg {
-                let next_output = next_output.expect("DKG success => output exists");
+            let update = if success {
+                Update::Success {
+                    epoch: state.epoch,
+                    output: next_output.expect("success => output exists"),
+                    share: next_share,
+                }
+            } else {
+                Update::Failure { epoch: state.epoch }
+            };
+            if let PostUpdate::Stop = update_cb(update) {
                 // Close the mailbox to prevent accepting any new messages.
                 drop(self.mailbox);
-
                 // Exit last consensus instance to avoid useless work while we wait for shutdown (we
                 // won't need to finalize further blocks after the DKG completes).
                 orchestrator
                     .report(orchestrator::Message::Exit(state.epoch))
                     .await;
-
-                // Dump the share and group polynomial to disk so that it can be
-                // used by the validator process.
-                //
-                // In a production setting, care should be taken to ensure the
-                // share is stored securely.
-                if let Some((path, config)) = self.participant_config.take() {
-                    config.update_and_write(path.as_path(), |config| {
-                        config.output = Some(hex(next_output.encode().as_ref()));
-                        config.share = share;
-                    });
-                }
-
-                info!("dkg completed successfully, persisted outcome.");
-
                 // Keep running until killed to keep the orchestrator mailbox alive, allowing
                 // peers that may have gone offline to catch up.
                 //
                 // The initial DKG process will never be exited automatically, assuming coordination
                 // between participants is manual.
-                info!("DKG complete...waiting for shutdown");
+                info!("DKG told to sto post update, now waiting...");
                 futures::future::pending::<()>().await;
                 break 'actor;
             }

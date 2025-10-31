@@ -10,7 +10,7 @@ use commonware_consensus::{
     Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Hasher, PrivateKey, Signer,
+    bls12381::primitives::variant::Variant, Committable, Hasher, PrivateKey,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
