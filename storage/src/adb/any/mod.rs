@@ -360,7 +360,7 @@ where
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns the old location of
     /// the operation if it was active.
-    pub(super) async fn move_op_if_active(
+    async fn move_op_if_active(
         &mut self,
         op: O,
         old_loc: Location,
