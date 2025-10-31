@@ -872,7 +872,7 @@ mod tests {
             } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (application, mut actor) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 p2p::mocks::Coordinator::new(vec![]),
@@ -884,6 +884,7 @@ mod tests {
             // Before any finalization, GetBlock::Latest should be None
             let latest_block = actor.get_block(Identifier::Latest).await;
             assert!(latest_block.is_none());
+            assert!(application.tip().is_none());
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
@@ -903,6 +904,7 @@ mod tests {
             let by_height = actor.get_block(1).await.expect("missing block by height");
             assert_eq!(by_height.height(), 1);
             assert_eq!(by_height.digest(), commitment);
+            assert_eq!(application.tip(), Some((1, commitment)));
 
             // Get by latest
             let by_latest = actor
