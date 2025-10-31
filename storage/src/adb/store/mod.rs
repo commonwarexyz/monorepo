@@ -546,51 +546,13 @@ where
         }
     }
 
-    /// Find the last commit location by walking backwards from the end of the log.
-    async fn find_last_commit(
-        log: &Journal<E, Operation<K, V>>,
-        log_size: Location,
-    ) -> Result<Option<Location>, Error> {
-        if *log_size == 0 {
-            return Ok(None);
-        }
-        let Some(oldest_retained_pos) = log.oldest_retained_pos() else {
-            // Log is fully pruned, no commit can be found
-            return Ok(None);
-        };
-        let oldest_retained_loc = Location::new_unchecked(oldest_retained_pos);
-
-        let mut check_loc = Location::new_unchecked(*log_size - 1);
-        while check_loc >= oldest_retained_loc {
-            let op = log.read(*check_loc).await.map_err(|e| match e {
-                crate::journal::Error::ItemPruned(_) => Error::OperationPruned(check_loc),
-                e => Error::Journal(e),
-            })?;
-            match op {
-                Operation::CommitFloor(_, _) => return Ok(Some(check_loc)),
-                Operation::Update(_, _) | Operation::Delete(_) => {
-                    if check_loc == oldest_retained_loc {
-                        break;
-                    }
-                    check_loc = Location::new_unchecked(*check_loc - 1);
-                }
-                Operation::Set(_, _) | Operation::Commit(_) => {
-                    unreachable!("Set and Commit operations are not used in mutable stores")
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Builds the database's snapshot from the log of operations. Any operations after
     /// the latest commit operation are removed.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         // Rewind log to remove uncommitted operations
-        let new_log_size = Self::rewind_uncommitted(&mut self.log).await?;
-        self.log_size = Location::new_unchecked(new_log_size);
+        self.log_size = Location::new_unchecked(Self::rewind_uncommitted(&mut self.log).await?);
 
-        // Replay operations to build snapshot (all operations are now committed)
+        // Replay operations to build snapshot
         {
             let stream = self
                 .log
@@ -598,8 +560,8 @@ where
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (pos, op) = result?;
-                let loc = Location::new_unchecked(pos);
+                let (loc, op) = result?;
+                let loc = Location::new_unchecked(loc);
 
                 match op {
                     Operation::Delete(key) => {
@@ -624,8 +586,12 @@ where
             }
         }
 
-        // Find the last commit location
-        self.last_commit = Self::find_last_commit(&self.log, self.log_size).await?;
+        // After rewinding, the last operation (if any) is always a CommitFloor
+        self.last_commit = if *self.log_size == 0 {
+            None
+        } else {
+            Some(Location::new_unchecked(*self.log_size - 1))
+        };
 
         debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
