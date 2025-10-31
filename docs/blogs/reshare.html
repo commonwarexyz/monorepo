@@ -116,19 +116,14 @@
             be performed to ensure new participants receive some share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
             must not be able to use shares across dealings or else it is trivial for a single malicious participant to acquire <i>f</i> shares over <i>f</i> epochs). Our original
             <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
-            trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a>
-            to ensure all participants received the same set of commitments. Removing that trusted coordinator requires some form of reliable broadcast, fortunately we get that out-of-the-box with a replicated log.
+            trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a> to ensure all participants received the same set of
+            commitments. Removing that trusted coordinator requires some form of reliable broadcast such that all participants can each run their own arbiter (and all arrive at the same output). Fortunately,
+            we get that out-of-the-box with a replicated log.
         </p>
         <p>
-            Threshold <code>consensus::simplex</code> uses BLS threshold signatures so a committee can sign votes as a single aggregate.
-            Each validator holds a share of the private key, and as soon as <code>T</code> shares are combined the signature verifies under the group public key.
-            That structure is ideal for fast notarization, but it only works if every active validator possesses a fresh, matching share.
-        </p>
-        <p>
-            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>reshare</code></a> example
-            marries the DKG engine in <code>cryptography::bls12381::dkg</code> with the replicated log of a blockchain.
-            Validators refresh their key material every epoch&mdash;a configurable interval of blocks&mdash;and derive new shares for incoming participants.
-            The consensus log carries the entire transcript so that chains using threshold <code>consensus::simplex</code> can reconfigure committees without an out-of-band channel.
+            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
+            marries the DKG implementation from <code>commonware-cryptography::bls12381::dkg</code> with <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
+            Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
         </p>
         <p>
             Each epoch begins with a set of <b>dealers</b>, the validators currently signing blocks, and <b>players</b>, the validators who will sign in the next epoch.
