@@ -61,25 +61,50 @@ impl PeakIterator {
         last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
     }
 
-    // Returns the largest valid MMR size that is no greater than the given size.
-    //
-    // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
-    // implementation but it's reasonably straightforward to make it O(log2(n)).
-    //
+    /// Returns the largest valid MMR size that is no greater than the given size.
+    ///
+    /// This is an O(log2(n)) operation using binary search on the number of leaves.
+    ///
     /// # Panics
     ///
-    /// Panics if `size` is too large (specifically, the topmost bit should be 0).
-    pub fn to_nearest_size(mut size: Position) -> Position {
-        // If we don't check for overflow here, we could get stuck looping for a _very_ long time
-        // below, since we no longer have a log(n) bound on the number of iterations.
-        assert_ne!(size.leading_zeros(), 0, "overflow");
+    /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
+    pub fn to_nearest_size(size: Position) -> Position {
+        assert!(
+            size <= crate::mmr::MAX_POSITION,
+            "size exceeds MAX_POSITION"
+        );
 
-        while !size.is_mmr_size() {
-            // A size-0 MMR is always valid so this loop must terminate before underflow.
-            size -= 1;
+        // Algorithm: A valid MMR size corresponds to a specific number of leaves N, where:
+        // mmr_size(N) = 2*N - popcount(N)
+        // This formula comes from the fact that N leaves require N-1 internal nodes, but merging
+        // creates popcount(N)-1 additional nodes. We binary search for the largest N where
+        // mmr_size(N) <= size.
+
+        if size == 0 {
+            return size;
         }
 
-        size
+        // Binary search for the largest N (number of leaves) such that
+        // mmr_size(N) = 2*N - popcount(N) <= size
+        let size_val = size.as_u64();
+        let mut low = 0u64;
+        let mut high = size_val; // MMR size >= leaf count, so N <= size
+
+        while low < high {
+            // Use div_ceil for upper-biased midpoint in binary search
+            let mid = (low + high).div_ceil(2);
+            let mmr_size = 2 * mid - mid.count_ones() as u64;
+
+            if mmr_size <= size_val {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        // low is the largest N where mmr_size(N) <= size
+        let result = 2 * low - low.count_ones() as u64;
+        Position::new(result)
     }
 }
 
@@ -259,9 +284,85 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "size exceeds MAX_POSITION")]
     fn test_to_nearest_size_panic() {
-        let largest_valid_size = Position::new(u64::MAX >> 1);
-        PeakIterator::to_nearest_size(largest_valid_size + Position::new(1));
+        PeakIterator::to_nearest_size(crate::mmr::MAX_POSITION + 1);
+    }
+
+    #[test]
+    fn test_to_nearest_size() {
+        // Build an MMR incrementally and verify to_nearest_size for all intermediate values
+        let mut mmr: Mmr<Sha256> = Mmr::new();
+        let mut hasher = Standard::<Sha256>::new();
+        let digest = [1u8; 32];
+
+        for _ in 0..1000 {
+            let current_size = mmr.size();
+
+            // Test positions from current size up to current size + 10
+            for test_pos in *current_size..=*current_size + 10 {
+                let rounded = PeakIterator::to_nearest_size(Position::new(test_pos));
+
+                // Verify rounded is a valid MMR size
+                assert!(
+                    rounded.is_mmr_size(),
+                    "rounded size {} should be valid (test_pos: {}, current: {})",
+                    rounded,
+                    test_pos,
+                    current_size
+                );
+
+                // Verify rounded <= test_pos
+                assert!(
+                    rounded <= test_pos,
+                    "rounded {} should be <= test_pos {} (current: {})",
+                    rounded,
+                    test_pos,
+                    current_size
+                );
+
+                // Verify rounded is the largest valid size <= test_pos
+                if rounded < test_pos {
+                    assert!(
+                        !(rounded + 1).is_mmr_size(),
+                        "rounded {} should be largest valid size <= {} (current: {})",
+                        rounded,
+                        test_pos,
+                        current_size
+                    );
+                }
+            }
+
+            mmr.add(&mut hasher, &digest);
+        }
+    }
+
+    #[test]
+    fn test_to_nearest_size_specific_cases() {
+        // Test edge cases
+        assert_eq!(PeakIterator::to_nearest_size(Position::new(0)), 0);
+        assert_eq!(PeakIterator::to_nearest_size(Position::new(1)), 1);
+
+        // Test consecutive values
+        let mut expected = Position::new(0);
+        for size in 0..=20 {
+            let rounded = PeakIterator::to_nearest_size(Position::new(size));
+            assert_eq!(rounded, expected);
+            if Position::new(size + 1).is_mmr_size() {
+                expected = Position::new(size + 1);
+            }
+        }
+
+        // Test with large value
+        let large_size = Position::new(1_000_000);
+        let rounded = PeakIterator::to_nearest_size(large_size);
+        assert!(rounded.is_mmr_size());
+        assert!(rounded <= large_size);
+
+        // Test maximum allowed input
+        let largest_valid_size = crate::mmr::MAX_POSITION;
+        let rounded = PeakIterator::to_nearest_size(largest_valid_size);
+        assert!(rounded.is_mmr_size());
+        assert!(rounded <= largest_valid_size);
     }
 }

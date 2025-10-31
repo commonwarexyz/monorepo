@@ -14,7 +14,7 @@ impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Codec + Send,
+    V: Codec,
     H: Hasher,
     T: Translator,
 {
@@ -121,7 +121,7 @@ pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
     K: Array,
-    V: Codec + Send,
+    V: Codec,
     T: Translator,
     D: commonware_cryptography::Digest,
 {

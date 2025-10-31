@@ -18,7 +18,7 @@ impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
 {

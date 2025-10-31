@@ -75,8 +75,7 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Translator>
-{
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -111,7 +110,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHas
     pub(super) hasher: Standard<H>,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec + Send, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -797,7 +796,7 @@ impl<E, K, V, H, T> Db<E, K, V, T> for Any<E, K, V, H, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec + Send,
+    V: Codec,
     H: CHasher,
     T: Translator,
 {

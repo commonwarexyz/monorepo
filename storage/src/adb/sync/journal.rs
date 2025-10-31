@@ -18,7 +18,7 @@ pub trait Journal {
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    V: commonware_codec::Codec + Send,
+    V: commonware_codec::Codec,
 {
     type Op = V;
     type Error = crate::journal::Error;
