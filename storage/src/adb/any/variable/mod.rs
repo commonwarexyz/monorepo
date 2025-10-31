@@ -268,7 +268,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns the location of the deleted value for the key (if any).
+    /// successful `commit`.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
