@@ -93,7 +93,7 @@ where
         V,
         C,
         H,
-        EpochedApplication<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
+        EpochedApplication<E, S, Application<E, H, C, V>, Block<H, C, V>>,
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
@@ -173,7 +173,7 @@ where
 
         let application = EpochedApplication::new(
             context.with_label("application"),
-            Application::new(marshal_mailbox.clone(), dkg_mailbox.clone()),
+            Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             BLOCKS_PER_EPOCH,
         );
@@ -184,7 +184,7 @@ where
                 oracle: config.blocker.clone(),
                 application,
                 scheme_provider,
-                marshal: marshal_mailbox.clone(),
+                marshal: marshal_mailbox,
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,

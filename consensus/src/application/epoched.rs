@@ -37,7 +37,7 @@ use crate::{
     marshal,
     simplex::{signing_scheme::Scheme, types::Context},
     types::{Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
+    utils, Application, Automaton, Block, Epochable, Relay, Reporter,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::{
@@ -108,7 +108,7 @@ impl<E, S, A, B> Automaton for EpochedApplication<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
 {
     type Digest = B::Commitment;
@@ -204,7 +204,7 @@ where
 
                 let start = Instant::now();
                 let Some(built_block) = application
-                    .build(r_ctx.with_label("app_build"), context.clone())
+                    .propose(r_ctx.with_label("app_build"), parent, context.clone())
                     .await
                 else {
                     warn!(
