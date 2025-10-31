@@ -42,13 +42,11 @@ cfg_if::cfg_if! {
 
 fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
-        log_journal_partition: format!("log_{PARTITION_SUFFIX}"),
+        log_partition: format!("log_{PARTITION_SUFFIX}"),
         log_write_buffer: NZUsize!(64 * 1024),
         log_compression: None,
         log_codec_config: (),
         log_items_per_section: ITEMS_PER_BLOB,
-        locations_journal_partition: format!("locations_{PARTITION_SUFFIX}"),
-        locations_items_per_blob: ITEMS_PER_BLOB,
         translator: EightCap,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
