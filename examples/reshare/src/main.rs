@@ -1,12 +1,18 @@
 #![doc = include_str!("../README.md")]
 
-use crate::application::{EdScheme, ThresholdScheme};
+use crate::{
+    application::{EdScheme, ThresholdScheme},
+    dkg::{PostUpdate, Update},
+    setup::ParticipantConfig,
+};
 use clap::{Args, Parser, Subcommand};
+use commonware_codec::Encode;
 use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
 };
+use commonware_utils::hex;
 use std::path::PathBuf;
 use tracing::Level;
 
@@ -116,9 +122,31 @@ fn main() {
 
         match app.subcommand {
             Subcommands::Setup(args) => setup::run(args),
-            Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
+            Subcommands::Dkg(args) => {
+                let config_path = args.config_path.clone();
+                let update_cb = Box::new(move |update| match update {
+                    Update::Failure { .. } => PostUpdate::Continue,
+                    Update::Success { output, share, .. } => {
+                        let config_str = std::fs::read_to_string(&config_path)
+                            .expect("failed to read config file");
+                        let config: ParticipantConfig = serde_json::from_str(&config_str)
+                            .expect("Failed to deserialize participant configuration");
+                        config.update_and_write(&config_path, |config| {
+                            config.output = Some(hex(output.encode().as_ref()));
+                            config.share = share;
+                        });
+                        PostUpdate::Stop
+                    }
+                });
+                validator::run::<EdScheme>(context, args, update_cb).await;
+            }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args).await
+                validator::run::<ThresholdScheme<MinSig>>(
+                    context,
+                    args,
+                    Box::new(|_| PostUpdate::Continue),
+                )
+                .await
             }
         }
     });
