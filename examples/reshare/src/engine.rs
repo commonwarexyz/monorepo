@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::epoched::EpochedApplication,
+    application::marshaled::MarshaledApplication,
     marshal::{self, ingress::handler},
     simplex::signing_scheme::Scheme,
 };
@@ -93,7 +93,7 @@ where
         V,
         C,
         H,
-        EpochedApplication<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
+        MarshaledApplication<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
@@ -171,7 +171,7 @@ where
         )
         .await;
 
-        let application = EpochedApplication::new(
+        let application = MarshaledApplication::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
