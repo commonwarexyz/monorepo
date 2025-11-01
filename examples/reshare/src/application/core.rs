@@ -64,8 +64,7 @@ where
 
     async fn build(
         &mut self,
-        _r_context: E,
-        _context: Self::Context,
+        _context: (E, Self::Context),
         mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
@@ -102,7 +101,7 @@ where
 {
     async fn verify(
         &mut self,
-        _: E,
+        _context: E,
         mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
         let Some(block) = ancestry.next().await else {

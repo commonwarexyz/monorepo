@@ -125,8 +125,7 @@ cfg_if::cfg_if! {
             /// the implementor should return [None].
             fn build(
                 &mut self,
-                r_context: E,
-                context: Self::Context,
+                context: (E, Self::Context),
                 ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
 
