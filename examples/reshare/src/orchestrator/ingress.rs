@@ -7,6 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, SinkExt};
+use tracing::error;
 
 /// Messages that can be sent to the orchestrator.
 pub enum Message<V: Variant, P: PublicKey> {
@@ -43,9 +44,8 @@ impl<V: Variant, P: PublicKey> Reporter for Mailbox<V, P> {
     type Activity = Message<V, P>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        self.sender
-            .send(activity)
-            .await
-            .expect("failed to send epoch transition")
+        if let Err(err) = self.sender.send(activity).await {
+            error!(?err, "failed to send epoch transition");
+        }
     }
 }
