@@ -20,13 +20,13 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/4)"
+    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/6)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3, 4, 5, 6]
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
@@ -57,7 +57,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run ignored tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/4 --verbose -- --ignored
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/6 --verbose -- --ignored
 
   Tests-Gate:
     name: "Slow-Tests"
