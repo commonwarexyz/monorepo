@@ -106,24 +106,25 @@ impl BigRationalExt for BigRational {
         // Step 1: Normalize the value to the range [1, 2) by repeatedly dividing/multiplying by 2.
         // We track the integer part separately since we'll combine it with fractional bits later.
         let mut normalized = self.clone();
-        let mut integer_part: isize = 0;
+        let mut integer_part = BigInt::zero();
+        let one_int = BigInt::one();
 
         // If value >= 2, repeatedly divide by 2 to bring it into range.
         while normalized >= two {
             normalized /= &two;
-            integer_part += 1;
+            integer_part += &one_int;
         }
 
         // If value < 1, repeatedly multiply by 2 to bring it into range.
         while normalized < one {
             normalized *= &two;
-            integer_part -= 1;
+            integer_part -= &one_int;
         }
 
         // Step 2: Handle the special case where the value is exactly a power of 2.
         // In this case, log2(x) is exact and has no fractional component.
         if normalized == one {
-            let numerator = BigInt::from(integer_part) << binary_digits;
+            let numerator = integer_part.clone() << binary_digits;
             let denominator = BigInt::one() << binary_digits;
             return BigRational::new(numerator, denominator);
         }
@@ -150,12 +151,12 @@ impl BigRationalExt for BigRational {
         // Step 4: Combine integer and fractional parts, then apply ceiling operation.
         // The result is stored as a fixed-point number: (integer_part << binary_digits) + fractional_bits
         // This represents integer_part + fractional_bits / (2^binary_digits)
-        let mut numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
+        let mut numerator = (integer_part << binary_digits) + fractional_bits;
 
         // If there's any leftover mass in normalized after extracting all digits,
         // we need to round up (ceiling operation). This happens when normalized > 1.
         if normalized > one {
-            numerator += BigInt::one();
+            numerator += &one_int;
         }
 
         let denominator = BigInt::one() << binary_digits;
