@@ -347,7 +347,7 @@ impl<H: Hasher> Read for Shard<H> {
             data_bytes,
             root: ReadExt::read(buf)?,
             inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=topology.samples), ()))?,
-            rows: Read::read_cfg(buf, &(topology.data_cols * topology.data_rows))?,
+            rows: Read::read_cfg(buf, &(topology.data_cols * topology.samples))?,
             checksum: Arc::new(Read::read_cfg(
                 buf,
                 &(topology.data_rows * topology.column_samples),
