@@ -40,11 +40,12 @@ use crate::{
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
-    future::{Either, Ready},
+    future::{select, try_join, Either, Ready},
     lock::Mutex,
-    try_join,
+    pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
@@ -167,26 +168,39 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
             .spawn(move |r_ctx| async move {
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
+
                 let (parent_view, parent_commitment) = context.parent;
-                let Ok(parent) = fetch_parent(
+                let parent_request = fetch_parent(
                     parent_commitment,
                     Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
-                .await
-                .await
-                else {
-                    warn!(
-                        ?parent_commitment,
-                        reason = "missing parent block",
-                        "skipping proposal"
-                    );
-                    return;
+                .await;
+                pin_mut!(parent_request);
+
+                let parent = match select(parent_request, &mut tx_closed).await {
+                    Either::Left((Ok(parent), _)) => parent,
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            ?parent_commitment,
+                            reason = "failed to fetch parent block",
+                            "skipping proposal"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    }
                 };
 
                 // Special case: If the parent block is the last block in the epoch,
@@ -211,21 +225,28 @@ where
                 }
 
                 let ancestor_stream = AncestorStream::new(marshal.clone(), parent);
+                let build_request = application.build(
+                    r_ctx.with_label("app_build"),
+                    context.clone(),
+                    ancestor_stream,
+                );
+                pin_mut!(build_request);
+
                 let start = Instant::now();
-                let Some(built_block) = application
-                    .build(
-                        r_ctx.with_label("app_build"),
-                        context.clone(),
-                        ancestor_stream,
-                    )
-                    .await
-                else {
-                    warn!(
-                        ?parent_commitment,
-                        reason = "block building returned nothing",
-                        "skipping proposal"
-                    );
-                    return;
+                let built_block = match select(build_request, &mut tx_closed).await {
+                    Either::Left((Some(block), _)) => block,
+                    Either::Left((None, _)) => {
+                        debug!(
+                            ?parent_commitment,
+                            reason = "block building failed",
+                            "skipping proposal"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    }
                 };
                 build_duration.set(start.elapsed().as_millis() as i64);
 
@@ -264,26 +285,45 @@ where
         let mut application = self.application.clone();
         let epoch_length = self.epoch_length;
 
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("verify")
             .spawn(move |r_ctx| async move {
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
+
                 let (parent_view, parent_commitment) = context.parent;
-                let parent = fetch_parent(
+                let parent_request = fetch_parent(
                     parent_commitment,
                     Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
                 .await;
-                let block = marshal.subscribe(None, digest).await;
-                let Ok((parent, block)) = try_join!(parent, block) else {
-                    warn!(
-                        ?parent_commitment,
-                        reason = "missing block",
-                        "skipping verification"
-                    );
-                    return;
+                let block_request = marshal.subscribe(None, digest).await;
+
+                let block_requests = try_join(parent_request, block_request);
+                pin_mut!(block_requests);
+
+                // If consensus drops the rceiver, we can stop work early.
+                let (parent, block) = match select(block_requests, &mut tx_closed).await {
+                    Either::Left((Ok((parent, block)), _)) => (parent, block),
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            reason = "failed to fetch parent or block",
+                            "skipping verification"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping verification"
+                        );
+                        return;
+                    }
                 };
 
                 // You can only re-propose the same block if it's the last height in the epoch.
@@ -305,9 +345,21 @@ where
                     return;
                 }
 
-                let application_valid = application
-                    .verify(r_ctx.with_label("app_verify"), parent, block.clone())
-                    .await;
+                let validity_request =
+                    application.verify(r_ctx.with_label("app_verify"), parent, block.clone());
+                pin_mut!(validity_request);
+
+                // If consensus drops the rceiver, we can stop work early.
+                let application_valid = match select(validity_request, &mut tx_closed).await {
+                    Either::Left((is_valid, _)) => is_valid,
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping verification"
+                        );
+                        return;
+                    }
+                };
 
                 if application_valid {
                     marshal.verified(context.round, block).await;

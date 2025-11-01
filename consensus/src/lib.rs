@@ -121,8 +121,8 @@ cfg_if::cfg_if! {
             /// Payload used to initialize the consensus engine in the first epoch.
             fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-            /// Build a new block on top of the provided parent commitment. If the build job fails,
-            /// returns [None].
+            /// Build a new block on top of the provided parent ancestry. If the build job fails,
+            /// the implementor should return [None].
             fn build(
                 &mut self,
                 r_context: E,
