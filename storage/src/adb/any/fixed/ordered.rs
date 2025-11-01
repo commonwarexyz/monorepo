@@ -15,7 +15,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Cursor as _, Index as _, Ordered as Index},
+    index::{ordered::Index, Cursor as _, Index as _},
     journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,

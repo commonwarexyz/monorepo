@@ -11,7 +11,7 @@ use crate::{
         store::{self, Db},
         Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Index as _},
     journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,
