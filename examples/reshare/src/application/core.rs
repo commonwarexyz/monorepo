@@ -62,7 +62,7 @@ where
         genesis_block::<H, C, V>()
     }
 
-    async fn build(
+    async fn propose(
         &mut self,
         _context: (E, Self::Context),
         mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,

@@ -123,7 +123,7 @@ cfg_if::cfg_if! {
 
             /// Build a new block on top of the provided parent ancestry. If the build job fails,
             /// the implementor should return [None].
-            fn build(
+            fn propose(
                 &mut self,
                 context: (E, Self::Context),
                 ancestry: AncestorStream<Self::SigningScheme, Self::Block>,

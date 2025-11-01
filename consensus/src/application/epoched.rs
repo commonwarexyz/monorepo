@@ -226,9 +226,9 @@ where
                 }
 
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
-                let build_request = application.build(
+                let build_request = application.propose(
                     (
-                        runtime_context.with_label("app_build"),
+                        runtime_context.with_label("app_propose"),
                         consensus_context.clone(),
                     ),
                     ancestor_stream,
