@@ -9,6 +9,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use tracing::error;
 
 /// A message that can be sent to the [Actor].
 ///
@@ -66,9 +67,18 @@ where
         let message = Message::Act {
             response: response_tx,
         };
-        self.sender.send(message).await.expect("mailbox closed");
+        if let Err(err) = self.sender.send(message).await {
+            error!(?err, "failed to send act message");
+            return None;
+        }
 
-        response_rx.await.expect("response channel closed")
+        match response_rx.await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                error!(?err, "failed to receive act response");
+                None
+            }
+        }
     }
 }
 
