@@ -34,7 +34,7 @@
 //! - Blocks are automatically verified to be within the current epoch
 
 use crate::{
-    marshal,
+    marshal::{self, ingress::mailbox::AncestorStream},
     simplex::{signing_scheme::Scheme, types::Context},
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
@@ -42,7 +42,9 @@ use crate::{
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::{
     channel::oneshot::{self, Canceled},
+    future::{Either, Ready},
     lock::Mutex,
+    try_join,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
@@ -108,7 +110,12 @@ impl<E, S, A, B> Automaton for EpochedApplication<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: VerifyingApplication<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Commitment, S::PublicKey>,
+    >,
     B: Block,
 {
     type Digest = B::Commitment;
@@ -172,6 +179,7 @@ where
                     &mut marshal,
                 )
                 .await
+                .await
                 else {
                     warn!(
                         ?parent_commitment,
@@ -202,9 +210,14 @@ where
                     return;
                 }
 
+                let ancestor_stream = AncestorStream::new(marshal.clone(), parent);
                 let start = Instant::now();
                 let Some(built_block) = application
-                    .build(r_ctx.with_label("app_build"), context.clone())
+                    .build(
+                        r_ctx.with_label("app_build"),
+                        context.clone(),
+                        ancestor_stream,
+                    )
                     .await
                 else {
                     warn!(
@@ -263,18 +276,13 @@ where
                     &mut marshal,
                 )
                 .await;
-                let block = marshal.subscribe(None, digest).await.await;
-
-                let Ok(parent) = parent else {
+                let block = marshal.subscribe(None, digest).await;
+                let Ok((parent, block)) = try_join!(parent, block) else {
                     warn!(
                         ?parent_commitment,
-                        reason = "missing parent block",
+                        reason = "missing block",
                         "skipping verification"
                     );
-                    return;
-                };
-                let Ok(block) = block else {
-                    warn!(?digest, reason = "missing block", "skipping verification");
                     return;
                 };
 
@@ -381,7 +389,7 @@ async fn fetch_parent<E, S, A, B>(
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut marshal::Mailbox<S, B>,
-) -> Result<B, Canceled>
+) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -390,11 +398,8 @@ where
 {
     let genesis = application.genesis().await;
     if parent_commitment == genesis.commitment() {
-        Ok(genesis)
+        Either::Left(futures::future::ready(Ok(genesis)))
     } else {
-        marshal
-            .subscribe(parent_round, parent_commitment)
-            .await
-            .await
+        Either::Right(marshal.subscribe(parent_round, parent_commitment).await)
     }
 }

@@ -173,7 +173,7 @@ where
 
         let application = EpochedApplication::new(
             context.with_label("application"),
-            Application::new(marshal_mailbox.clone(), dkg_mailbox.clone()),
+            Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             BLOCKS_PER_EPOCH,
         );

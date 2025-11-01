@@ -5,15 +5,15 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::{self},
+    marshal::ingress::mailbox::AncestorStream,
     simplex::{signing_scheme::Scheme, types::Context},
-    types::Round,
-    Block as _, Epochable, VerifyingApplication,
+    Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
+use futures::StreamExt;
 use rand::Rng;
 use std::{marker::PhantomData, time::Duration};
 
@@ -26,9 +26,8 @@ where
     C: Signer,
     V: Variant,
 {
-    marshal: marshal::Mailbox<S, Block<H, C, V>>,
     dkg: dkg::Mailbox<H, C, V>,
-    _marker: PhantomData<E>,
+    _marker: PhantomData<(E, S)>,
 }
 
 impl<E, S, H, C, V> Application<E, S, H, C, V>
@@ -39,9 +38,8 @@ where
     C: Signer,
     V: Variant,
 {
-    pub fn new(marshal: marshal::Mailbox<S, Block<H, C, V>>, dkg: dkg::Mailbox<H, C, V>) -> Self {
+    pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
-            marshal,
             dkg,
             _marker: PhantomData,
         }
@@ -57,29 +55,22 @@ where
     V: Variant,
 {
     type Block = Block<H, C, V>;
+    type SigningScheme = S;
     type Context = Context<H::Digest, C::PublicKey>;
 
     async fn genesis(&mut self) -> Self::Block {
         genesis_block::<H, C, V>()
     }
 
-    async fn build(&mut self, r_context: E, context: Self::Context) -> Option<Self::Block> {
-        let genesis = genesis_block::<H, C, V>();
-
-        // Fetch the parent block from marshal.
-        let (parent_view, parent_commitment) = context.parent;
-        let parent_block = if parent_commitment == genesis.commitment() {
-            genesis
-        } else {
-            self.marshal
-                .subscribe(
-                    Some(Round::new(context.epoch(), parent_view)),
-                    parent_commitment,
-                )
-                .await
-                .await
-                .ok()?
-        };
+    async fn build(
+        &mut self,
+        r_context: E,
+        _context: Self::Context,
+        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+    ) -> Option<Self::Block> {
+        // Fetch the parent block from the ancestry stream.
+        let parent_block = ancestry.next().await?;
+        let parent_commitment = parent_block.commitment();
 
         // Ask the DKG actor for a result to include
         //

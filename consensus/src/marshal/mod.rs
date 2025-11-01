@@ -1076,7 +1076,7 @@ mod tests {
 
             // Stream from latest -> height 1
             let (_, commitment) = actor.get_info(Identifier::Latest).await.unwrap();
-            let ancestry = actor.ancestry((None, commitment), 1).await.unwrap();
+            let ancestry = actor.ancestry((None, commitment)).await.unwrap();
             let blocks = ancestry.collect::<Vec<_>>().await;
 
             // Ensure correct delivery order: 5,4,3,2,1
@@ -1084,12 +1084,6 @@ mod tests {
             (0..5).for_each(|i| {
                 assert_eq!(blocks[i].height(), 5 - i as u64);
             });
-
-            // Stream from height 5 -> height 8 (range invalid, should only yield 5.)
-            let ancestry = actor.ancestry((None, commitment), 8).await.unwrap();
-            let blocks = ancestry.collect::<Vec<_>>().await;
-            assert_eq!(blocks.len(), 1);
-            assert_eq!(blocks[0].height(), 5);
         })
     }
 }

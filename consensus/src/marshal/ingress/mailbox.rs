@@ -245,19 +245,18 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         rx
     }
 
-    /// Returns an [AncestorStream] over the ancestry of a given block, leading up to the end bound.
+    /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
     ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
         &mut self,
         (start_round, start_commitment): (Option<Round>, B::Commitment),
-        end_height: u64,
     ) -> Option<AncestorStream<S, B>> {
         self.subscribe(start_round, start_commitment)
             .await
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), block, end_height))
+            .map(|block| AncestorStream::new(self.clone(), block))
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
@@ -316,21 +315,22 @@ fn subscribe_block_future<S: Scheme, B: Block>(
     .boxed()
 }
 
-/// Yields the ancestors of a block while prefetching parents.
+/// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
+///
+/// TODO(clabby): Once marshal can also yield the genesis block, this stream should end
+/// at block height 0 rather than 1.
 #[pin_project]
 pub struct AncestorStream<S: Scheme, B: Block> {
     marshal: Mailbox<S, B>,
-    end_height: u64,
     buffered: Option<B>,
     #[pin]
     pending: FuturesOrdered<BoxFuture<'static, Option<B>>>,
 }
 
 impl<S: Scheme, B: Block> AncestorStream<S, B> {
-    pub(crate) fn new(marshal: Mailbox<S, B>, initial: B, end_height: u64) -> Self {
+    pub(crate) fn new(marshal: Mailbox<S, B>, initial: B) -> Self {
         Self {
             marshal,
-            end_height,
             buffered: Some(initial),
             pending: FuturesOrdered::new(),
         }
@@ -341,12 +341,15 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
     type Item = B;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Because marshal cannot currently yield the genesis block, we stop at height 1.
+        const END_BOUND: u64 = 1;
+
         let mut this = self.project();
 
         // If a result has been buffered, return it and queue the parent fetch if needed.
         if let Some(block) = this.buffered.take() {
             let height = block.height();
-            let should_fetch_parent = height > *this.end_height;
+            let should_fetch_parent = height > END_BOUND;
             if should_fetch_parent {
                 let parent_commitment = block.parent();
                 let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
@@ -367,7 +370,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
             Poll::Ready(None) | Poll::Ready(Some(None)) => Poll::Ready(None),
             Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
-                let should_fetch_parent = height > *this.end_height;
+                let should_fetch_parent = height > END_BOUND;
                 if should_fetch_parent {
                     let parent_commitment = block.parent();
                     let future = subscribe_block_future(this.marshal.clone(), parent_commitment);

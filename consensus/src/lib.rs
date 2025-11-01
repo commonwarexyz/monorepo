@@ -53,6 +53,7 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
+        use crate::{marshal::ingress::mailbox::AncestorStream, simplex::signing_scheme::Scheme};
 
         pub mod application;
         pub mod marshal;
@@ -111,6 +112,9 @@ cfg_if::cfg_if! {
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context: Epochable;
 
+            /// The signing scheme used by the application.
+            type SigningScheme: Scheme;
+
             /// The block type produced by the application's builder.
             type Block: Block;
 
@@ -123,6 +127,7 @@ cfg_if::cfg_if! {
                 &mut self,
                 r_context: E,
                 context: Self::Context,
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
 
             /// Receive a finalized block from [crate::marshal].
