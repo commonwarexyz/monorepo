@@ -160,6 +160,7 @@ type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 /// Inner logic for [encode()]
 fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
     // Validate parameters
+    assert!(total > min);
     assert!(min > 0);
     let n = total as usize;
     let k = min as usize;
@@ -581,6 +582,15 @@ mod tests {
         for i in 0..total {
             assert!(!chunks[i as usize].verify(i + 1, &root));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: total > min")]
+    fn test_invalid_total() {
+        let data = b"Test parameter validation";
+
+        // total <= min should panic
+        encode::<Sha256>(3, 3, data.to_vec()).unwrap();
     }
 
     #[test]
