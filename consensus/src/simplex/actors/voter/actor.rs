@@ -1030,7 +1030,6 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<Request<D, P, bool>> {
         let round = self.views.get_mut(&view)?;
-        let leader = round.leader?;
 
         // Request certification only once
         if round.certify_handle.is_some() || round.certified_proposal.is_some() {
@@ -1048,6 +1047,24 @@ impl<
 
         // Get the context for the proposal.
         let parent_view = proposal.parent;
+
+        // Get the leader
+        let Some(leader) = round.leader else {
+            // If the leader is not set, then we may need the seed for this round.
+            // We should attempt to fetch a notarization or nullification for the previous round.
+            let last_view = view - 1;
+            let (missing_notarizations, missing_nullifications) = if parent_view == last_view {
+                (vec![last_view], vec![])
+            } else {
+                (vec![parent_view], vec![last_view])
+            };
+            resolver
+                .fetch(missing_notarizations, missing_nullifications)
+                .await;
+            self.certification_candidates.insert(view);
+            return None;
+        };
+
         // Since we have a notarization, the parent does not need to be certified by us. It is
         // implicitly certified by the fact that participants notarized the current proposal.
         let Some(parent_payload) = self.is_notarized(parent_view) else {
@@ -1125,11 +1142,11 @@ impl<
                 .append(view, msg)
                 .await
                 .expect("unable to append to journal");
+            debug!(certified = ?success, view, "certify result");
         }
 
         // Log the result and exit early if certification failed since we should not move to the
         // next view until a nullification is formed.
-        debug!(certified = ?success, view, "certify result");
         if !success {
             return;
         }
@@ -1158,6 +1175,14 @@ impl<
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
+        // Set leader if round already exists.
+        if let Some(round) = self.views.get_mut(&view) {
+            if round.leader.is_none() {
+                round.set_leader(seed);
+            }
+            return;
+        }
+
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1414,9 +1439,7 @@ impl<
         }
 
         // Track view finalized
-        if view > self.last_finalized {
-            self.last_finalized = view;
-        }
+        self.last_finalized = self.last_finalized.max(view);
 
         // Enter next view
         self.enter_view(view + 1, seed);
@@ -1923,6 +1946,7 @@ impl<
             // Drain pending certifications triggered by notarizations
             let candidates = take(&mut self.certification_candidates)
                 .into_iter()
+                .filter(|v| v > &self.last_finalized)
                 .collect::<Vec<_>>();
             for v in candidates {
                 if let Some(Request(ctx, receiver)) = self.certify(v, &mut resolver).await {
