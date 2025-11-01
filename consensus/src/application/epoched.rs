@@ -306,7 +306,6 @@ where
                 )
                 .await;
                 let block_request = marshal.subscribe(None, digest).await;
-
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
 
