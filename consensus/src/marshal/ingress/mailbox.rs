@@ -256,7 +256,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .await
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), block))
+            .map(|block| AncestorStream::new(self.clone(), [block]))
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
@@ -322,16 +322,33 @@ fn subscribe_block_future<S: Scheme, B: Block>(
 #[pin_project]
 pub struct AncestorStream<S: Scheme, B: Block> {
     marshal: Mailbox<S, B>,
-    buffered: Option<B>,
+    buffered: Vec<B>,
     #[pin]
     pending: FuturesOrdered<BoxFuture<'static, Option<B>>>,
 }
 
 impl<S: Scheme, B: Block> AncestorStream<S, B> {
-    pub(crate) fn new(marshal: Mailbox<S, B>, initial: B) -> Self {
+    /// Creates a new [AncestorStream] starting from the given ancestry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the initial blocks are not contiguous in height.
+    pub(crate) fn new(marshal: Mailbox<S, B>, initial: impl IntoIterator<Item = B>) -> Self {
+        let mut buffered = initial.into_iter().collect::<Vec<B>>();
+        buffered.sort_by_key(Block::height);
+
+        // Check that the initial blocks are contiguous in height.
+        buffered.windows(2).for_each(|window| {
+            assert_eq!(
+                window[0].height() + 1,
+                window[1].height(),
+                "initial blocks must be contiguous in height"
+            );
+        });
+
         Self {
             marshal,
-            buffered: Some(initial),
+            buffered,
             pending: FuturesOrdered::new(),
         }
     }
@@ -347,9 +364,9 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
         let mut this = self.project();
 
         // If a result has been buffered, return it and queue the parent fetch if needed.
-        if let Some(block) = this.buffered.take() {
+        if let Some(block) = this.buffered.pop() {
             let height = block.height();
-            let should_fetch_parent = height > END_BOUND;
+            let should_fetch_parent = height > END_BOUND && this.buffered.is_empty();
             if should_fetch_parent {
                 let parent_commitment = block.parent();
                 let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
@@ -358,7 +375,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
                 // Explicitly poll the pending futures to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
                 if let Poll::Ready(Some(Some(block))) = this.pending.as_mut().poll_next(cx) {
-                    this.buffered.replace(block);
+                    this.buffered.push(block);
                 }
             }
 
@@ -379,7 +396,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
                     // Explicitly poll the pending futures to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
                     if let Poll::Ready(Some(Some(block))) = this.pending.as_mut().poll_next(cx) {
-                        this.buffered.replace(block);
+                        this.buffered.push(block);
                     }
                 }
 

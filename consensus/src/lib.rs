@@ -145,12 +145,11 @@ cfg_if::cfg_if! {
         where
             E: Rng + Spawner + Metrics + Clock
         {
-            /// Verify a block produced by the application's builder, relative to its parent.
+            /// Verify a block produced by the application's builder, relative to its ancestry.
             fn verify(
                 &mut self,
                 context: E,
-                parent: Self::Block,
-                block: Self::Block,
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> impl Future<Output = bool> + Send;
         }
 

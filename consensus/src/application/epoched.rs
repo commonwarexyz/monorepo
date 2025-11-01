@@ -224,7 +224,7 @@ where
                     return;
                 }
 
-                let ancestor_stream = AncestorStream::new(marshal.clone(), parent);
+                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
                 let build_request = application.build(
                     r_ctx.with_label("app_build"),
                     context.clone(),
@@ -345,8 +345,9 @@ where
                     return;
                 }
 
+                let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request =
-                    application.verify(r_ctx.with_label("app_verify"), parent, block.clone());
+                    application.verify(r_ctx.with_label("app_verify"), ancestry_stream);
                 pin_mut!(validity_request);
 
                 // If consensus drops the rceiver, we can stop work early.

@@ -100,7 +100,17 @@ where
     C: Signer,
     V: Variant,
 {
-    async fn verify(&mut self, _: E, parent: Self::Block, block: Self::Block) -> bool {
+    async fn verify(
+        &mut self,
+        _: E,
+        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+    ) -> bool {
+        let Some(block) = ancestry.next().await else {
+            return false;
+        };
+        let Some(parent) = ancestry.next().await else {
+            return false;
+        };
         block.height() == parent.height() + 1 && block.parent() == parent.digest()
     }
 }
