@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [MarshaledApplication] is an adapter that wraps any [VerifyingApplication] implementation to handle
+//! [Marshaled] is an adapter that wraps any [VerifyingApplication] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -15,11 +15,11 @@
 //!
 //! # Usage
 //!
-//! Wrap your application implementation with [MarshaledApplication::new] and provide it to your
+//! Wrap your application implementation with [Marshaled::new] and provide it to your
 //! consensus engine for the [Automaton] and [Relay]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = MarshaledApplication::new(
+//! let application = Marshaled::new(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
@@ -58,7 +58,7 @@ use tracing::{debug, warn};
 /// blocks from being produced outside their valid epoch and handles the special case of
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
-pub struct MarshaledApplication<E, S, A, B>
+pub struct Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -74,14 +74,14 @@ where
     build_duration: Gauge,
 }
 
-impl<E, S, A, B> MarshaledApplication<E, S, A, B>
+impl<E, S, A, B> Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
 {
-    /// Creates a new [MarshaledApplication] wrapper.
+    /// Creates a new [Marshaled] wrapper.
     pub fn new(
         context: E,
         application: A,
@@ -107,7 +107,7 @@ where
     }
 }
 
-impl<E, S, A, B> Automaton for MarshaledApplication<E, S, A, B>
+impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -373,7 +373,7 @@ where
     }
 }
 
-impl<E, S, A, B> Relay for MarshaledApplication<E, S, A, B>
+impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -412,7 +412,7 @@ where
     }
 }
 
-impl<E, S, A, B> Reporter for MarshaledApplication<E, S, A, B>
+impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
