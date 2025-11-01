@@ -15,13 +15,13 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        Location, Proof, StandardHasher as Standard,
+        Location, Proof, StandardHasher,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
 use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -30,7 +30,7 @@ use tracing::debug;
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [RStorage] partition used for the MMR's backing journal.
+    /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
@@ -39,10 +39,10 @@ pub struct Config<T: Translator, C> {
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
 
-    /// The name of the [RStorage] partition used for the MMR's metadata.
+    /// The name of the [Storage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the log of operations.
+    /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
@@ -69,7 +69,7 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -101,14 +101,14 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     pub(crate) last_commit: Option<Location>,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(super) hasher: Standard<H>,
+    pub(super) hasher: StandardHasher<H>,
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type SharedState<'a, E, K, V, H, T> =
     super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -117,7 +117,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::<H>::new();
 
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
@@ -284,7 +284,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
         self.mmr.root(hasher)
     }
 
@@ -460,13 +460,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 }
 
-impl<E, K, V, H, T> Db<E, K, V, T> for Any<E, K, V, H, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    H: CHasher,
-    T: Translator,
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> Db<E, K, V, T>
+    for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -553,7 +548,7 @@ pub(super) mod test {
     pub fn test_any_variable_db_commit_on_empty_db() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1);
@@ -575,7 +570,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -678,7 +673,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
             // expected.
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let d1 = Sha256::fill(1u8);
@@ -801,7 +796,7 @@ pub(super) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Vec<u8>>::default();
@@ -913,10 +908,10 @@ pub(super) mod test {
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
     // in the snapshot.
     #[test_traced("WARN")]
-    pub fn test_any_db_log_replay() {
+    pub fn test_any_variable_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Update the same key many times.
@@ -941,10 +936,10 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_multiple_commits_delete_gets_replayed() {
+    pub fn test_any_variable_db_multiple_commits_delete_gets_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Vec<u8>>::default();
@@ -984,7 +979,7 @@ pub(super) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
             let root = db.root(&mut hasher);
 
@@ -1100,7 +1095,7 @@ pub(super) mod test {
     fn test_any_variable_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Insert 1000 keys then sync.
@@ -1191,7 +1186,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize an empty db.
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone()).await;
             let root = db.root(&mut hasher);
 
