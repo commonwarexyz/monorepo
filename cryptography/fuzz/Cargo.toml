@@ -20,6 +20,8 @@ ed25519-zebra = "4.0.3"
 rand = { workspace = true }
 blake3 = { workspace = true }
 zeroize = { workspace = true }
+bytes = { workspace = true }
+rand_chacha = { workspace = true }
 
 [[bin]]
 name = "bls12381_decode"
@@ -115,6 +117,13 @@ bench = false
 [[bin]]
 name = "metamorph_lthash"
 path = "fuzz_targets/metamorph_lthash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
 test = false
 doc = false
 bench = false
