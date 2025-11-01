@@ -101,19 +101,19 @@ cfg_if::cfg_if! {
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
         }
 
-        /// Application is the interface responsible for building new blocks on top of consensus-provided parent
-        /// commitments as well as receiving finalized updates from [crate::marshal].
+        /// Application is a minimal interface for standard implementations that operate over a stream
+        /// of epoched blocks.
         pub trait Application<E>: Clone + Send + 'static
         where
             E: Rng + Spawner + Metrics + Clock
         {
+            /// The signing scheme used by the application.
+            type SigningScheme: Scheme;
+
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context: Epochable;
-
-            /// The signing scheme used by the application.
-            type SigningScheme: Scheme;
 
             /// The block type produced by the application's builder.
             type Block: Block;
@@ -133,13 +133,12 @@ cfg_if::cfg_if! {
             fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
         }
 
-        /// An extension of [Application] that can verify blocks produced by its builder
-        /// for the sake of driving [Automaton::verify].
+        /// An extension of [Application] that provides the ability to implementations to verify blocks.
         ///
-        /// Some [Application]s may not require this functionality - i.e. when employing
-        /// erasure coding, verification only serves to verify the integrity of the
+        /// Some [Application]s may not require this functionality. When employing
+        /// erasure coding, for example, verification only serves to verify the integrity of the
         /// received shard relative to the consensus commitment, and can therefore be
-        /// hidden from the application.
+        /// hidden from the application (any invalid blocks will be discarded in [Application::finalize]).
         pub trait VerifyingApplication<E>: Application<E>
         where
             E: Rng + Spawner + Metrics + Clock
