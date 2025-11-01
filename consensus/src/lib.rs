@@ -99,6 +99,26 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+
+            /// Determine whether a notarized payload is safe to finalize. If not, the payload will
+            /// be excluded from the block chain and will not be finalized. Therefore, the return
+            /// value must be deterministic and consistent across all participants.
+            ///
+            /// Applications that employ erasure-coding can override this to delay or prevent
+            /// finalization until they have reconstructed and validated the full block (e.g., after
+            /// receiving enough shards).
+            fn certify(
+                &mut self,
+                _context: Self::Context,
+                _payload: Self::Digest,
+            ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
+                #[allow(clippy::async_yields_async)]
+                async move {
+                    let (sender, receiver) = oneshot::channel();
+                    let _ = sender.send(true);
+                    receiver
+                }
+            }
         }
 
         /// Application is a minimal interface for standard implementations that operate over a stream

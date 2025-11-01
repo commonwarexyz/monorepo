@@ -8,16 +8,26 @@ use std::{collections::BTreeMap, sync::Mutex};
 /// Relay is a mock for distributing artifacts between applications.
 pub struct Relay<D: Digest, P: PublicKey> {
     recipients: Mutex<BTreeMap<P, mpsc::UnboundedSender<(D, Bytes)>>>,
+    payloads: Mutex<BTreeMap<D, Bytes>>,
 }
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
+    /// Creates a new relay.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
+            payloads: Mutex::new(BTreeMap::new()),
         }
     }
 
+    /// Deregisters all recipients without clearing the payloads.
+    pub fn deregister_all(&self) {
+        let mut recipients = self.recipients.lock().unwrap();
+        recipients.clear();
+    }
+
+    /// Registers a new recipient that receives all broadcasts.
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         if self
@@ -32,7 +42,12 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &P, payload: (D, Bytes)) {
+    /// Broadcasts a payload to all registered recipients.
+    pub async fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
+        // Record payload for future use
+        self.payloads.lock().unwrap().insert(payload, data.clone());
+
+        // Send to all recipients
         let channels = {
             let mut channels = Vec::new();
             let recipients = self.recipients.lock().unwrap();
@@ -46,10 +61,25 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         };
         for mut channel in channels {
             channel
-                .send((payload.0, payload.1.clone()))
+                .send((payload, data.clone()))
                 .await
                 .expect("Failed to send");
         }
+    }
+
+    /// Requests that a payload is sent to a public key.
+    pub async fn request(&self, payload: D, public_key: P) {
+        let Some(data) = self.payloads.lock().unwrap().get(&payload).cloned() else {
+            return;
+        };
+        let mut sender = self
+            .recipients
+            .lock()
+            .unwrap()
+            .get(&public_key)
+            .expect("unregistered recipient")
+            .clone();
+        sender.send((payload, data)).await.expect("Failed to send");
     }
 }
 
