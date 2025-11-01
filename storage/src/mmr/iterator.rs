@@ -306,29 +306,20 @@ mod tests {
                 // Verify rounded is a valid MMR size
                 assert!(
                     rounded.is_mmr_size(),
-                    "rounded size {} should be valid (test_pos: {}, current: {})",
-                    rounded,
-                    test_pos,
-                    current_size
+                    "rounded size {rounded} should be valid (test_pos: {test_pos}, current: {current_size})",
                 );
 
                 // Verify rounded <= test_pos
                 assert!(
                     rounded <= test_pos,
-                    "rounded {} should be <= test_pos {} (current: {})",
-                    rounded,
-                    test_pos,
-                    current_size
+                    "rounded {rounded} should be <= test_pos {test_pos} (current: {current_size})",
                 );
 
                 // Verify rounded is the largest valid size <= test_pos
                 if rounded < test_pos {
                     assert!(
                         !(rounded + 1).is_mmr_size(),
-                        "rounded {} should be largest valid size <= {} (current: {})",
-                        rounded,
-                        test_pos,
-                        current_size
+                        "rounded {rounded} should be largest valid size <= {test_pos} (current: {current_size})",
                     );
                 }
             }

@@ -1,8 +1,8 @@
-//! Epoch management wrapper for consensus applications.
+//! Wrapper for consensus applications that handles epochs and block dissemination.
 //!
 //! # Overview
 //!
-//! [EpochedApplication] is an adapter that wraps any [VerifyingApplication] implementation to handle
+//! [Marshaled] is an adapter that wraps any [VerifyingApplication] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -15,11 +15,11 @@
 //!
 //! # Usage
 //!
-//! Wrap your application implementation with [EpochedApplication::new] and provide it to your
+//! Wrap your application implementation with [Marshaled::new] and provide it to your
 //! consensus engine for the [Automaton] and [Relay]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = EpochedApplication::new(
+//! let application = Marshaled::new(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
@@ -58,7 +58,7 @@ use tracing::{debug, warn};
 /// blocks from being produced outside their valid epoch and handles the special case of
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
-pub struct EpochedApplication<E, S, A, B>
+pub struct Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -74,14 +74,14 @@ where
     build_duration: Gauge,
 }
 
-impl<E, S, A, B> EpochedApplication<E, S, A, B>
+impl<E, S, A, B> Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
 {
-    /// Creates a new [EpochedApplication] wrapper.
+    /// Creates a new [Marshaled] wrapper.
     pub fn new(
         context: E,
         application: A,
@@ -107,7 +107,7 @@ where
     }
 }
 
-impl<E, S, A, B> Automaton for EpochedApplication<E, S, A, B>
+impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -158,7 +158,7 @@ where
     /// broadcasting.
     async fn propose(
         &mut self,
-        context: Context<Self::Digest, S::PublicKey>,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -171,16 +171,16 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
-            .spawn(move |r_ctx| async move {
+            .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
 
-                let (parent_view, parent_commitment) = context.parent;
+                let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    Some(Round::new(context.epoch(), parent_view)),
+                    Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
@@ -206,17 +206,18 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch = utils::last_block_in_epoch(epoch_length, context.epoch());
+                let last_in_epoch =
+                    utils::last_block_in_epoch(epoch_length, consensus_context.epoch());
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
                         let mut lock = last_built.lock().await;
-                        *lock = Some((context.round, parent));
+                        *lock = Some((consensus_context.round, parent));
                     }
 
                     let result = tx.send(digest);
                     debug!(
-                        round = ?context.round,
+                        round = ?consensus_context.round,
                         ?digest,
                         success = result.is_ok(),
                         "re-proposed parent block at epoch boundary"
@@ -225,9 +226,11 @@ where
                 }
 
                 let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
-                let build_request = application.build(
-                    r_ctx.with_label("app_build"),
-                    context.clone(),
+                let build_request = application.propose(
+                    (
+                        runtime_context.with_label("app_propose"),
+                        consensus_context.clone(),
+                    ),
                     ancestor_stream,
                 );
                 pin_mut!(build_request);
@@ -253,12 +256,12 @@ where
                 let digest = built_block.commitment();
                 {
                     let mut lock = last_built.lock().await;
-                    *lock = Some((context.round, built_block));
+                    *lock = Some((consensus_context.round, built_block));
                 }
 
                 let result = tx.send(digest);
                 debug!(
-                    round = ?context.round,
+                    round = ?consensus_context.round,
                     ?digest,
                     success = result.is_ok(),
                     "proposed new block"
@@ -303,7 +306,6 @@ where
                 )
                 .await;
                 let block_request = marshal.subscribe(None, digest).await;
-
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
 
@@ -371,7 +373,7 @@ where
     }
 }
 
-impl<E, S, A, B> Relay for EpochedApplication<E, S, A, B>
+impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -410,7 +412,7 @@ where
     }
 }
 
-impl<E, S, A, B> Reporter for EpochedApplication<E, S, A, B>
+impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
