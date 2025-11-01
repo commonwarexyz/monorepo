@@ -8,6 +8,7 @@ use std::ops::{Index, IndexMut};
 ///
 /// Any bits beyond that width will be erased.
 fn reverse_bits(bit_width: u32, i: u64) -> u64 {
+    assert!(bit_width <= 64, "bit_width must be <= 64");
     i.wrapping_shl(64 - bit_width).reverse_bits()
 }
 
