@@ -199,7 +199,7 @@ impl std::fmt::Debug for Matrix {
         for i in 0..self.rows {
             let row_i = &self[i];
             for &row_i_j in row_i {
-                write!(f, "{:?} ", row_i_j)?;
+                write!(f, "{row_i_j:?} ")?;
             }
             writeln!(f)?;
         }
@@ -753,8 +753,15 @@ impl PolynomialVector {
             },
         );
         // Do a point wise division.
+        // After applying the skew, q should have no zeroes in the evaluation domain.
+        // This assertion ensures the vanishing polynomial was constructed correctly.
         for i in 0..self.data.rows {
-            let q_i_inv = q.coefficients[i].inv();
+            let q_i = q.coefficients[i];
+            assert!(
+                q.coefficients[i] != F::zero(),
+                "vanishing polynomial has zero at evaluation point after skew"
+            );
+            let q_i_inv = q_i.inv();
             for d_i_j in &mut self.data[i] {
                 *d_i_j = *d_i_j * q_i_inv;
             }

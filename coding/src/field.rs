@@ -159,6 +159,10 @@ impl F {
         // Yes. Even if x and y have the maximum value, a single subtraction of P
         // would suffice to make their sum < P. Thus, our strategy for field addition
         // will always work.
+        //
+        // Note: (b << 32) - b = b * (2^32 - 1). Since b <= 2^32 - 1, this is at most
+        // (2^32 - 1)^2 = 2^64 - 2^33 + 1 < 2^64. Since b << 32 >= b always,
+        // this subtraction will never underflow.
         Self(a).sub_inner(Self(c)).add_inner(Self((b << 32) - b))
     }
 
