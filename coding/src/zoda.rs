@@ -132,6 +132,8 @@ use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
 const SECURITY_BITS: usize = 126;
+const LOG2_INITIAL_PRECISION: usize = 7;
+const LOG2_MAX_PRECISION: usize = 128;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
@@ -188,7 +190,20 @@ fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
     let m = BigRational::from_usize(m);
     let skew = BigRational::from_u64(if upper_bound { 0u64 } else { 1u64 });
     let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
-    let log_term = (BigRational::from_usize(1) - fraction).log2_ceil(7);
+    if fraction == BigRational::from_u64(0) {
+        return usize::MAX;
+    }
+    let one_minus = BigRational::from_usize(1) - fraction;
+    let zero = BigRational::from_u64(0);
+    let mut precision = LOG2_INITIAL_PRECISION;
+    let mut log_term = one_minus.log2_ceil(precision);
+    while log_term >= zero && precision < LOG2_MAX_PRECISION {
+        precision += 1;
+        log_term = one_minus.log2_ceil(precision);
+    }
+    if log_term >= zero {
+        return usize::MAX;
+    }
     let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
 }
@@ -703,6 +718,13 @@ mod tests {
     #[test]
     fn required_samples_handles_minimal_padding() {
         assert!(required_samples(3, 4) > 0);
+    }
+
+    #[test]
+    fn required_samples_handles_equal_rows() {
+        let value = required_samples_impl(512, 512, false);
+        assert!(value > 0);
+        assert_ne!(value, usize::MAX);
     }
 
     #[test]
