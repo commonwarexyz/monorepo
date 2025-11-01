@@ -144,7 +144,7 @@ cfg_if::cfg_if! {
         where
             E: Rng + Spawner + Metrics + Clock
         {
-            /// Verify a block produced by the application's builder, relative to its ancestry.
+            /// Verify a block produced by the application's proposer, relative to its ancestry.
             fn verify(
                 &mut self,
                 context: E,
