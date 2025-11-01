@@ -194,8 +194,7 @@ fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
 }
 
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
-    let k = encoded_rows - min_rows;
-    required_samples_impl(min_rows, k, false)
+    required_samples_impl(min_rows, encoded_rows, false)
 }
 
 /// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
@@ -685,3 +684,35 @@ impl<H: Hasher> Scheme for Zoda<H> {
 }
 
 impl<H: Hasher> ValidatingScheme for Zoda<H> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    #[test]
+    fn required_samples_matches_impl() {
+        let min_rows = 3;
+        let encoded_rows = 4;
+        assert_eq!(
+            required_samples(min_rows, encoded_rows),
+            required_samples_impl(min_rows, encoded_rows, false)
+        );
+    }
+
+    #[test]
+    fn required_samples_handles_minimal_padding() {
+        assert!(required_samples(3, 4) > 0);
+    }
+
+    #[test]
+    fn topology_reckon_handles_small_extra_shards() {
+        let config = Config {
+            minimum_shards: 3,
+            extra_shards: 1,
+        };
+        let topology = Topology::reckon(&config, 16);
+        assert_eq!(topology.min_shards, 3);
+        assert_eq!(topology.total_shards, 4);
+    }
+}
