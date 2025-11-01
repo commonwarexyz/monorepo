@@ -390,7 +390,8 @@ impl<H: Hasher> Read for ReShard<H> {
         buf: &mut impl bytes::Buf,
         &(max_data_bytes, _): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let max_data_els = max_data_bytes.div_ceil(F::SIZE);
+        let max_data_bits = max_data_bytes.saturating_mul(8);
+        let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
             inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_data_els), ()))?,
@@ -736,5 +737,30 @@ mod tests {
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
+    }
+
+    #[test]
+    fn reshard_roundtrip_handles_field_packing() {
+        use bytes::BytesMut;
+        use commonware_cryptography::Sha256;
+
+        let config = Config {
+            minimum_shards: 3,
+            extra_shards: 2,
+        };
+        let data = vec![0xAA; 64];
+
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, data.as_slice()).unwrap();
+        let shard = shards.into_iter().next().unwrap();
+
+        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
+
+        let mut buf = BytesMut::new();
+        reshard.write(&mut buf);
+        let mut bytes = buf.freeze();
+        let decoded =
+            ReShard::<Sha256>::read_cfg(&mut bytes, &(data.len(), config)).unwrap();
+
+        assert_eq!(decoded, reshard);
     }
 }
