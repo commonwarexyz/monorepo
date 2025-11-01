@@ -3,7 +3,10 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_mmr_and_log, ordered::Any, Config as AConfig},
+        any::{
+            build_snapshot_from_log,
+            fixed::{init_mmr_and_log, ordered::Any, Config as AConfig},
+        },
         current::Config,
         operation::fixed::ordered::{KeyData, Operation},
         store::{self, Db},
@@ -168,7 +171,7 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        Any::<E, K, V, H, T>::build_snapshot_from_log(
+        build_snapshot_from_log(
             inactivity_floor_loc,
             &log,
             &mut snapshot,
@@ -819,7 +822,11 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::operation::fixed::FixedOperation, mmr::mem::Mmr, translator::OneCap};
+    use crate::{
+        adb::operation::{fixed::FixedSize, Keyed as _},
+        mmr::mem::Mmr,
+        translator::OneCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
