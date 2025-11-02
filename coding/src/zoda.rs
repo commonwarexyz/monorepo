@@ -195,6 +195,18 @@ fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
     }
     let one_minus = BigRational::from_usize(1) - fraction;
     let zero = BigRational::from_u64(0);
+    // We need to compute log2(one_minus), which must be negative for the formula below to work.
+    // However, when m is very close to n (e.g., n = m = 512), we have:
+    //   fraction = (k + skew) / (2m) = 1/(2m) when k=0 and skew=1
+    //   one_minus = 1 - 1/(2m) = (2m-1)/(2m)
+    //   log2(one_minus) ≈ log2(1 - 1/(2m)) ≈ -1/(2m ln(2)) (very small negative number)
+    //
+    // With low precision (e.g., 7 bits), log2_ceil rounds up this tiny negative value to 0 or
+    // even positive, which would cause us to incorrectly return usize::MAX. For example, with
+    // n=m=512, precision 7 gives log2_ceil(1023/1024) = 0, but the true value is ≈ -0.00142.
+    //
+    // By progressively increasing precision until we get a negative result, we ensure we have
+    // enough precision to correctly capture the sign.
     let mut precision = LOG2_INITIAL_PRECISION;
     let mut log_term = one_minus.log2_ceil(precision);
     while log_term >= zero && precision < LOG2_MAX_PRECISION {
