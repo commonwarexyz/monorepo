@@ -11,3 +11,14 @@ examples/flood/assets
 **/quint/_apalache-out/
 **/quint/out*/
 CLAUDE.md
+
+# Contracts
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/.env
+contracts/.env.*
+*.skip.bak
+contracts/test/*.bak
+*.skip
+*.sol.skip
