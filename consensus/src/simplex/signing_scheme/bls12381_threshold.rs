@@ -23,7 +23,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::ops,
         primitives::{
-            group::Share,
+            group::{Element, Share},
             ops::{
                 aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
                 partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
@@ -595,6 +595,10 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Self::Seed {
         Seed::new(round, certificate.seed_signature)
+    }
+
+    fn seed_genesis(&self, epoch: Epoch) -> Self::Seed {
+        Seed::new(Round::new(epoch, 0), V::Signature::zero())
     }
 
     fn is_attributable(&self) -> bool {

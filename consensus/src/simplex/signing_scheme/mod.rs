@@ -35,7 +35,7 @@ cfg_if::cfg_if! {
 
 use crate::{
     simplex::types::{Vote, VoteContext, VoteVerification},
-    types::Round,
+    types::{Epoch, Round},
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
@@ -159,9 +159,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
-    /// Extracts randomness seed, if provided by the scheme, derived from the certificate
-    /// for the given round.
+    /// Returns a seed derived from a round and certificate.
+    ///
+    /// Can be used as a randomness seed if the certificate provides a VRF.
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Self::Seed;
+
+    /// Returns a seed derived from the epoch number.
+    ///
+    /// This may be needed in the case where there is no prior certificate or view to derive a seed
+    /// from.
+    fn seed_genesis(&self, epoch: Epoch) -> Self::Seed;
 
     /// Returns whether per-validator fault evidence can be safely exposed.
     ///

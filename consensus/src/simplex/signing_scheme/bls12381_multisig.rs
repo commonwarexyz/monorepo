@@ -10,7 +10,7 @@ use crate::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
         types::{OrderedExt, Vote, VoteContext, VoteVerification},
     },
-    types::Round,
+    types::{Epoch, Round},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
@@ -296,6 +296,10 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn seed(&self, round: Round, _: &Self::Certificate) -> Self::Seed {
         (round.epoch(), round.view())
+    }
+
+    fn seed_genesis(&self, epoch: Epoch) -> Self::Seed {
+        (epoch, 0)
     }
 
     fn is_attributable(&self) -> bool {
