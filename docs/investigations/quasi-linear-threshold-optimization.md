@@ -55,7 +55,8 @@ The FFT-based approach achieves O(n log n) complexity by:
 3. Exploiting algebraic structure for fast weight computation
 
 ### Key Papers
-- Glaser-Liu-Rokhlin algorithm for barycentric weights
+- Berrut and Trefethen's barycentric Lagrange interpolation (SIAM Review, 2004)
+- Glaser, Liu, and Rokhlin's fast algorithm for polynomial evaluation (SIAM J. Sci. Comput., 2007)
 - Tomescu et al., "Towards Scalable Threshold Cryptosystems" (IEEE S&P 2020)
 - "Efficient polynomial commitment schemes for multiple points" (IACR ePrint 2020/081)
 
@@ -173,10 +174,10 @@ Monitor for scenarios where FFT optimization would be valuable:
 
 ## References
 
-1. Tomescu, A., et al. "Towards Scalable Threshold Cryptosystems." IEEE S&P 2020.
-2. Berrut, J.-P., and Trefethen, L.N. "Barycentric Lagrange Interpolation." SIAM Review, 2004.
-3. Glaser, A., Liu, X., and Rokhlin, V. "A fast algorithm for the calculation of the roots of special functions." SIAM J. Sci. Comput., vol. 29, no. 4, pp. 1420-1438, 2007.
-4. Boneh, D., Drake, J., Fisch, B., and Gabizon, A. "Efficient polynomial commitment schemes for multiple points and polynomials." IACR ePrint 2020/081.
+1. Tomescu, A., Robert, I., Devadas, S., Abraham, I., Gueta, G., Pinkas, B., and Yanai, A. "Towards Scalable Threshold Cryptosystems." IEEE Symposium on Security and Privacy (S&P), 2020.
+2. Berrut, J.-P., and Trefethen, L.N. "Barycentric Lagrange Interpolation." SIAM Review, vol. 46, no. 3, pp. 501-517, 2004.
+3. Glaser, A., Liu, X., and Rokhlin, V. "A Fast Algorithm for the Evaluation of Legendre Expansions." SIAM J. Sci. Comput., vol. 29, no. 4, pp. 1420-1438, 2007.
+4. Boneh, D., Drake, J., Fisch, B., and Gabizon, A. "Efficient polynomial commitment schemes for multiple points and polynomials." IACR ePrint Archive, Report 2020/081, 2020.
 
 ## Conclusion
 
