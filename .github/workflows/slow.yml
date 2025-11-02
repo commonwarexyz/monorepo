@@ -86,6 +86,8 @@ jobs:
             cargo_flags: "--features commonware-runtime/iouring-storage" # Additional features can be added here
           - package: commonware-coding
             cargo_flags: ""
+          - package: commonware-utils
+            cargo_flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

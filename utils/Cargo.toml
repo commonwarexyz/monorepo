@@ -29,6 +29,7 @@ features = ["js"]
 
 [dev-dependencies]
 num-bigint = { version = "0.4.6", default-features = false }
+criterion = { workspace = true }
 
 [features]
 default = ["std"]
@@ -48,3 +49,8 @@ std = [
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "utils"
+harness = false
+path = "src/benches/bench.rs"
