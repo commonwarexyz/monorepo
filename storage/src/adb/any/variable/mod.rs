@@ -218,13 +218,15 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
-        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
-
-        let op = Operation::Update(key, value);
-        self.as_shared().apply_op(op).await?;
-        if res.is_some() {
+        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
+            .await?
+            .is_some()
+        {
             self.steps += 1;
         }
+        self.as_shared()
+            .apply_op(Operation::Update(key, value))
+            .await?;
 
         Ok(())
     }
