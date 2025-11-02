@@ -166,32 +166,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         })
     }
 
-    /// Get the value of the operation with location `loc` in the db if it matches `key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= [Self::op_count].
-    /// Returns [Error::UnexpectedData] if the location does not reference an Update operation.
-    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::Mmr(crate::mmr::Error::LocationOverflow(loc)));
-        }
-        let op_count = self.op_count();
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(loc, op_count));
-        }
-
-        let op = self.log.read(*loc).await?;
-        let Operation::Update(k, v) = op else {
-            return Err(Error::UnexpectedData(loc));
-        };
-        if k != *key {
-            return Ok(None);
-        }
-        Ok(Some(v))
-    }
-
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
@@ -235,7 +209,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if let Some(v) = self.get_from_loc(key, loc).await? {
+            let Operation::Update(k, v) = self.log.read(*loc).await? else {
+                unreachable!("location does not reference update operation. loc={loc}");
+            };
+            if k == *key {
                 return Ok(Some(v));
             }
         }
@@ -1242,41 +1219,6 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
             assert_ne!(db.root(&mut hasher), root);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_db_get_from_loc_out_of_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let mut db = open_db(context.clone()).await;
-
-            let key = Digest::random(&mut context);
-
-            // Test getting from empty database
-            let result = db.get_from_loc(&key, Location::new_unchecked(0)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0))
-            );
-
-            // Add some operations
-            db.update(key, vec![10]).await.unwrap();
-            db.update(Digest::random(&mut context), vec![20]).await.unwrap();
-            db.update(Digest::random(&mut context), vec![30]).await.unwrap();
-            db.commit(None).await.unwrap();
-
-            // Test getting valid locations succeeds
-            assert!(db.get_from_loc(&key, Location::new_unchecked(0)).await.unwrap().is_some());
-
-            // Test getting exactly at boundary
-            let op_count = *db.op_count();
-            let result = db.get_from_loc(&key, Location::new_unchecked(op_count)).await;
-            assert!(
-                matches!(result, Err(Error::LocationOutOfBounds(loc, size))
-                    if loc == Location::new_unchecked(op_count) && size == Location::new_unchecked(op_count))
-            );
 
             db.destroy().await.unwrap();
         });
