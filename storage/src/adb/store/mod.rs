@@ -554,31 +554,27 @@ where
         op: Operation<K, V>,
         old_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.key() else {
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
 
-        // Get the new location before borrowing snapshot mutably.
-        let new_loc = self.op_count();
-
+        // If we find a snapshot entry corresponding to the operation, we know it's active.
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
-
-        if cursor.find(|&loc| loc == old_loc) {
-            // Update the location of the operation in the snapshot.
-            cursor.update(new_loc);
-            drop(cursor);
-
-            self.log.append(op).await?;
-
-            Ok(Some(old_loc))
-        } else {
-            // The operation is not active, so this is a no-op.
-            Ok(None)
+        if !cursor.find(|&loc| loc == old_loc) {
+            return Ok(None);
         }
+
+        // Update the location of the operation in the snapshot to point to tip.
+        cursor.update(Location::new_unchecked(self.log.size()));
+        drop(cursor);
+
+        // Apply the operation at tip.
+        self.log.append(op).await?;
+
+        Ok(Some(old_loc))
     }
 }
 
