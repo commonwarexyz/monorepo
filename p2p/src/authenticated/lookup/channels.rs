@@ -28,6 +28,7 @@ impl<P: PublicKey> Sender<P> {
 impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
+    type Message = Bytes;
 
     /// Sends a message to a set of recipients.
     ///
@@ -71,11 +72,11 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    receiver: mpsc::Receiver<Message<P>>,
+    receiver: mpsc::Receiver<Message<P, Bytes>>,
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
+    pub(super) fn new(receiver: mpsc::Receiver<Message<P, Bytes>>) -> Self {
         Self { receiver }
     }
 }
@@ -83,12 +84,13 @@ impl<P: PublicKey> Receiver<P> {
 impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
+    type Message = Bytes;
 
     /// Receives a message from the channel.
     ///
     /// This method will block until a message is received or the underlying
     /// network shuts down.
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey, Self::Message>, Error> {
         let (sender, message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // We don't check that the message is too large here because we already enforce
@@ -101,7 +103,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: router::Messenger<P>,
     max_size: usize,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
+    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P, Bytes>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -129,7 +131,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P, Bytes>>)> {
         self.receivers
     }
 }

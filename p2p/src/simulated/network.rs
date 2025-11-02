@@ -632,6 +632,7 @@ impl<P: PublicKey> Sender<P> {
 impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
+    type Message = Bytes;
 
     async fn send(
         &mut self,
@@ -655,7 +656,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     }
 }
 
-type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
+type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P, Bytes>>;
 type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
@@ -667,8 +668,9 @@ pub struct Receiver<P: PublicKey> {
 impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
+    type Message = Bytes;
 
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey, Self::Message>, Error> {
         self.receiver.next().await.ok_or(Error::NetworkClosed)
     }
 }

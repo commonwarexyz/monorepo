@@ -10,7 +10,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::Bytes;
+use commonware_codec::Codec;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc;
@@ -24,7 +24,7 @@ pub mod utils;
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-pub type Message<P> = (P, Bytes);
+pub type Message<P, M> = (P, M);
 
 /// Alias for identifying communication channels.
 pub type Channel = u64;
@@ -45,11 +45,14 @@ pub trait Sender: Clone + Debug + Send + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
 
+    /// Message type that can be sent.
+    type Message: Codec + Send + Sync;
+
     /// Send a message to a set of recipients.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: Self::Message,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -62,10 +65,13 @@ pub trait Receiver: Debug + Send + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
 
+    /// Message type that can be received.
+    type Message: Codec + Send + Sync;
+
     /// Receive a message from an arbitrary recipient.
     fn recv(
         &mut self,
-    ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Message<Self::PublicKey, Self::Message>, Self::Error>> + Send;
 }
 
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
