@@ -158,9 +158,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) =
-            select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
+    pub fn set_leader(&mut self, seed: S::Seed) {
+        let (leader, leader_idx) = select_leader::<S, _>(self.scheme.participants().as_ref(), seed);
         self.leader = Some(leader_idx);
 
         debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
@@ -967,7 +966,7 @@ impl<
         ))
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
+    fn enter_view(&mut self, view: u64, seed: S::Seed) {
         // Ensure view is valid
         if view <= self.view {
             trace!(

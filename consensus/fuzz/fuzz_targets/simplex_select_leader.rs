@@ -13,7 +13,10 @@ use commonware_consensus::{
     types::Round,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
+    bls12381::primitives::{
+        group::{G1, G2},
+        variant::{MinPk, MinSig},
+    },
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
@@ -41,10 +44,11 @@ struct FuzzInput {
     round_epoch: u64,
     round_view: u64,
     scheme: FuzzScheme,
-    encoded_seed: Vec<u8>,
+    signature_g1: [u8; 48],
+    signature_g2: [u8; 96],
 }
 
-fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
+fn fuzz<S: Scheme>(input: &FuzzInput, seed: S::Seed) {
     let participants: Vec<PublicKey> = (1..=input.participants_count)
         .map(|i| {
             let mut rng = StdRng::seed_from_u64(i as u64);
@@ -56,28 +60,36 @@ fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
         return;
     }
 
-    let round = Round::new(input.round_epoch, input.round_view);
-    let _ = select_leader::<S, PublicKey>(&participants, round, seed);
+    let _ = select_leader::<S, PublicKey>(&participants, seed);
 }
 
 fuzz_target!(|input: FuzzInput| {
     match input.scheme {
         FuzzScheme::Ed25519 => {
-            fuzz::<Ed25519Scheme>(&input, None);
+            let seed = (input.round_epoch, input.round_view);
+            fuzz::<Ed25519Scheme>(&input, seed);
         }
         FuzzScheme::Bls12381ThresholdMinPk => {
-            let seed = Seed::<MinPk>::decode(input.encoded_seed.as_slice()).ok();
+            let seed = Seed::<MinPk>::new(
+                Round::new(input.round_epoch, input.round_view),
+                G2::decode(input.signature_g2.as_ref()).unwrap(),
+            );
             fuzz::<Bls12381ThresholdMinPk>(&input, seed);
         }
         FuzzScheme::Bls12381ThresholdMinSig => {
-            let seed = Seed::<MinSig>::decode(input.encoded_seed.as_slice()).ok();
+            let seed = Seed::<MinSig>::new(
+                Round::new(input.round_epoch, input.round_view),
+                G1::decode(input.signature_g1.as_ref()).unwrap(),
+            );
             fuzz::<Bls12381ThresholdMinSig>(&input, seed);
         }
         FuzzScheme::Bls12381MultisigMinPk => {
-            fuzz::<Bls12381MultisigMinPk>(&input, None);
+            let seed = (input.round_epoch, input.round_view);
+            fuzz::<Bls12381MultisigMinPk>(&input, seed);
         }
         FuzzScheme::Bls12381MultisigMinSig => {
-            fuzz::<Bls12381MultisigMinSig>(&input, None);
+            let seed = (input.round_epoch, input.round_view);
+            fuzz::<Bls12381MultisigMinSig>(&input, seed);
         }
     }
 });

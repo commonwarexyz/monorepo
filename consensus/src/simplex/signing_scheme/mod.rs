@@ -161,7 +161,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Extracts randomness seed, if provided by the scheme, derived from the certificate
     /// for the given round.
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Self::Seed;
 
     /// Returns whether per-validator fault evidence can be safely exposed.
     ///

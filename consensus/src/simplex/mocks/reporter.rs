@@ -44,7 +44,7 @@ pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Option<S::Seed>>>>,
+    pub seeds: Arc<Mutex<HashMap<View, S::Seed>>>,
     pub notarizes: Arc<Mutex<Participation<P, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
@@ -86,12 +86,12 @@ where
         }
     }
 
-    fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
+    fn record_leader(&self, round: Round, seed: S::Seed) {
         // We use the seed from view N to select the leader for view N+1
-        let next_round = Round::new(round.epoch(), round.view() + 1);
+        let next_view = round.view() + 1;
         let mut leaders = self.leaders.lock().unwrap();
-        leaders.entry(next_round.view()).or_insert_with(|| {
-            let (leader, _) = select_leader::<S, _>(self.participants.as_ref(), next_round, seed);
+        leaders.entry(next_view).or_insert_with(|| {
+            let (leader, _) = select_leader::<S, _>(self.participants.as_ref(), seed);
             leader
         });
     }

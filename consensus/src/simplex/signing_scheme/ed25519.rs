@@ -156,7 +156,7 @@ impl signing_scheme::Scheme for Scheme {
     type PublicKey = ed25519::PublicKey;
     type Signature = ed25519::Signature;
     type Certificate = Certificate;
-    type Seed = ();
+    type Seed = (u64, u64);
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
@@ -317,8 +317,8 @@ impl signing_scheme::Scheme for Scheme {
         batch.verify(rng)
     }
 
-    fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
-        None
+    fn seed(&self, round: Round, _: &Self::Certificate) -> Self::Seed {
+        (round.epoch(), round.view())
     }
 
     fn is_attributable(&self) -> bool {

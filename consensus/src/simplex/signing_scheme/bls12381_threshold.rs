@@ -593,8 +593,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         .is_ok()
     }
 
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed> {
-        Some(Seed::new(round, certificate.seed_signature))
+    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Self::Seed {
+        Seed::new(round, certificate.seed_signature)
     }
 
     fn is_attributable(&self) -> bool {
@@ -1006,9 +1006,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let seed = schemes[0]
-            .seed(proposal.round, &certificate)
-            .expect("extract seed");
+        let seed = schemes[0].seed(proposal.round, &certificate);
 
         let encoded = seed.encode();
         let decoded = Seed::<V>::decode_cfg(encoded, &()).expect("decode seed");
@@ -1045,18 +1043,14 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let seed = schemes[0]
-            .seed(proposal.round, &certificate)
-            .expect("extract seed");
+        let seed = schemes[0].seed(proposal.round, &certificate);
 
         assert!(seed.verify(&schemes[0], NAMESPACE));
 
-        let invalid_seed = schemes[0]
-            .seed(
-                Round::new(proposal.epoch(), proposal.view() + 1),
-                &certificate,
-            )
-            .expect("extract seed");
+        let invalid_seed = schemes[0].seed(
+            Round::new(proposal.epoch(), proposal.view() + 1),
+            &certificate,
+        );
 
         assert!(!invalid_seed.verify(&schemes[0], NAMESPACE));
     }
@@ -1243,7 +1237,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let seed = schemes[0].seed(proposal.round, &certificate).unwrap();
+        let seed = schemes[0].seed(proposal.round, &certificate);
         assert_eq!(seed.signature, certificate.seed_signature);
     }
 

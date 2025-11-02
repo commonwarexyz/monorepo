@@ -119,7 +119,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     type PublicKey = P;
     type Signature = V::Signature;
     type Certificate = Certificate<V>;
-    type Seed = ();
+    type Seed = (u64, u64);
 
     fn me(&self) -> Option<u32> {
         self.signer.as_ref().map(|(index, _)| *index)
@@ -294,8 +294,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         .is_ok()
     }
 
-    fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
-        None
+    fn seed(&self, round: Round, _: &Self::Certificate) -> Self::Seed {
+        (round.epoch(), round.view())
     }
 
     fn is_attributable(&self) -> bool {
