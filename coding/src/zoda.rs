@@ -119,7 +119,7 @@ use crate::{
     Config, Scheme, ValidatingScheme,
 };
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
@@ -356,7 +356,7 @@ impl<H: Hasher> Read for Shard<H> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
     inclusion_proofs: Vec<Proof<H>>,
     shard: Matrix,
@@ -531,6 +531,8 @@ pub enum Error {
     InvalidIndex(u16),
     #[error("insufficient shards {0} < {1}")]
     InsufficientShards(usize, usize),
+    #[error("insufficient unique rows {0} < {1}")]
+    InsufficientUniqueRows(usize, usize),
 }
 
 const NAMESPACE: &[u8] = b"commonware-zoda";
@@ -686,6 +688,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 evaluation.fill_row(i, row);
             }
         }
+        let filled_rows = evaluation.filled_rows();
+        if filled_rows < data_rows {
+            return Err(Error::InsufficientUniqueRows(filled_rows, data_rows));
+        }
         Ok(collect_u64_le(
             data_bytes,
             F::stream_to_u64s(
@@ -705,6 +711,7 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 mod tests {
     use super::*;
     use crate::Config;
+    use commonware_cryptography::Sha256;
 
     #[test]
     fn required_samples_matches_impl() {
@@ -758,9 +765,33 @@ mod tests {
         let mut buf = BytesMut::new();
         reshard.write(&mut buf);
         let mut bytes = buf.freeze();
-        let decoded =
-            ReShard::<Sha256>::read_cfg(&mut bytes, &(data.len(), config)).unwrap();
+        let decoded = ReShard::<Sha256>::read_cfg(&mut bytes, &(data.len(), config)).unwrap();
 
         assert_eq!(decoded, reshard);
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_indices() {
+        let config = Config {
+            minimum_shards: 2,
+            extra_shards: 0,
+        };
+        let data = b"duplicate shard coverage";
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..]).unwrap();
+        let shard0 = shards[0].clone();
+        let (checking_data, checked_shard0, _reshard0) =
+            Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
+        let duplicate = CheckedShard {
+            index: checked_shard0.index,
+            shard: checked_shard0.shard.clone(),
+        };
+        let shards = vec![checked_shard0, duplicate];
+        let result = Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards);
+        match result {
+            Err(Error::InsufficientUniqueRows(actual, expected)) => {
+                assert!(actual < expected);
+            }
+            other => panic!("expected insufficient unique rows error, got {other:?}"),
+        }
     }
 }

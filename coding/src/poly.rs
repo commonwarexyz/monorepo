@@ -882,6 +882,11 @@ impl EvaluationVector {
     pub fn data(self) -> Matrix {
         self.data
     }
+
+    /// Return how many distinct rows have been filled.
+    pub fn filled_rows(&self) -> usize {
+        self.active_rows.count_ones() as usize
+    }
 }
 
 #[cfg(test)]
