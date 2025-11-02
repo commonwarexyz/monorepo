@@ -84,7 +84,7 @@
 //! ```
 
 use crate::{
-    adb::{build_snapshot_from_log, delete_key, operation::variable::Operation, update_loc},
+    adb::{build_snapshot_from_log, delete_key, operation::variable::Operation, update_loc, Error},
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
@@ -96,20 +96,6 @@ use commonware_utils::Array;
 use core::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
-
-/// Errors that can occur when interacting with a [Store] database.
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    /// The requested operation has been pruned.
-    #[error("operation pruned")]
-    OperationPruned(Location),
-
-    #[error(transparent)]
-    Journal(#[from] crate::journal::Error),
-
-    #[error(transparent)]
-    Adb(#[from] crate::adb::Error),
-}
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]

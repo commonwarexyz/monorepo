@@ -16,8 +16,8 @@ use tracing::{debug, warn};
 pub mod fixed;
 pub mod variable;
 
-/// Discard any uncommitted log operations, then correct any inconsistencies between the MMR and
-/// log.
+/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
+/// log. Returns the inactivity floor location set by the last commit.
 ///
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit floor operation.
@@ -29,43 +29,43 @@ pub(super) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H:
 ) -> Result<Location, Error> {
     // Back up over / discard any uncommitted operations in the log.
     let mut log_size: Location = log.size().await.into();
-    let mut rewind_leaf_num = log_size;
+    let mut rewind_loc = log_size;
     let mut inactivity_floor_loc = Location::new_unchecked(0);
-    while rewind_leaf_num > 0 {
-        let op = log.read(*rewind_leaf_num - 1).await?;
+    while rewind_loc > 0 {
+        let op = log.read(*rewind_loc - 1).await?;
         if let Some(loc) = op.commit_floor() {
             inactivity_floor_loc = loc;
             break;
         }
-        rewind_leaf_num -= 1;
+        rewind_loc -= 1;
     }
-    if rewind_leaf_num != log_size {
-        let op_count = log_size - rewind_leaf_num;
+    if rewind_loc != log_size {
+        let op_count = log_size - rewind_loc;
         warn!(
             ?log_size,
             ?op_count,
             "rewinding over uncommitted log operations"
         );
-        log.rewind(*rewind_leaf_num).await?;
+        log.rewind(*rewind_loc).await?;
         log.sync().await?;
-        log_size = rewind_leaf_num;
+        log_size = rewind_loc;
     }
 
     // Pop any MMR elements that are ahead of the last log commit point.
     let mut next_mmr_leaf_num = mmr.leaves();
     if next_mmr_leaf_num > log_size {
-        let op_count = next_mmr_leaf_num - log_size;
-        warn!(?log_size, ?op_count, "popping uncommitted MMR operations");
-        mmr.pop(*op_count as usize).await?;
+        let pop_count = next_mmr_leaf_num - log_size;
+        warn!(?log_size, ?pop_count, "popping uncommitted MMR operations");
+        mmr.pop(*pop_count as usize).await?;
         next_mmr_leaf_num = log_size;
     }
 
     // If the MMR is behind, replay log operations to catch up.
     if next_mmr_leaf_num < log_size {
-        let op_count = log_size - next_mmr_leaf_num;
+        let replay_count = log_size - next_mmr_leaf_num;
         warn!(
             ?log_size,
-            ?op_count,
+            ?replay_count,
             "MMR lags behind log, replaying log to catch up"
         );
         while next_mmr_leaf_num < log_size {
@@ -185,11 +185,7 @@ where
         return Ok(());
     }
 
-    debug!(
-        log_size = *op_count,
-        ?target_prune_loc,
-        "pruned inactive ops"
-    );
+    debug!(?op_count, ?target_prune_loc, "pruned inactive ops");
 
     mmr.prune_to_pos(hasher, target_prune_pos)
         .await
