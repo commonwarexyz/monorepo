@@ -6,10 +6,11 @@ use crate::{
     p2p::{Handler, Monitor},
     Error,
 };
-use commonware_codec::Codec;
+use bytes::Bytes;
+use commonware_codec::{Codec, DecodeExt, Encode};
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -108,20 +109,20 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
+        responses: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
+        responses: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
     ) {
-        // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
+        // Get senders and receivers
+        let (mut req_tx, mut req_rx) = (requests.0, requests.1);
+        let (mut res_tx, mut res_rx) = (responses.0, responses.1);
 
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
@@ -139,10 +140,11 @@ where
                                     (HashSet::new(), HashSet::new())
                                 });
 
-                                // Send the request to recipients
+                                // Send the request to recipients (encode first)
+                                let encoded = Bytes::from(request.encode());
                                 match req_tx.send(
                                     recipients,
-                                    request,
+                                    encoded,
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
@@ -173,10 +175,11 @@ where
                     };
                     self.responses.inc();
 
-                    // Send the response
+                    // Send the response (encode first)
+                    let encoded = Bytes::from(reply.encode());
                     let _ = res_tx.send(
                         Recipients::One(peer),
-                        reply,
+                        encoded,
                         self.priority_response
                     ).await;
                 },
@@ -186,14 +189,16 @@ where
                     self.requests.inc();
 
                     // Error handling
-                    let (peer, msg) = match message {
+                    let (peer, bytes) = match message {
                         Ok(r) => r,
                         Err(err) => {
                             error!(?err, "request receiver failed");
                             break;
                         }
                     };
-                    let msg = match msg {
+                    
+                    // Decode the request
+                    let msg = match Rq::decode_cfg(bytes.as_ref(), &self.request_codec) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "blocking peer");
@@ -213,14 +218,16 @@ where
                 // Response from a handler
                 response = res_rx.recv() => {
                     // Error handling
-                    let (peer, msg) = match response {
+                    let (peer, bytes) = match response {
                         Ok(r) => r,
                         Err(err) => {
                             error!(?err, "response receiver failed");
                             break;
                         }
                     };
-                    let msg = match msg {
+                    
+                    // Decode the response
+                    let msg = match Rs::decode_cfg(bytes.as_ref(), &self.response_codec) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "blocking peer");
