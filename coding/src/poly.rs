@@ -187,9 +187,9 @@ impl Read for Matrix {
         &max_els: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let cfg = RangeCfg::from(..=max_els);
-        let rows = Read::read_cfg(buf, &cfg)?;
-        let cols = Read::read_cfg(buf, &cfg)?;
-        let data = Read::read_cfg(buf, &(cfg, ()))?;
+        let rows = usize::read_cfg(buf, &cfg)?;
+        let cols = usize::read_cfg(buf, &cfg)?;
+        let data = Vec::<F>::read_cfg(buf, &(cfg, ()))?;
         let expected_len = rows
             .checked_mul(cols)
             .ok_or(commonware_codec::Error::Invalid(
