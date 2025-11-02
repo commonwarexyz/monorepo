@@ -268,7 +268,7 @@ where
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
-            if k == *key {
+            if &k == key {
                 return Ok(Some(v));
             }
         }

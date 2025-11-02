@@ -212,7 +212,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             let Operation::Update(k, v) = self.log.read(*loc).await? else {
                 unreachable!("location does not reference update operation. loc={loc}");
             };
-            if k == *key {
+            if &k == key {
                 return Ok(Some(v));
             }
         }
