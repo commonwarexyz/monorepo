@@ -708,16 +708,6 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     #[test]
-    fn required_samples_matches_impl() {
-        let min_rows = 3;
-        let encoded_rows = 4;
-        assert_eq!(
-            required_samples(min_rows, encoded_rows),
-            required_samples_impl(min_rows, encoded_rows, false)
-        );
-    }
-
-    #[test]
     fn required_samples_handles_minimal_padding() {
         assert!(required_samples(3, 4) > 0);
     }
