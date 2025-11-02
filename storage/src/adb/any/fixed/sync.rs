@@ -1,8 +1,7 @@
 use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{
-        self,
-        any::{build_snapshot_from_log, fixed::unordered::Any},
+        self, any::fixed::unordered::Any, build_snapshot_from_log,
         operation::fixed::unordered::Operation,
     },
     index::Unordered as Index,

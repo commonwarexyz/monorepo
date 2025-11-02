@@ -84,7 +84,10 @@
 //! ```
 
 use crate::{
-    adb::operation::variable::Operation,
+    adb::{
+        build_snapshot_from_log,
+        operation::{variable::Operation, Keyed},
+    },
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
@@ -92,15 +95,10 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{Array, NZUsize};
+use commonware_utils::Array;
 use core::future::Future;
-use futures::{pin_mut, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Errors that can occur when interacting with a [Store] database.
 #[derive(thiserror::Error, Debug)]
@@ -235,8 +233,6 @@ where
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-
         let mut log = Journal::init(
             context.with_label("log"),
             JournalConfig {
@@ -252,16 +248,28 @@ where
 
         // Rewind log to remove uncommitted operations.
         let log_size = Self::rewind_uncommitted(&mut log).await?;
+        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
 
-        let db = Self {
-            log,
-            snapshot,
-            inactivity_floor_loc: Location::new_unchecked(0),
-            steps: 0,
-            last_commit: log_size.checked_sub(1).map(Location::new_unchecked),
+        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+
+        let inactivity_floor_loc = match last_commit {
+            Some(loc) => {
+                let op = log.read(*loc).await?;
+                op.commit_floor().unwrap()
+            }
+            None => Location::new_unchecked(0),
         };
 
-        db.build_snapshot_from_log().await
+        // Build the snapshot.
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        Ok(Self {
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            steps: 0,
+            last_commit,
+        })
     }
 
     /// Gets the value associated with the given key in the store.
@@ -543,47 +551,6 @@ where
         } else {
             Ok(log_size)
         }
-    }
-
-    /// Builds the database's snapshot from the log of operations. Any operations after
-    /// the latest commit operation are removed.
-    async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        let pruning_boundary = self.oldest_retained_loc().unwrap_or(self.op_count());
-
-        {
-            let stream = self
-                .log
-                .replay(*pruning_boundary, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
-                .await?;
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                let (loc, op) = result?;
-                let loc = Location::new_unchecked(loc);
-
-                match op {
-                    Operation::Delete(key) => {
-                        if let Some(old_loc) = self.get_key_loc(&key).await? {
-                            Self::delete_loc(&mut self.snapshot, &key, old_loc);
-                        }
-                    }
-                    Operation::Update(key, _) => {
-                        if let Some(old_loc) = self.get_key_loc(&key).await? {
-                            Self::update_loc(&mut self.snapshot, &key, old_loc, loc);
-                        } else {
-                            self.snapshot.insert(&key, loc);
-                        }
-                    }
-                    Operation::CommitFloor(_, loc) => {
-                        self.inactivity_floor_loc = loc;
-                    }
-                    Operation::Set(_, _) | Operation::Commit(_) => {
-                        unreachable!("Set and Commit operations are not used in mutable stores")
-                    }
-                }
-            }
-        }
-
-        Ok(self)
     }
 
     /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key

@@ -3,13 +3,13 @@
 use crate::{
     adb::{
         any::{
-            build_snapshot_from_log, delete_key,
             fixed::{init_mmr_and_log, Config},
-            historical_proof, prune_db, update_loc, Shared,
+            historical_proof, prune_db, Shared,
         },
+        build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
         store::{self, Db},
-        Error,
+        update_loc, Error,
     },
     index::{unordered::Index, Index as _},
     journal::contiguous::fixed::Journal,
@@ -400,7 +400,6 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::build_snapshot_from_log,
             operation::{fixed::unordered::Operation, Keyed as _},
             verify_proof,
         },
