@@ -191,9 +191,9 @@ where
         "pruned inactive ops"
     );
 
-    mmr.prune_to_pos(hasher, target_prune_pos).await?;
-
-    Ok(())
+    mmr.prune_to_pos(hasher, target_prune_pos)
+        .await
+        .map_err(Error::Mmr)
 }
 /// A wrapper of DB state required for invoking operations shared across variants.
 pub(crate) struct Shared<
@@ -250,7 +250,7 @@ where
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
-        if !cursor.find(|&loc| *loc == old_loc) {
+        if !cursor.find(|&loc| loc == old_loc) {
             return Ok(None);
         }
 
