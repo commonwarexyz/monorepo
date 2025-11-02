@@ -3,7 +3,6 @@
 use crate::{Handler, Monitor};
 
 mod engine;
-use commonware_p2p::Blocker;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
@@ -13,10 +12,7 @@ mod mocks;
 
 /// Configuration for an [Engine].
 #[derive(Clone)]
-pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
-    /// The [commonware_p2p::Blocker] that will be used to block peers from sending messages.
-    pub blocker: B,
-
+pub struct Config<M: Monitor, H: Handler> {
     /// The [Monitor] that will be notified when a response is collected.
     pub monitor: M,
 
@@ -29,14 +25,8 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// Whether or not to send requests with priority over other network messages.
     pub priority_request: bool,
 
-    /// The [commonware_codec::Codec] configuration for requests.
-    pub request_codec: RqC,
-
     /// Whether or not to send responses with priority over other network messages.
     pub priority_response: bool,
-
-    /// The [commonware_codec::Codec] configuration for responses.
-    pub response_codec: RsC,
 }
 
 #[cfg(test)]

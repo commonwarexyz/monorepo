@@ -9,8 +9,7 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
-use bytes::BufMut;
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{varint::UInt, ReadExt};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{

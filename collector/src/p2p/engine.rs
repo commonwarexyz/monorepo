@@ -6,11 +6,10 @@ use crate::{
     p2p::{Handler, Monitor},
     Error,
 };
-use bytes::Bytes;
-use commonware_codec::{Codec, DecodeExt, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -19,14 +18,13 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E, B, Rq, Rs, P, M, H>
+pub struct Engine<E, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner,
     P: PublicKey,
-    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     M: Monitor<Response = Rs, PublicKey = P>,
@@ -34,11 +32,8 @@ where
 {
     // Configuration
     context: ContextCell<E>,
-    blocker: B,
     priority_request: bool,
-    request_codec: Rq::Cfg,
     priority_response: bool,
-    response_codec: Rs::Cfg,
 
     // Message passing
     monitor: M,
@@ -54,11 +49,10 @@ where
     responses: Counter,
 }
 
-impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
+impl<E, Rq, Rs, P, M, H> Engine<E, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner + Metrics,
     P: PublicKey,
-    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     M: Monitor<Response = Rs, PublicKey = P>,
@@ -67,7 +61,7 @@ where
     /// Creates a new engine with the given configuration.
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
-    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+    pub fn new(context: E, cfg: Config<M, H>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
@@ -87,11 +81,8 @@ where
         (
             Self {
                 context: ContextCell::new(context),
-                blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
-                request_codec: cfg.request_codec,
                 priority_response: cfg.priority_response,
-                response_codec: cfg.response_codec,
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
@@ -109,16 +100,16 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
-        responses: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
+        requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
-        responses: (impl Sender<PublicKey = P, Message = Bytes>, impl Receiver<PublicKey = P, Message = Bytes>),
+        requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) {
         // Get senders and receivers
         let (mut req_tx, mut req_rx) = (requests.0, requests.1);
@@ -140,11 +131,10 @@ where
                                     (HashSet::new(), HashSet::new())
                                 });
 
-                                // Send the request to recipients (encode first)
-                                let encoded = Bytes::from(request.encode());
+                                // Send the request to recipients
                                 match req_tx.send(
                                     recipients,
-                                    encoded,
+                                    request,
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
@@ -175,11 +165,10 @@ where
                     };
                     self.responses.inc();
 
-                    // Send the response (encode first)
-                    let encoded = Bytes::from(reply.encode());
+                    // Send the response
                     let _ = res_tx.send(
                         Recipients::One(peer),
-                        encoded,
+                        reply,
                         self.priority_response
                     ).await;
                 },
@@ -189,21 +178,11 @@ where
                     self.requests.inc();
 
                     // Error handling
-                    let (peer, bytes) = match message {
+                    let (peer, msg) = match message {
                         Ok(r) => r,
                         Err(err) => {
                             error!(?err, "request receiver failed");
                             break;
-                        }
-                    };
-                    
-                    // Decode the request
-                    let msg = match Rq::decode_cfg(bytes.as_ref(), &self.request_codec) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
                         }
                     };
 
@@ -218,21 +197,11 @@ where
                 // Response from a handler
                 response = res_rx.recv() => {
                     // Error handling
-                    let (peer, bytes) = match response {
+                    let (peer, msg) = match response {
                         Ok(r) => r,
                         Err(err) => {
                             error!(?err, "response receiver failed");
                             break;
-                        }
-                    };
-                    
-                    // Decode the response
-                    let msg = match Rs::decode_cfg(bytes.as_ref(), &self.response_codec) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
                         }
                     };
 
