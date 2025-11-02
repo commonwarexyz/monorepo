@@ -9,6 +9,7 @@ mod batch_verify_multiple_public_keys;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
 mod evaluate_point;
+mod fft_recovery_poc;
 mod partial_verify_multiple_public_keys;
 mod partial_verify_multiple_public_keys_precomputed;
 mod signature_generation;
@@ -21,6 +22,7 @@ criterion_main!(
     dkg_recovery::benches,
     dkg_reshare_recovery::benches,
     threshold_signature_recover::benches,
+    fft_recovery_poc::benches,
     aggregate_public_keys::benches,
     aggregate_signatures::benches,
     signature_generation::benches,
