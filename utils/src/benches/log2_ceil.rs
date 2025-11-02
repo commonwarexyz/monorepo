@@ -15,7 +15,7 @@ fn benchmark_log2_ceil(c: &mut Criterion) {
     ];
 
     for value in cases.iter() {
-        for precision in [4, 8, 12, 16, 32] {
+        for precision in [4, 8, 12] {
             c.bench_function(
                 &format!(
                     "{}/value={}:{} precision={}",
@@ -34,6 +34,6 @@ fn benchmark_log2_ceil(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default().sample_size(10);
     targets = benchmark_log2_ceil,
 }
