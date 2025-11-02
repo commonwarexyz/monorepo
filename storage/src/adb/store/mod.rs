@@ -85,8 +85,9 @@
 
 use crate::{
     adb::{
-        build_snapshot_from_log,
+        build_snapshot_from_log, delete_key,
         operation::{variable::Operation, Keyed},
+        update_loc,
     },
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -306,14 +307,14 @@ where
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
-        if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
+        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
+            .await?
+            .is_some()
+        {
             self.steps += 1;
-        } else {
-            self.snapshot.insert(&key, new_loc);
-        };
-
+        }
         self.log.append(Operation::Update(key, value)).await?;
+
         Ok(())
     }
 
@@ -336,15 +337,12 @@ where
     /// Deletes the value associated with the given key in the store. If the key has no value,
     /// the operation is a no-op.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_key_loc(&key).await? else {
-            // Key does not exist, so this is a no-op.
-            return Ok(());
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_some() {
+            self.log.append(Operation::Delete(key)).await?;
+            self.steps += 1;
         };
 
-        Self::delete_loc(&mut self.snapshot, &key, old_loc);
-        self.steps += 1;
-
-        self.log.append(Operation::Delete(key)).await?;
         Ok(())
     }
 
@@ -553,26 +551,6 @@ where
         }
     }
 
-    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
-    /// does not have a value.
-    async fn get_key_loc(&self, key: &K) -> Result<Option<Location>, Error> {
-        for loc in self.snapshot.get(key) {
-            match self.get_op(*loc).await {
-                Ok(Operation::Update(k, _)) => {
-                    if k == *key {
-                        return Ok(Some(*loc));
-                    }
-                }
-                Err(Error::OperationPruned(_)) => {
-                    unreachable!("invalid location in snapshot: loc={loc}")
-                }
-                _ => unreachable!("non-update operation referenced by snapshot: loc={loc}"),
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
@@ -585,35 +563,6 @@ where
             crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
             e => Error::Journal(e),
         })
-    }
-
-    /// Updates the snapshot with the new operation location for the given key.
-    fn update_loc(
-        snapshot: &mut Index<T, Location>,
-        key: &K,
-        old_loc: Location,
-        new_loc: Location,
-    ) {
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return;
-        };
-
-        // Find the location in the snapshot and update it.
-        if cursor.find(|&loc| loc == old_loc) {
-            cursor.update(new_loc);
-        }
-    }
-
-    /// Deletes items in the snapshot that point to the given location.
-    fn delete_loc(snapshot: &mut Index<T, Location>, key: &K, old_loc: Location) {
-        let Some(mut cursor) = snapshot.get_mut(key) else {
-            return;
-        };
-
-        // Find the key in the snapshot and delete it.
-        if cursor.find(|&loc| loc == old_loc) {
-            cursor.delete();
-        }
     }
 
     // Moves the given operation to the tip of the log if it is active, rendering its old location
