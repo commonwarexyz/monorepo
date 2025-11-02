@@ -189,17 +189,15 @@ fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
     let m = BigRational::from_usize(m);
     let skew = BigRational::from_u64(if upper_bound { 0u64 } else { 1u64 });
     let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
-    let zero = BigRational::from_u64(0);
-    if fraction == zero {
-        return usize::MAX;
-    }
-    let one_minus = BigRational::from_usize(1) - fraction;
+
     // Compute log2(one_minus). When m is close to n, one_minus is close to 1, making log2(one_minus)
     // a small negative value that requires sufficient precision to correctly capture the sign.
+    let one_minus = BigRational::from_usize(1) - fraction;
     let log_term = one_minus.log2_ceil(LOG2_PRECISION);
-    if log_term >= zero {
+    if log_term >= BigRational::from_u64(0) {
         return usize::MAX;
     }
+
     let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
 }
