@@ -237,7 +237,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// is closed without committing.
     pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
     where
-        V: Codec + Default,
+        V: Default,
     {
         let mut value = self.get(&key).await?.unwrap_or_default();
         update(&mut value);

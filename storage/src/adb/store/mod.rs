@@ -389,6 +389,7 @@ where
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await?;
+
         Ok(())
     }
 
@@ -455,6 +456,7 @@ where
     /// you want to delete all data associated with this store permanently!
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await?;
+
         Ok(())
     }
 
@@ -571,6 +573,7 @@ where
             drop(cursor);
 
             self.log.append(op).await?;
+
             Ok(Some(old_loc))
         } else {
             // The operation is not active, so this is a no-op.
