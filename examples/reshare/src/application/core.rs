@@ -54,9 +54,9 @@ where
     C: Signer,
     V: Variant,
 {
-    type Block = Block<H, C, V>;
-    type SigningScheme = S;
     type Context = Context<H::Digest, C::PublicKey>;
+    type SigningScheme = S;
+    type Block = Block<H, C, V>;
 
     async fn genesis(&mut self) -> Self::Block {
         genesis_block::<H, C, V>()
@@ -84,10 +84,6 @@ where
             parent_block.height() + 1,
             reshare,
         ))
-    }
-
-    async fn finalize(&mut self, _: Self::Block) {
-        // no-op: the reshare application does not process finalized blocks
     }
 }
 

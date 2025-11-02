@@ -34,7 +34,7 @@
 //! - Blocks are automatically verified to be within the current epoch
 
 use crate::{
-    marshal::{self, ingress::mailbox::AncestorStream},
+    marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::{signing_scheme::Scheme, types::Context},
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
@@ -416,17 +416,15 @@ impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
+        + Reporter<Activity = Update<B>>,
     B: Block,
 {
-    type Activity = B;
+    type Activity = A::Activity;
 
-    /// Reports a finalized block to the underlying application.
-    ///
-    /// This forwards the finalized block to the wrapped application's finalize method,
-    /// allowing the application to perform any necessary state updates or cleanup.
-    async fn report(&mut self, block: Self::Activity) {
-        self.application.finalize(block).await
+    /// Relays a report to the underlying [Application].
+    async fn report(&mut self, update: Self::Activity) {
+        self.application.report(update).await
     }
 }
 

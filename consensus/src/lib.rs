@@ -128,9 +128,6 @@ cfg_if::cfg_if! {
                 context: (E, Self::Context),
                 ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
-
-            /// Receive a finalized block from [crate::marshal].
-            fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
         }
 
         /// An extension of [Application] that provides the ability to implementations to verify blocks.
@@ -138,7 +135,7 @@ cfg_if::cfg_if! {
         /// Some [Application]s may not require this functionality. When employing
         /// erasure coding, for example, verification only serves to verify the integrity of the
         /// received shard relative to the consensus commitment, and can therefore be
-        /// hidden from the application (any invalid blocks will be discarded in [Application::finalize]).
+        /// hidden from the application.
         pub trait VerifyingApplication<E>: Application<E>
         where
             E: Rng + Spawner + Metrics + Clock
