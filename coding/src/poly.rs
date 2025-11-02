@@ -187,11 +187,22 @@ impl Read for Matrix {
         &max_els: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let cfg = RangeCfg::from(..=max_els);
-        Ok(Self {
-            rows: Read::read_cfg(buf, &cfg)?,
-            cols: Read::read_cfg(buf, &cfg)?,
-            data: Read::read_cfg(buf, &(cfg, ()))?,
-        })
+        let rows = Read::read_cfg(buf, &cfg)?;
+        let cols = Read::read_cfg(buf, &cfg)?;
+        let data = Read::read_cfg(buf, &(cfg, ()))?;
+        let expected_len = rows
+            .checked_mul(cols)
+            .ok_or(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix dimensions overflow",
+            ))?;
+        if data.len() != expected_len {
+            return Err(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix element count does not match dimensions",
+            ));
+        }
+        Ok(Self { rows, cols, data })
     }
 }
 
@@ -904,6 +915,27 @@ mod test {
         assert_eq!(reverse_bits(4, 0b0100), 0b0010);
         assert_eq!(reverse_bits(4, 0b0010), 0b0100);
         assert_eq!(reverse_bits(4, 0b0001), 0b1000);
+    }
+
+    #[test]
+    fn matrix_read_rejects_length_mismatch() {
+        use bytes::BytesMut;
+        use commonware_codec::{Read as _, Write as _};
+
+        let mut buf = BytesMut::new();
+        (2usize).write(&mut buf);
+        (2usize).write(&mut buf);
+        vec![F::one(); 3].write(&mut buf);
+
+        let mut bytes = buf.freeze();
+        let result = Matrix::read_cfg(&mut bytes, &8);
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix element count does not match dimensions"
+            ))
+        ));
     }
 
     fn any_polynomial_vector(
