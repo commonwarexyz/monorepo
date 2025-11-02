@@ -175,8 +175,8 @@ Monitor for scenarios where FFT optimization would be valuable:
 
 1. Tomescu, A., et al. "Towards Scalable Threshold Cryptosystems." IEEE S&P 2020.
 2. Berrut, J.-P., and Trefethen, L.N. "Barycentric Lagrange Interpolation." SIAM Review, 2004.
-3. Glaser, A., Liu, X., and Rokhlin, V. "A fast algorithm for the calculation of the roots of special functions." SIAM J. Sci. Comput., 2007.
-4. Boneh, D., et al. "Efficient polynomial commitment schemes for multiple points and polynomials." IACR ePrint 2020/081.
+3. Glaser, A., Liu, X., and Rokhlin, V. "A fast algorithm for the calculation of the roots of special functions." SIAM J. Sci. Comput., vol. 29, no. 4, pp. 1420-1438, 2007.
+4. Boneh, D., Drake, J., Fisch, B., and Gabizon, A. "Efficient polynomial commitment schemes for multiple points and polynomials." IACR ePrint 2020/081.
 
 ## Conclusion
 
