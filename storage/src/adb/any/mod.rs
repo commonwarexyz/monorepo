@@ -242,28 +242,26 @@ where
         op: O,
         old_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.key() else {
             return Ok(None); // operations without keys cannot be active
         };
+
+        // If we find a snapshot entry corresponding to the operation, we know it's active.
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
-
-        // Find the snapshot entry corresponding to the operation.
-        if cursor.find(|&loc| *loc == old_loc) {
-            // Update the operation's snapshot location to point to tip.
-            let tip_loc = Location::new_unchecked(self.log.size().await);
-            cursor.update(tip_loc);
-            drop(cursor);
-
-            // Apply the operation at tip.
-            self.apply_op(op).await?;
-            return Ok(Some(old_loc));
+        if !cursor.find(|&loc| *loc == old_loc) {
+            return Ok(None);
         }
 
-        // The operation is not active, so this is a no-op.
-        Ok(None)
+        // Update the operation's snapshot location to point to tip.
+        cursor.update(Location::new_unchecked(self.log.size().await));
+        drop(cursor);
+
+        // Apply the operation at tip.
+        self.apply_op(op).await?;
+
+        Ok(Some(old_loc))
     }
 
     /// Raise the inactivity floor by taking one _step_, which involves searching for the first
