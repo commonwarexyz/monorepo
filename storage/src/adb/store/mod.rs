@@ -84,11 +84,7 @@
 //! ```
 
 use crate::{
-    adb::{
-        build_snapshot_from_log, delete_key,
-        operation::{variable::Operation, Keyed},
-        update_loc,
-    },
+    adb::{build_snapshot_from_log, delete_key, operation::variable::Operation, update_loc},
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
@@ -248,21 +244,13 @@ where
         .await?;
 
         // Rewind log to remove uncommitted operations.
-        let log_size = Self::rewind_uncommitted(&mut log).await?;
-        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
-
-        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-
-        let inactivity_floor_loc = match last_commit {
-            Some(loc) => {
-                let op = log.read(*loc).await?;
-                op.commit_floor().unwrap()
-            }
-            None => Location::new_unchecked(0),
-        };
+        let inactivity_floor_loc = Self::rewind_uncommitted(&mut log).await?;
 
         // Build the snapshot.
+        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
         build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit = log.size().checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
             log,
@@ -273,31 +261,19 @@ where
         })
     }
 
-    /// Gets the value associated with the given key in the store.
-    ///
-    /// If the key does not exist, returns `Ok(None)`.
+    /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
             let Operation::Update(k, v) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
-            if &k == key {
+            if k == *key {
                 return Ok(Some(v));
             }
         }
 
         Ok(None)
-    }
-
-    /// Get the value of the operation with location `loc` in the db. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
-        let op = self.get_op(loc).await?;
-
-        Ok(op.into_value())
     }
 
     /// Updates the value associated with the given key in the store.
@@ -506,26 +482,30 @@ where
 
     /// Walk backwards and removes uncommitted operations after the last commit.
     ///
-    /// Returns the log size after rewinding.
-    async fn rewind_uncommitted(log: &mut Journal<E, Operation<K, V>>) -> Result<u64, Error> {
+    /// Returns the inactivity floor location after rewinding.
+    async fn rewind_uncommitted(log: &mut Journal<E, Operation<K, V>>) -> Result<Location, Error> {
         let log_size = log.size();
         if log_size == 0 {
-            return Ok(0);
+            return Ok(Location::new_unchecked(0));
         }
         let Some(oldest_retained_loc) = log.oldest_retained_pos().map(Location::new_unchecked)
         else {
             // Log is fully pruned
-            return Ok(log_size);
+            return Ok(Location::new_unchecked(log_size));
         };
 
         // Walk backwards to find last commit
         let mut first_uncommitted = None;
+        let mut inactivity_floor_loc = oldest_retained_loc;
         let mut loc = Location::new_unchecked(log_size - 1);
 
         loop {
             let op = log.read(*loc).await.map_err(Error::Journal)?;
             match op {
-                Operation::CommitFloor(_, _) => break,
+                Operation::CommitFloor(_, floor_loc) => {
+                    inactivity_floor_loc = floor_loc;
+                    break;
+                }
                 Operation::Update(_, _) | Operation::Delete(_) => {
                     first_uncommitted = Some(loc);
                 }
@@ -545,10 +525,9 @@ where
             warn!(ops_to_rewind, ?rewind_loc, "rewinding log to last commit");
             log.rewind(*rewind_loc).await.map_err(Error::Journal)?;
             log.sync().await.map_err(Error::Journal)?;
-            Ok(*rewind_loc)
-        } else {
-            Ok(log_size)
         }
+
+        Ok(inactivity_floor_loc)
     }
 
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
