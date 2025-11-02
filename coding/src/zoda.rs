@@ -709,14 +709,12 @@ mod tests {
 
     #[test]
     fn required_samples_handles_minimal_padding() {
-        assert!(required_samples(3, 4) > 0);
+        assert_eq!(required_samples(3, 4), 305);
     }
 
     #[test]
     fn required_samples_handles_equal_rows() {
-        let value = required_samples_impl(512, 512, false);
-        assert!(value > 0);
-        assert_ne!(value, usize::MAX);
+        assert_eq!(required_samples_upper_bound(512, 512), usize::MAX);
     }
 
     #[test]
