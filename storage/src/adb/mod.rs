@@ -85,10 +85,10 @@ pub enum Error {
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
-/// the log and mmr have the same number of operations and are not pruned beyond the inactivity
-/// floor. The callback is invoked for each replayed operation, indicating activity status updates.
-/// The first argument of the callback is the activity status of the operation, and the second
-/// argument is the location of the operation it inactivates (if any).
+/// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
+/// operation, indicating activity status updates. The first argument of the callback is the
+/// activity status of the operation, and the second argument is the location of the operation it
+/// inactivates (if any).
 pub(super) async fn build_snapshot_from_log<O, I, F>(
     inactivity_floor_loc: Location,
     log: &impl Contiguous<Item = O>,
