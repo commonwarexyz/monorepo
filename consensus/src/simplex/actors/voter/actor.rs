@@ -1577,7 +1577,7 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, None);
+        self.enter_view(1, None); // Should we require Seed to be Default ?
 
         // Initialize journal
         let journal = Journal::<_, Voter<S, D>>::init(
