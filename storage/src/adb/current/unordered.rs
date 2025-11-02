@@ -3,10 +3,8 @@
 
 use crate::{
     adb::{
-        any::{
-            build_snapshot_from_log,
-            fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
-        },
+        any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
+        build_snapshot_from_log,
         current::{verify_key_value_proof, Config},
         operation::fixed::unordered::Operation,
         store::{self, Db},

@@ -7,10 +7,10 @@
 use crate::{
     adb::{
         any::{
-            build_snapshot_from_log,
             fixed::{init_mmr_and_log, Config},
             historical_proof, prune_db, Shared,
         },
+        build_snapshot_from_log,
         operation::fixed::ordered::{KeyData, Operation},
         store::{self, Db},
         Error,

@@ -6,10 +6,11 @@
 
 use crate::{
     adb::{
-        any::{delete_key, historical_proof, prune_db, update_loc},
+        any::{historical_proof, prune_db},
+        build_snapshot_from_log, delete_key,
         operation::variable::Operation,
         store::{self, Db},
-        Error,
+        update_loc, Error,
     },
     index::{Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -151,8 +152,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 
         // Build snapshot from the log
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-        super::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
-            .await?;
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
         let last_commit = log.size().checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
