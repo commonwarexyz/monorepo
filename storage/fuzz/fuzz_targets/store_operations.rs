@@ -5,7 +5,6 @@ use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::store::{Config, Store},
-    mmr::Location,
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -22,7 +21,6 @@ enum Operation {
     Delete { key: [u8; 32] },
     Commit { metadata_bytes: Option<Vec<u8>> },
     Get { key: [u8; 32] },
-    GetLoc { loc_offset: u32 },
     GetMetadata,
     Sync,
     Prune,
@@ -57,13 +55,9 @@ impl<'a> Arbitrary<'a> for Operation {
                 };
                 Ok(Operation::Commit { metadata_bytes })
             }
-            3 => {
+            3 | 4 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
-            }
-            4 => {
-                let loc_offset = u.arbitrary()?;
-                Ok(Operation::GetLoc { loc_offset })
             }
             5 => Ok(Operation::GetMetadata),
             6 => Ok(Operation::Sync),
@@ -140,14 +134,6 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Get { key } => {
                     let _ = store.get(&Digest(*key)).await;
-                }
-
-                Operation::GetLoc { loc_offset } => {
-                    let op_count = store.op_count();
-                    if op_count > 0 {
-                        let loc = (*loc_offset as u64) % op_count.as_u64();
-                        let _ = store.get_loc(Location::new(loc).unwrap()).await;
-                    }
                 }
 
                 Operation::GetMetadata => {
