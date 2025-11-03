@@ -374,21 +374,21 @@ mod tests {
                 0,
                 OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
             );
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Update address
             directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4)]));
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ignore update to me
             directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
