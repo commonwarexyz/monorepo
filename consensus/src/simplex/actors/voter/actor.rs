@@ -341,13 +341,19 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         Some(finalization)
     }
 
-    /// Returns whether at least one honest participant has notarized a proposal.
-    pub fn at_least_one_honest(&self) -> Option<View> {
-        if self.notarizes.len() <= self.scheme.participants().max_faults() as usize {
-            return None;
+    /// Returns `true` if at least one honest participant has notarized a proposal in this view.
+    pub fn at_least_one_honest_notarization(&self) -> bool {
+        if self.finalization.is_some() {
+            return true;
         }
-        let proposal = self.proposal.as_ref().unwrap().clone();
-        Some(proposal.parent)
+        if self.nullification.is_some() {
+            return true;
+        }
+
+        // If there are more notarizations than the number of faulty nodes,
+        // then at least one of the notarizations is from an honest node.
+        let max_faults = self.scheme.participants().max_faults() as usize;
+        self.notarizes.len() > max_faults
     }
 }
 
@@ -585,16 +591,6 @@ impl<
             // We can't find a valid parent, return
             return Err(cursor);
         }
-    }
-
-    fn missing_nullifications(&self, parent: View) -> Vec<View> {
-        let mut missing = Vec::new();
-        for view in (parent + 1)..self.view {
-            if !self.is_nullified(view) {
-                missing.push(view);
-            }
-        }
-        missing
     }
 
     #[allow(clippy::question_mark)]
@@ -1417,52 +1413,32 @@ impl<
                 .await
                 .unwrap();
 
-            // If `>= f+1` notarized a given proposal, then we should backfill missing
-            // notarizations
+            // If at least one honest node notarized a proposal in this view,
+            // then backfill any missing certificates.
             let round = self.views.get(&view).expect("missing round");
-            if let Some(parent) = round.at_least_one_honest() {
-                if parent >= self.last_finalized {
-                    // Compute missing nullifications
-                    let mut missing_notarizations = Vec::new();
-                    if parent != GENESIS_VIEW && self.is_notarized(parent).is_none() {
-                        missing_notarizations.push(parent);
-                    }
-                    let missing_nullifications = self.missing_nullifications(parent);
+            if round.at_least_one_honest_notarization() {
+                // Compute certificates that we know are missing
+                let parent = round.proposal.as_ref().unwrap().parent;
+                let missing_notarizations = match self.is_notarized(parent) {
+                    Some(_) => Vec::new(),
+                    None => vec![parent],
+                };
+                let missing_nullifications = ((parent + 1)..view)
+                    .filter(|v| !self.is_nullified(*v))
+                    .collect::<Vec<_>>();
 
-                    // Fetch any missing
-                    if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
-                        warn!(
-                            proposal_view = view,
-                            parent,
-                            ?missing_notarizations,
-                            ?missing_nullifications,
-                            ">= 1 honest notarize for nullified parent"
-                        );
-                        resolver
-                            .fetch(missing_notarizations, missing_nullifications)
-                            .await;
-                    }
-                } else {
-                    // Broadcast last finalized
-                    debug!(
+                // Fetch any missing certificates
+                if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
+                    warn!(
+                        proposal_view = view,
                         parent,
-                        last_finalized = self.last_finalized,
-                        "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                        ?missing_notarizations,
+                        ?missing_nullifications,
+                        ">= 1 honest notarize for nullified parent"
                     );
-                    if let Some(finalization) =
-                        self.construct_finalization(self.last_finalized, true).await
-                    {
-                        let msg = Voter::Finalization(finalization.clone());
-                        recovered_sender
-                            .send(Recipients::All, msg, true)
-                            .await
-                            .expect("unable to broadcast finalization");
-                    } else {
-                        warn!(
-                            last_finalized = self.last_finalized,
-                            "unable to construct last finalization"
-                        );
-                    }
+                    resolver
+                        .fetch(missing_notarizations, missing_nullifications)
+                        .await;
                 }
             }
         }
