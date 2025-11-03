@@ -44,7 +44,6 @@ enum Operation {
     },
     SimulateFailure {
         sync_log: bool,
-        sync_locations: bool,
         sync_mmr: bool,
     },
 }
@@ -101,13 +100,8 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             12 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_locations: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_locations,
-                    sync_mmr,
-                })
+                Ok(Operation::SimulateFailure { sync_log, sync_mmr })
             }
             _ => unreachable!(),
         }
@@ -138,14 +132,11 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         mmr_metadata_partition: format!("{test_name}_meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
-        locations_journal_partition: format!("{test_name}_locations"),
-        locations_items_per_blob: NZU64!(11),
-        locations_write_buffer: NZUsize!(1024),
         thread_pool: None,
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     }
@@ -212,7 +203,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc().await;
+                    let _ = db.oldest_retained_loc();
                 }
 
                 Operation::Root => {
@@ -261,10 +252,9 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::SimulateFailure {
                     sync_log,
-                    sync_locations,
                     sync_mmr,
                 } => {
-                    db.simulate_failure(*sync_log, *sync_locations, *sync_mmr)
+                    db.simulate_failure(*sync_log, *sync_mmr)
                         .await
                         .expect("Simulate failure should not fail");
 
