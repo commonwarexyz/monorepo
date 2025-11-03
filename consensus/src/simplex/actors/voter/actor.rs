@@ -1416,11 +1416,12 @@ impl<
             // If at least one honest node notarized a proposal in this view,
             // then backfill any missing certificates.
             let round = self.views.get(&view).expect("missing round");
-            if round.at_least_one_honest_notarization() {
+            if view > self.last_finalized && round.at_least_one_honest_notarization() {
                 // Compute certificates that we know are missing
                 let parent = round.proposal.as_ref().unwrap().parent;
                 let missing_notarizations = match self.is_notarized(parent) {
                     Some(_) => Vec::new(),
+                    None if parent == GENESIS_VIEW => Vec::new(),
                     None => vec![parent],
                 };
                 let missing_nullifications = ((parent + 1)..view)
