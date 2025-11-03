@@ -208,3 +208,10 @@ path = "fuzz_targets/extract_pinned_nodes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "proof_store"
+path = "fuzz_targets/proof_store.rs"
+test = false
+doc = false
+bench = false
