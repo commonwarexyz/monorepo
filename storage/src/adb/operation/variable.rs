@@ -80,7 +80,7 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     }
 
     fn is_update(&self) -> bool {
-        matches!(self, Self::Update(_, _))
+        matches!(self, Self::Update(_, _) | Self::Set(_, _))
     }
 
     fn commit_floor(&self) -> Option<Location> {
@@ -93,7 +93,7 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
 
 impl<K: Array, V: Codec> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _))
+        matches!(self, Self::CommitFloor(_, _) | Self::Commit(_))
     }
 }
 
