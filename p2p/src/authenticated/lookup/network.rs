@@ -40,6 +40,9 @@ pub struct Network<
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
     listener: mpsc::Receiver<HashSet<IpAddr>>,
+
+    listener_info: mpsc::UnboundedReceiver<listener::Message>,
+    listener_info_mailbox: listener::Info,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -57,6 +60,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_info_mailbox, listener_info) = UnboundedMailbox::new();
+
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -87,9 +92,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 router,
                 router_mailbox,
                 listener,
+
+                listener_info,
+                listener_info_mailbox: listener::Info::new(listener_info_mailbox),
             },
             oracle,
         )
+    }
+
+    pub fn listener_info(&self) -> listener::Info {
+        self.listener_info_mailbox.clone()
     }
 
     /// Register a new channel over the network.
@@ -163,6 +175,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
             },
             self.listener,
+            self.listener_info,
         );
         let mut listener_task =
             listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());

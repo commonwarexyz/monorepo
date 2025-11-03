@@ -1,7 +1,7 @@
 //! Listener
 
 use crate::authenticated::{
-    lookup::actors::{spawner, tracker},
+    lookup::actors::{listener, spawner, tracker},
     mailbox::UnboundedMailbox,
     Mailbox,
 };
@@ -19,25 +19,16 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
 };
 use tracing::debug;
+
+use super::Config;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
-
-/// Configuration for the listener actor.
-pub struct Config<C: Signer> {
-    pub address: SocketAddr,
-    pub stream_cfg: StreamConfig<C>,
-    pub attempt_unregistered_handshakes: bool,
-    pub max_concurrent_handshakes: NonZeroU32,
-    pub allowed_handshake_rate_per_ip: Quota,
-    pub allowed_handshake_rate_per_subnet: Quota,
-}
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
@@ -53,6 +44,7 @@ pub struct Actor<
     allowed_handshake_rate_per_subnet: Quota,
     registered_ips: HashSet<IpAddr>,
     mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    info_mailbox: mpsc::UnboundedReceiver<super::ingress::Message>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -62,7 +54,12 @@ pub struct Actor<
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(
+        context: E,
+        cfg: Config<C>,
+        mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+        info_mailbox: mpsc::UnboundedReceiver<super::ingress::Message>,
+    ) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
         context.register(
@@ -100,6 +97,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
             registered_ips: HashSet::new(),
             mailbox,
+            info_mailbox,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
@@ -174,6 +172,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .await
             .expect("failed to bind listener");
 
+        let local_addr = listener
+            .local_addr()
+            .inspect_err(|error| {
+                debug!(
+                    error = error as &dyn std::error::Error,
+                    "cannot determine bound local address"
+                )
+            })
+            .ok();
+
         // Loop over incoming connections
         let mut accepted = 0;
         loop {
@@ -184,6 +192,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         break;
                     };
                     self.registered_ips = registered_ips;
+                },
+                msg = self.info_mailbox.next() => {
+                    let Some(msg) = msg else {
+                        debug!("info mailbox closed;");
+                        continue;
+                    };
+                    match msg {
+                        listener::Message::GetLocalAddr { response } => {
+                            let _ = response.send(local_addr.clone());
+                        }
+                    }
                 },
                 listener = listener.accept() => {
                     // Accept a new connection
@@ -265,6 +284,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
 #[cfg(test)]
 mod tests {
+    use super::super::Info;
     use super::*;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
     use commonware_macros::test_traced;
@@ -296,6 +316,7 @@ mod tests {
             };
 
             let (mut updates_tx, updates_rx) = mpsc::channel(1);
+            let (_info_tx, info_rx) = mpsc::unbounded();
             let actor = Actor::new(
                 context.clone(),
                 Config {
@@ -307,6 +328,7 @@ mod tests {
                     allowed_handshake_rate_per_subnet,
                 },
                 updates_rx,
+                info_rx,
             );
 
             let mut allowed = HashSet::new();
@@ -463,6 +485,7 @@ mod tests {
             };
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_info_tx, info_rx) = mpsc::unbounded();
             let actor = Actor::new(
                 context.clone(),
                 Config {
@@ -474,6 +497,7 @@ mod tests {
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
                 },
                 updates_rx,
+                info_rx,
             );
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
@@ -543,6 +567,7 @@ mod tests {
             };
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_info_tx, info_rx) = mpsc::unbounded();
             let actor = Actor::new(
                 context.clone(),
                 Config {
@@ -554,6 +579,7 @@ mod tests {
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
                 },
                 updates_rx,
+                info_rx,
             );
 
             let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
@@ -605,6 +631,95 @@ mod tests {
             listener_handle.abort();
             tracker_task.abort();
             supervisor_task.abort();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn reports_bound_local_addr() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (info_tx, info_rx) = UnboundedMailbox::new();
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    attempt_unregistered_handshakes: false,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+                updates_rx,
+                info_rx,
+            );
+
+            let (tracker_mailbox, _tracker_rx) = UnboundedMailbox::new();
+            let (supervisor_mailbox, _supervisor_rx) = Mailbox::new(1);
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            let mut info = Info::new(info_tx);
+            assert_eq!(
+                info.get_local_addr().await,
+                Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101)),
+            );
+
+            listener_handle.abort();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn reports_bound_zero_port_local_addr() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (info_tx, info_rx) = UnboundedMailbox::new();
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    attempt_unregistered_handshakes: false,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+                updates_rx,
+                info_rx,
+            );
+
+            let (tracker_mailbox, _tracker_rx) = UnboundedMailbox::new();
+            let (supervisor_mailbox, _supervisor_rx) = Mailbox::new(1);
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            let mut info = Info::new(info_tx);
+            let local_addr = info
+                .get_local_addr()
+                .await
+                .expect("any port should have been found");
+            assert!(local_addr.port() != 0, "the port should not be 0");
+
+            listener_handle.abort();
         });
     }
 }
