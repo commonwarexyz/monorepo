@@ -42,6 +42,7 @@ use crate::{
     journal::contiguous::Contiguous,
     mmr::Location,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use futures::StreamExt as _;
@@ -50,7 +51,7 @@ pub struct IndexedJournal<
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
     C: Contiguous<Item = O>,
-    O: Keyed,
+    O: Keyed + Committable + Encode,
     H: Hasher,
 > {
     /// The authenticated journal maintaining synchronized MMR and log.
@@ -72,7 +73,7 @@ where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
     C: Contiguous<Item = O>,
-    O: Keyed + Committable,
+    O: Keyed + Committable + Encode,
     H: Hasher,
 {
     /// Create a new IndexedJournal from an authenticated journal and snapshot.

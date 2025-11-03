@@ -26,13 +26,11 @@
 //! leaves correspond to log positions is maintained.
 
 use crate::{
-    adb::{
-        operation::{Committable, Keyed},
-        rewind_uncommitted, Error,
-    },
+    adb::{operation::Committable, rewind_uncommitted, Error},
     journal::contiguous::Contiguous,
     mmr::{journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
@@ -44,7 +42,7 @@ pub struct AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
-    O: Keyed,
+    O: Committable + Encode,
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
@@ -60,7 +58,7 @@ impl<E, C, O, H> AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
-    O: Keyed + Committable,
+    O: Committable + Encode,
     H: Hasher,
 {
     /// Create a new [AuthenticatedJournal] from the given components.
@@ -146,6 +144,12 @@ where
             self.mmr.merkleize(&mut self.hasher);
             Ok::<(), Error>(())
         };
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/XXXX): This syncs both the log data
+        // and metadata (e.g., offsets for variable-length journals). The original keyless implementation
+        // only synced data via `sync_data()`, deferring metadata sync for better performance. However,
+        // `sync_data()` is not part of the `Contiguous` trait interface, so we use full `sync()` here.
+        // This may have minor performance implications but ensures correctness across all journal types.
+        // Consider adding `sync_data()` to the `Contiguous` trait if this becomes a bottleneck.
         try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
 
         Ok(())
@@ -249,6 +253,25 @@ where
     /// Get the current operation count (number of operations in the journal).
     pub fn op_count(&self) -> Location {
         self.mmr.leaves()
+    }
+
+    /// Read an operation from the log at the given location.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::ItemPruned] if the operation at `loc` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the operation at `loc` does not exist.
+    pub async fn read(&self, loc: Location) -> Result<O, Error> {
+        self.log.read(*loc).await.map_err(Error::Journal)
+    }
+
+    /// Return the root of the MMR.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations in the MMR.
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
+        self.mmr.root(hasher)
     }
 
     /// Returns the oldest retained location in the journal.
