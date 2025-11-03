@@ -63,6 +63,7 @@ pub fn init(
         tracing_opentelemetry::layer().with_tracer(tracer)
     });
 
+    // Create tracing registry.
     cfg_if! {
         if #[cfg(feature = "tokio-console")] {
             let console_layer = console_subscriber::spawn();

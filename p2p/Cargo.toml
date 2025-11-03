@@ -11,28 +11,28 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
 documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-macros = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-stream = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-rand = { workspace = true }
-rand_distr = { workspace = true }
-thiserror = { workspace = true }
-futures = { workspace = true }
-tracing = { workspace = true }
-governor = { workspace = true }
-prometheus-client = { workspace = true }
-either = { workspace = true }
-num-bigint = { workspace = true }
-num-integer = { workspace = true }
-num-rational = { workspace = true }
-num-traits = { workspace = true }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+either.workspace = true
+futures.workspace = true
+governor.workspace = true
+num-bigint.workspace = true
+num-integer.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+tracing-subscriber.workspace = true
 
 [lib]
 bench = false

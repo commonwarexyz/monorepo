@@ -11,26 +11,26 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/resha
 documentation = "https://docs.rs/commonware-reshare"
 
 [dependencies]
-rand.workspace = true
 bytes.workspace = true
-serde.workspace = true
-futures.workspace = true
-tracing.workspace = true
-governor.workspace = true
-rand_core.workspace = true
-serde_json.workspace = true
-commonware-p2p.workspace = true
-commonware-codec.workspace = true
-commonware-utils.workspace = true
-commonware-macros.workspace = true
-prometheus-client.workspace = true
-commonware-runtime.workspace = true
-commonware-storage.workspace = true
-commonware-resolver.workspace = true
+clap = { workspace = true, features = ["derive"] }
 commonware-broadcast.workspace = true
+commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
-clap = { workspace = true, features = ["derive"] }
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-resolver.workspace = true
+commonware-runtime.workspace = true
+commonware-storage.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

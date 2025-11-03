@@ -19,20 +19,20 @@ name = "client"
 path = "src/bin/client.rs"
 
 [dependencies]
+bytes.workspace = true
+clap.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
-commonware-runtime = { workspace = true }
-commonware-codec = { workspace = true }
-commonware-utils = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-stream = { workspace = true }
-commonware-macros = { workspace = true }
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
-tokio = {workspace = true }
-bytes = { workspace = true }
-futures = { workspace = true }
-clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-rand = { workspace = true }
-thiserror = { workspace = true }
-prometheus-client = { workspace = true }
