@@ -141,7 +141,7 @@ where
         inactivity_floor_loc: Location,
     ) -> Result<Location, Error> {
         if prune_loc > inactivity_floor_loc {
-            return Err(Error::PruneBeyondInactivityFloor(
+            return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
                 inactivity_floor_loc,
             ));
@@ -229,46 +229,6 @@ where
     /// Get the current operation count (number of operations in the journal).
     pub fn op_count(&self) -> Location {
         self.mmr.leaves()
-    }
-
-    /// Get a reference to the internal MMR.
-    ///
-    /// This is a temporary accessor to support migration. Eventually all logic should be
-    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
-    pub(crate) fn mmr(&self) -> &Mmr<E, H> {
-        &self.mmr
-    }
-
-    /// Get a mutable reference to the internal MMR.
-    ///
-    /// This is a temporary accessor to support migration. Eventually all logic should be
-    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
-    pub(crate) fn mmr_mut(&mut self) -> &mut Mmr<E, H> {
-        &mut self.mmr
-    }
-
-    /// Get a reference to the internal log.
-    ///
-    /// This is a temporary accessor to support migration. Eventually all logic should be
-    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
-    pub(crate) fn log(&self) -> &C {
-        &self.log
-    }
-
-    /// Get a mutable reference to the internal log.
-    ///
-    /// This is a temporary accessor to support migration. Eventually all logic should be
-    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
-    pub(crate) fn log_mut(&mut self) -> &mut C {
-        &mut self.log
-    }
-
-    /// Get a mutable reference to the internal hasher.
-    ///
-    /// This is a temporary accessor to support migration. Eventually all logic should be
-    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
-    pub(crate) fn hasher_mut(&mut self) -> &mut StandardHasher<H> {
-        &mut self.hasher
     }
 
     /// Returns the oldest retained location in the journal.
@@ -584,10 +544,7 @@ mod tests {
                 .prune(Location::new_unchecked(5), Location::new_unchecked(3))
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(Error::PruneBeyondInactivityFloor(_, _))
-            ));
+            assert!(matches!(result, Err(Error::PruneBeyondMinRequired(_, _))));
         });
     }
 

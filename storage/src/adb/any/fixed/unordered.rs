@@ -4,10 +4,11 @@ use crate::{
     adb::{
         any::{
             fixed::{init_mmr_and_log, Config},
-            historical_proof, prune_db, Shared,
+            historical_proof, Shared,
         },
         build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
+        prune_db,
         store::Db,
         update_loc, Error,
     },

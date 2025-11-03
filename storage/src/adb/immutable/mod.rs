@@ -2,7 +2,7 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{operation::variable::Operation, Error},
+    adb::{operation::variable::Operation, prune_db, Error},
     index::{Index as _, Unordered as Index},
     journal::contiguous::variable,
     mmr::{
@@ -310,30 +310,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
+    /// Returns [Error::PruneBeyondMinRequired] if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
-        if loc > last_commit {
-            return Err(Error::PruneBeyondCommit(loc, last_commit));
-        }
+        let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
+        let op_count = self.op_count();
+        prune_db(
+            &mut self.mmr,
+            &mut self.log,
+            &mut self.hasher,
+            loc,
+            last_commit_loc,
+            op_count,
+        )
+        .await?;
 
-        // Prune the log up to the requested location. The log will prune at section boundaries,
-        // so the actual oldest retained location may be less than requested. We always prune the
-        // log first, and then prune the MMR based on the log's actual pruning boundary. This
-        // procedure ensures all log operations always have corresponding MMR entries, even in the
-        // event of failures, with no need for special recovery.
-        self.log.prune(*loc).await?;
-
-        // Get the oldest retained location based on what the log actually pruned.
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(loc) => loc,
-            None => self.op_count(),
-        };
-
-        // Prune the MMR up to the oldest retained item in the log after pruning.
-        self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
-            .await?;
         Ok(())
     }
 
@@ -1078,7 +1068,7 @@ pub(super) mod test {
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
+                matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
                     if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
             );
 
@@ -1110,7 +1100,7 @@ pub(super) mod test {
             let beyond = Location::new_unchecked(*new_last_commit + 1);
             let result = db.prune(beyond).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
+                matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
                     if prune_loc == beyond && commit_loc == new_last_commit)
             );
 
