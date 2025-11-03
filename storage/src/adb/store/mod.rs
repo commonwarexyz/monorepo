@@ -84,7 +84,10 @@
 //! ```
 
 use crate::{
-    adb::{build_snapshot_from_log, delete_key, operation::variable::Operation, update_loc, Error},
+    adb::{
+        build_snapshot_from_log, delete_key, operation::variable::Operation, rewind_uncommitted,
+        update_loc, Error,
+    },
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
@@ -95,7 +98,7 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -230,7 +233,7 @@ where
         .await?;
 
         // Rewind log to remove uncommitted operations.
-        let inactivity_floor_loc = Self::rewind_uncommitted(&mut log).await?;
+        let inactivity_floor_loc = rewind_uncommitted(&mut log).await?;
 
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
@@ -466,56 +469,6 @@ where
     /// Return the oldest location that remains retrievable.
     fn oldest_retained_loc(&self) -> Option<Location> {
         self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Walk backwards and removes uncommitted operations after the last commit.
-    ///
-    /// Returns the inactivity floor location after rewinding.
-    async fn rewind_uncommitted(log: &mut Journal<E, Operation<K, V>>) -> Result<Location, Error> {
-        let log_size = log.size();
-        if log_size == 0 {
-            return Ok(Location::new_unchecked(0));
-        }
-        let Some(oldest_retained_loc) = log.oldest_retained_pos().map(Location::new_unchecked)
-        else {
-            // Log is fully pruned
-            return Ok(Location::new_unchecked(log_size));
-        };
-
-        // Walk backwards to find last commit
-        let mut first_uncommitted = None;
-        let mut inactivity_floor_loc = oldest_retained_loc;
-        let mut loc = Location::new_unchecked(log_size - 1);
-
-        loop {
-            let op = log.read(*loc).await.map_err(Error::Journal)?;
-            match op {
-                Operation::CommitFloor(_, floor_loc) => {
-                    inactivity_floor_loc = floor_loc;
-                    break;
-                }
-                Operation::Update(_, _) | Operation::Delete(_) => {
-                    first_uncommitted = Some(loc);
-                }
-                Operation::Set(_, _) | Operation::Commit(_) => {
-                    unreachable!("Set and Commit operations are not used in mutable stores")
-                }
-            }
-            if loc == oldest_retained_loc {
-                break;
-            }
-            loc = Location::new_unchecked(*loc - 1);
-        }
-
-        // Rewind operations after the last commit
-        if let Some(rewind_loc) = first_uncommitted {
-            let ops_to_rewind = log_size - *rewind_loc;
-            warn!(ops_to_rewind, ?rewind_loc, "rewinding log to last commit");
-            log.rewind(*rewind_loc).await.map_err(Error::Journal)?;
-            log.sync().await.map_err(Error::Journal)?;
-        }
-
-        Ok(inactivity_floor_loc)
     }
 
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
