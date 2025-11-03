@@ -21,9 +21,6 @@ pub struct Config<C: Signer> {
     /// Address to listen on.
     pub listen: SocketAddr,
 
-    /// Dialable address of the peer.
-    pub dialable: SocketAddr,
-
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
@@ -101,14 +98,12 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        dialable: SocketAddr,
         max_message_size: usize,
     ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
 
             allow_private_ips: false,
             attempt_unregistered_handshakes: false,
@@ -135,18 +130,11 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(
-        crypto: C,
-        namespace: &[u8],
-        listen: SocketAddr,
-        dialable: SocketAddr,
-        max_message_size: usize,
-    ) -> Self {
+    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: usize) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
 
             allow_private_ips: true,
             attempt_unregistered_handshakes: false,
@@ -173,7 +161,6 @@ impl<C: Signer> Config<C> {
             crypto,
             namespace: b"test_namespace".to_vec(),
             listen,
-            dialable: listen,
 
             allow_private_ips: true,
             attempt_unregistered_handshakes: false,

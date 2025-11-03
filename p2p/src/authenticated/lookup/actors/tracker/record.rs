@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 #[derive(Clone, Debug)]
 pub enum Address {
     /// Peer is the local node.
-    Myself(SocketAddr),
+    Myself,
 
     /// Address is provided when peer is registered.
     Known(SocketAddr),
@@ -61,9 +61,9 @@ impl Record {
     }
 
     /// Create a new record with the local node's information.
-    pub fn myself(socket: SocketAddr) -> Self {
+    pub fn myself() -> Self {
         Record {
-            address: Address::Myself(socket),
+            address: Address::Myself,
             status: Status::Inert,
             sets: 0,
             persistent: true,
@@ -74,7 +74,7 @@ impl Record {
 
     /// Update the record with a new address.
     pub fn update(&mut self, socket: SocketAddr) {
-        if matches!(self.address, Address::Myself(_) | Address::Blocked) {
+        if matches!(self.address, Address::Myself | Address::Blocked) {
             return;
         }
         self.address = Address::Known(socket);
@@ -85,7 +85,7 @@ impl Record {
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
     pub fn block(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
+        if matches!(self.address, Address::Blocked | Address::Myself) {
             return false;
         }
         self.address = Address::Blocked;
@@ -111,7 +111,7 @@ impl Record {
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
+        if matches!(self.address, Address::Blocked | Address::Myself) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
@@ -170,7 +170,7 @@ impl Record {
     /// Return the socket of the peer, if known.
     pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Myself(addr) => Some(*addr),
+            Address::Myself => None,
             Address::Known(addr) => Some(*addr),
             Address::Blocked => None,
         }
@@ -191,7 +191,7 @@ impl Record {
     #[allow(unstable_name_collisions)]
     pub fn allowed(&self, allow_private_ips: bool) -> bool {
         match self.address {
-            Address::Blocked | Address::Myself(_) => false,
+            Address::Blocked | Address::Myself => false,
             Address::Known(addr) => {
                 (self.sets > 0 || self.persistent) && (allow_private_ips || addr.ip().is_global())
             }
@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn test_myself_initial_state() {
         let socket = test_socket();
-        let record = Record::myself(socket);
-        assert!(matches!(record.address, Address::Myself(got_socket) if got_socket == socket));
+        let record = Record::myself();
+        assert!(matches!(record.address, Address::Myself));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
@@ -225,8 +225,7 @@ mod tests {
 
     #[test]
     fn test_myself_blocked_to_known() {
-        let socket = test_socket();
-        let mut record = Record::myself(socket);
+        let mut record = Record::myself();
         record.block();
         assert!(!record.blocked(), "Can't block myself");
     }
@@ -243,7 +242,7 @@ mod tests {
         assert!(record_known.deletable());
 
         // Test Myself (persistent)
-        let mut record_myself = Record::myself(socket);
+        let mut record_myself = Record::myself();
         assert!(!record_myself.deletable()); // Persistent
         record_myself.increment(); // sets = 1
         assert!(!record_myself.deletable());
@@ -286,14 +285,11 @@ mod tests {
 
     #[test]
     fn test_block_myself_and_already_blocked() {
-        let socket = test_socket();
-        let mut record_myself = Record::myself(socket);
+        let mut record_myself = Record::myself();
         assert!(!record_myself.block(), "Cannot block myself");
-        assert!(
-            matches!(&record_myself.address, Address::Myself(got_socket) if *got_socket == socket)
-        );
+        assert!(matches!(&record_myself.address, Address::Myself));
 
-        let mut record_to_be_blocked = Record::known(socket);
+        let mut record_to_be_blocked = Record::known(test_socket());
         assert!(record_to_be_blocked.block());
         assert!(
             !record_to_be_blocked.block(),
@@ -371,7 +367,7 @@ mod tests {
         let socket = test_socket();
 
         // Persistent records are never deletable regardless of sets count
-        assert!(!Record::myself(socket).deletable());
+        assert!(!Record::myself().deletable());
 
         // Non-persistent records depend on sets count and status
         let mut record = Record::known(socket); // Not persistent
@@ -403,7 +399,7 @@ mod tests {
         let mut record_blocked = Record::known(socket);
         record_blocked.block();
         assert!(!record_blocked.allowed(false));
-        assert!(!Record::myself(socket).allowed(false));
+        assert!(!Record::myself().allowed(false));
 
         // Non-persistent records (Unknown, Known) require sets > 0
         let mut record_unknown = Record::known(socket);
