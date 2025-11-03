@@ -101,7 +101,7 @@ impl crate::Network for Network {
             // Unless its zero - then cycle through all ports
             for port in 1..32768 {
                 socket = SocketAddr::new(socket.ip(), port);
-                if listeners.contains_key(&socket) {
+                if !listeners.contains_key(&socket) {
                     break;
                 }
             }
