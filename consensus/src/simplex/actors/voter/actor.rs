@@ -346,7 +346,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.finalization.is_some() {
             return true;
         }
-        if self.nullification.is_some() {
+        if self.notarization.is_some() {
             return true;
         }
 
