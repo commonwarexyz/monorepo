@@ -147,15 +147,9 @@
         }
 
         function setupBenchmark() {
-            try {
-                // Set Chart.js default font family
-                Chart.defaults.global.defaultFontFamily = 'monospace';
-                Chart.defaults.global.defaultFontColor = "#000";
-            } catch (error) {
-                console.error('Failed to initialize Chart.js:', error);
-                document.getElementById('main').innerHTML = '<p style="color: red;">Failed to initialize charts. Please refresh the page.</p>';
-                return;
-            }
+            // Set Chart.js default font family
+            Chart.defaults.global.defaultFontFamily = 'monospace';
+            Chart.defaults.global.defaultFontColor = "#000";
 
             // Build cases
             function init() {
@@ -195,10 +189,6 @@
                         }
                     }
                     return moduleMap;
-                }
-
-                if (!window.BENCHMARK_DATA) {
-                    throw new Error('Benchmark data not available');
                 }
 
                 const data = window.BENCHMARK_DATA;
@@ -247,119 +237,114 @@
                     function createChart() {
                         if (chartInstance) return; // Already created
 
-                        try {
-                            const data = {
-                                datasets: [{
-                                    label: name,
-                                    data: dataset.map(d => {
-                                        return { x: new Date(d.commit.timestamp), y: d.bench.value };
-                                    }),
-                                    borderColor: '#000000',
-                                    backgroundColor: '#000000' + '60'
+                        const data = {
+                            datasets: [{
+                                label: name,
+                                data: dataset.map(d => {
+                                    return { x: new Date(d.commit.timestamp), y: d.bench.value };
+                                }),
+                                borderColor: '#000000',
+                                backgroundColor: '#000000' + '60'
+                            }]
+                        };
+                        const options = {
+                            scales: {
+                                xAxes: [{
+                                    type: 'time',
+                                    time: {
+                                        unit: 'day',
+                                        displayFormats: {
+                                            day: 'M/D'
+                                        },
+                                    },
+                                    ticks: {
+                                        autoSkip: true,
+                                        maxTicksLimit: 5,
+                                    },
+                                    scaleLabel: {
+                                        display: false,
+                                    },
+                                    gridLines: {
+                                        display: true,
+                                    }
+                                }],
+                                yAxes: [{
+                                    scaleLabel: {
+                                        display: true,
+                                        labelString: 'ms/iter',
+                                    },
+                                    ticks: {
+                                        beginAtZero: true,
+                                        autoSkip: true,
+                                        maxTicksLimit: 7,
+                                        callback: function (value) {
+                                            return (value / 1e6);
+                                        }
+                                    },
+                                    gridLines: {
+                                        display: true,
+                                    }
                                 }]
-                            };
-                            const options = {
-                                scales: {
-                                    xAxes: [{
-                                        type: 'time',
-                                        time: {
-                                            unit: 'day',
-                                            displayFormats: {
-                                                day: 'M/D'
-                                            },
-                                        },
-                                        ticks: {
-                                            autoSkip: true,
-                                            maxTicksLimit: 5,
-                                        },
-                                        scaleLabel: {
-                                            display: false,
-                                        },
-                                        gridLines: {
-                                            display: true,
-                                        }
-                                    }],
-                                    yAxes: [{
-                                        scaleLabel: {
-                                            display: true,
-                                            labelString: 'ms/iter',
-                                        },
-                                        ticks: {
-                                            beginAtZero: true,
-                                            autoSkip: true,
-                                            maxTicksLimit: 7,
-                                            callback: function (value) {
-                                                return (value / 1e6);
-                                            }
-                                        },
-                                        gridLines: {
-                                            display: true,
-                                        }
-                                    }]
-                                },
-                                animation: false,
-                                legend: { display: false },
-                                tooltips: {
-                                    callbacks: {
-                                        afterTitle: items => {
-                                            const { index } = items[0];
-                                            const data = dataset[index];
-                                            return '\n' + data.commit.message
-                                                + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
-                                        },
-                                        label: function (item) {
-                                            let rawVal = Number(item.value);
-                                            // Convert from ns -> ms (divide by 1e6)
-                                            let val = rawVal / 1e6;
+                            },
+                            animation: false,
+                            legend: { display: false },
+                            tooltips: {
+                                callbacks: {
+                                    afterTitle: items => {
+                                        const { index } = items[0];
+                                        const data = dataset[index];
+                                        return '\n' + data.commit.message
+                                            + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
+                                    },
+                                    label: function (item) {
+                                        let rawVal = Number(item.value);
+                                        // Convert from ns -> ms (divide by 1e6)
+                                        let val = rawVal / 1e6;
 
-                                            // Format numeric output
-                                            let label = val.toLocaleString(undefined, {
+                                        // Format numeric output
+                                        let label = val.toLocaleString(undefined, {
+                                            minimumFractionDigits: 3,
+                                            maximumFractionDigits: 3
+                                        });
+
+                                        const { range, unit } = dataset[item.index].bench;
+                                        label += ' ms/iter';
+
+                                        if (range) {
+                                            // parse numeric range if it exists, also convert to ms if needed
+                                            let rangeVal = range.replace(/[^\d.]/g, '');
+                                            let rangeNum = Number(rangeVal);
+                                            if (!isNaN(rangeNum)) {
+                                                rangeNum = rangeNum / 1e6;
+                                            }
+                                            label += ' (' + rangeNum.toLocaleString(undefined, {
                                                 minimumFractionDigits: 3,
                                                 maximumFractionDigits: 3
-                                            });
-
-                                            const { range, unit } = dataset[item.index].bench;
-                                            label += ' ms/iter';
-
-                                            if (range) {
-                                                // parse numeric range if it exists, also convert to ms if needed
-                                                let rangeVal = range.replace(/[^\d.]/g, '');
-                                                let rangeNum = Number(rangeVal);
-                                                if (!isNaN(rangeNum)) {
-                                                    rangeNum = rangeNum / 1e6;
-                                                }
-                                                label += ' (' + rangeNum.toLocaleString(undefined, {
-                                                    minimumFractionDigits: 3,
-                                                    maximumFractionDigits: 3
-                                                }) + ' ms)';
-                                            }
-                                            return label;
-                                        },
-                                        afterLabel: item => {
-                                            const { extra } = dataset[item.index].bench;
-                                            return extra ? '\n' + extra : '';
+                                            }) + ' ms)';
                                         }
+                                        return label;
+                                    },
+                                    afterLabel: item => {
+                                        const { extra } = dataset[item.index].bench;
+                                        return extra ? '\n' + extra : '';
                                     }
-                                },
-                                onClick: (_mouseEvent, activeElems) => {
-                                    if (activeElems.length === 0) return;
-                                    const index = activeElems[0]._index;
-                                    const url = dataset[index].commit.url;
-                                    window.open(url, '_blank');
-                                },
-                                title: {
-                                    display: false,
-                                },
-                            };
-                            chartInstance = new Chart(canvas, {
-                                type: 'line',
-                                data,
-                                options,
-                            });
-                        } catch (error) {
-                            console.error('Failed to create chart:', error);
-                            canvas.parentElement.innerHTML = '<p style="color: red;">Failed to load chart. Please try again.</p>';
-                        }
+                                }
+                            },
+                            onClick: (_mouseEvent, activeElems) => {
+                                if (activeElems.length === 0) return;
+                                const index = activeElems[0]._index;
+                                const url = dataset[index].commit.url;
+                                window.open(url, '_blank');
+                            },
+                            title: {
+                                display: false,
+                            },
+                        };
+                        chartInstance = new Chart(canvas, {
+                            type: 'line',
+                            data,
+                            options,
+                        });
                     }
 
                     // Lazy load: only create chart when details element is opened
@@ -441,26 +426,14 @@
                 }
             }
 
-            try {
-                // Render all charts
-                renderAllCharts(init());
+            // Render all charts
+            renderAllCharts(init());
 
-                // Update buttons
-                updateExpandButton();
-            } catch (error) {
-                console.error('Failed to render benchmarks:', error);
-                document.getElementById('main').innerHTML = '<p style="color: red;">Failed to load benchmark data. Please refresh the page.</p>';
-            }
-        }
-
-        function handleBenchmarkDataError() {
-            const main = document.getElementById('main');
-            if (main) {
-                main.innerHTML = '<p style="color: red;">Failed to load benchmark data. Please check your connection and try again.</p>';
-            }
-        }
+            // Update buttons
+            updateExpandButton();
+        };
     </script>
-    <script src="https://benchmark-data.commonware.xyz/data.js" onload="setupBenchmark()" onerror="handleBenchmarkDataError()"></script>
+    <script src="https://benchmark-data.commonware.xyz/data.js" onload="setupBenchmark()"></script>
     <script src="/shared.js"></script>
 </body>
 
