@@ -2,7 +2,9 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{operation::variable::Operation, prune_db, Error},
+    adb::{
+        align_mmr_and_log, build_snapshot_from_log, operation::variable::Operation, prune_db, Error,
+    },
     index::{Index as _, Unordered as Index},
     journal::contiguous::variable,
     mmr::{
@@ -14,17 +16,11 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{Array, NZUsize};
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use commonware_utils::Array;
+use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
 
 pub mod sync;
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot. The exact value does not impact performance significantly as long as it is large
-/// enough, so we don't make it configurable.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
@@ -133,12 +129,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        // Build snapshot from the log
-        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let log_size =
-            Self::build_snapshot_from_log(&mut hasher, &mut mmr, &mut log, &mut snapshot).await?;
+        let log_size = align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
 
-        let last_commit = log_size.checked_sub(1);
+        let mut snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        // Get the start location from the log.
+        let start_loc = match log.oldest_retained_pos() {
+            Some(pos) => Location::new_unchecked(pos),
+            None => Location::new_unchecked(log.size()),
+        };
+
+        // Build snapshot from the log.
+        build_snapshot_from_log(start_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
 
         Ok(Immutable {
             mmr,
@@ -174,20 +178,24 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        // Build snapshot from the log
-        let mut snapshot = Index::init(
+        let mut hasher = Standard::new();
+        let log_size = align_mmr_and_log(&mut mmr, &mut cfg.log, &mut hasher).await?;
+
+        let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
             cfg.db_config.translator.clone(),
         );
-        let log_size = Self::build_snapshot_from_log(
-            &mut Standard::<H>::new(),
-            &mut mmr,
-            &mut cfg.log,
-            &mut snapshot,
-        )
-        .await?;
 
-        let last_commit = log_size.checked_sub(1);
+        // Get the start location from the log.
+        let start_loc = match cfg.log.oldest_retained_pos() {
+            Some(pos) => Location::new_unchecked(pos),
+            None => Location::new_unchecked(log_size),
+        };
+
+        // Build snapshot from the log
+        build_snapshot_from_log(start_loc, &cfg.log, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
 
         let mut db = Immutable {
             mmr,
@@ -199,105 +207,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         db.sync().await?;
         Ok(db)
-    }
-
-    /// Builds the database's snapshot by replaying the log from inception, while also:
-    ///   - trimming any uncommitted operations from the log,
-    ///   - adding log operations to the MMR if they are missing,
-    ///   - removing any elements from the MMR that don't remain in the log after trimming.
-    ///
-    /// Returns the number of operations in the log.
-    ///
-    /// # Post-condition
-    ///
-    /// The number of operations in the log and the number of leaves in the MMR are equal.
-    pub(super) async fn build_snapshot_from_log(
-        hasher: &mut Standard<H>,
-        mmr: &mut Mmr<E, H>,
-        log: &mut variable::Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, Location>,
-    ) -> Result<Location, Error> {
-        // Get current MMR size
-        let mut mmr_leaves = mmr.leaves();
-
-        // Get the start location from the log.
-        let start_loc = match log.oldest_retained_pos() {
-            Some(loc) => loc,
-            None => log.size(),
-        };
-
-        // The number of operations in the log.
-        let mut log_size = Location::new_unchecked(start_loc);
-        // The location of the first operation to follow the last known commit point.
-        let mut after_last_commit = None;
-        // A list of uncommitted operations that must be rolled back, in order of their locations.
-        let mut uncommitted_ops = Vec::new();
-
-        // Replay the log from the start to build the snapshot, keeping track of any uncommitted
-        // operations that must be rolled back, and any log operations that need to be re-added to the MMR.
-        {
-            let stream = log
-                .replay(start_loc, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
-                .await?;
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                let (loc, op) = result?;
-
-                let loc = Location::new_unchecked(loc); // location of the current operation.
-                if after_last_commit.is_none() {
-                    after_last_commit = Some(loc);
-                }
-
-                log_size = loc + 1;
-
-                if log_size > mmr_leaves {
-                    debug!(?loc, "operation was missing from MMR");
-                    mmr.add(hasher, &op.encode()).await?;
-                    mmr_leaves += 1;
-                }
-                match op {
-                    Operation::Set(key, _) => {
-                        uncommitted_ops.push((key, loc));
-                    }
-                    Operation::Commit(_) => {
-                        for (key, loc) in uncommitted_ops.iter() {
-                            snapshot.insert(key, *loc);
-                        }
-                        uncommitted_ops.clear();
-                        after_last_commit = None;
-                    }
-                    _ => {
-                        unreachable!("unsupported operation at location {loc}");
-                    }
-                }
-            }
-        }
-
-        // Rewind the operations log if necessary.
-        if let Some(end_loc) = after_last_commit {
-            assert!(!uncommitted_ops.is_empty());
-            warn!(
-                op_count = uncommitted_ops.len(),
-                log_size = *end_loc,
-                "rewinding over uncommitted operations at end of log"
-            );
-            log.rewind(*end_loc).await.map_err(Error::Journal)?;
-            log.sync().await.map_err(Error::Journal)?;
-            log_size = end_loc;
-        }
-
-        // Pop any MMR elements that are ahead of the last log commit point.
-        if mmr_leaves > log_size {
-            let op_count = (*mmr_leaves - *log_size) as usize;
-            warn!(op_count, "popping uncommitted MMR operations");
-            mmr.pop(op_count).await?;
-        }
-
-        // Confirm post-conditions hold.
-        assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
-        assert_eq!(log_size, log.size());
-
-        Ok(log_size)
     }
 
     /// Return the oldest location that remains retrievable.
