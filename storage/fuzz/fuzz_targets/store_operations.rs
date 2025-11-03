@@ -32,7 +32,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 11 {
+        match choice % 10 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -55,16 +55,16 @@ impl<'a> Arbitrary<'a> for Operation {
                 };
                 Ok(Operation::Commit { metadata_bytes })
             }
-            3 | 4 => {
+            3 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
             }
-            5 => Ok(Operation::GetMetadata),
-            6 => Ok(Operation::Sync),
-            7 => Ok(Operation::Prune),
-            8 => Ok(Operation::OpCount),
-            9 => Ok(Operation::InactivityFloorLoc),
-            10 => Ok(Operation::SimulateFailure),
+            4 => Ok(Operation::GetMetadata),
+            5 => Ok(Operation::Sync),
+            6 => Ok(Operation::Prune),
+            7 => Ok(Operation::OpCount),
+            8 => Ok(Operation::InactivityFloorLoc),
+            9 => Ok(Operation::SimulateFailure),
             _ => unreachable!(),
         }
     }

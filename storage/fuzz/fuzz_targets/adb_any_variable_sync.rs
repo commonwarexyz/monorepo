@@ -61,7 +61,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 17 {
+        match choice % 15 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -85,19 +85,19 @@ impl<'a> Arbitrary<'a> for Operation {
                 Ok(Operation::Commit { metadata_bytes })
             }
             3 => Ok(Operation::Prune),
-            4..=6 => {
+            4 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
             }
-            7 => Ok(Operation::GetMetadata),
-            8 => {
+            5 => Ok(Operation::GetMetadata),
+            6 => {
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
             }
-            9 => {
+            7 => {
                 let size = u.arbitrary()?;
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
@@ -109,12 +109,12 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            10 => Ok(Operation::Sync),
-            11 => Ok(Operation::OldestRetainedLoc),
-            12 => Ok(Operation::InactivityFloorLoc),
-            13 => Ok(Operation::OpCount),
-            14 => Ok(Operation::Root),
-            15 | 16 => {
+            8 => Ok(Operation::Sync),
+            9 => Ok(Operation::OldestRetainedLoc),
+            10 => Ok(Operation::InactivityFloorLoc),
+            11 => Ok(Operation::OpCount),
+            12 => Ok(Operation::Root),
+            13 | 14 => {
                 let sync_log: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
