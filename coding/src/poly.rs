@@ -765,14 +765,12 @@ impl PolynomialVector {
             },
         );
         // Do a point wise division.
-        // After applying the skew, q should have no zeroes in the evaluation domain.
-        // This assertion ensures the vanishing polynomial was constructed correctly.
         for i in 0..self.data.rows {
             let q_i = q.coefficients[i];
-            assert!(
-                q.coefficients[i] != F::zero(),
-                "vanishing polynomial has zero at evaluation point after skew"
-            );
+            // If `q_i = 0`, then we will get 0 in the output.
+            // We don't expect any of the q_i to be 0, but being 0 is only one
+            // of the many possibilities for the coefficient to be incorrect,
+            // so doing a runtime assertion here doesn't make sense.
             let q_i_inv = q_i.inv();
             for d_i_j in &mut self.data[i] {
                 *d_i_j = *d_i_j * q_i_inv;

@@ -682,6 +682,8 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 evaluation.fill_row(i, row);
             }
         }
+        // This should never happen, because we check each shard, and the shards
+        // should have distinct rows. But, as a sanity check, this doesn't hurt.
         let filled_rows = evaluation.filled_rows();
         if filled_rows < data_rows {
             return Err(Error::InsufficientUniqueRows(filled_rows, data_rows));

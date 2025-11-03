@@ -175,6 +175,9 @@ impl F {
         Self::zero().sub_inner(self)
     }
 
+    /// Return the multiplicative inverse of a field element.
+    ///
+    /// [Self::zero] will return [Self::zero].
     pub const fn inv(self) -> Self {
         self.exp(P - 2)
     }
