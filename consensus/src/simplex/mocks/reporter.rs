@@ -154,7 +154,7 @@ where
                     .insert(view, notarization.clone());
                 let seed = self
                     .scheme
-                    .seed(notarization.round(), &notarization.certificate);
+                    .seed(notarization.round(), Some(&notarization.certificate));
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(notarization.round(), seed);
             }
@@ -198,7 +198,7 @@ where
                     .insert(view, nullification.clone());
                 let seed = self
                     .scheme
-                    .seed(nullification.round, &nullification.certificate);
+                    .seed(nullification.round, Some(&nullification.certificate));
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(nullification.round, seed);
             }
@@ -244,7 +244,7 @@ where
                     .insert(view, finalization.clone());
                 let seed = self
                     .scheme
-                    .seed(finalization.round(), &finalization.certificate);
+                    .seed(finalization.round(), Some(&finalization.certificate));
                 self.seeds.lock().unwrap().insert(view, seed.clone());
                 self.record_leader(finalization.round(), seed);
 

@@ -1084,7 +1084,7 @@ impl<
         let msg = Voter::Notarization(notarization.clone());
         let seed = self
             .scheme
-            .seed(notarization.round(), &notarization.certificate);
+            .seed(notarization.round(), Some(&notarization.certificate));
 
         // Create round (if it doesn't exist) and add verified notarization
         if self.round_mut(view).add_verified_notarization(notarization) {
@@ -1135,7 +1135,7 @@ impl<
         let msg = Voter::Nullification(nullification.clone());
         let seed = self
             .scheme
-            .seed(nullification.round, &nullification.certificate);
+            .seed(nullification.round, Some(&nullification.certificate));
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
@@ -1208,7 +1208,7 @@ impl<
         let msg = Voter::Finalization(finalization.clone());
         let seed = self
             .scheme
-            .seed(finalization.round(), &finalization.certificate);
+            .seed(finalization.round(), Some(&finalization.certificate));
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
@@ -1577,7 +1577,7 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        let seed = self.scheme.seed_genesis(self.epoch);
+        let seed = self.scheme.seed(Rnd::new(self.epoch, 0), None);
         self.enter_view(1, seed);
 
         // Initialize journal
