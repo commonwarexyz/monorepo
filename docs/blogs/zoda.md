@@ -20,6 +20,10 @@ As an outline, we'll cover:
 - how to increase efficiency with coding,
 - and, finally, how to get quicker guarantees about the data with [ZODA](https://eprint.iacr.org/2025/034).
 
+ZODA is particularly exciting, because it achieves the guarantees of something like
+Reed-Solomon + KZG, without requiring a trusted setup, and while being more performant,
+and having less data transmission overhead.
+
 In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
@@ -93,7 +97,7 @@ One follower being able to block transmission is not acceptable.
 
 From here, we reach to using a _coding scheme_.
 This scheme takes in a message of $n$ _symbols_---we shall revisit the term,
-but think of it like a small, consistently sized piece of data, e.g. a byte---and produce
+but think of it like a small, consistently sized piece of data, e.g. a byte---and produces
 $m \geq n$ symbols.
 A useful coding scheme has the property that given any $n$ of these $m$ symbols,
 we can recover the original message.
@@ -342,7 +346,7 @@ In any case, we can see a claimed improvement in the context of Data Availabilit
 and we should expect this to extend to our slightly different use-case of
 data dissemination.
 
-Another factor in the cost of KZG is that requires many operations over a _group_
+Another factor in the cost of KZG is that it requires many operations over a _group_
 (in this case, an elliptic curve) which is at least an order of magnitude
 more expensive than a field operation.
 ZODA, on the other hand, performs only field operations, and inexpensive hashing.

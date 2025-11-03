@@ -99,6 +99,10 @@ Meier</a></div>
         <li>and, finally, how to get quicker guarantees about the data
         with <a href="https://eprint.iacr.org/2025/034">ZODA</a>.</li>
         </ul>
+        <p>ZODA is particularly exciting, because it achieves the
+        guarantees of something like Reed-Solomon + KZG, without
+        requiring a trusted setup, and while being more performant, and
+        having less data transmission overhead.</p>
         <p>In a future post we will cover lower-level details of <a
         href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">our
         implementation</a>, like the field we use for Reed-Solomon
@@ -184,7 +188,7 @@ Meier</a></div>
         scheme takes in a message of <span
         class="math inline">\(n\)</span> <em>symbols</em>—we shall
         revisit the term, but think of it like a small, consistently
-        sized piece of data, e.g. a byte—and produce <span
+        sized piece of data, e.g. a byte—and produces <span
         class="math inline">\(m \geq n\)</span> symbols. A useful coding
         scheme has the property that given any <span
         class="math inline">\(n\)</span> of these <span
@@ -519,7 +523,7 @@ Meier</a></div>
         <p>In any case, we can see a claimed improvement in the context
         of Data Availability, and we should expect this to extend to our
         slightly different use-case of data dissemination.</p>
-        <p>Another factor in the cost of KZG is that requires many
+        <p>Another factor in the cost of KZG is that it requires many
         operations over a <em>group</em> (in this case, an elliptic
         curve) which is at least an order of magnitude more expensive
         than a field operation. ZODA, on the other hand, performs only
