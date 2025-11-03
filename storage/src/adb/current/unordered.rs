@@ -128,7 +128,6 @@ impl<
             init_mmr_and_log(context.with_label("any"), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -138,6 +137,7 @@ impl<
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
             // hasher so the new leaf digests can be computed during merkleization.
+            let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
             grafter
                 .load_grafted_digests(&status.dirty_chunks(), &mmr)
                 .await?;
@@ -159,6 +159,7 @@ impl<
         )
         .await
         .unwrap();
+        let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
@@ -259,7 +260,7 @@ impl<
         for _ in 0..steps_to_take {
             if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(tip = bit_count, "db is empty, raising floor to tip");
+                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
             let loc = self.any.inactivity_floor_loc;

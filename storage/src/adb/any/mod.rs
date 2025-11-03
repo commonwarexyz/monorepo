@@ -110,7 +110,7 @@ where
         .await?;
 
     let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
-    let futures = (*start_loc..(*end_loc))
+    let futures = (*start_loc..*end_loc)
         .map(|i| log.read(i))
         .collect::<Vec<_>>();
     try_join_all(futures)

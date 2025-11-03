@@ -279,6 +279,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= [Self::op_count].
     /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    ///
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
