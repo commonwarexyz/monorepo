@@ -11,25 +11,25 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
 documentation = "https://docs.rs/commonware-coding"
 
 [dependencies]
+bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
-bytes = { workspace = true }
-thiserror = { workspace = true }
-num-rational = { workspace = true }
+num-rational.workspace = true
+rand.workspace = true
+rand_core.workspace = true
 reed-solomon-simd = "3.0.1"
-rand_core = { workspace = true }
-rand = { workspace = true }
+thiserror.workspace = true
 
 [lib]
 bench = false
 
 [dev-dependencies]
-criterion = { workspace = true }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
-proptest = { workspace = true }
+criterion.workspace = true
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
 
 [[bench]]
 name = "coding_scheme_times"
