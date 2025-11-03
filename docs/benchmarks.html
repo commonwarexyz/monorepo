@@ -431,8 +431,19 @@
             // Update buttons
             updateExpandButton();
         };
+
+        // Load benchmark data with explicit cache control
+        fetch('https://benchmark-data.commonware.xyz/data.js', { cache: 'no-store' })
+            .then(response => response.text())
+            .then(code => {
+                eval(code);
+                setupBenchmark();
+            })
+            .catch(error => {
+                console.error('Failed to load benchmark data:', error);
+                document.getElementById('main').innerHTML = '<p style="color: red;">Failed to load benchmark data. Please check your connection and try again.</p>';
+            });
     </script>
-    <script src="https://benchmark-data.commonware.xyz/data.js" onload="setupBenchmark()"></script>
     <script src="/shared.js"></script>
 </body>
 
