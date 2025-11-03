@@ -88,6 +88,11 @@ impl<T: Attributable> AttributableVec<T> {
         self.added == 0
     }
 
+    /// Returns a reference to the item from the given signer, if present.
+    pub fn get(&self, signer: u32) -> Option<&T> {
+        self.data[signer as usize].as_ref()
+    }
+
     /// Returns an ordered iterator over [Attributable::signer()]s in the [AttributableVec].
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.data.iter().filter_map(|o| o.as_ref())
@@ -3654,6 +3659,11 @@ mod tests {
         assert_eq!(vec.len(), 0);
         assert!(vec.is_empty());
 
+        // Test get on empty vec
+        for i in 0..5 {
+            assert!(vec.get(i).is_none());
+        }
+
         assert!(vec.push(MockAttributable(3)));
         assert_eq!(vec.len(), 1);
         assert!(!vec.is_empty());
@@ -3661,6 +3671,9 @@ mod tests {
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
+
+        // Test get on pushed item
+        assert!(matches!(vec.get(3), Some(a) if a.signer() == 3));
 
         assert!(vec.push(MockAttributable(1)));
         assert_eq!(vec.len(), 2);
@@ -3670,6 +3683,15 @@ mod tests {
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
+
+        // Test get on both items
+        assert!(matches!(vec.get(1), Some(a) if a.signer() == 1));
+        assert!(matches!(vec.get(3), Some(a) if a.signer() == 3));
+
+        // Test get on non-existing items
+        assert!(vec.get(0).is_none());
+        assert!(vec.get(2).is_none());
+        assert!(vec.get(4).is_none());
 
         assert!(!vec.push(MockAttributable(3)));
         assert_eq!(vec.len(), 2);
