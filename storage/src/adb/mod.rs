@@ -222,52 +222,6 @@ where
     Ok(())
 }
 
-/// Common implementation for pruning an authenticated database.
-///
-/// # Errors
-///
-/// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
-///   [crate::mmr::MAX_LOCATION].
-/// - Returns [Error::PruneBeyondMinRequired] if `target_prune_loc` is greater than the
-///   minimum required location.
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-    prune_loc: Location,
-    min_required_loc: Location,
-    op_count: Location,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + Metrics,
-    O: Codec,
-    H: Hasher,
-{
-    if prune_loc > min_required_loc {
-        return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));
-    }
-
-    if mmr.size() == 0 {
-        // DB is empty, nothing to prune.
-        return Ok(());
-    };
-
-    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-    // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
-
-    if !log.prune(*prune_loc).await? {
-        return Ok(());
-    }
-
-    debug!(?op_count, ?prune_loc, "pruned inactive ops");
-
-    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await
-        .map_err(Error::Mmr)
-}
-
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
 async fn delete_key<I, O>(
@@ -343,4 +297,48 @@ where
     }
 
     Ok(None)
+}
+
+/// Common implementation for pruning an authenticated database.
+///
+/// # Errors
+///
+/// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` is greater than `min_required_loc`.
+/// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+async fn prune_db<E, O, H>(
+    mmr: &mut Mmr<E, H>,
+    log: &mut impl Contiguous<Item = O>,
+    hasher: &mut StandardHasher<H>,
+    prune_loc: Location,
+    min_required_loc: Location,
+    op_count: Location,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + Metrics,
+    O: Codec,
+    H: Hasher,
+{
+    if prune_loc > min_required_loc {
+        return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));
+    }
+
+    if mmr.size() == 0 {
+        // DB is empty, nothing to prune.
+        return Ok(());
+    };
+
+    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
+    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+    // the operations between the MMR tip and the log pruning boundary.
+    mmr.sync(hasher).await?;
+
+    if !log.prune(*prune_loc).await? {
+        return Ok(());
+    }
+
+    debug!(?op_count, ?prune_loc, "pruned inactive ops");
+
+    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
+        .await
+        .map_err(Error::Mmr)
 }
