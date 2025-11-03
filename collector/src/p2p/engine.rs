@@ -108,8 +108,8 @@ where
 
     async fn run(
         mut self,
-        mut requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
-        mut responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
+        (mut req_tx, mut req_rx): (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        (mut res_tx, mut res_rx): (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) {
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
@@ -128,7 +128,7 @@ where
                                 });
 
                                 // Send the request to recipients
-                                match requests.0.send(
+                                match req_tx.send(
                                     recipients,
                                     request,
                                     self.priority_request
@@ -162,7 +162,7 @@ where
                     self.responses.inc();
 
                     // Send the response
-                    let _ = responses.0.send(
+                    let _ = res_tx.send(
                         Recipients::One(peer),
                         reply,
                         self.priority_response
@@ -170,7 +170,7 @@ where
                 },
 
                 // Request from an originator
-                message = requests.1.recv() => {
+                message = req_rx.recv() => {
                     self.requests.inc();
 
                     // Error handling
@@ -191,7 +191,7 @@ where
                 },
 
                 // Response from a handler
-                response = responses.1.recv() => {
+                response = res_rx.recv() => {
                     // Error handling
                     let (peer, msg) = match response {
                         Ok(r) => r,

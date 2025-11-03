@@ -9,7 +9,8 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
-use commonware_codec::{varint::UInt, ReadExt};
+use bytes::{BufMut, BytesMut};
+use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -97,7 +98,7 @@ impl<E: Spawner, S: Sender, R: Receiver, Msg> Muxer<E, S, R, Msg> {
     pub fn start(mut self) -> Handle<Result<(), R::Error>>
     where
         R::Message: AsRef<[u8]>,
-        Msg: From<bytes::Bytes> + Send + 'static + Clone + Debug,
+        Msg: From<bytes::Bytes> + commonware_codec::Codec + Clone + Debug + Send + 'static,
     {
         spawn_cell!(self.context, self.run().await)
     }
@@ -109,7 +110,7 @@ impl<E: Spawner, S: Sender, R: Receiver, Msg> Muxer<E, S, R, Msg> {
     pub async fn run(mut self) -> Result<(), R::Error>
     where
         R::Message: AsRef<[u8]>,
-        Msg: From<bytes::Bytes> + Send + 'static + Clone + Debug,
+        Msg: From<bytes::Bytes> + commonware_codec::Codec + Clone + Debug + Send + 'static,
     {
         
         
@@ -208,7 +209,7 @@ impl<S: Sender, R: Receiver, Msg> MuxHandle<S, R, Msg> {
     ) -> Result<(SubSender<S, Msg>, SubReceiver<R, Msg>), Error>
     where
         S::Message: From<bytes::Bytes>,
-        Msg: Send + 'static + Clone + Debug,
+        Msg: commonware_codec::Codec + Clone + Debug + Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
         self.control_tx
@@ -246,7 +247,7 @@ pub struct SubSender<S: Sender, Msg> {
 impl<S: Sender, Msg> Sender for SubSender<S, Msg>
 where
     S::Message: From<bytes::Bytes>,
-    Msg: commonware_codec::Codec + Send + Sync + 'static + Clone + Debug,
+    Msg: commonware_codec::Codec + Clone + Debug + Send + Sync + 'static,
 {
     type Error = S::Error;
     type PublicKey = S::PublicKey;
@@ -274,7 +275,7 @@ pub struct SubReceiver<R: Receiver, Msg> {
 
 impl<R: Receiver, Msg> Receiver for SubReceiver<R, Msg>
 where
-    Msg: commonware_codec::Codec + Send + Sync + 'static + Clone + Debug,
+    Msg: commonware_codec::Codec + Debug + Send + Sync + 'static,
 {
     type Error = Error;
     type PublicKey = R::PublicKey;
@@ -329,9 +330,6 @@ where
         payload: bytes::Bytes,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, S::Error> {
-        use bytes::{BufMut, BytesMut};
-        use commonware_codec::{EncodeSize, Write};
-        
         // Encode the subchannel
         let subchannel_enc = UInt(subchannel);
         let subchannel_size = subchannel_enc.encode_size();
