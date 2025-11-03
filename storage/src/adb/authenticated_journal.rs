@@ -67,38 +67,36 @@ where
     /// - Uncommitted operations in the log are discarded
     /// - MMR elements ahead of the log are popped
     /// - MMR elements behind the log are caught up by replaying log operations
-    ///
-    /// This is an internal method primarily used during initialization. Most callers should
-    /// use `new()` instead, which creates both components from configuration.
     async fn align(
         mut mmr: Mmr<E, H>,
         mut log: C,
         mut hasher: StandardHasher<H>,
     ) -> Result<Self, Error> {
-        // Back up over / discard any uncommitted operations in the log.
+        // Remove any uncommitted operations from the end of the log.
         rewind_uncommitted(&mut log).await?;
         let log_size = log.size().await;
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_num = mmr.leaves();
-        if next_mmr_leaf_num > log_size {
-            let pop_count = next_mmr_leaf_num - log_size;
+        // Note mmr_size is the size of the MMR in leaves, not positions.
+        let mut mmr_size = mmr.leaves();
+        if mmr_size > log_size {
+            let pop_count = mmr_size - log_size;
             warn!(log_size, ?pop_count, "popping uncommitted MMR operations");
             mmr.pop(*pop_count as usize).await?;
-            next_mmr_leaf_num = Location::new_unchecked(log_size);
+            mmr_size = Location::new_unchecked(log_size);
         }
 
         // If the MMR is behind, replay log operations to catch up.
-        if next_mmr_leaf_num < log_size {
-            let replay_count = log_size - *next_mmr_leaf_num;
+        if mmr_size < log_size {
+            let replay_count = log_size - *mmr_size;
             warn!(
                 log_size,
                 replay_count, "MMR lags behind log, replaying log to catch up"
             );
-            while next_mmr_leaf_num < log_size {
-                let op = log.read(*next_mmr_leaf_num).await?;
+            while mmr_size < log_size {
+                let op = log.read(*mmr_size).await?;
                 mmr.add_batched(&mut hasher, &op.encode()).await?;
-                next_mmr_leaf_num += 1;
+                mmr_size += 1;
             }
             mmr.sync(&mut hasher).await.map_err(Error::Mmr)?;
         }
@@ -166,7 +164,7 @@ where
             "pruned inactive ops"
         );
 
-        // Prune MMR to match the log's actual boundary (not the requested location!)
+        // Prune MMR to match the log's actual boundary
         self.mmr
             .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
             .await
@@ -183,11 +181,11 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `op_count` or `start_loc` >
-    ///   [`crate::mmr::MAX_LOCATION`].
-    /// - Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= `op_count` or `op_count` >
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
     ///   number of operations in the log.
-    /// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// - Returns [Error::OperationPruned] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,
         op_count: Location,
