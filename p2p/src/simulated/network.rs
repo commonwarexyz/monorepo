@@ -125,7 +125,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
-        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
+        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 1);
         (
             Self {
                 context: ContextCell::new(context),
@@ -979,7 +979,7 @@ mod tests {
             let next = network.get_next_socket();
             assert_eq!(next, original);
             let next = network.get_next_socket();
-            original.set_port(1);
+            original.set_port(2);
             assert_eq!(next, original);
 
             // Test that the port number overflows correctly

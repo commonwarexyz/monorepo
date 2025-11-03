@@ -82,7 +82,7 @@ impl Default for Network {
 impl crate::Network for Network {
     type Listener = Listener;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+    async fn bind(&self, mut socket: SocketAddr) -> Result<Self::Listener, Error> {
         // If the IP is localhost, ensure the port is not in the ephemeral range
         // so that it can be used for binding in the dial method
         if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
@@ -91,10 +91,20 @@ impl crate::Network for Network {
             return Err(Error::BindFailed);
         }
 
-        // Ensure the port is not already bound
         let mut listeners = self.listeners.lock().unwrap();
-        if listeners.contains_key(&socket) {
-            return Err(Error::BindFailed);
+        if socket.port() != 0 {
+            // Ensure the port is not already bound
+            if listeners.contains_key(&socket) {
+                return Err(Error::BindFailed);
+            }
+        } else {
+            // Unless its zero - then cycle through all ports
+            for port in 1..32768 {
+                socket = SocketAddr::new(socket.ip(), port);
+                if listeners.contains_key(&socket) {
+                    break;
+                }
+            }
         }
 
         // Bind the socket
