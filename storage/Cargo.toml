@@ -95,8 +95,3 @@ path = "src/metadata/benches/bench.rs"
 name="rmap"
 harness = false
 path = "src/rmap/benches/bench.rs"
-
-[[bench]]
-name="store"
-harness = false
-path = "src/adb/store/benches/bench.rs"

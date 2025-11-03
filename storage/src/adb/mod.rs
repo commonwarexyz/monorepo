@@ -13,11 +13,9 @@
 use crate::{
     adb::operation::Keyed,
     index::{Cursor, Index},
-    journal::contiguous::{fixed::Journal, Contiguous},
-    mmr::{journaled, Location},
+    journal::contiguous::Contiguous,
+    mmr::Location,
 };
-use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
