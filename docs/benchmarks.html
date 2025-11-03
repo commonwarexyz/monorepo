@@ -350,8 +350,7 @@
                     // Lazy load: only create chart when details element is opened
                     graphDetails.addEventListener('toggle', function () {
                         if (graphDetails.open && !chartInstance) {
-                            // Small delay to avoid blocking UI
-                            setTimeout(createChart, 10);
+                            createChart();
                         }
                     });
                 }
