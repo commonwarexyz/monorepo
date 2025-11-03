@@ -131,6 +131,26 @@ where
         Ok(())
     }
 
+    /// Sync the log to disk and process pending MMR updates in parallel.
+    ///
+    /// This is an optimization over `sync()` that:
+    /// - Makes the log durable (via fsync)
+    /// - Updates the MMR root to reflect new operations (via merkleize)
+    /// - Defers writing MMR nodes to disk for better performance
+    ///
+    /// This is sufficient after commit operations where you need the log to be durable
+    /// and the MMR root to be up-to-date, but writing MMR nodes to disk can be deferred.
+    /// Full `sync()` can be called later when MMR persistence is needed.
+    pub async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
+        let mmr_fut = async {
+            self.mmr.merkleize(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
+
+        Ok(())
+    }
+
     /// Prune both the MMR and journal to the given location.
     ///
     /// # Returns
@@ -826,6 +846,40 @@ mod tests {
                 count += 1;
             }
             assert_eq!(count, 5); // Should have replayed positions 5-9
+        });
+    }
+
+    #[test]
+    fn test_sync_log_and_process_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mmr, log, hasher) =
+                create_aligned_mmr_journal(context.clone(), "sync_updates").await;
+            let mut journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Apply some operations
+            let op1 = Operation::Update(Sha256::fill(1u8), Sha256::fill(2u8));
+            let op2 = Operation::Update(Sha256::fill(3u8), Sha256::fill(4u8));
+            journal.apply_op(op1).await.unwrap();
+            journal.apply_op(op2).await.unwrap();
+
+            // Call sync_log_and_process_updates
+            journal.sync_log_and_process_updates().await.unwrap();
+
+            // After sync_log_and_process_updates:
+            // 1. Log should be synced (operations are durable)
+            // 2. MMR should be merkleized (root reflects new operations)
+            let root = journal.mmr.root(&mut journal.hasher);
+
+            // Verify we can still do full sync afterward
+            journal.sync().await.unwrap();
+
+            // Root should remain the same
+            let root_after_full_sync = journal.mmr.root(&mut journal.hasher);
+            assert_eq!(root, root_after_full_sync);
+
+            // Verify the log and MMR are in sync
+            assert_eq!(journal.op_count(), Location::new_unchecked(2));
         });
     }
 }

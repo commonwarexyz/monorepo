@@ -44,6 +44,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
+use futures::StreamExt as _;
 
 pub struct IndexedJournal<
     E: Storage + Clock + Metrics,
@@ -87,6 +88,88 @@ where
         }
     }
 
+    /// Initialize an IndexedJournal by building the snapshot from the log.
+    ///
+    /// This rebuilds the snapshot by replaying operations from `start_loc` onwards.
+    /// The `callback` is invoked for each operation:
+    /// - For Update: `callback(true, old_loc)` where `old_loc` is the previous location (if any)
+    /// - For Delete: `callback(false, old_loc)` where `old_loc` is the previous location (if any)
+    /// - For CommitFloor: `callback(is_last_op, None)` where `is_last_op` indicates if this is the last operation
+    pub async fn init<F>(
+        authenticated_journal: AuthenticatedJournal<E, C, O, H>,
+        mut snapshot: I,
+        start_loc: Location,
+        mut callback: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        const BUFFER_SIZE: usize = 1024;
+
+        // Process stream in a separate scope so it's dropped before we move authenticated_journal
+        {
+            let stream = authenticated_journal
+                .log
+                .replay(
+                    *start_loc,
+                    core::num::NonZeroUsize::new(BUFFER_SIZE).unwrap(),
+                )
+                .await?;
+            futures::pin_mut!(stream);
+            let last_commit_loc = authenticated_journal.log.size().await.saturating_sub(1);
+
+            while let Some(result) = stream.next().await {
+                let (loc, op) = result?;
+                if let Some(key) = op.key() {
+                    if op.is_delete() {
+                        // Delete key from snapshot - find the matching location
+                        let mut old_loc = None;
+                        if let Some(mut cursor) = snapshot.get_mut(key) {
+                            // Find the key's current location
+                            while let Some(&snap_loc) = cursor.next() {
+                                let snap_op = authenticated_journal.log.read(*snap_loc).await?;
+                                if snap_op.key() == Some(key) {
+                                    old_loc = Some(snap_loc);
+                                    cursor.delete();
+                                    break;
+                                }
+                            }
+                        }
+                        callback(false, old_loc);
+                    } else if op.is_update() {
+                        let new_loc = Location::new_unchecked(loc);
+                        // Update key's location in snapshot
+                        let mut old_loc = None;
+                        if let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) {
+                            // Find if key already exists
+                            while let Some(&snap_loc) = cursor.next() {
+                                let snap_op = authenticated_journal.log.read(*snap_loc).await?;
+                                if snap_op.key() == Some(key) {
+                                    assert!(new_loc > snap_loc);
+                                    old_loc = Some(snap_loc);
+                                    cursor.update(new_loc);
+                                    break;
+                                }
+                            }
+                            if old_loc.is_none() {
+                                // Key not found, insert it
+                                cursor.insert(new_loc);
+                            }
+                        }
+                        callback(true, old_loc);
+                    }
+                } else if op.commit_floor().is_some() {
+                    callback(loc == last_commit_loc, None);
+                }
+            }
+        } // stream is dropped here
+
+        Ok(Self {
+            authenticated_journal,
+            snapshot,
+        })
+    }
+
     /// Moves the given operation to the tip of the log if it is active.
     ///
     /// An operation is "active" if its key exists in the snapshot at this specific location.
@@ -110,6 +193,33 @@ where
 
         self.authenticated_journal.apply_op(op).await?;
         Ok(true)
+    }
+
+    /// Apply an operation: append to log+MMR and update snapshot.
+    ///
+    /// This is the common pattern used by databases when applying operations.
+    /// For operations with keys (Update), updates the snapshot to point to the new location.
+    /// For operations with keys (Delete), removes the key from the snapshot.
+    /// For keyless operations (CommitFloor), just appends to log+MMR.
+    pub async fn apply_op(&mut self, op: O) -> Result<(), Error> {
+        // Get location where operation will be appended
+        let new_loc = Location::new_unchecked(self.authenticated_journal.log.size().await);
+
+        // If operation has a key, update snapshot first
+        if let Some(key) = op.key() {
+            if op.is_update() {
+                // Update snapshot to point to new location
+                self.update_key_loc(key, new_loc).await?;
+            } else if op.is_delete() {
+                // Delete from snapshot
+                self.delete_key(key).await?;
+            }
+        }
+
+        // Apply operation to authenticated journal (log + MMR)
+        self.authenticated_journal.apply_op(op).await?;
+
+        Ok(())
     }
 
     /// Updates the location of a key in the snapshot to `new_loc`.
@@ -404,6 +514,438 @@ mod tests {
 
             let moved = indexed_journal.move_op_if_active(op, loc).await.unwrap();
             assert!(!moved);
+        });
+    }
+
+    #[test]
+    fn test_apply_op_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let snapshot = Index::init(context.with_label("snapshot"), EightCap);
+            let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
+
+            // Apply an Update operation
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(10u8);
+            let op = TestOperation::Update(key, value);
+            indexed_journal.apply_op(op.clone()).await.unwrap();
+
+            // Verify operation was added to log
+            assert_eq!(indexed_journal.authenticated_journal.log.size().await, 1);
+
+            // Verify snapshot was updated
+            let (retrieved_op, loc) = indexed_journal.get_key_loc(&key).await.unwrap().unwrap();
+            assert_eq!(retrieved_op.key().unwrap(), &key);
+            assert_eq!(loc, Location::new_unchecked(0));
+
+            // Verify MMR was updated
+            assert_eq!(
+                indexed_journal.authenticated_journal.mmr.leaves(),
+                Location::new_unchecked(1)
+            );
+        });
+    }
+
+    #[test]
+    fn test_apply_op_delete() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let snapshot = Index::init(context.with_label("snapshot"), EightCap);
+            let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
+
+            // First apply an Update operation
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(10u8);
+            let update_op = TestOperation::Update(key, value);
+            indexed_journal.apply_op(update_op).await.unwrap();
+
+            // Verify key is in snapshot
+            assert_eq!(indexed_journal.key_count(), 1);
+
+            // Now apply a Delete operation
+            let delete_op = TestOperation::Delete(key);
+            indexed_journal.apply_op(delete_op).await.unwrap();
+
+            // Verify operation was added to log
+            assert_eq!(indexed_journal.authenticated_journal.log.size().await, 2);
+
+            // Verify key was deleted from snapshot
+            assert_eq!(indexed_journal.key_count(), 0);
+            assert!(indexed_journal.get_key_loc(&key).await.unwrap().is_none());
+
+            // Verify MMR was updated
+            assert_eq!(
+                indexed_journal.authenticated_journal.mmr.leaves(),
+                Location::new_unchecked(2)
+            );
+        });
+    }
+
+    #[test]
+    fn test_apply_op_commit_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let snapshot = Index::init(context.with_label("snapshot"), EightCap);
+            let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
+
+            // Apply a CommitFloor operation (keyless)
+            let commit_op = TestOperation::CommitFloor(Location::new_unchecked(0));
+            indexed_journal.apply_op(commit_op).await.unwrap();
+
+            // Verify operation was added to log
+            assert_eq!(indexed_journal.authenticated_journal.log.size().await, 1);
+
+            // Verify snapshot was not modified (CommitFloor has no key)
+            assert_eq!(indexed_journal.key_count(), 0);
+
+            // Verify MMR was updated
+            assert_eq!(
+                indexed_journal.authenticated_journal.mmr.leaves(),
+                Location::new_unchecked(1)
+            );
+        });
+    }
+
+    #[test]
+    fn test_init_builds_snapshot_from_log() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut authenticated_journal =
+                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Populate the log with operations
+            let key1 = Sha256::fill(1u8);
+            let key2 = Sha256::fill(2u8);
+            let value1 = Sha256::fill(10u8);
+            let value2 = Sha256::fill(20u8);
+
+            authenticated_journal
+                .apply_op(TestOperation::Update(key1, value1))
+                .await
+                .unwrap();
+            authenticated_journal
+                .apply_op(TestOperation::Update(key2, value2))
+                .await
+                .unwrap();
+            authenticated_journal
+                .apply_op(TestOperation::CommitFloor(Location::new_unchecked(0)))
+                .await
+                .unwrap();
+
+            // Close and recreate to simulate recovery scenario
+            authenticated_journal.close().await.unwrap();
+
+            // Re-initialize authenticated journal
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log: Journal<_, TestOperation> = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Initialize IndexedJournal which should build snapshot from log
+            let snapshot = Index::init(context.with_label("snapshot"), EightCap);
+            let mut callback_invocations = Vec::new();
+            let indexed_journal = IndexedJournal::init(
+                authenticated_journal,
+                snapshot,
+                Location::new_unchecked(0),
+                |is_update, old_loc| {
+                    callback_invocations.push((is_update, old_loc));
+                },
+            )
+            .await
+            .unwrap();
+
+            // Verify snapshot was built correctly
+            assert_eq!(indexed_journal.key_count(), 2);
+            assert!(indexed_journal.get_key_loc(&key1).await.unwrap().is_some());
+            assert!(indexed_journal.get_key_loc(&key2).await.unwrap().is_some());
+
+            // Verify callback was invoked correctly
+            assert_eq!(callback_invocations.len(), 3);
+            assert_eq!(callback_invocations[0], (true, None)); // Update key1
+            assert_eq!(callback_invocations[1], (true, None)); // Update key2
+            assert_eq!(callback_invocations[2], (true, None)); // CommitFloor (last op)
+        });
+    }
+
+    #[test]
+    fn test_init_with_delete_operations() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut authenticated_journal =
+                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Create, then delete a key
+            let key1 = Sha256::fill(1u8);
+            let value1 = Sha256::fill(10u8);
+
+            authenticated_journal
+                .apply_op(TestOperation::Update(key1, value1))
+                .await
+                .unwrap();
+            authenticated_journal
+                .apply_op(TestOperation::Delete(key1))
+                .await
+                .unwrap();
+
+            // Close and recreate
+            authenticated_journal.close().await.unwrap();
+
+            // Re-initialize
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("mmr"),
+                &mut hasher,
+                crate::mmr::journaled::Config {
+                    journal_partition: "mmr".to_string(),
+                    metadata_partition: "mmr_meta".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let log: Journal<_, TestOperation> = Journal::init(
+                context.with_label("log"),
+                crate::journal::contiguous::fixed::Config {
+                    partition: "log".to_string(),
+                    items_per_blob: 100.try_into().unwrap(),
+                    write_buffer: 1024.try_into().unwrap(),
+                    buffer_pool: PoolRef::new(
+                        NZUsize::new(PAGE_SIZE).unwrap(),
+                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Initialize IndexedJournal
+            let snapshot = Index::init(context.with_label("snapshot"), EightCap);
+            let indexed_journal = IndexedJournal::init(
+                authenticated_journal,
+                snapshot,
+                Location::new_unchecked(0),
+                |_, _| {},
+            )
+            .await
+            .unwrap();
+
+            // Verify key was deleted from snapshot
+            assert_eq!(indexed_journal.key_count(), 0);
+            assert!(indexed_journal.get_key_loc(&key1).await.unwrap().is_none());
         });
     }
 }
