@@ -231,9 +231,8 @@
                     canvas.className = 'benchmark-chart';
                     graphDetails.appendChild(canvas);
 
-                    // Store chart data for lazy creation
+                    // Define chart generator
                     let chartInstance = null;
-
                     function createChart() {
                         if (chartInstance) return; // Already created
 
@@ -348,7 +347,7 @@
                         });
                     }
 
-                    // Lazy load: only create chart when details element is opened
+                    // Create chart when opened (instead of all at once on load)
                     graphDetails.addEventListener('toggle', function () {
                         if (graphDetails.open && !chartInstance) {
                             createChart();
