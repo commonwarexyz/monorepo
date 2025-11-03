@@ -371,19 +371,20 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.as_shared().sync().await
     }
 
-    /// Prune historical operations. This does not affect the db's root or current snapshot.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::PruneBeyondMinRequired] if `target_prune_loc` > inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
             &mut self.mmr,
             &mut self.log,
             &mut self.hasher,
-            target_prune_loc,
+            prune_loc,
             self.inactivity_floor_loc,
             op_count,
         )
@@ -467,8 +468,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.sync().await
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        self.prune(target_prune_loc).await
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {

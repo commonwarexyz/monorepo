@@ -299,11 +299,11 @@ where
     Ok(None)
 }
 
-/// Common implementation for pruning an authenticated database.
+/// Common implementation for pruning an authenticated database of operations prior to `prune_loc`.
 ///
 /// # Errors
 ///
-/// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` is greater than `min_required_loc`.
+/// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
 /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
 async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
@@ -332,13 +332,21 @@ where
     // the operations between the MMR tip and the log pruning boundary.
     mmr.sync(hasher).await?;
 
+    // Prune the log. The log will prune at section boundaries, so the actual oldest retained
+    // location may be less than requested.
     if !log.prune(*prune_loc).await? {
         return Ok(());
     }
 
-    debug!(?op_count, ?prune_loc, "pruned inactive ops");
-
     mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await
-        .map_err(Error::Mmr)
+        .await?;
+
+    debug!(
+        ?op_count,
+        oldest_retained_loc = log.oldest_retained_pos().await?,
+        ?prune_loc,
+        "pruned inactive ops"
+    );
+
+    Ok(())
 }
