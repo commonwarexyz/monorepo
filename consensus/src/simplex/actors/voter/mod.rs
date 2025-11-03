@@ -48,6 +48,7 @@ mod tests {
             actors::{batcher, resolver},
             mocks,
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
+            select_leader,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -1174,8 +1175,7 @@ mod tests {
             // Register network channels
             let me = participants[0].clone();
             let peer = participants[1].clone();
-            let (pending_sender, _pending_receiver) =
-                oracle.control(me.clone()).register(0).await.unwrap();
+            let (pending_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
             let (recovered_sender, recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
@@ -1304,5 +1304,223 @@ mod tests {
         certificate_overrides_existing_proposal(bls12381_multisig::<MinPk, _>);
         certificate_overrides_existing_proposal(bls12381_multisig::<MinSig, _>);
         certificate_overrides_existing_proposal(ed25519);
+    }
+
+    /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
+    ///
+    /// This is a regression test for a byzantine scenario where multiple nodes share the
+    /// same signing key:
+    /// 1. A peer with our identity sends a notarize vote for proposal A
+    /// 2. Our automaton completes with a different proposal B
+    /// 3. Our proposal should be dropped when the conflict is detected
+    ///
+    /// Note: Requires a scheme with deterministic leader selection to determine
+    /// the round leader ahead of time for test setup.
+    fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey, Seed = ()>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"peer_before_our".to_vec();
+        let epoch = 333;
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                verifier: _,
+            } = fixture(&mut context, n);
+
+            // Figure out who the leader will be for view 2
+            let view2_round = Round::new(epoch, 2);
+            let (leader, leader_idx) = select_leader::<S, _>(&participants, view2_round, None);
+
+            // Create a voter with the leader's identity
+            let leader_scheme = schemes[leader_idx as usize].clone();
+
+            // Setup application mock with some latency so we can inject peer
+            // message before automaton completes
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: leader.clone(),
+                propose_latency: (50.0, 10.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: leader_scheme.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: leader_scheme.clone(),
+                blocker: oracle.control(leader.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_leader".to_string(),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels
+            let (pending_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.control(leader.clone()).register(1).await.unwrap();
+
+            // Set up a peer to send messages from
+            let peer = participants[1].clone();
+            let (mut peer_recovered_sender, _) =
+                oracle.control(peer.clone()).register(1).await.unwrap();
+
+            // Link the peer to the leader
+            oracle
+                .add_link(
+                    peer.clone(),
+                    leader.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start the voter
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for initial batcher notification
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Now create a finalization certificate for view 1 to advance to view 2
+            let view1_round = Round::new(epoch, 1);
+            let view1_proposal = Proposal::new(view1_round, 0, Sha256::hash(b"view1_payload"));
+
+            let (_, finalization) =
+                build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
+            let msg = Voter::Finalization(finalization).encode().into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send finalization");
+
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 2);
+                        assert_eq!(finalized, 1);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait a bit for the voter to request a proposal from automaton for view 2
+            context.sleep(Duration::from_millis(5)).await;
+
+            // Create a conflicting proposal from ourselves (equivocating) for view 2
+            let conflicting_proposal =
+                Proposal::new(view2_round, 1, Sha256::hash(b"leader_proposal"));
+            let notarize = Notarize::sign(
+                &schemes[leader_idx as usize],
+                &namespace,
+                conflicting_proposal.clone(),
+            )
+            .unwrap();
+
+            // Inject the leader's notarize vote (this will set `round.proposal` via `add_verified_notarize`)
+            // This happens AFTER we requested a proposal but BEFORE the automaton responds
+            mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+
+            // Now wait for our automaton to complete its proposal
+            // This should trigger `our_proposal` which will see the conflicting proposal
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify that the voter kept the original injected proposal and dropped the
+            // automaton's conflicting proposal by checking batcher messages.
+            while let Ok(Some(message)) = batcher_receiver.try_next() {
+                match message {
+                    batcher::Message::Constructed(Voter::Notarize(notarize)) => {
+                        assert!(notarize.proposal == conflicting_proposal,);
+                    }
+                    _ => panic!("unexpected batcher message"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_drop_our_proposal_on_conflict() {
+        drop_our_proposal_on_conflict(bls12381_multisig::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_multisig::<MinSig, _>);
+        drop_our_proposal_on_conflict(ed25519);
     }
 }
