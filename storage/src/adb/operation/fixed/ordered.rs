@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, fixed::FixedSize, Keyed},
+    adb::operation::{self, fixed::FixedSize, Committable, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -114,6 +114,12 @@ impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
 
     fn is_update(&self) -> bool {
         matches!(self, Self::Update(_))
+    }
+}
+
+impl<K: Array + Ord, V: CodecFixed> Committable for Operation<K, V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_))
     }
 }
 

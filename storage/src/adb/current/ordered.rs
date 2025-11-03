@@ -285,7 +285,7 @@ impl<
         for _ in 0..steps_to_take {
             if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(tip = bit_count, "db is empty, raising floor to tip");
+                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
             let loc = self.any.inactivity_floor_loc;

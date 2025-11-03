@@ -39,7 +39,7 @@ pub enum Error {
     InvalidCommitFloorOp,
 }
 
-/// Methods common to operation types for keyed databases.
+/// A trait for operations used by database variants that support mutable keyed values.
 pub trait Keyed: Codec {
     /// The key type for this operation.
     type Key: Array;
@@ -56,6 +56,11 @@ pub trait Keyed: Codec {
     /// The commit floor location if this operation is a commit operation with a floor value, None
     /// otherwise.
     fn commit_floor(&self) -> Option<Location>;
+}
+
+/// A trait for operations used by database variants that support commit operations.
+pub trait Committable {
+    fn is_commit(&self) -> bool;
 }
 
 #[cfg(test)]

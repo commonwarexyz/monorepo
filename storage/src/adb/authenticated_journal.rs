@@ -26,7 +26,10 @@
 //! leaves correspond to log positions is maintained.
 
 use crate::{
-    adb::{operation::Keyed, rewind_uncommitted, Error},
+    adb::{
+        operation::{Committable, Keyed},
+        rewind_uncommitted, Error,
+    },
     journal::contiguous::Contiguous,
     mmr::{journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
@@ -57,7 +60,7 @@ impl<E, C, O, H> AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
-    O: Keyed,
+    O: Keyed + Committable,
     H: Hasher,
 {
     /// Create a new [AuthenticatedJournal] from the given components.
@@ -66,9 +69,9 @@ where
         mut mmr: Mmr<E, H>,
         mut log: C,
         mut hasher: StandardHasher<H>,
-    ) -> Result<(Self, Location), Error> {
+    ) -> Result<Self, Error> {
         // Back up over / discard any uncommitted operations in the log.
-        let inactivity_floor_loc = rewind_uncommitted(&mut log).await?;
+        rewind_uncommitted(&mut log).await?;
         let log_size = log.size().await;
 
         // Pop any MMR elements that are ahead of the last log commit point.
@@ -98,18 +101,7 @@ where
         // At this point the MMR and log should be consistent.
         assert_eq!(log.size().await, mmr.leaves());
 
-        // The final operation in the log (if any) should be a commit.
-        let last_op_loc = log.size().await.checked_sub(1);
-        assert!(
-            last_op_loc.is_none()
-                || log
-                    .read(last_op_loc.unwrap())
-                    .await?
-                    .commit_floor()
-                    .is_some()
-        );
-
-        Ok((Self { mmr, log, hasher }, inactivity_floor_loc))
+        Ok(Self { mmr, log, hasher })
     }
 
     /// Append an operation.
@@ -239,6 +231,46 @@ where
         self.mmr.leaves()
     }
 
+    /// Get a reference to the internal MMR.
+    ///
+    /// This is a temporary accessor to support migration. Eventually all logic should be
+    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
+    pub(crate) fn mmr(&self) -> &Mmr<E, H> {
+        &self.mmr
+    }
+
+    /// Get a mutable reference to the internal MMR.
+    ///
+    /// This is a temporary accessor to support migration. Eventually all logic should be
+    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
+    pub(crate) fn mmr_mut(&mut self) -> &mut Mmr<E, H> {
+        &mut self.mmr
+    }
+
+    /// Get a reference to the internal log.
+    ///
+    /// This is a temporary accessor to support migration. Eventually all logic should be
+    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
+    pub(crate) fn log(&self) -> &C {
+        &self.log
+    }
+
+    /// Get a mutable reference to the internal log.
+    ///
+    /// This is a temporary accessor to support migration. Eventually all logic should be
+    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
+    pub(crate) fn log_mut(&mut self) -> &mut C {
+        &mut self.log
+    }
+
+    /// Get a mutable reference to the internal hasher.
+    ///
+    /// This is a temporary accessor to support migration. Eventually all logic should be
+    /// encapsulated within `AuthenticatedJournal` and this accessor removed.
+    pub(crate) fn hasher_mut(&mut self) -> &mut StandardHasher<H> {
+        &mut self.hasher
+    }
+
     /// Returns the oldest retained location in the journal.
     ///
     /// Returns `None` if the journal is empty or all items have been pruned.
@@ -255,6 +287,54 @@ where
     /// operations have been pruned.
     pub async fn pruning_boundary(&self) -> Result<Location, Error> {
         Ok(self.oldest_retained_loc().await?.unwrap_or(self.op_count()))
+    }
+
+    /// Close the authenticated journal, syncing all pending writes.
+    pub async fn close(self) -> Result<(), Error> {
+        let Self {
+            mmr,
+            log,
+            mut hasher,
+        } = self;
+        try_join!(
+            log.close().map_err(Error::Journal),
+            mmr.close(&mut hasher).map_err(Error::Mmr),
+        )?;
+        Ok(())
+    }
+
+    /// Destroy the authenticated journal, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        let Self {
+            mmr,
+            log,
+            hasher: _,
+        } = self;
+        try_join!(
+            log.destroy().map_err(Error::Journal),
+            mmr.destroy().map_err(Error::Mmr),
+        )?;
+        Ok(())
+    }
+
+    /// Replay operations from the journal starting at `start_loc`.
+    ///
+    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
+    /// around the log's replay functionality.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
+    pub async fn replay(
+        &self,
+        start_loc: u64,
+        buffer_size: core::num::NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
+        crate::journal::Error,
+    > {
+        self.log.replay(start_loc, buffer_size).await
     }
 }
 
@@ -325,11 +405,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "empty").await;
-            let (mmr_journal, inactivity_floor_loc) =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(0));
-            assert_eq!(inactivity_floor_loc, Location::new_unchecked(0));
         });
     }
 
@@ -360,11 +438,9 @@ mod tests {
             mmr.sync(&mut hasher).await.unwrap();
             log.sync().await.unwrap();
 
-            let (mmr_journal, inactivity_floor_loc) =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(3));
-            assert_eq!(inactivity_floor_loc, Location::new_unchecked(0));
         });
     }
 
@@ -387,12 +463,10 @@ mod tests {
             log.sync().await.unwrap();
 
             // MMR is now ahead (has 1 leaf, log has 2 operations)
-            let (mmr_journal, inactivity_floor_loc) =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // MMR should have been popped to match log
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(2));
-            assert_eq!(inactivity_floor_loc, Location::new_unchecked(0));
         });
     }
 
@@ -415,12 +489,10 @@ mod tests {
             log.sync().await.unwrap();
 
             // Log is ahead (has 3 operations, MMR has 0 leaves)
-            let (mmr_journal, inactivity_floor_loc) =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // MMR should have been replayed to match log
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(3));
-            assert_eq!(inactivity_floor_loc, Location::new_unchecked(0));
         });
     }
 
@@ -429,7 +501,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "apply_op").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(0));
 
@@ -451,7 +523,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "sync").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             let op = Operation::Update(Sha256::fill(1u8), Sha256::fill(2u8));
             mmr_journal.apply_op(op).await.unwrap();
@@ -469,7 +541,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "prune").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             for i in 0..10 {
@@ -505,7 +577,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "prune_error").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Try to prune beyond inactivity floor - should error
             let result = mmr_journal
@@ -525,7 +597,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "historical_proof").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             let ops: Vec<_> = (0..5)
@@ -560,7 +632,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "oldest_empty").await;
-            let (mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Empty journal should return None
             let oldest = mmr_journal.oldest_retained_loc().await.unwrap();
@@ -574,7 +646,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "oldest_with_data").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             for i in 0..10 {
@@ -597,7 +669,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "oldest_after_prune").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             for i in 0..20 {
@@ -634,7 +706,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "boundary_empty").await;
-            let (mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Empty journal should return op_count (which is 0)
             let boundary = mmr_journal.pruning_boundary().await.unwrap();
@@ -648,7 +720,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "boundary_with_data").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             for i in 0..10 {
@@ -671,7 +743,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "boundary_after_prune").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add operations
             for i in 0..20 {
@@ -703,7 +775,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, log, hasher) =
                 create_aligned_mmr_journal(context.clone(), "mmr_log_alignment").await;
-            let (mut mmr_journal, _) = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
 
             // Add many operations to ensure section boundaries matter
             for i in 0..50 {
@@ -733,6 +805,70 @@ mod tests {
 
             // Verify the MMR and log remain in sync after pruning
             assert_eq!(mmr_journal.op_count(), Location::new_unchecked(51));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_close() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "close").await;
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Add an operation
+            let op = Operation::Update(Sha256::fill(1), Sha256::fill(2));
+            mmr_journal.apply_op(op).await.unwrap();
+            mmr_journal.sync().await.unwrap();
+
+            // Close should succeed
+            mmr_journal.close().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_destroy() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "destroy").await;
+            let mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Destroy should succeed
+            mmr_journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mmr, log, hasher) = create_aligned_mmr_journal(context.clone(), "replay").await;
+            let mut mmr_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+
+            // Add operations
+            let ops: Vec<_> = (0..10)
+                .map(|i| {
+                    Operation::Update(Sha256::fill((i * 2) as u8), Sha256::fill((i * 2 + 1) as u8))
+                })
+                .collect();
+
+            for op in &ops {
+                mmr_journal.apply_op(op.clone()).await.unwrap();
+            }
+            mmr_journal.sync().await.unwrap();
+
+            // Replay from position 5
+            use futures::StreamExt;
+            let stream = mmr_journal.replay(5, NZUsize!(10)).await.unwrap();
+            futures::pin_mut!(stream);
+
+            let mut count = 0;
+            while let Some(result) = stream.next().await {
+                let (pos, op) = result.unwrap();
+                assert_eq!(pos as usize, 5 + count);
+                assert_eq!(op, ops[5 + count]);
+                count += 1;
+            }
+            assert_eq!(count, 5); // Should have replayed positions 5-9
         });
     }
 }
