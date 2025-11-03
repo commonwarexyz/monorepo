@@ -24,6 +24,7 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
+pub mod authenticated_journal;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
