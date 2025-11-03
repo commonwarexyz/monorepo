@@ -11,25 +11,25 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
+bytes.workspace = true
+cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
-bytes = { workspace = true }
 futures = { workspace = true, optional = true }
-rand = { workspace = true }
-thiserror = { workspace = true }
-cfg-if = { workspace = true }
 num-bigint = { workspace = true, optional = true }
-num-rational = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
+num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
+rand.workspace = true
+thiserror.workspace = true
 
-# Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+# Enable "js" feature when WASM is target
 version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
+criterion.workspace = true
 num-bigint = { version = "0.4.6", default-features = false }
-criterion = { workspace = true }
 
 [features]
 default = ["std"]

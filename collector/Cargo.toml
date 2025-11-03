@@ -11,24 +11,24 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/collector"
 documentation = "https://docs.rs/commonware-collector"
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-stream = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-rand = { workspace = true }
-futures = { workspace = true }
-tracing = { workspace = true }
-governor = { workspace = true }
-prometheus-client = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
+anyhow.workspace = true
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+tracing-subscriber.workspace = true
 
 [lib]
 bench = false

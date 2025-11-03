@@ -15,6 +15,6 @@ default = ["std"]
 std = ["thiserror/std", "bytes/std"]
 
 [dependencies]
-thiserror = { workspace = true }
-bytes = { workspace = true }
-paste = { workspace = true }
+bytes.workspace = true
+paste.workspace = true
+thiserror.workspace = true
