@@ -240,7 +240,7 @@ where
             let floor_loc = log
                 .read(last_commit_loc)
                 .await?
-                .commit_floor()
+                .has_floor()
                 .expect("last operation should be a commit floor");
             (Some(Location::new_unchecked(last_commit_loc)), floor_loc)
         } else {

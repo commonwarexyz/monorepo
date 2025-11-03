@@ -153,11 +153,12 @@ pub(super) async fn align_mmr_and_floored_log<
 
     // The final operation in the log must be a commit wrapping the inactivity floor.
     Ok(op
-        .commit_floor()
+        .has_floor()
         .expect("last operation should be a commit floor"))
 }
 
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
+/// Assumes there is at least one unpruned commit operation in the log if the log has been pruned.
 pub(super) async fn rewind_uncommitted<O: Committable>(
     log: &mut impl Contiguous<Item = O>,
 ) -> Result<u64, Error> {
@@ -214,7 +215,7 @@ where
                 let old_loc = update_loc(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
             }
-        } else if op.commit_floor().is_some() {
+        } else if op.has_floor().is_some() {
             callback(loc == last_commit_loc, None);
         }
     }

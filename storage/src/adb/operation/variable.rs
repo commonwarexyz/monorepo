@@ -83,7 +83,7 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
         matches!(self, Self::Update(_, _) | Self::Set(_, _))
     }
 
-    fn commit_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<Location> {
         match self {
             Self::CommitFloor(_, floor_loc) => Some(*floor_loc),
             _ => None,
