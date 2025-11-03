@@ -105,7 +105,7 @@
         // Compute all-time and 7-day performance changes for a single benchmark
         function computeSingleBenchSummary(benches) {
             if (!benches || benches.length < 1) {
-                return { pct7Day: "N/A", latest: "N/A" };
+                return { pct30Day: "N/A", latest: "N/A" };
             }
             // Sort by date ascending
             const sorted = [...benches].sort((a, b) => a.date - b.date);
@@ -114,36 +114,36 @@
             const latestVal = sorted[sorted.length - 1].bench.value; // last
             const latestDate = sorted[sorted.length - 1].date;
             if (benches.length < 2) {
-                return { pct7Day: "N/A", latest: latestVal };
+                return { pct30Day: "N/A", latest: latestVal };
             }
 
-            // 7-day ratio
-            const sevenDaysInMs = 7 * 24 * 3600 * 1000;
-            const cutoffDate = latestDate - sevenDaysInMs;
+            // 30-day ratio
+            const thirtyDaysInMs = 30 * 24 * 3600 * 1000;
+            const cutoffDate = latestDate - thirtyDaysInMs;
             // find the bench value for the point in time just after or near that date
-            let sevenDayVal = null;
+            let thirtyDayVal = null;
             let minDelta = Number.MAX_VALUE;
             for (const point of sorted) {
                 if (point.date >= cutoffDate) {
                     const delta = point.date - cutoffDate;
                     if (delta < minDelta) {
                         minDelta = delta;
-                        sevenDayVal = point.bench.value;
+                        thirtyDayVal = point.bench.value;
                     }
                 }
             }
             // if we never found anything after the cutoffDate, fallback to earliest
-            if (!sevenDayVal) {
-                sevenDayVal = earliestVal;
+            if (!thirtyDayVal) {
+                thirtyDayVal = earliestVal;
             }
 
-            let pct7Day = "N/A";
-            if (sevenDayVal > 0) {
-                const ratio7 = (latestVal - sevenDayVal) / sevenDayVal;
-                pct7Day = (ratio7 * 100).toFixed(1) + "%";
+            let pct30Day = "N/A";
+            if (thirtyDayVal > 0) {
+                const ratio30 = (latestVal - thirtyDayVal) / thirtyDayVal;
+                pct30Day = (ratio30 * 100).toFixed(1) + "%";
             }
 
-            return { pct7Day, latest: latestVal };
+            return { pct30Day, latest: latestVal };
         }
 
         function setupBenchmark() {
@@ -216,13 +216,13 @@
                     // <summary> that shows/hides the graph
                     const summary = document.createElement('summary');
                     summary.textContent = name;
-                    const { pct7Day, latest } = computeSingleBenchSummary(dataset);
+                    const { pct30Day, latest } = computeSingleBenchSummary(dataset);
                     const value = latest / 1e6;
                     const units = "ms";
                     summary.innerHTML = `
                         <span class="benchmark-graph-title">${name}</span>
                         <br>
-                        <span class="benchmark-performance">${value} ${units} (Last 7 Days: ${pct7Day})</span>
+                        <span class="benchmark-performance">${value} ${units} (Last 30 Days: ${pct30Day})</span>
                     `;
                     graphDetails.appendChild(summary);
 
