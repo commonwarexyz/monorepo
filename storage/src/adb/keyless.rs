@@ -154,12 +154,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
-    /// Prunes the db of up to all operations that have location less than `loc`. The actual number
-    /// pruned may be fewer than requested due to blob boundaries in the underlying journals.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
     ///
     /// # Errors
     ///
-    /// Returns [Error::PruneBeyondMinRequired] if `loc` is beyond the last commit point.
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > last commit point.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION]
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();
