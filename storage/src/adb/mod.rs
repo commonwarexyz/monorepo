@@ -14,7 +14,7 @@ use crate::{
     adb::operation::{Committable, Keyed},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{journaled::Mmr, Location, StandardHasher},
+    mmr::{journaled::Mmr, Location, Position, StandardHasher},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -23,7 +23,7 @@ use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 pub mod any;
 pub mod current;
@@ -71,11 +71,8 @@ pub enum Error {
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location, Location),
 
-    #[error("prune location {0} beyond last commit {1}")]
-    PruneBeyondCommit(Location, Location),
-
-    #[error("prune location {0} beyond inactivity floor {1}")]
-    PruneBeyondInactivityFloor(Location, Location),
+    #[error("prune location {0} beyond minimum required location {1}")]
+    PruneBeyondMinRequired(Location, Location),
 
     #[error("uncommitted operations present")]
     UncommittedOperations,
@@ -223,6 +220,52 @@ where
     }
 
     Ok(())
+}
+
+/// Common implementation for pruning an authenticated database.
+///
+/// # Errors
+///
+/// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
+///   [crate::mmr::MAX_LOCATION].
+/// - Returns [Error::PruneBeyondMinRequired] if `target_prune_loc` is greater than the
+///   minimum required location.
+async fn prune_db<E, O, H>(
+    mmr: &mut Mmr<E, H>,
+    log: &mut impl Contiguous<Item = O>,
+    hasher: &mut StandardHasher<H>,
+    prune_loc: Location,
+    min_required_loc: Location,
+    op_count: Location,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + Metrics,
+    O: Codec,
+    H: Hasher,
+{
+    if prune_loc > min_required_loc {
+        return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));
+    }
+
+    if mmr.size() == 0 {
+        // DB is empty, nothing to prune.
+        return Ok(());
+    };
+
+    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
+    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+    // the operations between the MMR tip and the log pruning boundary.
+    mmr.sync(hasher).await?;
+
+    if !log.prune(*prune_loc).await? {
+        return Ok(());
+    }
+
+    debug!(?op_count, ?prune_loc, "pruned inactive ops");
+
+    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
+        .await
+        .map_err(Error::Mmr)
 }
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously

@@ -6,12 +6,8 @@
 
 use crate::{
     adb::{
-        align_mmr_and_floored_log,
-        any::{historical_proof, prune_db},
-        build_snapshot_from_log, delete_key,
-        operation::variable::Operation,
-        store::Db,
-        update_loc, Error,
+        align_mmr_and_floored_log, any::historical_proof, build_snapshot_from_log, delete_key,
+        operation::variable::Operation, prune_db, store::Db, update_loc, Error,
     },
     index::{Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -1249,7 +1245,7 @@ pub(super) mod test {
             // Try to prune beyond the inactivity floor
             let result = db.prune(beyond_floor).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondInactivityFloor(loc, floor))
+                matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
                     if loc == beyond_floor && floor == inactivity_floor)
             );
 
