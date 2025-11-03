@@ -67,6 +67,12 @@ impl<T: Attributable> AttributableMap<T> {
         Self { data, added: 0 }
     }
 
+    /// Clears all existing items from the [AttributableMap].
+    pub fn clear(&mut self) {
+        self.data.fill_with(|| None);
+        self.added = 0;
+    }
+
     /// Inserts an item into the map, using [Attributable::signer()] as the key,
     /// if it has not been added yet.
     ///
@@ -3706,5 +3712,17 @@ mod tests {
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
+
+        map.clear();
+        assert_eq!(map.len(), 0);
+        assert!(map.is_empty());
+        assert!(map.iter().next().is_none());
+
+        // verify can insert after clear
+        assert!(map.insert(MockAttributable(2)));
+        assert_eq!(map.len(), 1);
+        let mut iter = map.iter();
+        assert!(matches!(iter.next(), Some(a) if a.signer() == 2));
+        assert!(iter.next().is_none());
     }
 }

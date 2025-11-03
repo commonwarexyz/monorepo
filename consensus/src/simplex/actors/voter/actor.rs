@@ -171,7 +171,19 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             debug!(?proposal, "setting verified proposal");
             self.proposal = Some(proposal);
         } else if let Some(previous) = &self.proposal {
-            assert_eq!(proposal, *previous);
+            if proposal != *previous {
+                // Certificate has 2f+1 agreement, should override local lock
+                warn!(
+                    ?proposal,
+                    ?previous,
+                    "certificate overrides locally locked proposal (likely equivocation)"
+                );
+                self.proposal = Some(proposal);
+
+                // All cached votes must be for current proposal
+                self.notarizes.clear();
+                self.finalizes.clear();
+            }
         }
     }
 
@@ -811,9 +823,29 @@ impl<
             return false;
         }
 
-        // Store the proposal
-        debug!(?proposal, "generated proposal");
-        assert!(round.proposal.is_none());
+        // Check if proposal already set
+        if let Some(ref existing) = round.proposal {
+            if existing != &proposal {
+                // This can only happen in byzantine scenarios where multiple
+                // nodes share the same signing key (equivocation), only the
+                // byzantine node is affected when it's the leader.
+                warn!(
+                    ?proposal,
+                    ?existing,
+                    "different proposal from ourselves already set, dropping new proposal (likely equivocation)"
+                );
+                return false;
+            }
+
+            debug!(
+                ?proposal,
+                "our proposal matches already existing proposal (likely equivocation)"
+            );
+        } else {
+            debug!(?proposal, "generated proposal");
+        }
+
+        // No proposal yet (or existing matches ours), (re)set ours
         round.proposal = Some(proposal);
         round.requested_proposal_verify = true;
         round.verified_proposal = true;
