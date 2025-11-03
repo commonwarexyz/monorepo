@@ -171,9 +171,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             last_commit,
             op_count,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     /// Append a value to the db, returning its location which can be used to retrieve it.

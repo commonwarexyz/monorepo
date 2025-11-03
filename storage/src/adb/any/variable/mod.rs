@@ -343,7 +343,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .await?;
 
         // Sync the log and process the updates to the MMR.
-        shared.sync_and_process_updates().await
+        shared.sync_log_and_process_updates().await
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been

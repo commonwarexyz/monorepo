@@ -645,7 +645,7 @@ impl<
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
         // Sync the log and process the updates to the MMR.
-        shared.sync_and_process_updates().await
+        shared.sync_log_and_process_updates().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
