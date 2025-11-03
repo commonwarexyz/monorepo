@@ -1,6 +1,6 @@
 //! Local network setup.
 
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, RangeCfg};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -49,7 +49,11 @@ impl ParticipantConfig {
     pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
         self.polynomial.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
-            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &(threshold as usize)).unwrap()
+            Public::<MinSig>::decode_cfg(
+                &mut bytes.as_slice(),
+                &RangeCfg::exact(threshold as usize),
+            )
+            .unwrap()
         })
     }
 

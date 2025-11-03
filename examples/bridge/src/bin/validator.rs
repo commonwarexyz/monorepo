@@ -2,7 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
-use commonware_codec::{Decode, DecodeExt};
+use commonware_codec::{Decode, DecodeExt, RangeCfg};
 use commonware_consensus::{
     simplex::{self, Engine},
     types::{Epoch, ViewDelta},
@@ -118,8 +118,8 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
+    let identity: Public<MinSig> = Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(threshold))
+        .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");

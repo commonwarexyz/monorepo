@@ -8,7 +8,7 @@ use crate::{
     PublicKey, Signature, Signer,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::quorum;
 
 /// A [Share] sent by a [Dealer] node to a [Player] node.
@@ -57,7 +57,7 @@ impl<V: Variant> Read for Share<V> {
     fn read_cfg(buf: &mut impl Buf, t: &u32) -> Result<Self, commonware_codec::Error> {
         let q = quorum(*t);
         Ok(Self {
-            commitment: Public::<V>::read_cfg(buf, &(q as usize))?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::from(0..=q as usize))?,
             share: group::Share::read(buf)?,
         })
     }
