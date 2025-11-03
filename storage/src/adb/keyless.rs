@@ -159,7 +159,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
+    /// Returns [Error::PruneBeyondMinRequired] if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();

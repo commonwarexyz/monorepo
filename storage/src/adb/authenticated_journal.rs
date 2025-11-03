@@ -231,31 +231,6 @@ where
         self.mmr.leaves()
     }
 
-    /// Get a reference to the internal log.
-    pub(crate) fn log(&self) -> &C {
-        &self.log
-    }
-
-    /// Get a mutable reference to the internal log.
-    pub(crate) fn log_mut(&mut self) -> &mut C {
-        &mut self.log
-    }
-
-    /// Get a mutable reference to the internal hasher.
-    pub(crate) fn hasher_mut(&mut self) -> &mut StandardHasher<H> {
-        &mut self.hasher
-    }
-
-    /// Get a reference to the internal MMR.
-    pub(crate) fn mmr(&self) -> &Mmr<E, H> {
-        &self.mmr
-    }
-
-    /// Get a mutable reference to the internal MMR.
-    pub(crate) fn mmr_mut(&mut self) -> &mut Mmr<E, H> {
-        &mut self.mmr
-    }
-
     /// Returns the oldest retained location in the journal.
     ///
     /// Returns `None` if the journal is empty or all items have been pruned.

@@ -377,7 +377,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
+    /// Returns [Error::PruneBeyondMinRequired] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
