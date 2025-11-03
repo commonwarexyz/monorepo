@@ -119,7 +119,7 @@ use crate::{
     Config, Scheme, ValidatingScheme,
 };
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
@@ -132,6 +132,7 @@ use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
 const SECURITY_BITS: usize = 126;
+const LOG2_PRECISION: usize = 10;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
@@ -188,14 +189,21 @@ fn required_samples_impl(n: usize, m: usize, upper_bound: bool) -> usize {
     let m = BigRational::from_usize(m);
     let skew = BigRational::from_u64(if upper_bound { 0u64 } else { 1u64 });
     let fraction = (&k + &skew) / (BigRational::from_usize(2) * &m);
-    let log_term = (BigRational::from_usize(1) - fraction).log2_ceil(7);
+
+    // Compute log2(one_minus). When m is close to n, one_minus is close to 1, making log2(one_minus)
+    // a small negative value that requires sufficient precision to correctly capture the sign.
+    let one_minus = BigRational::from_usize(1) - fraction;
+    let log_term = one_minus.log2_ceil(LOG2_PRECISION);
+    if log_term >= BigRational::from_u64(0) {
+        return usize::MAX;
+    }
+
     let required = BigRational::from_usize(SECURITY_BITS) / -log_term;
     required.ceil_to_u128().unwrap_or(u128::MAX) as usize
 }
 
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
-    let k = encoded_rows - min_rows;
-    required_samples_impl(min_rows, k, false)
+    required_samples_impl(min_rows, encoded_rows, false)
 }
 
 /// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
@@ -333,7 +341,7 @@ impl<H: Hasher> Read for Shard<H> {
             data_bytes,
             root: ReadExt::read(buf)?,
             inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=topology.samples), ()))?,
-            rows: Read::read_cfg(buf, &(topology.data_cols * topology.data_rows))?,
+            rows: Read::read_cfg(buf, &(topology.data_cols * topology.samples))?,
             checksum: Arc::new(Read::read_cfg(
                 buf,
                 &(topology.data_rows * topology.column_samples),
@@ -342,7 +350,7 @@ impl<H: Hasher> Read for Shard<H> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
     inclusion_proofs: Vec<Proof<H>>,
     shard: Matrix,
@@ -376,7 +384,8 @@ impl<H: Hasher> Read for ReShard<H> {
         buf: &mut impl bytes::Buf,
         &(max_data_bytes, _): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let max_data_els = max_data_bytes.div_ceil(F::SIZE);
+        let max_data_bits = max_data_bytes.saturating_mul(8);
+        let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
             inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_data_els), ()))?,
@@ -516,6 +525,8 @@ pub enum Error {
     InvalidIndex(u16),
     #[error("insufficient shards {0} < {1}")]
     InsufficientShards(usize, usize),
+    #[error("insufficient unique rows {0} < {1}")]
+    InsufficientUniqueRows(usize, usize),
 }
 
 const NAMESPACE: &[u8] = b"commonware-zoda";
@@ -671,6 +682,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 evaluation.fill_row(i, row);
             }
         }
+        let filled_rows = evaluation.filled_rows();
+        if filled_rows < data_rows {
+            return Err(Error::InsufficientUniqueRows(filled_rows, data_rows));
+        }
         Ok(collect_u64_le(
             data_bytes,
             F::stream_to_u64s(
@@ -685,3 +700,80 @@ impl<H: Hasher> Scheme for Zoda<H> {
 }
 
 impl<H: Hasher> ValidatingScheme for Zoda<H> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use commonware_cryptography::Sha256;
+
+    #[test]
+    fn required_samples_handles_minimal_padding() {
+        assert_eq!(required_samples(3, 4), 305);
+    }
+
+    #[test]
+    fn required_samples_handles_equal_rows() {
+        assert_eq!(required_samples_upper_bound(512, 512), usize::MAX);
+    }
+
+    #[test]
+    fn topology_reckon_handles_small_extra_shards() {
+        let config = Config {
+            minimum_shards: 3,
+            extra_shards: 1,
+        };
+        let topology = Topology::reckon(&config, 16);
+        assert_eq!(topology.min_shards, 3);
+        assert_eq!(topology.total_shards, 4);
+    }
+
+    #[test]
+    fn reshard_roundtrip_handles_field_packing() {
+        use bytes::BytesMut;
+        use commonware_cryptography::Sha256;
+
+        let config = Config {
+            minimum_shards: 3,
+            extra_shards: 2,
+        };
+        let data = vec![0xAA; 64];
+
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, data.as_slice()).unwrap();
+        let shard = shards.into_iter().next().unwrap();
+
+        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
+
+        let mut buf = BytesMut::new();
+        reshard.write(&mut buf);
+        let mut bytes = buf.freeze();
+        let decoded = ReShard::<Sha256>::read_cfg(&mut bytes, &(data.len(), config)).unwrap();
+
+        assert_eq!(decoded, reshard);
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_indices() {
+        let config = Config {
+            minimum_shards: 2,
+            extra_shards: 0,
+        };
+        let data = b"duplicate shard coverage";
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..]).unwrap();
+        let shard0 = shards[0].clone();
+        let (checking_data, checked_shard0, _reshard0) =
+            Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
+        let duplicate = CheckedShard {
+            index: checked_shard0.index,
+            shard: checked_shard0.shard.clone(),
+        };
+        let shards = vec![checked_shard0, duplicate];
+        let result = Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards);
+        match result {
+            Err(Error::InsufficientUniqueRows(actual, expected)) => {
+                assert!(actual < expected);
+            }
+            other => panic!("expected insufficient unique rows error, got {other:?}"),
+        }
+    }
+}

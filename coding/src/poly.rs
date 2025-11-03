@@ -8,6 +8,7 @@ use std::ops::{Index, IndexMut};
 ///
 /// Any bits beyond that width will be erased.
 fn reverse_bits(bit_width: u32, i: u64) -> u64 {
+    assert!(bit_width <= 64, "bit_width must be <= 64");
     i.wrapping_shl(64 - bit_width).reverse_bits()
 }
 
@@ -186,11 +187,22 @@ impl Read for Matrix {
         &max_els: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let cfg = RangeCfg::from(..=max_els);
-        Ok(Self {
-            rows: Read::read_cfg(buf, &cfg)?,
-            cols: Read::read_cfg(buf, &cfg)?,
-            data: Read::read_cfg(buf, &(cfg, ()))?,
-        })
+        let rows = usize::read_cfg(buf, &cfg)?;
+        let cols = usize::read_cfg(buf, &cfg)?;
+        let data = Vec::<F>::read_cfg(buf, &(cfg, ()))?;
+        let expected_len = rows
+            .checked_mul(cols)
+            .ok_or(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix dimensions overflow",
+            ))?;
+        if data.len() != expected_len {
+            return Err(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix element count does not match dimensions",
+            ));
+        }
+        Ok(Self { rows, cols, data })
     }
 }
 
@@ -199,7 +211,7 @@ impl std::fmt::Debug for Matrix {
         for i in 0..self.rows {
             let row_i = &self[i];
             for &row_i_j in row_i {
-                write!(f, "{:?} ", row_i_j)?;
+                write!(f, "{row_i_j:?} ")?;
             }
             writeln!(f)?;
         }
@@ -753,8 +765,15 @@ impl PolynomialVector {
             },
         );
         // Do a point wise division.
+        // After applying the skew, q should have no zeroes in the evaluation domain.
+        // This assertion ensures the vanishing polynomial was constructed correctly.
         for i in 0..self.data.rows {
-            let q_i_inv = q.coefficients[i].inv();
+            let q_i = q.coefficients[i];
+            assert!(
+                q.coefficients[i] != F::zero(),
+                "vanishing polynomial has zero at evaluation point after skew"
+            );
+            let q_i_inv = q_i.inv();
             for d_i_j in &mut self.data[i] {
                 *d_i_j = *d_i_j * q_i_inv;
             }
@@ -874,6 +893,11 @@ impl EvaluationVector {
     pub fn data(self) -> Matrix {
         self.data
     }
+
+    /// Return how many distinct rows have been filled.
+    pub fn filled_rows(&self) -> usize {
+        self.active_rows.count_ones() as usize
+    }
 }
 
 #[cfg(test)]
@@ -891,6 +915,27 @@ mod test {
         assert_eq!(reverse_bits(4, 0b0100), 0b0010);
         assert_eq!(reverse_bits(4, 0b0010), 0b0100);
         assert_eq!(reverse_bits(4, 0b0001), 0b1000);
+    }
+
+    #[test]
+    fn matrix_read_rejects_length_mismatch() {
+        use bytes::BytesMut;
+        use commonware_codec::{Read as _, Write as _};
+
+        let mut buf = BytesMut::new();
+        (2usize).write(&mut buf);
+        (2usize).write(&mut buf);
+        vec![F::one(); 3].write(&mut buf);
+
+        let mut bytes = buf.freeze();
+        let result = Matrix::read_cfg(&mut bytes, &8);
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid(
+                "Matrix",
+                "matrix element count does not match dimensions"
+            ))
+        ));
     }
 
     fn any_polynomial_vector(

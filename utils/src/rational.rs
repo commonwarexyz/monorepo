@@ -100,55 +100,67 @@ impl BigRationalExt for BigRational {
             panic!("log2 undefined for non-positive numbers");
         }
 
-        // Integer part
-        let numer_bits = self.numer().bits() as i64;
-        let denom_bits = self.denom().bits() as i64;
-        let int_part = numer_bits - denom_bits - 1;
+        let two = BigRational::from_integer(BigInt::from(2));
+        let one = BigRational::one();
 
-        // Normalize: divide or multiply by power of 2 to get into [1, 2)
-        let shift = int_part;
-        let mut ratio = if shift >= 0 {
-            self / BigRational::from(BigInt::from(1) << shift as usize)
-        } else {
-            self * BigRational::from(BigInt::from(1) << (-shift) as usize)
-        };
+        // Step 1: Normalize the value to the range [1, 2) by repeatedly dividing/multiplying by 2.
+        // We track the integer part separately since we'll combine it with fractional bits later.
+        let mut normalized = self.clone();
+        let mut integer_part = BigInt::zero();
+        let one_int = BigInt::one();
 
-        // Check if we have an exact power of 2
-        if ratio == BigRational::one() {
-            // log2 is exact, no rounding needed
-            return BigRational::from(BigInt::from(int_part));
+        // If value >= 2, repeatedly divide by 2 to bring it into range.
+        while normalized >= two {
+            normalized /= &two;
+            integer_part += &one_int;
         }
 
-        // Extract binary fractional digits
-        let mut frac = BigInt::zero();
-        let two = BigRational::from(BigInt::from(2));
-        let mut has_remaining = false;
+        // If value < 1, repeatedly multiply by 2 to bring it into range.
+        while normalized < one {
+            normalized *= &two;
+            integer_part -= &one_int;
+        }
 
-        for i in 0..binary_digits {
-            frac <<= 1;
-            ratio = &ratio * &ratio; // Square
+        // Step 2: Handle the special case where the value is exactly a power of 2.
+        // In this case, log2(x) is exact and has no fractional component.
+        if normalized == one {
+            let numerator = integer_part.clone() << binary_digits;
+            let denominator = BigInt::one() << binary_digits;
+            return BigRational::new(numerator, denominator);
+        }
 
-            if ratio >= two {
-                frac |= BigInt::one();
-                ratio /= &two;
+        // Step 3: Extract binary fractional digits using the square-and-compare method.
+        // At this point, normalized is in (1, 2), so log2(normalized) is in (0, 1).
+        // By repeatedly squaring and checking if we exceed 2, we extract binary digits.
+        let mut fractional_bits = BigInt::zero();
+        for _ in 0..binary_digits {
+            // Square the normalized value to shift the next binary digit into position.
+            normalized = &normalized * &normalized;
+
+            // Left-shift the fractional bits accumulator to make room for the new bit.
+            fractional_bits <<= 1;
+
+            // If squared value >= 2, the next binary digit is 1.
+            // We divide by 2 to renormalize back to [1, 2).
+            if normalized >= two {
+                fractional_bits |= BigInt::one();
+                normalized /= &two;
             }
-
-            // After last iteration, check if there are more bits
-            if i == binary_digits - 1 && ratio > BigRational::one() {
-                has_remaining = true;
-            }
         }
 
-        // Round up if there are remaining fractional bits
-        if has_remaining {
-            frac += BigInt::one();
+        // Step 4: Combine integer and fractional parts, then apply ceiling operation.
+        // The result is stored as a fixed-point number: (integer_part << binary_digits) + fractional_bits
+        // This represents integer_part + fractional_bits / (2^binary_digits)
+        let mut numerator = (integer_part << binary_digits) + fractional_bits;
+
+        // If there's any leftover mass in normalized after extracting all digits,
+        // we need to round up (ceiling operation). This happens when normalized > 1.
+        if normalized > one {
+            numerator += &one_int;
         }
 
-        // Combine: int_part.frac in binary = (int_part * 2^binary_digits + frac) / 2^binary_digits
-        let result_numer = (BigInt::from(int_part) << binary_digits) + frac;
-        let result_denom = BigInt::one() << binary_digits;
-
-        BigRational::new(result_numer, result_denom)
+        let denominator = BigInt::one() << binary_digits;
+        BigRational::new(numerator, denominator)
     }
 }
 
@@ -241,19 +253,15 @@ mod tests {
         // Test fractional powers of 2: log2(1/2) = -1, log2(1/4) = -2
         let value = BigRational::from_frac_u64(1, 2); // 2^(-1)
         let result = value.log2_ceil(4);
-        println!("log2_ceil(1/2, 4) = {}", result);
         assert_eq!(result, BigRational::from_integer(BigInt::from(-1)));
 
         let value = BigRational::from_frac_u64(1, 4); // 2^(-2)
         let result = value.log2_ceil(4);
-        println!("log2_ceil(1/4, 4) = {}", result);
         assert_eq!(result, BigRational::from_integer(BigInt::from(-2)));
 
         let value = BigRational::from_frac_u64(3, 8); // 3/8 = 3 * 2^(-3)
         let result = value.log2_ceil(4);
-        println!("log2_ceil(3/8, 4) = {}", result);
-        // For now just check it's negative
-        assert!(result < BigRational::from_integer(BigInt::from(0)));
+        assert_eq!(result, BigRational::new(BigInt::from(-11), BigInt::from(8)));
     }
 
     #[test]
@@ -261,19 +269,17 @@ mod tests {
         // log2(3) ≈ 1.585, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(3);
         let result = value.log2_ceil(0);
-        assert_eq!(result, BigRational::from_u64(0)); // The algorithm currently returns 0
+        assert_eq!(result, BigRational::from_u64(2));
 
         // log2(5) ≈ 2.322, with binary_digits=0 we get integer part
         let value = BigRational::from_u64(5);
         let result = value.log2_ceil(0);
-        assert_eq!(result, BigRational::from_u64(1)); // The algorithm currently returns 1
+        assert_eq!(result, BigRational::from_u64(3));
 
         // With 4 bits precision, algorithm should provide fractional results
         let value = BigRational::from_u64(3);
         let result = value.log2_ceil(4);
-        // The actual result appears to be floor(log2(3)) = 1, not ceiling
-        // This suggests the algorithm implementation needs review
-        assert_eq!(result, BigRational::from_u64(1));
+        assert_eq!(result, BigRational::from_frac_u64(13, 8));
     }
 
     #[test]
@@ -281,15 +287,11 @@ mod tests {
         // Test with some basic fractional values
         let value = BigRational::from_frac_u64(3, 2);
         let result = value.log2_ceil(4);
-        // For now just verify it doesn't panic and gives reasonable result
-        assert!(result >= BigRational::from_integer(BigInt::from(-1)));
-        assert!(result <= BigRational::from_integer(BigInt::from(1)));
+        assert_eq!(result, BigRational::from_frac_u64(5, 8));
 
         let value = BigRational::from_frac_u64(7, 4);
         let result = value.log2_ceil(4);
-        // For now just verify it doesn't panic
-        assert!(result >= BigRational::from_integer(BigInt::from(0)));
-        assert!(result <= BigRational::from_integer(BigInt::from(2)));
+        assert_eq!(result, BigRational::from_frac_u64(13, 16));
     }
 
     #[test]
@@ -302,15 +304,13 @@ mod tests {
         let result4 = value.log2_ceil(4);
         let result8 = value.log2_ceil(8);
 
-        // All should be reasonable approximations of log2(3) ≈ 1.585
-        assert!(result0 >= BigRational::from_integer(BigInt::from(0)));
-        assert!(result0 <= BigRational::from_integer(BigInt::from(2)));
-        assert!(result1 >= BigRational::from_integer(BigInt::from(1)));
-        assert!(result1 <= BigRational::from_integer(BigInt::from(2)));
-        assert!(result4 >= BigRational::from_integer(BigInt::from(1)));
-        assert!(result4 <= BigRational::from_integer(BigInt::from(2)));
-        assert!(result8 >= BigRational::from_integer(BigInt::from(1)));
-        assert!(result8 <= BigRational::from_integer(BigInt::from(2)));
+        assert_eq!(result0, BigRational::from_u64(2));
+        assert_eq!(result1, BigRational::from_u64(2));
+        assert_eq!(result4, BigRational::from_frac_u64(13, 8));
+        assert_eq!(
+            result8,
+            BigRational::new(BigInt::from(203), BigInt::from(128))
+        );
     }
 
     #[test]
@@ -318,9 +318,7 @@ mod tests {
         // Test with larger numbers
         let value = BigRational::from_u64(1000);
         let result = value.log2_ceil(4);
-        // log2(1000) ≈ 9.966, should be close to 10
-        assert!(result >= BigRational::from_integer(BigInt::from(9)));
-        assert!(result <= BigRational::from_integer(BigInt::from(10)));
+        assert_eq!(result, BigRational::from_u64(10));
     }
 
     #[test]
@@ -328,8 +326,9 @@ mod tests {
         // Test with very small fractions
         let value = BigRational::from_frac_u64(1, 1000);
         let result = value.log2_ceil(4);
-        // log2(1/1000) = -log2(1000) ≈ -9.966, should be negative
-        assert!(result < BigRational::from_integer(BigInt::from(0)));
-        assert!(result >= BigRational::from_integer(BigInt::from(-10)));
+        assert_eq!(
+            result,
+            BigRational::new(BigInt::from(-159), BigInt::from(16))
+        );
     }
 }

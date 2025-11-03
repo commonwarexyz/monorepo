@@ -69,6 +69,10 @@ impl Read for Config {
     }
 }
 
+/// Codec configuration tuple.
+///
+/// The first element is the **maximum** chunk size (in bytes) that any shard may contain.
+/// The second element is the encoding scheme [`Config`] specifying the number of minimum and extra shards.
 pub type Cfg = (usize, Config);
 
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.

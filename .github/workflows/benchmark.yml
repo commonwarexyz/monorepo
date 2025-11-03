@@ -52,6 +52,10 @@ jobs:
             cargo_flags: ""
             file_suffix: ""
             benchmark_name: "commonware-coding"
+          - package: commonware-utils
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Install nightly Rust toolchain
