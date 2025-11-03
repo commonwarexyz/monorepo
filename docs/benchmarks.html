@@ -432,7 +432,7 @@
             updateExpandButton();
         };
 
-        // Load benchmark data with explicit cache control
+        // Explicitly fetch latest benchmark data
         fetch('https://benchmark-data.commonware.xyz/data.js', { cache: 'no-store' })
             .then(response => response.text())
             .then(code => {
