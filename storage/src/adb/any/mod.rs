@@ -154,7 +154,7 @@ async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-    target_prune_loc: Location,
+    prune_loc: Location,
     inactivity_floor_loc: Location,
     op_count: Location,
 ) -> Result<(), Error>
@@ -163,13 +163,12 @@ where
     O: Keyed,
     H: Hasher,
 {
-    if target_prune_loc > inactivity_floor_loc {
+    if prune_loc > inactivity_floor_loc {
         return Err(Error::PruneBeyondInactivityFloor(
-            target_prune_loc,
+            prune_loc,
             inactivity_floor_loc,
         ));
     }
-    let target_prune_pos = Position::try_from(target_prune_loc)?;
 
     if mmr.size() == 0 {
         // DB is empty, nothing to prune.
@@ -181,13 +180,13 @@ where
     // the operations between the MMR tip and the log pruning boundary.
     mmr.sync(hasher).await?;
 
-    if !log.prune(*target_prune_loc).await? {
+    if !log.prune(*prune_loc).await? {
         return Ok(());
     }
 
-    debug!(?op_count, ?target_prune_loc, "pruned inactive ops");
+    debug!(?op_count, ?prune_loc, "pruned inactive ops");
 
-    mmr.prune_to_pos(hasher, target_prune_pos)
+    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
         .await
         .map_err(Error::Mmr)
 }
@@ -231,23 +230,19 @@ where
     }
 
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns the old location of
-    /// the operation if it was active.
-    async fn move_op_if_active(
-        &mut self,
-        op: O,
-        old_loc: Location,
-    ) -> Result<Option<Location>, Error> {
+    /// inactive. If the operation was not active, then this is a no-op. Returns whether the
+    /// operation was moved.
+    async fn move_op_if_active(&mut self, op: O, old_loc: Location) -> Result<bool, Error> {
         let Some(key) = op.key() else {
-            return Ok(None); // operations without keys cannot be active
+            return Ok(false); // operations without keys cannot be active
         };
 
         // If we find a snapshot entry corresponding to the operation, we know it's active.
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
-            return Ok(None);
+            return Ok(false);
         };
         if !cursor.find(|&loc| loc == old_loc) {
-            return Ok(None);
+            return Ok(false);
         }
 
         // Update the operation's snapshot location to point to tip.
@@ -257,7 +252,7 @@ where
         // Apply the operation at tip.
         self.apply_op(op).await?;
 
-        Ok(Some(old_loc))
+        Ok(true)
     }
 
     /// Raise the inactivity floor by taking one _step_, which involves searching for the first
@@ -278,8 +273,8 @@ where
         // Search for the first active operation above the inactivity floor and move it to tip.
         //
         // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
+        let tip_loc = Location::new_unchecked(self.log.size().await);
         loop {
-            let tip_loc = Location::new_unchecked(self.log.size().await);
             assert!(
                 *inactivity_floor_loc < tip_loc,
                 "no active operations above the inactivity floor"
@@ -287,7 +282,7 @@ where
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
-            if self.move_op_if_active(op, old_loc).await?.is_some() {
+            if self.move_op_if_active(op, old_loc).await? {
                 return Ok(inactivity_floor_loc);
             }
         }
@@ -317,17 +312,14 @@ where
 
         // Move the active operation to tip.
         let op = self.log.read(*inactivity_floor_loc).await?;
-        let loc = self
-            .move_op_if_active(op, inactivity_floor_loc)
-            .await?
-            .expect("op should be active based on status bitmap");
-        status.set_bit(*loc, false);
+        assert!(
+            self.move_op_if_active(op, inactivity_floor_loc).await?,
+            "op should be active based on status bitmap"
+        );
+        status.set_bit(*inactivity_floor_loc, false);
         status.push(true);
 
-        // Advance inactivity floor above the moved operation since we know it's inactive.
-        inactivity_floor_loc += 1;
-
-        Ok(inactivity_floor_loc)
+        Ok(inactivity_floor_loc + 1)
     }
 
     /// Sync the log and process the updates to the MMR in parallel.
