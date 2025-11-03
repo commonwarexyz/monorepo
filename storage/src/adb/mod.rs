@@ -29,6 +29,7 @@ pub mod any;
 pub mod authenticated_journal;
 pub mod current;
 pub mod immutable;
+pub mod indexed_journal;
 pub mod keyless;
 pub mod operation;
 pub mod store;

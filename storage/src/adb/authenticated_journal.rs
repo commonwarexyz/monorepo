@@ -48,12 +48,12 @@ where
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
-    mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// Journal of operations.
-    log: C,
+    pub(crate) log: C,
 
-    hasher: StandardHasher<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
 impl<E, C, O, H> AuthenticatedJournal<E, C, O, H>
