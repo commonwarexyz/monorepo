@@ -9,7 +9,8 @@
 
 use crate::{
     adb::{
-        operation::{fixed::FixedSize, Keyed},
+        align_mmr_and_floored_log,
+        operation::{fixed::FixedSize, Committable, Keyed},
         Error,
     },
     journal::contiguous::fixed::{Config as JConfig, Journal},
@@ -66,7 +67,7 @@ pub struct Config<T: Translator> {
 /// operation. The number of leaves in the MMR will be equal to the number of operations in the log.
 pub(crate) async fn init_mmr_and_log<
     E: Storage + Clock + Metrics,
-    O: Keyed + FixedSize,
+    O: Keyed + Committable + FixedSize,
     H: Hasher,
     T: Translator,
 >(
@@ -99,7 +100,7 @@ pub(crate) async fn init_mmr_and_log<
     )
     .await?;
 
-    let inactivity_floor_loc = super::align_mmr_and_log(&mut mmr, &mut log, hasher).await?;
+    let inactivity_floor_loc = align_mmr_and_floored_log(&mut mmr, &mut log, hasher).await?;
 
     Ok((inactivity_floor_loc, mmr, log))
 }

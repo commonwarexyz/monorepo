@@ -1,4 +1,4 @@
-use crate::adb::operation;
+use crate::adb::operation::{self, Committable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_utils::hex;
@@ -45,6 +45,12 @@ impl<V: Codec> Write for Operation<V> {
                 metadata.write(buf);
             }
         }
+    }
+}
+
+impl<V: Codec> Committable for Operation<V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::Commit(_))
     }
 }
 

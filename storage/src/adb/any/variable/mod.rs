@@ -6,6 +6,7 @@
 
 use crate::{
     adb::{
+        align_mmr_and_floored_log,
         any::{historical_proof, prune_db},
         build_snapshot_from_log, delete_key,
         operation::variable::Operation,
@@ -148,7 +149,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         .await?;
 
         let inactivity_floor_loc =
-            super::align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
+            align_mmr_and_floored_log(&mut mmr, &mut log, &mut hasher).await?;
 
         // Build snapshot from the log
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);

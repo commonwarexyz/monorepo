@@ -2,7 +2,7 @@
 //! with a key.
 
 use crate::{
-    adb::{operation::Keyed, rewind_uncommitted, Error},
+    adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
     mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
@@ -11,66 +11,10 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub mod fixed;
 pub mod variable;
-
-/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
-/// log. Returns the inactivity floor location set by the last commit.
-///
-/// # Post-conditions
-/// - The log will either be empty, or its last operation will be a commit floor operation.
-/// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(super) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H: Hasher>(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error> {
-    // Back up over / discard any uncommitted operations in the log.
-    let inactivity_floor_loc = rewind_uncommitted(log).await?;
-    let log_size = log.size().await;
-
-    // Pop any MMR elements that are ahead of the last log commit point.
-    let mut next_mmr_leaf_num = mmr.leaves();
-    if next_mmr_leaf_num > log_size {
-        let pop_count = next_mmr_leaf_num - log_size;
-        warn!(log_size, ?pop_count, "popping uncommitted MMR operations");
-        mmr.pop(*pop_count as usize).await?;
-        next_mmr_leaf_num = Location::new_unchecked(log_size);
-    }
-
-    // If the MMR is behind, replay log operations to catch up.
-    if next_mmr_leaf_num < log_size {
-        let replay_count = log_size - *next_mmr_leaf_num;
-        warn!(
-            log_size,
-            replay_count, "MMR lags behind log, replaying log to catch up"
-        );
-        while next_mmr_leaf_num < log_size {
-            let op = log.read(*next_mmr_leaf_num).await?;
-            mmr.add_batched(hasher, &op.encode()).await?;
-            next_mmr_leaf_num += 1;
-        }
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
-    }
-
-    // At this point the MMR and log should be consistent.
-    assert_eq!(log.size().await, mmr.leaves());
-
-    // The final operation in the log (if any) should be a commit.
-    let last_op_loc = log.size().await.checked_sub(1);
-    assert!(
-        last_op_loc.is_none()
-            || log
-                .read(last_op_loc.unwrap())
-                .await?
-                .commit_floor()
-                .is_some()
-    );
-
-    Ok(inactivity_floor_loc)
-}
 
 /// Common implementation for historical_proof.
 ///

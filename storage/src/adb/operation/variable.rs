@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, Keyed},
+    adb::operation::{self, Committable, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -88,6 +88,12 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
             Self::CommitFloor(_, floor_loc) => Some(*floor_loc),
             _ => None,
         }
+    }
+}
+
+impl<K: Array, V: Codec> Committable for Operation<K, V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_, _))
     }
 }
 

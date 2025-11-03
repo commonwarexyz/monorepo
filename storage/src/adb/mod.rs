@@ -11,11 +11,14 @@
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use crate::{
-    adb::operation::Keyed,
+    adb::operation::{Committable, Keyed},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::Location,
+    mmr::{journaled::Mmr, Location, StandardHasher},
 };
+use commonware_codec::Codec;
+use commonware_cryptography::Hasher;
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -82,33 +85,104 @@ pub enum Error {
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 
-/// Walk backwards and removes uncommitted operations after the last commit. Returns the inactivity
-/// floor location after rewinding.
-pub(super) async fn rewind_uncommitted<O: Keyed>(
+/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
+/// log. Returns the size of the log after alignment.
+///
+/// # Post-conditions
+/// - The log will either be empty, or its last operation will be a commit operation.
+/// - The number of leaves in the MMR will be equal to the number of operations in the log.
+pub(super) async fn align_mmr_and_log<
+    E: Storage + Clock + Metrics,
+    O: Codec + Committable,
+    H: Hasher,
+>(
+    mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
+    hasher: &mut StandardHasher<H>,
+) -> Result<u64, Error> {
+    // Back up over / discard any uncommitted operations in the log.
+    let log_size = rewind_uncommitted(log).await?;
+
+    // Pop any MMR elements that are ahead of the last log commit point.
+    let mut next_mmr_leaf_num = mmr.leaves();
+    if next_mmr_leaf_num > log_size {
+        let pop_count = next_mmr_leaf_num - log_size;
+        warn!(log_size, ?pop_count, "popping uncommitted MMR operations");
+        mmr.pop(*pop_count as usize).await?;
+        next_mmr_leaf_num = Location::new_unchecked(log_size);
+    }
+
+    // If the MMR is behind, replay log operations to catch up.
+    if next_mmr_leaf_num < log_size {
+        let replay_count = log_size - *next_mmr_leaf_num;
+        warn!(
+            log_size,
+            replay_count, "MMR lags behind log, replaying log to catch up"
+        );
+        while next_mmr_leaf_num < log_size {
+            let op = log.read(*next_mmr_leaf_num).await?;
+            mmr.add_batched(hasher, &op.encode()).await?;
+            next_mmr_leaf_num += 1;
+        }
+        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+    }
+
+    // At this point the MMR and log should be consistent.
+    assert_eq!(log_size, mmr.leaves());
+
+    Ok(log_size)
+}
+
+/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
+/// log. Returns the inactivity floor location set by the last commit.
+///
+/// # Post-conditions
+/// - The log will either be empty, or its last operation will be a commit operation.
+/// - The number of leaves in the MMR will be equal to the number of operations in the log.
+pub(super) async fn align_mmr_and_floored_log<
+    E: Storage + Clock + Metrics,
+    O: Keyed + Committable,
+    H: Hasher,
+>(
+    mmr: &mut Mmr<E, H>,
+    log: &mut impl Contiguous<Item = O>,
+    hasher: &mut StandardHasher<H>,
 ) -> Result<Location, Error> {
+    let log_size = align_mmr_and_log(mmr, log, hasher).await?;
+    if log_size == 0 {
+        return Ok(Location::new_unchecked(0));
+    };
+    let op = log.read(log_size - 1).await?;
+
+    // The final operation in the log must be a commit wrapping the inactivity floor.
+    Ok(op
+        .commit_floor()
+        .expect("last operation should be a commit floor"))
+}
+
+/// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
+pub(super) async fn rewind_uncommitted<O: Committable>(
+    log: &mut impl Contiguous<Item = O>,
+) -> Result<u64, Error> {
     let log_size = log.size().await;
-    let mut rewind_loc = log_size;
-    let mut inactivity_floor_loc = Location::new_unchecked(0);
-    while rewind_loc > 0 {
-        let op = log.read(rewind_loc - 1).await?;
-        if let Some(loc) = op.commit_floor() {
-            inactivity_floor_loc = loc;
+    let mut rewind_size = log_size;
+    while rewind_size > 0 {
+        if log.read(rewind_size - 1).await?.is_commit() {
             break;
         }
-        rewind_loc -= 1;
+        rewind_size -= 1;
     }
-    if rewind_loc != log_size {
-        let rewound_ops = log_size - rewind_loc;
+    if rewind_size != log_size {
+        let rewound_ops = log_size - rewind_size;
         warn!(
             log_size,
             rewound_ops, "rewinding over uncommitted log operations"
         );
-        log.rewind(rewind_loc).await?;
+        log.rewind(rewind_size).await?;
         log.sync().await?;
     }
 
-    Ok(inactivity_floor_loc)
+    Ok(rewind_size)
 }
 
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes

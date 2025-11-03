@@ -85,8 +85,9 @@
 
 use crate::{
     adb::{
-        build_snapshot_from_log, delete_key, operation::variable::Operation, rewind_uncommitted,
-        update_loc, Error,
+        build_snapshot_from_log, delete_key,
+        operation::{variable::Operation, Keyed as _},
+        rewind_uncommitted, update_loc, Error,
     },
     index::{Cursor, Index as _, Unordered as Index},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -219,7 +220,7 @@ where
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log = Journal::init(
+        let mut log = Journal::<E, Operation<K, V>>::init(
             context.with_label("log"),
             JournalConfig {
                 partition: cfg.log_partition,
@@ -233,13 +234,22 @@ where
         .await?;
 
         // Rewind log to remove uncommitted operations.
-        let inactivity_floor_loc = rewind_uncommitted(&mut log).await?;
+        let log_size = rewind_uncommitted(&mut log).await?;
+        let (last_commit, inactivity_floor_loc) = if log_size > 0 {
+            let last_commit_loc = log_size - 1;
+            let floor_loc = log
+                .read(last_commit_loc)
+                .await?
+                .commit_floor()
+                .expect("last operation should be a commit floor");
+            (Some(Location::new_unchecked(last_commit_loc)), floor_loc)
+        } else {
+            (None, Location::new_unchecked(0))
+        };
 
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
         build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-
-        let last_commit = log.size().checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
             log,
