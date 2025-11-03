@@ -9,16 +9,15 @@ use commonware_cryptography::{
         dial_end, dial_start, listen_end, listen_start, Ack, Context, RecvCipher, SendCipher, Syn,
         SynAck,
     },
-    PrivateKeyExt as _, Signer,
+    Signer,
 };
 use libfuzzer_sys::fuzz_target;
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use std::ops::Range;
 
 const MAX_FRAME_BYTES: usize = 4096;
 const MAX_MESSAGE_BYTES: usize = 2048;
 const MAX_TWEAK_BYTES: usize = 128;
+const PRIVATE_KEY_SIZE: usize = 32;
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
@@ -26,14 +25,17 @@ pub struct FuzzInput {
     synack_frame: Vec<u8>,
     ack_frame: Vec<u8>,
     message: Vec<u8>,
-    dial_seed: u64,
-    listen_seed: u64,
+    dial_key_bytes: [u8; PRIVATE_KEY_SIZE],
+    listen_key_bytes: [u8; PRIVATE_KEY_SIZE],
+    dial_random_bytes: Vec<u8>,
+    listen_random_bytes: Vec<u8>,
     range_start: u64,
     range_len: u16,
     time_offset: u16,
     out_of_range: bool,
     tamper_synack: bool,
     tamper_ack: bool,
+    role_selector: bool,
     case_selector: u8,
 }
 
@@ -75,10 +77,10 @@ fn choose_time(range: &Range<u64>, span: u64, offset: u16, out_of_range: bool) -
     range.start.saturating_add((offset as u64) % span.max(1))
 }
 
-fn mutate_synack(
-    original: &SynAck<Ed25519Signature>,
-    mask: &[u8],
-) -> Option<SynAck<Ed25519Signature>> {
+fn mutate_message<T>(original: &T, mask: &[u8]) -> Option<T>
+where
+    T: Encode + Read<Cfg = ()>,
+{
     if mask.is_empty() {
         return None;
     }
@@ -87,29 +89,87 @@ fn mutate_synack(
         *byte ^= *tweak;
     }
     let mut buf = Bytes::from(encoded);
-    SynAck::<Ed25519Signature>::read_cfg(&mut buf, &()).ok()
+    T::read_cfg(&mut buf, &()).ok()
 }
 
-fn mutate_ack(original: &Ack, mask: &[u8]) -> Option<Ack> {
-    if mask.is_empty() {
-        return None;
-    }
-    let mut encoded = original.encode().to_vec();
-    for (byte, tweak) in encoded.iter_mut().zip(mask.iter().take(MAX_TWEAK_BYTES)) {
-        *byte ^= *tweak;
-    }
-    let mut buf = Bytes::from(encoded);
-    Ack::read_cfg(&mut buf, &()).ok()
+struct FuzzRng {
+    bytes: Vec<u8>,
+    index: usize,
 }
 
-fn fuzz_handshake(input: &FuzzInput, tamper_synack: bool, tamper_ack: bool) {
+impl FuzzRng {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, index: 0 }
+    }
+}
+
+impl rand::RngCore for FuzzRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for byte in dest.iter_mut() {
+            if self.index >= self.bytes.len() {
+                self.index = 0;
+            }
+            if self.bytes.is_empty() {
+                *byte = 0;
+            } else {
+                *byte = self.bytes[self.index];
+                self.index = (self.index + 1) % self.bytes.len();
+            }
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand::CryptoRng for FuzzRng {}
+
+fn private_key_from_bytes(bytes: &[u8; PRIVATE_KEY_SIZE]) -> Option<PrivateKey> {
+    use commonware_codec::ReadExt;
+    let mut buf = bytes.as_slice();
+    PrivateKey::read(&mut buf).ok()
+}
+
+fn fuzz_handshake(input: &FuzzInput) {
     let Some((range, span)) = make_range(input.range_start, input.range_len) else {
         return;
     };
-    let mut dial_rng = ChaCha8Rng::seed_from_u64(input.dial_seed);
-    let mut listen_rng = ChaCha8Rng::seed_from_u64(input.listen_seed);
-    let dial_secret = PrivateKey::from_rng(&mut dial_rng);
-    let listen_secret = PrivateKey::from_rng(&mut listen_rng);
+
+    let dial_secret = match private_key_from_bytes(&input.dial_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+    let listen_secret = match private_key_from_bytes(&input.listen_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+
+    let mut dial_rng = if input.dial_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.dial_random_bytes.clone())
+    };
+
+    let mut listen_rng = if input.listen_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.listen_random_bytes.clone())
+    };
+
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
     let dial_ctx = Context::new(
@@ -130,11 +190,8 @@ fn fuzz_handshake(input: &FuzzInput, tamper_synack: bool, tamper_ack: bool) {
         return;
     };
 
-    let synack_msg = if tamper_synack && input.tamper_synack {
-        match mutate_synack(&synack, &input.synack_frame) {
-            Some(mutated) => mutated,
-            None => synack,
-        }
+    let synack_msg = if input.tamper_synack {
+        mutate_message(&synack, &input.synack_frame).unwrap_or(synack)
     } else {
         synack
     };
@@ -143,11 +200,8 @@ fn fuzz_handshake(input: &FuzzInput, tamper_synack: bool, tamper_ack: bool) {
         return;
     };
 
-    let ack_msg = if tamper_ack && input.tamper_ack {
-        match mutate_ack(&ack, &input.ack_frame) {
-            Some(mutated) => mutated,
-            None => ack,
-        }
+    let ack_msg = if input.tamper_ack {
+        mutate_message(&ack, &input.ack_frame).unwrap_or(ack)
     } else {
         ack
     };
@@ -174,10 +228,22 @@ fn fuzz_listen_with_random_syn(input: &FuzzInput) {
     let Some((range, span)) = make_range(input.range_start, input.range_len) else {
         return;
     };
-    let mut dial_rng = ChaCha8Rng::seed_from_u64(input.dial_seed);
-    let mut listen_rng = ChaCha8Rng::seed_from_u64(input.listen_seed);
-    let dial_secret = PrivateKey::from_rng(&mut dial_rng);
-    let listen_secret = PrivateKey::from_rng(&mut listen_rng);
+
+    let dial_secret = match private_key_from_bytes(&input.dial_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+    let listen_secret = match private_key_from_bytes(&input.listen_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+
+    let mut listen_rng = if input.listen_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.listen_random_bytes.clone())
+    };
+
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
     let ctx = Context::new(current_time, range, listen_secret, dial_secret.public_key());
@@ -192,53 +258,124 @@ fn fuzz_dial_with_random_synack(input: &FuzzInput) {
     let Some((range, span)) = make_range(input.range_start, input.range_len) else {
         return;
     };
-    let mut dial_rng = ChaCha8Rng::seed_from_u64(input.dial_seed);
-    let mut listen_rng = ChaCha8Rng::seed_from_u64(input.listen_seed);
-    let dial_secret = PrivateKey::from_rng(&mut dial_rng);
-    let listen_secret = PrivateKey::from_rng(&mut listen_rng);
+
+    let dial_secret = match private_key_from_bytes(&input.dial_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+    let listen_secret = match private_key_from_bytes(&input.listen_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+
+    let mut dial_rng = if input.dial_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.dial_random_bytes.clone())
+    };
+
+    let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
+
+    let ctx = Context::new(
+        current_time,
+        range.clone(),
+        dial_secret.clone(),
+        listen_secret.public_key(),
+    );
+    let (state, _syn) = dial_start(&mut dial_rng, ctx);
+    let _ = dial_end(state, msg);
+}
+
+fn fuzz_listen_with_random_ack(input: &FuzzInput) {
+    let mut buf = Bytes::from(clamp_vec(input.ack_frame.clone(), MAX_FRAME_BYTES));
+    let Ok(ack_msg) = Ack::read_cfg(&mut buf, &()) else {
+        return;
+    };
+    let Some((range, span)) = make_range(input.range_start, input.range_len) else {
+        return;
+    };
+
+    let dial_secret = match private_key_from_bytes(&input.dial_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+    let listen_secret = match private_key_from_bytes(&input.listen_key_bytes) {
+        Some(key) => key,
+        None => return,
+    };
+
+    let mut dial_rng = if input.dial_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.dial_random_bytes.clone())
+    };
+
+    let mut listen_rng = if input.listen_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.listen_random_bytes.clone())
+    };
+
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
     let dial_ctx = Context::new(
         current_time,
-        range,
+        range.clone(),
         dial_secret.clone(),
         listen_secret.public_key(),
     );
-    let (dial_state, _) = dial_start(&mut dial_rng, dial_ctx);
-    let _ = dial_end(dial_state, msg);
+    let (_dial_state, syn) = dial_start(&mut dial_rng, dial_ctx);
+
+    let listen_ctx = Context::new(
+        current_time,
+        range.clone(),
+        listen_secret.clone(),
+        dial_secret.public_key(),
+    );
+    let Ok((listen_state, _synack)) = listen_start(&mut listen_rng, listen_ctx, syn) else {
+        return;
+    };
+
+    let _ = listen_end(listen_state, ack_msg);
 }
 
-fn fuzz_direct_ciphers(input: &FuzzInput) {
-    let mut rng = ChaCha8Rng::seed_from_u64(input.dial_seed);
+fn fuzz_cipher_exchange(input: &FuzzInput) {
+    let payload = clamp_vec(input.message.clone(), MAX_MESSAGE_BYTES);
+
+    let mut rng = if input.role_selector {
+        if input.dial_random_bytes.is_empty() {
+            FuzzRng::new(vec![0u8; 32])
+        } else {
+            FuzzRng::new(input.dial_random_bytes.clone())
+        }
+    } else if input.listen_random_bytes.is_empty() {
+        FuzzRng::new(vec![0u8; 32])
+    } else {
+        FuzzRng::new(input.listen_random_bytes.clone())
+    };
+
     let mut send = SendCipher::new(&mut rng);
     let mut recv = RecvCipher::new(&mut rng);
-    let payload = clamp_vec(input.message.clone(), MAX_MESSAGE_BYTES);
-    if let Ok(ciphertext) = send.send(&payload) {
-        let _ = recv.recv(&ciphertext);
-    }
 
-    let tweaks = clamp_vec(input.synack_frame.clone(), MAX_TWEAK_BYTES);
-    for chunk in tweaks.chunks(4) {
-        let mut data = payload.clone();
-        data.extend_from_slice(chunk);
-        if let Ok(ciphertext) = send.send(&data) {
-            let _ = recv.recv(&ciphertext);
-        } else {
-            break;
-        }
+    if let Ok(encrypted) = send.send(&payload) {
+        let _ = recv.recv(&encrypted);
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
+fn fuzz(input: FuzzInput) {
     match input.case_selector % 8 {
         0 => read_syn(&input.syn_frame),
         1 => read_synack(&input.synack_frame),
         2 => read_ack(&input.ack_frame),
-        3 => fuzz_handshake(&input, false, false),
-        4 => fuzz_handshake(&input, true, true),
-        5 => fuzz_listen_with_random_syn(&input),
-        6 => fuzz_dial_with_random_synack(&input),
-        7 => fuzz_direct_ciphers(&input),
+        3 => fuzz_handshake(&input),
+        4 => fuzz_listen_with_random_syn(&input),
+        5 => fuzz_dial_with_random_synack(&input),
+        6 => fuzz_listen_with_random_ack(&input),
+        7 => fuzz_cipher_exchange(&input),
         _ => unreachable!(),
     }
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
