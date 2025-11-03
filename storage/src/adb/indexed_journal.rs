@@ -315,11 +315,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        adb::operation::fixed::unordered::Operation,
-        index::unordered::Index,
-        journal::contiguous::fixed::Journal,
-        mmr::{journaled::Mmr, StandardHasher},
-        translator::EightCap,
+        adb::operation::fixed::unordered::Operation, index::unordered::Index,
+        journal::contiguous::fixed::Journal, translator::EightCap,
     };
     use commonware_cryptography::Sha256;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -332,47 +329,46 @@ mod tests {
     const PAGE_SIZE: usize = 1024;
     const PAGE_CACHE_SIZE: usize = 16;
 
+    fn mmr_config() -> crate::mmr::journaled::Config {
+        crate::mmr::journaled::Config {
+            journal_partition: "mmr".to_string(),
+            metadata_partition: "mmr_meta".to_string(),
+            items_per_blob: 100.try_into().unwrap(),
+            write_buffer: 1024.try_into().unwrap(),
+            thread_pool: None,
+            buffer_pool: PoolRef::new(
+                NZUsize::new(PAGE_SIZE).unwrap(),
+                NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+            ),
+        }
+    }
+
+    fn log_config() -> crate::journal::contiguous::fixed::Config {
+        crate::journal::contiguous::fixed::Config {
+            partition: "log".to_string(),
+            items_per_blob: 100.try_into().unwrap(),
+            write_buffer: 1024.try_into().unwrap(),
+            buffer_pool: PoolRef::new(
+                NZUsize::new(PAGE_SIZE).unwrap(),
+                NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
+            ),
+        }
+    }
+
     #[test]
     fn test_move_op_if_active_moves_active_operation() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-
-            // Initialize authenticated journal
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            // Initialize authenticated journal using new()
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
 
@@ -412,42 +408,15 @@ mod tests {
     fn test_move_op_if_active_returns_false_for_inactive() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
 
@@ -468,42 +437,15 @@ mod tests {
     fn test_move_op_if_active_returns_false_for_keyless_op() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
 
@@ -522,41 +464,15 @@ mod tests {
     fn test_apply_op_update() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
             let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
 
@@ -586,41 +502,15 @@ mod tests {
     fn test_apply_op_delete() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
             let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
 
@@ -656,41 +546,15 @@ mod tests {
     fn test_apply_op_commit_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
             let mut indexed_journal = IndexedJournal::new(authenticated_journal, snapshot);
 
@@ -716,42 +580,15 @@ mod tests {
     fn test_init_builds_snapshot_from_log() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
             let mut authenticated_journal =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             // Populate the log with operations
             let key1 = Sha256::fill(1u8);
@@ -776,41 +613,15 @@ mod tests {
             authenticated_journal.close().await.unwrap();
 
             // Re-initialize authenticated journal
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log: Journal<_, TestOperation> = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             // Initialize IndexedJournal which should build snapshot from log
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
@@ -843,42 +654,15 @@ mod tests {
     fn test_init_with_delete_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
             let mut authenticated_journal =
-                AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             // Create, then delete a key
             let key1 = Sha256::fill(1u8);
@@ -897,41 +681,15 @@ mod tests {
             authenticated_journal.close().await.unwrap();
 
             // Re-initialize
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = Mmr::init(
-                context.with_label("mmr"),
-                &mut hasher,
-                crate::mmr::journaled::Config {
-                    journal_partition: "mmr".to_string(),
-                    metadata_partition: "mmr_meta".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let log: Journal<_, TestOperation> = Journal::init(
-                context.with_label("log"),
-                crate::journal::contiguous::fixed::Config {
-                    partition: "log".to_string(),
-                    items_per_blob: 100.try_into().unwrap(),
-                    write_buffer: 1024.try_into().unwrap(),
-                    buffer_pool: PoolRef::new(
-                        NZUsize::new(PAGE_SIZE).unwrap(),
-                        NZUsize::new(PAGE_CACHE_SIZE).unwrap(),
-                    ),
-                },
-            )
-            .await
-            .unwrap();
-
-            let authenticated_journal = AuthenticatedJournal::new(mmr, log, hasher).await.unwrap();
+            let authenticated_journal =
+                <AuthenticatedJournal<
+                    deterministic::Context,
+                    Journal<deterministic::Context, TestOperation>,
+                    TestOperation,
+                    Sha256,
+                >>::new(context.clone(), mmr_config(), log_config())
+                .await
+                .unwrap();
 
             // Initialize IndexedJournal
             let snapshot = Index::init(context.with_label("snapshot"), EightCap);
