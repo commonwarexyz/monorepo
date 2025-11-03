@@ -42,7 +42,6 @@ pub struct Config<T: Translator, C> {
 
     /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
-
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
 
@@ -377,7 +376,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::PruneBeyondInactivityFloor] if `target_prune_loc` > inactivity floor.
+    /// Returns [Error::PruneBeyondMinRequired] if `target_prune_loc` > inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
