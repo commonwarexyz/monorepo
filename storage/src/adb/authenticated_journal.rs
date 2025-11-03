@@ -126,42 +126,6 @@ where
         Ok(())
     }
 
-    /// Sync both the log and the MMR to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Into::into)
-        )?;
-
-        Ok(())
-    }
-
-    /// Sync the log to disk and process pending MMR updates in parallel.
-    ///
-    /// This is an optimization over `sync()` that:
-    /// - Makes the log durable (via fsync)
-    /// - Updates the MMR root to reflect new operations (via merkleize)
-    /// - Defers writing MMR nodes to disk for better performance
-    ///
-    /// This is sufficient after commit operations where you need the log to be durable
-    /// and the MMR root to be up-to-date, but writing MMR nodes to disk can be deferred.
-    /// Full `sync()` can be called later when MMR persistence is needed.
-    pub async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        let mmr_fut = async {
-            self.mmr.merkleize(&mut self.hasher);
-            Ok::<(), Error>(())
-        };
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/XXXX): This syncs both the log data
-        // and metadata (e.g., offsets for variable-length journals). The original keyless implementation
-        // only synced data via `sync_data()`, deferring metadata sync for better performance. However,
-        // `sync_data()` is not part of the `Contiguous` trait interface, so we use full `sync()` here.
-        // This may have minor performance implications but ensures correctness across all journal types.
-        // Consider adding `sync_data()` to the `Contiguous` trait if this becomes a bottleneck.
-        try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
-
-        Ok(())
-    }
-
     /// Prune both the MMR and journal to the given location.
     ///
     /// # Returns
@@ -372,6 +336,16 @@ where
         let log = fixed::Journal::init(context.with_label("log"), log_cfg).await?;
         Self::align(mmr, log, hasher).await
     }
+
+    /// Sync the journal to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        try_join!(
+            self.log.sync().map_err(Error::Journal),
+            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+        )?;
+
+        Ok(())
+    }
 }
 
 // Specialized implementation for variable-length journals
@@ -398,6 +372,22 @@ where
         let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let log = variable::Journal::init(context.with_label("log"), log_cfg).await?;
         Self::align(mmr, log, hasher).await
+    }
+
+    /// Sync the journal to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        try_join!(
+            // Sync only the data journal, not the offsets journal.
+            // This is faster than `sync()` and ensure datas durability without
+            // the overhead of syncing the offsets journal. If the log is closed
+            // cleanly (i.e. with `close()`), then the offsets journal will be
+            // synced as well. Even if it's not, the data is recoverable on startup,
+            // it will just take a bit longer to replay the data.
+            self.log.sync_data().map_err(Error::Journal),
+            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+        )?;
+
+        Ok(())
     }
 }
 
@@ -929,40 +919,6 @@ mod tests {
                 count += 1;
             }
             assert_eq!(count, 5); // Should have replayed positions 5-9
-        });
-    }
-
-    #[test]
-    fn test_sync_log_and_process_updates() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (mmr, log, hasher) =
-                create_aligned_mmr_journal(context.clone(), "sync_updates").await;
-            let mut journal = AuthenticatedJournal::align(mmr, log, hasher).await.unwrap();
-
-            // Apply some operations
-            let op1 = Operation::Update(Sha256::fill(1u8), Sha256::fill(2u8));
-            let op2 = Operation::Update(Sha256::fill(3u8), Sha256::fill(4u8));
-            journal.apply_op(op1).await.unwrap();
-            journal.apply_op(op2).await.unwrap();
-
-            // Call sync_log_and_process_updates
-            journal.sync_log_and_process_updates().await.unwrap();
-
-            // After sync_log_and_process_updates:
-            // 1. Log should be synced (operations are durable)
-            // 2. MMR should be merkleized (root reflects new operations)
-            let root = journal.mmr.root(&mut journal.hasher);
-
-            // Verify we can still do full sync afterward
-            journal.sync().await.unwrap();
-
-            // Root should remain the same
-            let root_after_full_sync = journal.mmr.root(&mut journal.hasher);
-            assert_eq!(root, root_after_full_sync);
-
-            // Verify the log and MMR are in sync
-            assert_eq!(journal.op_count(), Location::new_unchecked(2));
         });
     }
 }

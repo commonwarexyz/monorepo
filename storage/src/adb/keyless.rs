@@ -167,8 +167,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let operation = Operation::Commit(metadata);
         self.log.apply_op(operation).await?;
 
-        // Sync log and process MMR updates (merkleize only, don't write MMR nodes yet)
-        self.log.sync_log_and_process_updates().await?;
+        self.log.sync().await?;
 
         debug!(size = ?self.op_count(), "committed db");
 
