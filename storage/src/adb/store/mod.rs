@@ -160,9 +160,9 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// recover the database on restart.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
 
-    /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
-    fn prune(&mut self, target_prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
@@ -395,26 +395,28 @@ where
     /// Prune historical operations that are behind the inactivity floor. This does not affect the
     /// state root.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        // Calculate the target pruning position: inactivity_floor_loc.
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
-
-        let pruning_boundary = self.oldest_retained_loc().unwrap_or(self.op_count());
-        if target_prune_loc <= pruning_boundary {
-            return Ok(());
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
         }
 
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
         // location may be less than requested.
-        self.log.prune(*target_prune_loc).await?;
+        if !self.log.prune(*prune_loc).await? {
+            return Ok(());
+        }
 
         debug!(
             log_size = ?self.op_count(),
             oldest_retained_loc = ?self.oldest_retained_loc(),
-            ?target_prune_loc,
+            ?prune_loc,
             "pruned inactive ops"
         );
 
@@ -562,8 +564,8 @@ where
         self.sync().await
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        self.prune(target_prune_loc).await
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {

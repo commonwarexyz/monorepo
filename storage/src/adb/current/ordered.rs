@@ -347,12 +347,14 @@ impl<
             .map_err(Into::into)
     }
 
-    /// Prune all operations prior to `target_prune_loc` from the db.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
     ///
     /// # Errors
     ///
-    /// Returns error if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
@@ -363,7 +365,7 @@ impl<
             )
             .await?;
 
-        self.any.prune(target_prune_loc).await
+        self.any.prune(prune_loc).await
     }
 
     /// Return the root of the db.
@@ -804,8 +806,8 @@ impl<
         self.sync().await
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        self.prune(target_prune_loc).await
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {
