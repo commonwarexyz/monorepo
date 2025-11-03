@@ -35,13 +35,6 @@ enum ImmutableOperation {
     Get {
         key_seed: u64,
     },
-    GetLoc {
-        loc: u64,
-    },
-    GetFromLoc {
-        key_seed: u64,
-        loc: u64,
-    },
     Commit {
         has_metadata: bool,
         metadata_size: usize,
@@ -155,24 +148,6 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::Get { key_seed } => {
                     let key = generate_key(&mut rng, key_seed);
                     let _ = db.get(&key).await;
-                }
-
-                ImmutableOperation::GetLoc { loc } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 && loc < op_count {
-                        let loc = Location::new(loc).unwrap();
-                        let _ = db.get_loc(loc).await;
-                    }
-                }
-
-                ImmutableOperation::GetFromLoc { key_seed, loc } => {
-                    let key = generate_key(&mut rng, key_seed);
-
-                    if !set_locations.is_empty() {
-                        let idx = (loc as usize) % set_locations.len();
-                        let (_, set_loc) = set_locations[idx];
-                        let _ = db.get_from_loc(&key, set_loc).await;
-                    }
                 }
 
                 ImmutableOperation::Commit {

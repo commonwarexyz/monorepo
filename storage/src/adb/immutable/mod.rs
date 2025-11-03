@@ -257,33 +257,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the value of the operation with location `loc` in the db.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOutOfBounds] if `loc >= op_count()`.
-    /// Returns [Error::OperationPruned] if `loc` precedes the oldest retained location.
-    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        let op_count = self.op_count();
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(loc, op_count));
-        }
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(oldest) => oldest,
-            None => self.op_count(),
-        };
-        if loc < pruning_boundary {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        let op = self.log.read(*loc).await?;
-        Ok(op.into_value())
-    }
-
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         let pruning_boundary = match self.oldest_retained_loc() {
             Some(oldest) => oldest,
             None => self.op_count(),
@@ -919,52 +896,6 @@ pub(super) mod test {
                 )
                 .await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("INFO")]
-    pub fn test_immutable_db_get_loc_out_of_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-
-            // Test getting from empty database
-            let result = db.get_loc(Location::new_unchecked(0)).await;
-            assert!(matches!(result, Err(Error::LocationOutOfBounds(loc, size))
-                    if loc == Location::new_unchecked(0) && size == Location::new_unchecked(0)));
-
-            // Add some key-value pairs
-            let k1 = Digest::from(*b"12345678901234567890123456789012");
-            let k2 = Digest::from(*b"abcdefghijklmnopqrstuvwxyz123456");
-            let v1 = vec![1u8; 16];
-            let v2 = vec![2u8; 16];
-
-            db.set(k1, v1.clone()).await.unwrap();
-            db.set(k2, v2.clone()).await.unwrap();
-            db.commit(None).await.unwrap();
-
-            // Test getting valid locations - should succeed
-            assert_eq!(
-                db.get_loc(Location::new_unchecked(0))
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                v1
-            );
-            assert_eq!(
-                db.get_loc(Location::new_unchecked(1))
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                v2
-            );
-
-            // Test getting out of bounds location (op_count is 3: k1, k2, commit)
-            let result = db.get_loc(Location::new_unchecked(3)).await;
-            assert!(matches!(result, Err(Error::LocationOutOfBounds(loc, size))
-                    if loc == Location::new_unchecked(3) && size == Location::new_unchecked(3)));
 
             db.destroy().await.unwrap();
         });
