@@ -144,20 +144,20 @@ type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
-    Unauthenticated,
+    Store,
     Any,
 }
 
 impl Variant {
     pub fn name(&self) -> &'static str {
         match self {
-            Variant::Unauthenticated => "unauthenticated",
+            Variant::Store => "adb::store",
             Variant::Any => "any",
         }
     }
 }
 
-const VARIANTS: [Variant; 2] = [Variant::Unauthenticated, Variant::Any];
+const VARIANTS: [Variant; 2] = [Variant::Store, Variant::Any];
 
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_variable_init(c: &mut Criterion) {
@@ -168,7 +168,7 @@ fn bench_variable_init(c: &mut Criterion) {
             for variant in VARIANTS {
                 match variant {
                     Variant::Any => gen_random_any(cfg.clone(), elements, operations),
-                    Variant::Unauthenticated => gen_random_store(cfg.clone(), elements, operations),
+                    Variant::Store => gen_random_store(cfg.clone(), elements, operations),
                 }
                 c.bench_function(
                     &format!(
@@ -188,7 +188,7 @@ fn bench_variable_init(c: &mut Criterion) {
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
-                                    Variant::Unauthenticated => {
+                                    Variant::Store => {
                                         let db = StoreDb::init(ctx.clone(), store_cfg.clone())
                                             .await
                                             .unwrap();
