@@ -62,8 +62,8 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// An authenticatable key-value database based on an MMR that does not allow updates or deletions
-/// of previously set keys.
+/// An authenticated database (ADB) that only supports adding new keyed values (no updates or
+/// deletions), where values can have varying sizes.
 pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -133,7 +133,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        // Get the start location from the log.
+
+        // Get the start of the log.
         let start_loc = match log.oldest_retained_pos() {
             Some(pos) => Location::new_unchecked(pos),
             None => Location::new_unchecked(log.size()),
@@ -186,7 +187,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             cfg.db_config.translator.clone(),
         );
 
-        // Get the start location from the log.
+        // Get the start of the log.
         let start_loc = match cfg.log.oldest_retained_pos() {
             Some(pos) => Location::new_unchecked(pos),
             None => Location::new_unchecked(log_size),
