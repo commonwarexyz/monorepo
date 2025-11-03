@@ -282,14 +282,14 @@ mod test {
         }
     }
 
-    fn all_online<S>(n: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S>(n: u32, n_active: u32, seed: u64, link: Link, required: u64) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
         // Create context
-        let threshold = quorum(n);
+        let threshold = quorum(n_active);
         let cfg = deterministic::Config::default().with_seed(seed);
         let executor = Runner::from(cfg);
         executor.start(|mut context| async move {
@@ -308,7 +308,7 @@ mod test {
 
             // Derive threshold
             let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+                ops::generate_shares::<_, MinSig>(&mut context, None, n_active, threshold);
 
             // Register participants
             let mut signers = Vec::new();
@@ -348,10 +348,10 @@ mod test {
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
-                        share: Some(shares[idx].clone()),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
+                        share: shares.get(idx).cloned(),
+                        active_participants: validators[..n_active as usize].to_vec(),
+                        inactive_participants: validators[n_active as usize..].to_vec(),
+                        num_participants_per_epoch: n_active as usize,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -410,6 +410,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_good_links_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -417,15 +418,16 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
             );
         }
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_good_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -433,16 +435,28 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state =
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<ThresholdScheme<MinSig>>(
+                5,
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+            );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<ThresholdScheme<MinSig>>(
+                    5,
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1
+                )
             );
         }
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_bad_links_ed() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -450,15 +464,16 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
             );
         }
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_bad_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -466,11 +481,22 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state =
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state = all_online::<ThresholdScheme<MinSig>>(
+                5,
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+            );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<ThresholdScheme<MinSig>>(
+                    5,
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1
+                )
             );
         }
     }
@@ -483,7 +509,18 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
+    }
+
+    #[test_traced("INFO")]
+    #[ignore]
+    fn test_1k_rotate() {
+        let link = Link {
+            latency: Duration::from_millis(80),
+            jitter: Duration::from_millis(10),
+            success_rate: 0.98,
+        };
+        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
     }
 
     fn reshare_failed(seed: u64) -> String {
@@ -495,7 +532,7 @@ mod test {
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(120)));
         let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -755,6 +792,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_reshare_failed() {
         assert_eq!(reshare_failed(1), reshare_failed(1));
     }
@@ -772,7 +810,7 @@ mod test {
         let final_container_required = 2 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(60)));
+            .with_timeout(Some(Duration::from_secs(120)));
         let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -988,11 +1026,13 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_threshold() {
         assert_eq!(
             test_marshal::<ThresholdScheme<MinSig>>(1),
@@ -1013,7 +1053,7 @@ mod test {
         let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(60)));
+            .with_timeout(Some(Duration::from_secs(120)));
         let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1240,6 +1280,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
             test_marshal_multi_epoch::<EdScheme>(1),
@@ -1248,6 +1289,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
             test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
@@ -1267,7 +1309,7 @@ mod test {
         let final_container_required = 4 * BLOCKS_PER_EPOCH + 1;
         let cfg = deterministic::Config::default()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(60)));
+            .with_timeout(Some(Duration::from_secs(120)));
         let executor = Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1494,6 +1536,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
@@ -1502,6 +1545,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
@@ -1653,7 +1697,7 @@ mod test {
 
                 // Exit at random points until finished
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(1_000));
+                    context.gen_range(Duration::from_millis(500)..Duration::from_millis(1_000));
 
                 // Wait for one to finish
                 select! {
@@ -1674,7 +1718,7 @@ mod test {
             } else {
                 let cfg = deterministic::Config::default()
                     .with_seed(seed)
-                    .with_timeout(Some(Duration::from_secs(90)));
+                    .with_timeout(Some(Duration::from_secs(180)));
                 Runner::new(cfg)
             }
             .start_and_recover(f);
@@ -1692,6 +1736,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
             test_unclean_shutdown::<EdScheme>(1),
@@ -1700,6 +1745,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    #[ignore]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),

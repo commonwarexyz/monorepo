@@ -247,16 +247,12 @@ impl<V: Variant> Seed<V> {
 }
 
 impl<V: Variant> Epochable for Seed<V> {
-    type Epoch = Epoch;
-
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
 impl<V: Variant> Viewable for Seed<V> {
-    type View = View;
-
     fn view(&self) -> View {
         self.round.view()
     }

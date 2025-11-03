@@ -31,6 +31,7 @@ prometheus-client = { workspace = true }
 governor = { workspace = true }
 rand_distr = { workspace = true }
 tracing = { workspace = true }
+pin-project = { workspace = true }
 
 [dev-dependencies]
 commonware-resolver = { workspace = true, features = ["mocks"] }

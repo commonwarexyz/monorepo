@@ -79,3 +79,4 @@ jobs:
           gh-pages-branch: main
           benchmark-data-dir-path: 'docs'
           auto-push: true
+          max-items-in-chart: 60

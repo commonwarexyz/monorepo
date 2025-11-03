@@ -10,7 +10,14 @@ use commonware_cryptography::Digest;
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt,
+    future::BoxFuture,
+    stream::{FuturesOrdered, Stream},
+    FutureExt, SinkExt,
+};
+use pin_project::pin_project;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
 };
 use tracing::error;
 
@@ -238,6 +245,20 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         rx
     }
 
+    /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
+    ///
+    /// If the starting block is not found, `None` is returned.
+    pub async fn ancestry(
+        &mut self,
+        (start_round, start_commitment): (Option<Round>, B::Commitment),
+    ) -> Option<AncestorStream<S, B>> {
+        self.subscribe(start_round, start_commitment)
+            .await
+            .await
+            .ok()
+            .map(|block| AncestorStream::new(self.clone(), [block]))
+    }
+
     /// Broadcast indicates that a block should be sent to all peers.
     pub async fn broadcast(&mut self, block: B) {
         if self
@@ -277,6 +298,110 @@ impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
         };
         if self.sender.send(message).await.is_err() {
             error!("failed to report activity to actor: receiver dropped");
+        }
+    }
+}
+
+/// Returns a boxed subscription future for a block.
+#[inline]
+fn subscribe_block_future<S: Scheme, B: Block>(
+    mut marshal: Mailbox<S, B>,
+    commitment: B::Commitment,
+) -> BoxFuture<'static, Option<B>> {
+    async move {
+        let receiver = marshal.subscribe(None, commitment).await;
+        receiver.await.ok()
+    }
+    .boxed()
+}
+
+/// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
+///
+/// TODO(clabby): Once marshal can also yield the genesis block, this stream should end
+/// at block height 0 rather than 1.
+#[pin_project]
+pub struct AncestorStream<S: Scheme, B: Block> {
+    marshal: Mailbox<S, B>,
+    buffered: Vec<B>,
+    #[pin]
+    pending: FuturesOrdered<BoxFuture<'static, Option<B>>>,
+}
+
+impl<S: Scheme, B: Block> AncestorStream<S, B> {
+    /// Creates a new [AncestorStream] starting from the given ancestry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the initial blocks are not contiguous in height.
+    pub(crate) fn new(marshal: Mailbox<S, B>, initial: impl IntoIterator<Item = B>) -> Self {
+        let mut buffered = initial.into_iter().collect::<Vec<B>>();
+        buffered.sort_by_key(Block::height);
+
+        // Check that the initial blocks are contiguous in height.
+        buffered.windows(2).for_each(|window| {
+            assert_eq!(
+                window[0].height() + 1,
+                window[1].height(),
+                "initial blocks must be contiguous in height"
+            );
+        });
+
+        Self {
+            marshal,
+            buffered,
+            pending: FuturesOrdered::new(),
+        }
+    }
+}
+
+impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
+    type Item = B;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Because marshal cannot currently yield the genesis block, we stop at height 1.
+        const END_BOUND: u64 = 1;
+
+        let mut this = self.project();
+
+        // If a result has been buffered, return it and queue the parent fetch if needed.
+        if let Some(block) = this.buffered.pop() {
+            let height = block.height();
+            let should_fetch_parent = height > END_BOUND && this.buffered.is_empty();
+            if should_fetch_parent {
+                let parent_commitment = block.parent();
+                let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
+                this.pending.push_back(future);
+
+                // Explicitly poll the pending futures to kick off the fetch. If it's already ready,
+                // buffer it for the next poll.
+                if let Poll::Ready(Some(Some(block))) = this.pending.as_mut().poll_next(cx) {
+                    this.buffered.push(block);
+                }
+            }
+
+            return Poll::Ready(Some(block));
+        }
+
+        match this.pending.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) | Poll::Ready(Some(None)) => Poll::Ready(None),
+            Poll::Ready(Some(Some(block))) => {
+                let height = block.height();
+                let should_fetch_parent = height > END_BOUND;
+                if should_fetch_parent {
+                    let parent_commitment = block.parent();
+                    let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
+                    this.pending.push_back(future);
+
+                    // Explicitly poll the pending futures to kick off the fetch. If it's already ready,
+                    // buffer it for the next poll.
+                    if let Poll::Ready(Some(Some(block))) = this.pending.as_mut().poll_next(cx) {
+                        this.buffered.push(block);
+                    }
+                }
+
+                Poll::Ready(Some(block))
+            }
         }
     }
 }

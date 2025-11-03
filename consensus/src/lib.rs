@@ -19,25 +19,20 @@ pub mod simplex;
 pub mod types;
 pub mod utils;
 
+use types::{Epoch, View};
+
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
 pub trait Epochable {
-    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
-    /// validators is constant.
-    type Epoch;
-
     /// Returns the epoch associated with this object.
-    fn epoch(&self) -> Self::Epoch;
+    fn epoch(&self) -> Epoch;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
-    /// View is the type used to indicate the in-progress consensus decision.
-    type View;
-
     /// Returns the view associated with this object.
-    fn view(&self) -> Self::View;
+    fn view(&self) -> View;
 }
 
 /// Block is the interface for a block in the blockchain.
@@ -56,7 +51,11 @@ cfg_if::cfg_if! {
         use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+        use commonware_runtime::{Spawner, Metrics, Clock};
+        use rand::Rng;
+        use crate::{marshal::ingress::mailbox::AncestorStream, simplex::signing_scheme::Scheme};
 
+        pub mod application;
         pub mod marshal;
         mod reporter;
         pub use reporter::*;
@@ -73,13 +72,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context: Epochable;
+            type Context;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -100,6 +99,53 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
+
+        /// Application is a minimal interface for standard implementations that operate over a stream
+        /// of epoched blocks.
+        pub trait Application<E>: Clone + Send + 'static
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// The signing scheme used by the application.
+            type SigningScheme: Scheme;
+
+            /// Context is metadata provided by the consensus engine associated with a given payload.
+            ///
+            /// This often includes things like the proposer, view number, the height, or the epoch.
+            type Context: Epochable;
+
+            /// The block type produced by the application's builder.
+            type Block: Block;
+
+            /// Payload used to initialize the consensus engine in the first epoch.
+            fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+            /// Build a new block on top of the provided parent ancestry. If the build job fails,
+            /// the implementor should return [None].
+            fn propose(
+                &mut self,
+                context: (E, Self::Context),
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> impl Future<Output = Option<Self::Block>> + Send;
+        }
+
+        /// An extension of [Application] that provides the ability to implementations to verify blocks.
+        ///
+        /// Some [Application]s may not require this functionality. When employing
+        /// erasure coding, for example, verification only serves to verify the integrity of the
+        /// received shard relative to the consensus commitment, and can therefore be
+        /// hidden from the application.
+        pub trait VerifyingApplication<E>: Application<E>
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// Verify a block produced by the application's proposer, relative to its ancestry.
+            fn verify(
+                &mut self,
+                context: E,
+                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> impl Future<Output = bool> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.

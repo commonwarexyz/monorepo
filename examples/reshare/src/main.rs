@@ -21,7 +21,7 @@ mod validator;
 ///
 /// Production systems should use a much larger value, as safety in the DKG/reshare depends on
 /// synchrony. All players must be online for a small duration during this window.
-pub const BLOCKS_PER_EPOCH: u64 = 100;
+pub const BLOCKS_PER_EPOCH: u64 = 200;
 
 /// Reshare example CLI.
 #[derive(Parser)]
