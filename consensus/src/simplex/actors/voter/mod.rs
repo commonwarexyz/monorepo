@@ -1294,6 +1294,23 @@ mod tests {
                     "certificate for proposal B should be recorded"
                 );
             }
+
+            // Verify that the batcher received a `DropView` message
+            // This should have been sent when the certificate overrode the local proposal
+            let mut found_drop_view = false;
+            while let Ok(Some(message)) = batcher_receiver.try_next() {
+                if let batcher::Message::DropView { view: dropped_view } = message {
+                    assert_eq!(dropped_view, view, "batcher should drop view {}", view);
+                    found_drop_view = true;
+                    break;
+                }
+            }
+
+            assert!(
+                found_drop_view,
+                "batcher should have received `DropView` message for view {}",
+                view
+            );
         });
     }
 

@@ -506,6 +506,20 @@ impl<
                                 .await;
                             self.added.inc();
                         }
+                        Some(Message::DropView { view }) => {
+                            // If the view isn't interesting, we can skip
+                            if !interesting(
+                                self.activity_timeout,
+                                finalized,
+                                current,
+                                view,
+                                false,
+                            ) {
+                                continue;
+                            }
+
+                            work.remove(&view);
+                        }
                         None => {
                             break;
                         }
