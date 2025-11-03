@@ -21,6 +21,10 @@ pre-pr: lint test-docs test
 fix-fmt nightly_version='+nightly':
     cargo {{ nightly_version }} fmt --all
 
+# Fixes the formatting of the `Cargo.toml` files in the workspace
+fix-toml-fmt:
+   find . -name Cargo.toml -type f -print0 | xargs -0 -n1 ./.github/scripts/lint_cargo_toml.py
+
 # Check the formatting of the workspace
 check-fmt nightly_version='+nightly':
     cargo {{ nightly_version }} fmt --all -- --check

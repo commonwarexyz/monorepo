@@ -14,31 +14,31 @@ documentation = "https://docs.rs/commonware-cryptography"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-thiserror = { workspace = true }
-rand = { workspace = true }
-rand_core = { workspace = true }
-sha2 = { workspace = true }
 blake3 = { workspace = true, features = ["zeroize"] }
-rayon = { workspace = true, optional = true }
-zeroize = { workspace = true, features = ["zeroize_derive"] }
-ed25519-consensus = { version = "2.1.0", default-features = false }
 blst = { workspace = true, features = ["no-threads"] }
-p256 = { workspace = true, features = ["ecdsa"] }
-rand_chacha = { workspace = true }
-cfg-if = { workspace = true }
-x25519-dalek = { workspace = true, features = ["zeroize"] }
+bytes.workspace = true
+cfg-if.workspace = true
 chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
+commonware-codec.workspace = true
+commonware-utils.workspace = true
+ed25519-consensus = { version = "2.1.0", default-features = false }
+p256 = { workspace = true, features = ["ecdsa"] }
+rand.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
+rayon = { workspace = true, optional = true }
+sha2.workspace = true
+thiserror.workspace = true
+x25519-dalek = { workspace = true, features = ["zeroize"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 
-# Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+# Enable "js" feature when WASM is target
 version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion.workspace = true
 
 [lib]
 bench = false

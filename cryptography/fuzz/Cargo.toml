@@ -9,17 +9,17 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+blake3.workspace = true
+blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
-arbitrary = { workspace = true, features = ["derive"] }
-blst = { workspace = true, features = ["no-threads"] }
-libfuzzer-sys = { workspace = true }
-p256 = { workspace = true, features = ["ecdsa"] }
-sha2 = { workspace = true }
 ed25519-zebra = "4.0.3"
-rand = { workspace = true }
-blake3 = { workspace = true }
-zeroize = { workspace = true }
+libfuzzer-sys.workspace = true
+p256 = { workspace = true, features = ["ecdsa"] }
+rand.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
 
 [[bin]]
 name = "bls12381_decode"

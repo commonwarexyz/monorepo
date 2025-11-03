@@ -11,29 +11,29 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
 documentation = "https://docs.rs/commonware-resolver"
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-stream = { workspace = true }
-commonware-utils = { workspace = true }
-bimap = { workspace = true }
-bytes = { workspace = true }
-rand = { workspace = true }
-futures = { workspace = true }
-tracing = { workspace = true }
-governor = { workspace = true }
-prometheus-client = { workspace = true }
-thiserror = { workspace = true }
+bimap.workspace = true
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
 commonware-resolver = { path = ".", features = ["mocks"] }
+tracing-subscriber.workspace = true
 
+[package.metadata.cargo-udeps.ignore]
 # Tell cargo-udeps to ignore the use of commonware-resolver in [dev-dependencies],
 # which we use to enable the mocks feature in tests
-[package.metadata.cargo-udeps.ignore]
 development = ["commonware-resolver"]
 
 [lib]
