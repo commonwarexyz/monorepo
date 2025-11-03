@@ -2,7 +2,7 @@
 //! with a key.
 
 use crate::{
-    adb::{operation::Keyed, Error},
+    adb::{operation::Keyed, rewind_uncommitted, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
     mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
@@ -28,45 +28,24 @@ pub(super) async fn align_mmr_and_log<E: Storage + Clock + Metrics, O: Keyed, H:
     hasher: &mut StandardHasher<H>,
 ) -> Result<Location, Error> {
     // Back up over / discard any uncommitted operations in the log.
-    let mut log_size: Location = log.size().await.into();
-    let mut rewind_loc = log_size;
-    let mut inactivity_floor_loc = Location::new_unchecked(0);
-    while rewind_loc > 0 {
-        let op = log.read(*rewind_loc - 1).await?;
-        if let Some(loc) = op.commit_floor() {
-            inactivity_floor_loc = loc;
-            break;
-        }
-        rewind_loc -= 1;
-    }
-    if rewind_loc != log_size {
-        let op_count = log_size - rewind_loc;
-        warn!(
-            ?log_size,
-            ?op_count,
-            "rewinding over uncommitted log operations"
-        );
-        log.rewind(*rewind_loc).await?;
-        log.sync().await?;
-        log_size = rewind_loc;
-    }
+    let inactivity_floor_loc = rewind_uncommitted(log).await?;
+    let log_size = log.size().await;
 
     // Pop any MMR elements that are ahead of the last log commit point.
     let mut next_mmr_leaf_num = mmr.leaves();
     if next_mmr_leaf_num > log_size {
         let pop_count = next_mmr_leaf_num - log_size;
-        warn!(?log_size, ?pop_count, "popping uncommitted MMR operations");
+        warn!(log_size, ?pop_count, "popping uncommitted MMR operations");
         mmr.pop(*pop_count as usize).await?;
-        next_mmr_leaf_num = log_size;
+        next_mmr_leaf_num = Location::new_unchecked(log_size);
     }
 
     // If the MMR is behind, replay log operations to catch up.
     if next_mmr_leaf_num < log_size {
-        let replay_count = log_size - next_mmr_leaf_num;
+        let replay_count = log_size - *next_mmr_leaf_num;
         warn!(
-            ?log_size,
-            ?replay_count,
-            "MMR lags behind log, replaying log to catch up"
+            log_size,
+            replay_count, "MMR lags behind log, replaying log to catch up"
         );
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;

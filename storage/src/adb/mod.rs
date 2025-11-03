@@ -84,6 +84,35 @@ pub enum Error {
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 
+/// Walk backwards and removes uncommitted operations after the last commit. Returns the inactivity
+/// floor location after rewinding.
+pub(super) async fn rewind_uncommitted<O: Keyed>(
+    log: &mut impl Contiguous<Item = O>,
+) -> Result<Location, Error> {
+    let log_size = log.size().await;
+    let mut rewind_loc = log_size;
+    let mut inactivity_floor_loc = Location::new_unchecked(0);
+    while rewind_loc > 0 {
+        let op = log.read(rewind_loc - 1).await?;
+        if let Some(loc) = op.commit_floor() {
+            inactivity_floor_loc = loc;
+            break;
+        }
+        rewind_loc -= 1;
+    }
+    if rewind_loc != log_size {
+        let rewound_ops = log_size - rewind_loc;
+        warn!(
+            log_size,
+            rewound_ops, "rewinding over uncommitted log operations"
+        );
+        log.rewind(rewind_loc).await?;
+        log.sync().await?;
+    }
+
+    Ok(inactivity_floor_loc)
+}
+
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
