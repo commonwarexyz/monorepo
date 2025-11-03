@@ -196,8 +196,8 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
-    /// Sync the log and process the updates to the MMR in parallel.
-    async fn sync_and_process_updates(&mut self) -> Result<(), Error> {
+    /// Sync only the log and process the updates to the MMR in parallel.
+    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
         let mmr_fut = async {
             self.mmr.merkleize(self.hasher);
             Ok::<(), Error>(())

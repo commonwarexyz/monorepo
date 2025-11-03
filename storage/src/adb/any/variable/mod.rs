@@ -42,7 +42,6 @@ pub struct Config<T: Translator, C> {
 
     /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
-
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
 
@@ -344,7 +343,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .await?;
 
         // Sync the log and process the updates to the MMR.
-        shared.sync_and_process_updates().await
+        shared.sync_log_and_process_updates().await
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
