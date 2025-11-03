@@ -108,13 +108,9 @@ where
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
-        responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
+        mut requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        mut responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) {
-        // Get senders and receivers
-        let (mut req_tx, mut req_rx) = (requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = (responses.0, responses.1);
-
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         loop {
@@ -132,7 +128,7 @@ where
                                 });
 
                                 // Send the request to recipients
-                                match req_tx.send(
+                                match requests.0.send(
                                     recipients,
                                     request,
                                     self.priority_request
@@ -166,7 +162,7 @@ where
                     self.responses.inc();
 
                     // Send the response
-                    let _ = res_tx.send(
+                    let _ = responses.0.send(
                         Recipients::One(peer),
                         reply,
                         self.priority_response
@@ -174,7 +170,7 @@ where
                 },
 
                 // Request from an originator
-                message = req_rx.recv() => {
+                message = requests.1.recv() => {
                     self.requests.inc();
 
                     // Error handling
@@ -195,7 +191,7 @@ where
                 },
 
                 // Response from a handler
-                response = res_rx.recv() => {
+                response = responses.1.recv() => {
                     // Error handling
                     let (peer, msg) = match response {
                         Ok(r) => r,

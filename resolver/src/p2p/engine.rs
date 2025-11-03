@@ -143,12 +143,9 @@ impl<
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
+    async fn run(mut self, mut network: (NetS, NetR)) {
         let mut shutdown = self.context.stopped();
         let peer_set_subscription = &mut self.manager.subscribe().await;
-
-        // Get sender and receiver
-        let (mut sender, mut receiver) = network;
 
         loop {
             // Update metrics
@@ -217,7 +214,7 @@ impl<
 
                             // Record fetch start time
                             self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.fetch(&mut sender, key, true).await;
+                            self.fetcher.fetch(&mut network.0, key, true).await;
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -270,11 +267,11 @@ impl<
                     }
 
                     // Send response to peer
-                    self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
+                    self.handle_serve(&mut network.0, peer, id, result, self.priority_responses).await;
                 },
 
                 // Handle network messages
-                msg = receiver.recv() => {
+                msg = network.1.recv() => {
                     // Break if the receiver is closed
                     let (peer, msg) = match msg {
                         Ok(msg) => msg,
@@ -287,8 +284,8 @@ impl<
                     // Process the message
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Response(response) => self.handle_network_response(&mut network.0, peer, msg.id, response).await,
+                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut network.0, peer, msg.id).await,
                     };
                 },
 
@@ -297,7 +294,7 @@ impl<
                     let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
                     self.metrics.fetch.inc(Status::Failure);
-                    self.fetcher.fetch(&mut sender, key, false).await;
+                    self.fetcher.fetch(&mut network.0, key, false).await;
                 },
 
                 // Handle active deadline
@@ -305,7 +302,7 @@ impl<
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
                         self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.fetch(&mut sender, key, false).await;
+                        self.fetcher.fetch(&mut network.0, key, false).await;
                     }
                 },
             }
