@@ -210,13 +210,12 @@ mod tests {
 
     #[test]
     fn test_myself_initial_state() {
-        let socket = test_socket();
         let record = Record::myself();
         assert!(matches!(record.address, Address::Myself));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.socket(), Some(socket));
+        assert_eq!(record.socket(), None);
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(!record.deletable());
