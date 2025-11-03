@@ -18,3 +18,6 @@ std = ["thiserror/std", "bytes/std"]
 thiserror = { workspace = true }
 bytes = { workspace = true }
 paste = { workspace = true }
+
+[dev-dependencies]
+commonware-cryptography = { path = "../cryptography", version = "0.0.62" }

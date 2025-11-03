@@ -211,3 +211,9 @@ pub use codec::*;
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
+pub use types::checksummed::Checksummed;
+
+// Re-export checksummed module for access to Hasher trait
+pub mod checksummed {
+    pub use crate::types::checksummed::*;
+}
