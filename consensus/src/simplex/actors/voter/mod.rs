@@ -1089,4 +1089,220 @@ mod tests {
         replay_duplicate_votes(bls12381_multisig::<MinSig, _>);
         replay_duplicate_votes(ed25519);
     }
+
+    /// Test that certificate overrides existing conflicting proposal.
+    ///
+    /// This is a regression test for a scenario where:
+    /// 1. A node receives individual votes for proposal A and locks onto it
+    /// 2. A network certificate arrives for proposal B
+    /// 3. The certificate (2f+1 proof) should override the local lock
+    fn certificate_overrides_existing_proposal<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"certificate_override_test".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup application mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "voter_certificate_override_test".to_string(),
+                epoch: 333,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: 10,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels
+            let me = participants[0].clone();
+            let peer = participants[1].clone();
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
+                oracle.control(peer.clone()).register(1).await.unwrap();
+
+            // Link nodes
+            oracle
+                .add_link(
+                    me.clone(),
+                    peer.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    peer,
+                    me,
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start the voter
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for initial batcher notification
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Drain peer receiver
+            context
+                .with_label("peer_recovered_receiver")
+                .spawn(|_| async move {
+                    loop {
+                        peer_recovered_receiver.recv().await.unwrap();
+                    }
+                });
+
+            // Send individual votes for proposal A (simulate local lock with < quorum)
+            let view = 2;
+            let proposal_a =
+                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_a"));
+
+            // Send 2 votes (less than quorum of 4) to simulate partial progress
+            let notarize_votes_a: Vec<_> = schemes
+                .iter()
+                .take(2)
+                .map(|scheme| Notarize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
+                .collect();
+
+            for notarize in notarize_votes_a.iter().cloned() {
+                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+            }
+
+            // Give it time to process
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Send network certificate for proposal B (different proposal)
+            let proposal_b =
+                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_b"));
+            let (_, notarization_b) =
+                build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
+
+            let msg = Voter::Notarization(notarization_b.clone()).encode().into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send certificate");
+
+            // Verify the certificate was accepted (proposal B should override A)
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                resolver::Message::Notarized { notarization } => {
+                    assert_eq!(notarization.proposal, proposal_b);
+                    assert_eq!(notarization, notarization_b);
+                }
+                _ => panic!("unexpected resolver message"),
+            }
+
+            // Verify reporter shows the correct notarization
+            {
+                let notarizations = reporter.notarizations.lock().unwrap();
+                assert_eq!(
+                    notarizations.get(&view),
+                    Some(&notarization_b),
+                    "certificate for proposal B should be recorded"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_certificate_overrides_existing_proposal() {
+        certificate_overrides_existing_proposal(bls12381_threshold::<MinPk, _>);
+        certificate_overrides_existing_proposal(bls12381_threshold::<MinSig, _>);
+        certificate_overrides_existing_proposal(bls12381_multisig::<MinPk, _>);
+        certificate_overrides_existing_proposal(bls12381_multisig::<MinSig, _>);
+        certificate_overrides_existing_proposal(ed25519);
+    }
 }
