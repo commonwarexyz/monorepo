@@ -210,13 +210,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "verify_range_inclusion_and_extract_digests"
-path = "fuzz_targets/verify_range_inclusion_and_extract_digests.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "proof_store"
 path = "fuzz_targets/proof_store.rs"
 test = false
