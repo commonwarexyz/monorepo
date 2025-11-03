@@ -1,7 +1,9 @@
 ---
 title: "Optimizing Block Dispersal with Coding"
 description: "In which we describe how we use coding schemes, and ZODA to distribute blocks efficiently"
-date: "October 15th, 2025"
+date: "November 4th, 2025"
+published-time: "2025-11-04T00:00:00Z"
+modified-time: "2025-11-04T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 katex: true
