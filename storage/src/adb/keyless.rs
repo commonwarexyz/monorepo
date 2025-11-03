@@ -104,9 +104,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             let op = log.read(loc).await?;
             match op {
                 Operation::Commit(_) => break,
-                Operation::Append(_) => {
-                    first_uncommitted = Some(loc);
-                }
+                _ => first_uncommitted = Some(loc),
             }
             if loc == oldest_retained_loc {
                 break;
