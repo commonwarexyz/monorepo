@@ -11,26 +11,26 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
 documentation = "https://docs.rs/commonware-runtime"
 
 [dependencies]
-thiserror = { workspace = true }
-cfg-if = { workspace = true }
-commonware-macros = { workspace = true }
-commonware-utils = { workspace = true, features = ["std"] }
-futures = { workspace = true }
-rand = { workspace = true }
-tracing = { workspace = true }
-bytes = { workspace = true }
-sha2 = { workspace = true }
-governor = { workspace = true }
-prometheus-client = { workspace = true }
-pin-project = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
-opentelemetry = { workspace = true }
-tracing-opentelemetry = { workspace = true }
-rayon = { workspace = true }
-async-lock = { workspace = true }
-io-uring = { workspace = true, optional = true }
 libc = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+bytes = { workspace = true }
+rayon = { workspace = true }
+cfg-if = { workspace = true }
+futures = { workspace = true }
 sysinfo = { workspace = true }
+tracing = { workspace = true }
+governor = { workspace = true }
+io-uring = { workspace = true, optional = true }
+thiserror = { workspace = true }
+async-lock = { workspace = true }
+pin-project = { workspace = true, optional = true }
+opentelemetry = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
+commonware-macros = { workspace = true }
+prometheus-client = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
+tracing-opentelemetry = { workspace = true }
 
 [features]
 default = []
@@ -38,6 +38,7 @@ external = ["pin-project"]
 test-utils = []
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -45,11 +46,14 @@ version = "0.2.15"
 features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-criterion = { workspace = true, features = ["async"] }
-tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+criterion = { workspace = true, features = ["async"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
+
+# `tokio-console` feature dependencies
+console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 
 [lib]
 bench = false
