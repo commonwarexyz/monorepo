@@ -15,11 +15,8 @@ use commonware_codec::Codec;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
-use futures::{stream, Stream, StreamExt as _};
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    pin::Pin,
-};
+use futures::{future::Either, stream, Stream, StreamExt as _};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, info};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -488,7 +485,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         &self,
         start_pos: u64,
         buffer_size: NonZeroUsize,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<(u64, V), Error>> + '_>>, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + '_, Error> {
         // Validate start position is within bounds.
         if start_pos < self.oldest_retained_pos {
             return Err(Error::ItemPruned(start_pos));
@@ -499,7 +496,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // If replaying at exactly size, return empty stream
         if start_pos == self.size {
-            return Ok(Box::pin(stream::empty()));
+            return Ok(Either::Left(stream::empty()));
         }
 
         // Use offsets index to find offset to start from, calculate section from position
@@ -519,7 +516,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             })
         });
 
-        Ok(Box::pin(transformed))
+        Ok(Either::Right(transformed))
     }
 
     /// Read the item at the given position.

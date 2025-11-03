@@ -222,18 +222,21 @@ where
             .await;
 
         // Register the initial set of peers.
-        self.manager
-            .update(
-                current_epoch,
-                dealers.clone().into_iter().collect::<Ordered<_>>(),
-            )
-            .await;
-        self.manager
-            .update(
+        //
+        // Any given peer set includes:
+        // - Dealers and players for the active epoch
+        // - Players for the next epoch
+        let peers = dealers
+            .clone()
+            .into_iter()
+            .chain(players.clone())
+            .chain(Self::choose_from_all(
+                &all_participants,
+                self.num_participants_per_epoch,
                 current_epoch + 1,
-                players.clone().into_iter().collect::<Ordered<_>>(),
-            )
-            .await;
+            ))
+            .collect();
+        self.manager.update(current_epoch, peers).await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -244,7 +247,7 @@ where
             current_share,
             &mut self.signer,
             dealers,
-            players.into_iter().collect::<Ordered<_>>(),
+            players.into(),
             &mut dkg_mux,
             self.rate_limit,
             &mut self.round_metadata,
@@ -414,10 +417,22 @@ where
                             .collect::<Ordered<_>>()
                         };
 
-                        // Register the players for the next epoch + 1
-                        self.manager
-                            .update(next_epoch + 1, next_players.clone())
-                            .await;
+                        // Register the players for the next epoch
+                        //
+                        // Any given peer set includes:
+                        // - Dealers and players for the active epoch
+                        // - Players for the next epoch
+                        let next_peers = next_dealers
+                            .clone()
+                            .into_iter()
+                            .chain(next_players.clone())
+                            .chain(Self::choose_from_all(
+                                &all_participants,
+                                self.num_participants_per_epoch,
+                                next_epoch + 1,
+                            ))
+                            .collect();
+                        self.manager.update(next_epoch, next_peers).await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {

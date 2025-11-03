@@ -438,6 +438,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 reason = "not in tracked peer set",
                 "dropping message"
             );
+            if let Err(err) = reply.send(Vec::new()) {
+                error!(?err, "failed to send ack");
+            }
             return;
         }
 
@@ -867,7 +870,7 @@ impl Link {
                 data.extend_from_slice(&channel.to_be_bytes());
                 data.extend_from_slice(&message);
                 let data = data.freeze();
-                send_frame(&mut sink, &data, max_size).await.unwrap();
+                let _ = send_frame(&mut sink, &data, max_size).await;
 
                 // Bump received messages metric
                 received_messages

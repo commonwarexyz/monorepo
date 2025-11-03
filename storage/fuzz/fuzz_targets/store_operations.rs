@@ -18,37 +18,23 @@ type Value = Vec<u8>;
 
 #[derive(Debug)]
 enum Operation {
-    Update {
-        key: [u8; 32],
-        value_bytes: Vec<u8>,
-    },
-    Delete {
-        key: [u8; 32],
-    },
-    Commit {
-        metadata_bytes: Option<Vec<u8>>,
-    },
-    Get {
-        key: [u8; 32],
-    },
-    GetLoc {
-        loc_offset: u32,
-    },
+    Update { key: [u8; 32], value_bytes: Vec<u8> },
+    Delete { key: [u8; 32] },
+    Commit { metadata_bytes: Option<Vec<u8>> },
+    Get { key: [u8; 32] },
+    GetLoc { loc_offset: u32 },
     GetMetadata,
     Sync,
     Prune,
     OpCount,
     InactivityFloorLoc,
-    SimulateFailure {
-        sync_locations: bool,
-        sync_log: bool,
-    },
+    SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 12 {
+        match choice % 11 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -84,14 +70,7 @@ impl<'a> Arbitrary<'a> for Operation {
             7 => Ok(Operation::Prune),
             8 => Ok(Operation::OpCount),
             9 => Ok(Operation::InactivityFloorLoc),
-            10 | 11 => {
-                let sync_locations: bool = u.arbitrary()?;
-                let sync_log: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure {
-                    sync_locations,
-                    sync_log,
-                })
-            }
+            10 => Ok(Operation::SimulateFailure),
             _ => unreachable!(),
         }
     }
@@ -117,13 +96,11 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        log_journal_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
-        locations_journal_partition: format!("{test_name}_locations"),
-        locations_items_per_blob: NZU64!(11),
         translator: TwoCap,
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     }
@@ -196,14 +173,8 @@ fn fuzz(input: FuzzInput) {
                     let _ = store.inactivity_floor_loc();
                 }
 
-                Operation::SimulateFailure {
-                    sync_locations,
-                    sync_log,
-                } => {
-                    store
-                        .simulate_failure(*sync_locations, *sync_log)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure => {
+                    drop(store);
 
                     store = Store::<_, Key, Value, TwoCap>::init(
                         context.clone(),

@@ -125,6 +125,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
+    use futures::StreamExt;
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
     use std::{
@@ -1032,6 +1033,57 @@ mod tests {
             assert_eq!(finalization.proposal.payload, commitment);
 
             assert!(actor.get_finalization(2).await.is_none());
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_ancestry_stream() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me,
+                schemes[0].clone().into(),
+            )
+            .await;
+
+            // Finalize blocks at heights 1-5
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=5 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(0, i);
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: i - 1,
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+
+                parent = block.digest();
+            }
+
+            // Stream from latest -> height 1
+            let (_, commitment) = actor.get_info(Identifier::Latest).await.unwrap();
+            let ancestry = actor.ancestry((None, commitment)).await.unwrap();
+            let blocks = ancestry.collect::<Vec<_>>().await;
+
+            // Ensure correct delivery order: 5,4,3,2,1
+            assert_eq!(blocks.len(), 5);
+            (0..5).for_each(|i| {
+                assert_eq!(blocks[i].height(), 5 - i as u64);
+            });
         })
     }
 }

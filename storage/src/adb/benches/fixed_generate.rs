@@ -75,13 +75,11 @@ type OCurrentDb = OCurrent<
 
 fn unauth_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
-        log_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         log_codec_config: (),
         log_items_per_section: ITEMS_PER_BLOB,
-        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
-        locations_items_per_blob: ITEMS_PER_BLOB,
         translator: EightCap,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
