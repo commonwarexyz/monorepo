@@ -151,11 +151,13 @@ As the redundancy decreases, with $m \to n$, we get the same cost as before.
 We want some redundancy though, with $m \gg n$, so the total cost
 will be _higher_ than before.
 Nevertheless, it is distributed far more fairly than the naive case, so
-we should expect it to perform better.
+we should expect it to perform better (TODO: lower latency?).
 
 We had [a podcast episode](https://www.youtube.com/watch?v=0m2DgfyCi0w) with
-the folks from [Category Labs](https://www.category.xyz/) about using
+the folks from [Category Labs](https://www.category.xyz/) about their work using
 Raptor Codes for this problem.
+
+TODO: link ZODA instead
 
 ## Integrity
 
@@ -377,6 +379,5 @@ Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
 can potentially allow for verifying arbitrary properties of the data, which
 we're excited about.
 
-Our work-in-progress implementation of this scheme can be found here:
-[](https://github.com/commonwarexyz/monorepo/blob/cronokirby/ZODA/coding/src/zoda.rs).
+Our work-in-progress implementation of this scheme can be found [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
 
