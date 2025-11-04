@@ -200,8 +200,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
         self.leader = Some(leader_idx);
-
-        debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
+        trace!(round=?self.round, ?leader, ?leader_idx, "leader elected");
     }
 
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
@@ -775,35 +774,6 @@ impl<
         null_retry
     }
 
-    /// Sends a certificate to all validators.
-    async fn send_certificate<Sr: Sender>(
-        &mut self,
-        sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        certificate: Voter<S, D>,
-        is_rebroadcast: bool,
-    ) {
-        // Log the broadcast and record metrics
-        let (metric, name) = match &certificate {
-            Voter::Notarization(_) => (metrics::Outbound::notarization(), "notarization"),
-            Voter::Nullification(_) => (metrics::Outbound::nullification(), "nullification"),
-            Voter::Finalization(_) => (metrics::Outbound::finalization(), "finalization"),
-            _ => unreachable!(),
-        };
-        self.outbound_messages.get_or_create(metric).inc();
-        let debug_msg = match is_rebroadcast {
-            true => format!("rebroadcast {}", name),
-            false => format!("broadcast {}", name),
-        };
-        let view = certificate.view();
-        debug!(view = view, debug_msg);
-
-        // Send the certificate
-        sender
-            .send(Recipients::All, certificate, true)
-            .await
-            .unwrap();
-    }
-
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -829,7 +799,7 @@ impl<
             let mut did_broadcast = false;
             // If we have a previous finalization, broadcast it
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
-                self.send_certificate(recovered_sender, Voter::Finalization(finalization), true)
+                self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), true)
                     .await;
                 did_broadcast = true;
             }
@@ -840,18 +810,14 @@ impl<
                 // If we have a previous notarization, broadcast it.
                 // The payload may not be certified.
                 if let Some(notarization) = self.construct_notarization(past_view, true).await {
-                    self.send_certificate(
-                        recovered_sender,
-                        Voter::Notarization(notarization),
-                        true,
-                    )
-                    .await;
+                    self.broadcast_cert(recovered_sender, Voter::Notarization(notarization), true)
+                        .await;
                     did_broadcast = true;
                 }
 
                 // If we have a previous nullification, broadcast it
                 if let Some(nullification) = self.construct_nullification(past_view, true).await {
-                    self.send_certificate(
+                    self.broadcast_cert(
                         recovered_sender,
                         Voter::Nullification(nullification),
                         true,
@@ -866,12 +832,8 @@ impl<
                     .get(&self.last_finalized)
                     .and_then(|r| r.finalization.as_ref().cloned())
                 {
-                    self.send_certificate(
-                        recovered_sender,
-                        Voter::Finalization(finalization),
-                        true,
-                    )
-                    .await;
+                    self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), true)
+                        .await;
                     did_broadcast = true;
                 }
             }
@@ -905,15 +867,8 @@ impl<
         }
 
         // Broadcast nullify
-        self.outbound_messages
-            .get_or_create(metrics::Outbound::nullify())
-            .inc();
-        debug!(round=?nullify.round(), me = self.scheme.me(), "broadcasting nullify");
-        let msg = Voter::Nullify(nullify);
-        pending_sender
-            .send(Recipients::All, msg, true)
-            .await
-            .unwrap();
+        self.broadcast_vote(pending_sender, Voter::Nullify(nullify))
+            .await;
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
@@ -1217,21 +1172,14 @@ impl<
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
-        // Set leader if round already exists.
-        if let Some(round) = self.views.get_mut(&view) {
-            if round.leader.is_none() {
-                round.set_leader(seed);
-            }
-            return;
-        }
-
-        // Ensure view is valid
+        // Don't need to create a new view
         if view <= self.view {
-            trace!(
-                view = view,
-                our_view = self.view,
-                "skipping useless view change"
-            );
+            // Set leader if round already exists.
+            if let Some(round) = self.views.get_mut(&view) {
+                if round.leader.is_none() {
+                    round.set_leader(seed);
+                }
+            }
             return;
         }
 
@@ -1284,6 +1232,67 @@ impl<
 
         // Update metrics
         self.tracked_views.set(self.views.len() as i64);
+    }
+
+    /// Broadcasts a certificate (notarization, nullification, or finalization) to all validators.
+    ///
+    /// Also logs and updates metrics properly.
+    async fn broadcast_cert<Sr: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate: Voter<S, D>,
+        is_retry: bool,
+    ) {
+        // Log the broadcast and record metrics
+        let (metric, name) = match &certificate {
+            Voter::Notarization(_) => (metrics::Outbound::notarization(), "notarization"),
+            Voter::Nullification(_) => (metrics::Outbound::nullification(), "nullification"),
+            Voter::Finalization(_) => (metrics::Outbound::finalization(), "finalization"),
+            _ => unreachable!(),
+        };
+        self.outbound_messages.get_or_create(metric).inc();
+        let debug_msg = match is_retry {
+            true => format!("rebroadcast {}", name),
+            false => format!("broadcast {}", name),
+        };
+        debug!(view=?certificate.view(), debug_msg);
+
+        // Send the certificate
+        sender
+            .send(Recipients::All, certificate, true)
+            .await
+            .unwrap();
+    }
+
+    async fn broadcast_vote<Sp: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        vote: Voter<S, D>,
+    ) {
+        // Log the broadcast and record metrics
+        let (metric, name, proposal) = match &vote {
+            Voter::Notarize(n) => (
+                metrics::Outbound::notarize(),
+                "notarize",
+                Some(n.proposal.clone()),
+            ),
+            Voter::Nullify(_) => (metrics::Outbound::nullify(), "nullify", None),
+            Voter::Finalize(f) => (
+                metrics::Outbound::finalize(),
+                "finalize",
+                Some(f.proposal.clone()),
+            ),
+            _ => unreachable!(),
+        };
+        self.outbound_messages.get_or_create(metric).inc();
+        let debug_msg = format!("broadcast {}", name);
+        match proposal {
+            Some(proposal) => debug!(view=?vote.view(), ?proposal, debug_msg),
+            None => debug!(view=?vote.view(), debug_msg),
+        };
+
+        // Send the vote
+        sender.send(Recipients::All, vote, true).await.unwrap();
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -1605,9 +1614,6 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::notarize())
-                .inc();
             batcher.constructed(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
 
@@ -1620,12 +1626,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            debug!(round=?notarize.round(), proposal=?notarize.proposal, me = self.scheme.me(), "broadcasting notarize");
-            let msg = Voter::Notarize(notarize);
-            pending_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            self.broadcast_vote(pending_sender, Voter::Notarize(notarize))
+                .await;
         };
 
         // Attempt to notarization
@@ -1657,7 +1659,7 @@ impl<
                 .await;
 
             // Broadcast the notarization
-            self.send_certificate(recovered_sender, Voter::Notarization(notarization), false)
+            self.broadcast_cert(recovered_sender, Voter::Notarization(notarization), false)
                 .await;
         };
 
@@ -1685,7 +1687,7 @@ impl<
                 .await;
 
             // Broadcast the nullification
-            self.send_certificate(recovered_sender, Voter::Nullification(nullification), false)
+            self.broadcast_cert(recovered_sender, Voter::Nullification(nullification), false)
                 .await;
 
             // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
@@ -1722,9 +1724,6 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::finalize())
-                .inc();
             batcher.constructed(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
 
@@ -1737,12 +1736,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            debug!(round=?finalize.round(), proposal=?finalize.proposal, "broadcasting finalize");
-            let msg = Voter::Finalize(finalize);
-            pending_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            self.broadcast_vote(pending_sender, Voter::Finalize(finalize))
+                .await;
         };
 
         // Attempt to finalization
@@ -1774,7 +1769,7 @@ impl<
                 .await;
 
             // Broadcast the finalization
-            self.send_certificate(recovered_sender, Voter::Finalization(finalization), false)
+            self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), false)
                 .await;
         };
     }
