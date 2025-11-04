@@ -95,20 +95,20 @@ impl<P: PublicKey> Oracle<P> {
         }
     }
 
-    /// Create a new [OrderedManager].
+    /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    pub fn ordered_manager(&self) -> OrderedManager<P> {
-        OrderedManager {
+    pub fn manager(&self) -> Manager<P> {
+        Manager {
             oracle: self.clone(),
         }
     }
 
-    /// Create a new [OrderedAssociatedManager].
+    /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    pub fn ordered_associated_manager(&self) -> OrderedAssociatedManager<P> {
-        OrderedAssociatedManager {
+    pub fn socket_manager(&self) -> SocketManager<P> {
+        SocketManager {
             oracle: self.clone(),
         }
     }
@@ -233,12 +233,12 @@ impl<P: PublicKey> Oracle<P> {
 ///
 /// Useful for mocking [crate::authenticated::discovery].
 #[derive(Debug, Clone)]
-pub struct OrderedManager<P: PublicKey> {
+pub struct Manager<P: PublicKey> {
     /// The oracle to send messages to.
     oracle: Oracle<P>,
 }
 
-impl<P: PublicKey> crate::Manager for OrderedManager<P> {
+impl<P: PublicKey> crate::Manager for Manager<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 
@@ -261,12 +261,12 @@ impl<P: PublicKey> crate::Manager for OrderedManager<P> {
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 #[derive(Debug, Clone)]
-pub struct OrderedAssociatedManager<P: PublicKey> {
+pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.
     oracle: Oracle<P>,
 }
 
-impl<P: PublicKey> crate::Manager for OrderedAssociatedManager<P> {
+impl<P: PublicKey> crate::Manager for SocketManager<P> {
     type PublicKey = P;
     type Peers = OrderedAssociated<Self::PublicKey, SocketAddr>;
 

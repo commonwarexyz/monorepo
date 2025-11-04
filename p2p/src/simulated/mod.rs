@@ -89,7 +89,7 @@
 //!     let network_handler = network.start();
 //!
 //!     // Register a peer set
-//!     let mut manager = oracle.ordered_manager();
+//!     let mut manager = oracle.manager();
 //!     manager.update(0, peers.clone().into()).await;
 //!
 //!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0).await.unwrap();
@@ -175,7 +175,7 @@ pub enum Error {
     PeerMissing,
 }
 
-pub use ingress::{Control, Link, Oracle, OrderedAssociatedManager, OrderedManager};
+pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{Config, Network, Receiver, Sender};
 
 #[cfg(test)]
@@ -484,7 +484,7 @@ mod tests {
             let pk2 = PrivateKey::from_seed(1).public_key();
 
             // Register peer set
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             manager
                 .update(0, vec![pk1.clone(), pk2.clone()].into())
                 .await;
@@ -2175,7 +2175,7 @@ mod tests {
             );
             network.start();
 
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             assert_eq!(manager.peer_set(0).await, Some([].into()));
 
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -2189,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_associated_manager() {
+    fn test_socket_manager() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
@@ -2207,7 +2207,7 @@ mod tests {
             let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
             let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
 
-            let mut manager = oracle.ordered_associated_manager();
+            let mut manager = oracle.socket_manager();
             let peers: OrderedAssociated<_, _> = vec![(pk1.clone(), addr1), (pk2.clone(), addr2)]
                 .into_iter()
                 .collect();
@@ -2258,7 +2258,7 @@ mod tests {
             let pk4 = PrivateKey::from_seed(4).public_key();
 
             // Register first peer set with pk1 and pk2
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             manager
                 .update(1, vec![pk1.clone(), pk2.clone()].into())
                 .await;
@@ -2371,7 +2371,7 @@ mod tests {
             network.start();
 
             // Subscribe to peer set updates
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             let mut subscription = manager.subscribe().await;
 
             // Create peers
@@ -2440,7 +2440,7 @@ mod tests {
             network.start();
 
             // Create multiple subscriptions
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             let mut subscription1 = manager.subscribe().await;
             let mut subscription2 = manager.subscribe().await;
             let mut subscription3 = manager.subscribe().await;

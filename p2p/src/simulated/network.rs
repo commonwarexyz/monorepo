@@ -935,7 +935,7 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register the peer set
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             manager.update(0, [pk1.clone(), pk2.clone()].into()).await;
             let mut control = oracle.control(pk1.clone());
             control.register(0).await.unwrap();
@@ -1020,7 +1020,7 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             manager
                 .update(0, [sender_pk.clone(), recipient_pk.clone()].into())
                 .await;
@@ -1093,7 +1093,7 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
-            let mut manager = oracle.ordered_manager();
+            let mut manager = oracle.manager();
             manager
                 .update(
                     0,

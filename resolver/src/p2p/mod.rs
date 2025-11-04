@@ -115,7 +115,7 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-        let mut manager = oracle.ordered_manager();
+        let mut manager = oracle.manager();
         manager.update(0, peers.clone().into()).await;
 
         let mut connections = Vec::new();
@@ -196,7 +196,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -206,7 +206,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -242,7 +242,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -288,7 +288,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -298,7 +298,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -308,7 +308,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -345,7 +345,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -391,7 +391,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -401,7 +401,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -411,7 +411,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -477,7 +477,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -487,7 +487,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -571,7 +571,7 @@ mod tests {
             // Spawn actors
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -581,7 +581,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -591,7 +591,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -655,7 +655,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -665,7 +665,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -725,7 +725,7 @@ mod tests {
 
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 cons1,
@@ -735,7 +735,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
@@ -759,7 +759,7 @@ mod tests {
             // Change peer set to include peer 3
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.ordered_manager(),
+                oracle.manager(),
                 schemes.remove(0),
                 connections.remove(0),
                 Consumer::dummy(),
