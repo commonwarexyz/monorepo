@@ -325,7 +325,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 success_rate,
                 result,
             } => {
-                // If peer does not exist, then create it.
+                // If sender or receiver does not exist, then create it.
                 self.ensure_peer_exists(&sender);
                 let receiver_socket = self.ensure_peer_exists(&receiver);
 
