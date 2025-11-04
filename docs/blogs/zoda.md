@@ -9,13 +9,9 @@ author_twitter: "https://x.com/cronokirby"
 katex: true
 ---
 
-TODO: ZK fanboys would say no (just need to send state diffs)
-TODO: talk about agreement then distributing blocks
-
-A crucial part of blockchain consensus is distributing the block among participants.
 You can come to consensus over a mere fingerprint of the block---a hash for example---
-but doing anything interesting with the block, like processing transactions, requires
-the data.
+but doing anything interesting with that fingerprint, like processing transactions or updating
+state, requires disseminating (a lot of) data.
 
 We've invested some effort in this part of the [Commonware Library](https://github.com/commonwarexyz/monorepo)
 recently, and I'd like to share some fruits of that effort in this post.
