@@ -236,6 +236,7 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
+/// Implementation of [crate::Manager] for [Ordered] peers.
 #[derive(Debug, Clone)]
 pub struct OrderedManager<P: PublicKey> {
     /// The oracle to send messages to.
@@ -261,6 +262,7 @@ impl<P: PublicKey> crate::Manager for OrderedManager<P> {
     }
 }
 
+/// Implementation of [crate::Manager] for [OrderedAssociated] peers.
 #[derive(Debug, Clone)]
 pub struct OrderedAssociatedManager<P: PublicKey> {
     /// The oracle to send messages to.
