@@ -127,6 +127,8 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
     /// rates in bytes per second. Use `None` for unlimited bandwidth.
+    ///
+    /// Bandwidth can be specified before a peer is registered or linked.
     pub async fn limit_bandwidth(
         &mut self,
         public_key: P,
@@ -150,6 +152,8 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
+    ///
+    /// Link can be called before a peer is registered or bandwidth is specified.
     pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
