@@ -6,7 +6,7 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::{
     types::Epoch,
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
@@ -37,6 +37,8 @@ mod player;
 #[derive(Clone)]
 struct EpochState<V: Variant, P: PublicKey> {
     epoch: Epoch,
+    // Increments only when the DKG is successful.
+    round: u64,
     output: Option<Output<V, P>>,
     share: Option<Share>,
 }
@@ -45,6 +47,7 @@ impl<V: Variant, P: PublicKey> Default for EpochState<V, P> {
     fn default() -> Self {
         Self {
             epoch: Default::default(),
+            round: Default::default(),
             output: None,
             share: None,
         }
@@ -54,6 +57,7 @@ impl<V: Variant, P: PublicKey> Default for EpochState<V, P> {
 impl<V: Variant, P: PublicKey> Write for EpochState<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.epoch.write(buf);
+        UInt(self.round).write(buf);
         self.output.write(buf);
         self.share.write(buf);
     }
@@ -61,7 +65,10 @@ impl<V: Variant, P: PublicKey> Write for EpochState<V, P> {
 
 impl<V: Variant, P: PublicKey> EncodeSize for EpochState<V, P> {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.output.encode_size() + self.share.encode_size()
+        self.epoch.encode_size()
+            + UInt(self.round).encode_size()
+            + self.output.encode_size()
+            + self.share.encode_size()
     }
 }
 
@@ -74,6 +81,7 @@ impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             epoch: ReadExt::read(buf)?,
+            round: UInt::read(buf)?.into(),
             output: Read::read_cfg(buf, &cfg)?,
             share: ReadExt::read(buf)?,
         })
@@ -197,6 +205,7 @@ where
                     FixedBytes::new([]),
                     EpochState {
                         epoch: Default::default(),
+                        round: 0,
                         output,
                         share,
                     },
@@ -225,9 +234,9 @@ where
                 )
             } else {
                 (
-                    self.peer_config.dealers(state.epoch.get()),
-                    self.peer_config.dealers(state.epoch.next().get()),
-                    self.peer_config.dealers(state.epoch.next().next().get()),
+                    self.peer_config.dealers(state.round),
+                    self.peer_config.dealers(state.round + 1),
+                    self.peer_config.dealers(state.round + 2),
                 )
             };
 
@@ -389,18 +398,31 @@ where
             }
 
             let logs = observer.logs().clone();
-            let (success, next_output, next_share) = if let Some(mb_player) = mb_player {
+            let (success, next_round, next_output, next_share) = if let Some(mb_player) = mb_player
+            {
                 let Ok(res) = mb_player.finalize(logs).await else {
                     break 'actor;
                 };
                 match res {
-                    Ok((new_output, new_share)) => (true, Some(new_output), Some(new_share)),
-                    Err(_) => (false, state.output.clone(), state.share.clone()),
+                    Ok((new_output, new_share)) => {
+                        (true, state.round + 1, Some(new_output), Some(new_share))
+                    }
+                    Err(_) => (
+                        false,
+                        state.round,
+                        state.output.clone(),
+                        state.share.clone(),
+                    ),
                 }
             } else {
                 match observe(round_info, logs) {
-                    Ok(output) => (true, Some(output), None),
-                    Err(_) => (false, state.output.clone(), state.share.clone()),
+                    Ok(output) => (true, state.round + 1, Some(output), None),
+                    Err(_) => (
+                        false,
+                        state.round,
+                        state.output.clone(),
+                        state.share.clone(),
+                    ),
                 }
             };
             if !success {
@@ -417,6 +439,7 @@ where
             // Persist the next epoch information
             let epoch_state = EpochState {
                 epoch: next_epoch,
+                round: next_round,
                 output: next_output.clone(),
                 share: next_share.clone(),
             };
