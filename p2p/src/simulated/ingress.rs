@@ -10,18 +10,18 @@ use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
 pub enum Message<P: PublicKey> {
-    Update {
-        peer_set: u64,
-        peers: Ordered<P>,
-    },
     Register {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
+    Update {
+        id: u64,
+        peers: Ordered<P>,
+    },
     PeerSet {
-        index: u64,
+        id: u64,
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     Subscribe {
@@ -198,9 +198,10 @@ impl<P: PublicKey> Oracle<P> {
         r.await.map_err(|_| Error::NetworkClosed)?
     }
 
-    async fn update(&mut self, peer_set: u64, peers: Ordered<P>) {
+    /// Set the peers for a given id.
+    async fn update(&mut self, id: u64, peers: Ordered<P>) {
         self.sender
-            .send(Message::Update { peer_set, peers })
+            .send(Message::Update { id, peers })
             .await
             .unwrap();
     }
@@ -209,7 +210,7 @@ impl<P: PublicKey> Oracle<P> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::PeerSet {
-                index: id,
+                id,
                 response: sender,
             })
             .await
@@ -237,8 +238,8 @@ impl<P: PublicKey> crate::Manager for OrderedManager<P> {
     type PublicKey = P;
     type Peers = Ordered<Self::PublicKey>;
 
-    async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
-        self.oracle.update(peer_set, peers).await;
+    async fn update(&mut self, id: u64, peers: Self::Peers) {
+        self.oracle.update(id, peers).await;
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
@@ -262,8 +263,11 @@ impl<P: PublicKey> crate::Manager for OrderedAssociatedManager<P> {
     type PublicKey = P;
     type Peers = OrderedAssociated<Self::PublicKey, SocketAddr>;
 
-    async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
-        self.oracle.update(peer_set, peers.into_keys()).await;
+    async fn update(&mut self, id: u64, peers: Self::Peers) {
+        // Because SocketAddrs are never exposed in p2p::simulated,
+        // there is nothing to check the provided data against. The
+        // only reasonable thing to do is to just ignore the data.
+        self.oracle.update(id, peers.into_keys()).await;
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {

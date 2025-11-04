@@ -194,23 +194,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
-            ingress::Message::Update { peer_set, peers } => {
+            ingress::Message::Update { id, peers } => {
                 let Some(tracked_peer_sets) = self.tracked_peer_sets else {
                     warn!("attempted to register peer set when tracking is disabled");
                     return;
                 };
 
                 // Check if peer set already exists
-                if self.peer_sets.contains_key(&peer_set) {
-                    warn!(index = peer_set, "peer set already exists");
+                if self.peer_sets.contains_key(&id) {
+                    warn!(id, "peer set already exists");
                     return;
                 }
 
                 // Ensure that peer set is monotonically increasing
                 if let Some((last, _)) = self.peer_sets.last_key_value() {
-                    if peer_set <= *last {
+                    if id <= *last {
                         warn!(
-                            new_id = peer_set,
+                            new_id = id,
                             old_id = last,
                             "attempted to register peer set with non-monotonically increasing ID"
                         );
@@ -234,12 +234,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     // Increment reference count
                     *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
-                self.peer_sets.insert(peer_set, peers.clone());
+                self.peer_sets.insert(id, peers.clone());
 
                 // Remove oldest peer set if we exceed the limit
                 while self.peer_sets.len() > tracked_peer_sets {
-                    let (index, set) = self.peer_sets.pop_first().unwrap();
-                    debug!(index, "removed oldest peer set");
+                    let (id, set) = self.peer_sets.pop_first().unwrap();
+                    debug!(id, "removed oldest peer set");
 
                     // Decrement reference counts and clean up peers/links
                     for public_key in set.iter() {
@@ -258,7 +258,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Notify all subscribers about the new peer set
                 let all = self.peer_refs.keys().cloned().collect();
-                let notification = (peer_set, peers, all);
+                let notification = (id, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
             }
@@ -295,13 +295,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
-            ingress::Message::PeerSet { index, response } => {
+            ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
                     // Return all peers if no peer sets are registered.
                     let _ = response.send(Some(self.peers.keys().cloned().collect()));
                 } else {
                     // Return the peer set at the given index
-                    let _ = response.send(self.peer_sets.get(&index).cloned());
+                    let _ = response.send(self.peer_sets.get(&id).cloned());
                 }
             }
             ingress::Message::Subscribe { response } => {
