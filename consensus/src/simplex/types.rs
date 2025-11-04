@@ -48,15 +48,17 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-/// AttributableVec is a vector of [Attributable] items where a given [Attributable::signer()]
-/// can add at most one item.
-pub struct AttributableVec<T: Attributable> {
+/// A map of [Attributable] items keyed by their signer index.
+///
+/// The key for each item is automatically inferred from [Attributable::signer()].
+/// Each signer can insert at most one item.
+pub struct AttributableMap<T: Attributable> {
     data: Vec<Option<T>>,
     added: usize,
 }
 
-impl<T: Attributable> AttributableVec<T> {
-    /// Creates a new [AttributableVec] with the given number of participants.
+impl<T: Attributable> AttributableMap<T> {
+    /// Creates a new [AttributableMap] with the given number of participants.
     pub fn new(participants: usize) -> Self {
         // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
         let mut data = Vec::with_capacity(participants);
@@ -65,10 +67,12 @@ impl<T: Attributable> AttributableVec<T> {
         Self { data, added: 0 }
     }
 
-    /// Adds an item to the [AttributableVec] if it has not been added yet.
+    /// Inserts an item into the map, using [Attributable::signer()] as the key,
+    /// if it has not been added yet.
     ///
-    /// Returns `true` if the item was added, `false` if it was already added.
-    pub fn push(&mut self, item: T) -> bool {
+    /// Returns `true` if the item was inserted, `false` if an item from this
+    /// signer already exists.
+    pub fn insert(&mut self, item: T) -> bool {
         let index = item.signer() as usize;
         if self.data[index].is_some() {
             return false;
@@ -78,22 +82,23 @@ impl<T: Attributable> AttributableVec<T> {
         true
     }
 
-    /// Returns the number of items in the [AttributableVec].
+    /// Returns the number of items in the [AttributableMap].
     pub fn len(&self) -> usize {
         self.added
     }
 
-    /// Returns `true` if the [AttributableVec] is empty.
+    /// Returns `true` if the [AttributableMap] is empty.
     pub fn is_empty(&self) -> bool {
         self.added == 0
     }
 
-    /// Returns a reference to the item from the given signer, if present.
+    /// Returns a reference to the item associated with the given signer, if present.
     pub fn get(&self, signer: u32) -> Option<&T> {
-        self.data[signer as usize].as_ref()
+        self.data.get(signer as usize)?.as_ref()
     }
 
-    /// Returns an ordered iterator over [Attributable::signer()]s in the [AttributableVec].
+    /// Returns an iterator over items in the map, ordered by signer index
+    /// ([Attributable::signer()]).
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.data.iter().filter_map(|o| o.as_ref())
     }
@@ -3654,49 +3659,49 @@ mod tests {
     }
 
     #[test]
-    fn test_attributable_vec() {
-        let mut vec = AttributableVec::new(5);
-        assert_eq!(vec.len(), 0);
-        assert!(vec.is_empty());
+    fn test_attributable_map() {
+        let mut map = AttributableMap::new(5);
+        assert_eq!(map.len(), 0);
+        assert!(map.is_empty());
 
-        // Test get on empty vec
+        // Test get on empty map
         for i in 0..5 {
-            assert!(vec.get(i).is_none());
+            assert!(map.get(i).is_none());
         }
 
-        assert!(vec.push(MockAttributable(3)));
-        assert_eq!(vec.len(), 1);
-        assert!(!vec.is_empty());
-        let mut iter = vec.iter();
+        assert!(map.insert(MockAttributable(3)));
+        assert_eq!(map.len(), 1);
+        assert!(!map.is_empty());
+        let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
 
-        // Test get on pushed item
-        assert!(matches!(vec.get(3), Some(a) if a.signer() == 3));
+        // Test get on existing item
+        assert!(matches!(map.get(3), Some(a) if a.signer() == 3));
 
-        assert!(vec.push(MockAttributable(1)));
-        assert_eq!(vec.len(), 2);
-        assert!(!vec.is_empty());
-        let mut iter = vec.iter();
+        assert!(map.insert(MockAttributable(1)));
+        assert_eq!(map.len(), 2);
+        assert!(!map.is_empty());
+        let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
 
         // Test get on both items
-        assert!(matches!(vec.get(1), Some(a) if a.signer() == 1));
-        assert!(matches!(vec.get(3), Some(a) if a.signer() == 3));
+        assert!(matches!(map.get(1), Some(a) if a.signer() == 1));
+        assert!(matches!(map.get(3), Some(a) if a.signer() == 3));
 
         // Test get on non-existing items
-        assert!(vec.get(0).is_none());
-        assert!(vec.get(2).is_none());
-        assert!(vec.get(4).is_none());
+        assert!(map.get(0).is_none());
+        assert!(map.get(2).is_none());
+        assert!(map.get(4).is_none());
 
-        assert!(!vec.push(MockAttributable(3)));
-        assert_eq!(vec.len(), 2);
-        assert!(!vec.is_empty());
-        let mut iter = vec.iter();
+        assert!(!map.insert(MockAttributable(3)));
+        assert_eq!(map.len(), 2);
+        assert!(!map.is_empty());
+        let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());

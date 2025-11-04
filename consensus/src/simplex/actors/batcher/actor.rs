@@ -6,7 +6,7 @@ use crate::{
         metrics::Inbound,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableVec, BatchVerifier, ConflictingFinalize,
+            Activity, Attributable, AttributableMap, BatchVerifier, ConflictingFinalize,
             ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, OrderedExt, Voter,
         },
     },
@@ -40,9 +40,9 @@ struct Round<
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
-    notarizes: AttributableVec<Notarize<S, D>>,
-    nullifies: AttributableVec<Nullify<S>>,
-    finalizes: AttributableVec<Finalize<S, D>>,
+    notarizes: AttributableMap<Notarize<S, D>>,
+    nullifies: AttributableMap<Nullify<S>>,
+    finalizes: AttributableMap<Finalize<S, D>>,
 
     inbound_messages: Family<Inbound, Counter>,
 }
@@ -70,9 +70,9 @@ impl<
             None
         };
 
-        let notarizes = AttributableVec::new(participants.len());
-        let nullifies = AttributableVec::new(participants.len());
-        let finalizes = AttributableVec::new(participants.len());
+        let notarizes = AttributableMap::new(participants.len());
+        let nullifies = AttributableMap::new(participants.len());
+        let finalizes = AttributableMap::new(participants.len());
 
         // Initialize data structures
         Self {
@@ -130,7 +130,7 @@ impl<
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
-                        self.notarizes.push(notarize.clone());
+                        self.notarizes.insert(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
@@ -173,7 +173,7 @@ impl<
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
-                        self.nullifies.push(nullify.clone());
+                        self.nullifies.insert(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
@@ -220,7 +220,7 @@ impl<
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
-                        self.finalizes.push(finalize.clone());
+                        self.finalizes.insert(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
@@ -240,19 +240,19 @@ impl<
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
-                self.notarizes.push(notarize.clone());
+                self.notarizes.insert(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
-                self.nullifies.push(nullify.clone());
+                self.nullifies.insert(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
-                self.finalizes.push(finalize.clone());
+                self.finalizes.insert(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 unreachable!("recovered messages should be sent to batcher");
