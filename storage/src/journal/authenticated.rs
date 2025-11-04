@@ -1,6 +1,6 @@
 //! Authenticated journal implementation.
 //!
-//! An authenticated journal maintains a sequential journal of operations alongside a Merkle Mountain
+//! An authenticated journal maintains a contiguous journal of operations alongside a Merkle Mountain
 //! Range (MMR). The operation at index i in the journal corresponds to the leaf at Location i in the
 //! MMR. This structure enables efficient proofs that an operation is included in the journal at a
 //! specific location.
@@ -30,31 +30,28 @@ pub enum Error {
     PruneBeyondMinRequired(Location, Location),
 }
 
-/// Rewinds the journal to the last operation matching the rewind predicate, returning the size of the journal after rewinding.
-///
-/// Scans backwards from the end to find the last operation that matches the predicate, then rewinds everything after it.
-///
-/// Assumes there is at least one unpruned operation matching the predicate in the journal if the journal has been
-/// pruned.
+/// Rewinds the journal to the last operation matching the rewind predicate. If no operation
+/// matches the predicate, rewinds to the pruning boundary, discarding all unpruned operations.
 async fn rewind<O>(
     journal: &mut impl Contiguous<Item = O>,
     rewind_predicate: fn(&O) -> bool,
 ) -> Result<u64, Error> {
-    let log_size = journal.size().await;
-    let mut rewind_size = log_size;
-    while rewind_size > 0 {
+    let journal_size = journal.size().await;
+    let pruning_boundary = journal
+        .oldest_retained_pos()
+        .await?
+        .unwrap_or(journal.size().await);
+    let mut rewind_size = journal_size;
+    while rewind_size > pruning_boundary {
         let op = journal.read(rewind_size - 1).await?;
         if rewind_predicate(&op) {
             break;
         }
         rewind_size -= 1;
     }
-    if rewind_size != log_size {
-        let rewound_ops = log_size - rewind_size;
-        warn!(
-            log_size,
-            rewound_ops, "rewinding over uncommitted log operations"
-        );
+    if rewind_size != journal_size {
+        let rewound_ops = journal_size - rewind_size;
+        warn!(journal_size, rewound_ops, "rewinding journal operations");
         journal.rewind(rewind_size).await?;
         journal.sync().await?;
     }
@@ -94,7 +91,6 @@ where
     /// Align `mmr` to be consistent with `journal`.
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
-    /// Returns the aligned MMR and journal.
     async fn align(
         mmr: &mut Mmr<E, H>,
         journal: &mut C,
@@ -198,7 +194,7 @@ where
         Ok(pruning_boundary)
     }
 
-    /// Generate a proof for operations starting at `start_loc`.
+    /// Generate a proof of inclusion for operations starting at `start_loc`.
     ///
     /// Returns a proof and the operations corresponding to the leaves in the range `start_loc..end_loc`,
     /// where `end_loc` is the minimum of the current operation count and `start_loc + max_ops`.
