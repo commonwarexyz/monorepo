@@ -302,29 +302,19 @@ where
     }
 
     /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(self) -> Result<(), Error> {
-        let Self {
-            mmr,
-            journal,
-            mut hasher,
-        } = self;
+    pub async fn close(mut self) -> Result<(), Error> {
         try_join!(
-            journal.close().map_err(Error::Journal),
-            mmr.close(&mut hasher).map_err(Error::Mmr),
+            self.journal.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
         )?;
         Ok(())
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        let Self {
-            mmr,
-            journal,
-            hasher: _,
-        } = self;
         try_join!(
-            journal.destroy().map_err(Error::Journal),
-            mmr.destroy().map_err(Error::Mmr),
+            self.journal.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
         )?;
         Ok(())
     }
