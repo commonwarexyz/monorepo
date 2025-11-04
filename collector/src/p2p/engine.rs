@@ -9,7 +9,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -18,14 +18,13 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E, B, Rq, Rs, P, M, H>
+pub struct Engine<E, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner,
     P: PublicKey,
-    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     M: Monitor<Response = Rs, PublicKey = P>,
@@ -33,11 +32,8 @@ where
 {
     // Configuration
     context: ContextCell<E>,
-    blocker: B,
     priority_request: bool,
-    request_codec: Rq::Cfg,
     priority_response: bool,
-    response_codec: Rs::Cfg,
 
     // Message passing
     monitor: M,
@@ -53,11 +49,10 @@ where
     responses: Counter,
 }
 
-impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
+impl<E, Rq, Rs, P, M, H> Engine<E, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner + Metrics,
     P: PublicKey,
-    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     M: Monitor<Response = Rs, PublicKey = P>,
@@ -66,7 +61,7 @@ where
     /// Creates a new engine with the given configuration.
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
-    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+    pub fn new(context: E, cfg: Config<M, H>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
@@ -86,11 +81,8 @@ where
         (
             Self {
                 context: ContextCell::new(context),
-                blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
-                request_codec: cfg.request_codec,
                 priority_response: cfg.priority_response,
-                response_codec: cfg.response_codec,
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
@@ -108,21 +100,17 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        responses: (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        (mut req_tx, mut req_rx): (impl Sender<PublicKey = P, Message = Rq>, impl Receiver<PublicKey = P, Message = Rq>),
+        (mut res_tx, mut res_rx): (impl Sender<PublicKey = P, Message = Rs>, impl Receiver<PublicKey = P, Message = Rs>),
     ) {
-        // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
-
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         loop {
@@ -193,14 +181,6 @@ where
                             break;
                         }
                     };
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
-                        }
-                    };
 
                     // Handle the request
                     let (tx, rx) = oneshot::channel();
@@ -218,14 +198,6 @@ where
                         Err(err) => {
                             error!(?err, "response receiver failed");
                             break;
-                        }
-                    };
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "blocking peer");
-                            self.blocker.block(peer).await;
-                            continue;
                         }
                     };
 

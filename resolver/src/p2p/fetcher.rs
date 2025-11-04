@@ -2,10 +2,7 @@ use crate::p2p::wire;
 use bimap::BiHashMap;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
-    utils::{
-        codec::WrappedSender,
-        requester::{Config, Requester, ID},
-    },
+    utils::requester::{Config, Requester, ID},
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
@@ -40,7 +37,7 @@ pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
+    NetS: Sender<PublicKey = P, Message = wire::Message<Key>>,
 > {
     context: E,
 
@@ -64,7 +61,7 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
+impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P, Message = wire::Message<Key>>>
     Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
@@ -94,7 +91,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Panics if the key is already being fetched.
     pub async fn fetch(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         key: Key,
         is_new: bool,
     ) {

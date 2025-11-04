@@ -8,10 +8,7 @@ use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Manager, Receiver, Recipients, Sender,
-};
+use commonware_p2p::{Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
@@ -47,8 +44,8 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
+    NetS: Sender<PublicKey = P, Message = wire::Message<Key>>,
+    NetR: Receiver<PublicKey = P, Message = wire::Message<Key>>,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -98,8 +95,8 @@ impl<
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
+        NetS: Sender<PublicKey = P, Message = wire::Message<Key>>,
+        NetR: Receiver<PublicKey = P, Message = wire::Message<Key>>,
     > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
@@ -146,12 +143,9 @@ impl<
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
+    async fn run(mut self, mut network: (NetS, NetR)) {
         let mut shutdown = self.context.stopped();
         let peer_set_subscription = &mut self.manager.subscribe().await;
-
-        // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         loop {
             // Update metrics
@@ -220,7 +214,7 @@ impl<
 
                             // Record fetch start time
                             self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.fetch(&mut sender, key, true).await;
+                            self.fetcher.fetch(&mut network.0, key, true).await;
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -273,11 +267,11 @@ impl<
                     }
 
                     // Send response to peer
-                    self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
+                    self.handle_serve(&mut network.0, peer, id, result, self.priority_responses).await;
                 },
 
                 // Handle network messages
-                msg = receiver.recv() => {
+                msg = network.1.recv() => {
                     // Break if the receiver is closed
                     let (peer, msg) = match msg {
                         Ok(msg) => msg,
@@ -287,18 +281,11 @@ impl<
                         }
                     };
 
-                    // Skip if there is a decoding error
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            trace!(?err, ?peer, "decode failed");
-                            continue;
-                        }
-                    };
+                    // Process the message
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Response(response) => self.handle_network_response(&mut network.0, peer, msg.id, response).await,
+                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut network.0, peer, msg.id).await,
                     };
                 },
 
@@ -307,7 +294,7 @@ impl<
                     let key = self.fetcher.pop_pending();
                     debug!(?key, "retrying");
                     self.metrics.fetch.inc(Status::Failure);
-                    self.fetcher.fetch(&mut sender, key, false).await;
+                    self.fetcher.fetch(&mut network.0, key, false).await;
                 },
 
                 // Handle active deadline
@@ -315,7 +302,7 @@ impl<
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
                         self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.fetch(&mut sender, key, false).await;
+                        self.fetcher.fetch(&mut network.0, key, false).await;
                     }
                 },
             }
@@ -325,7 +312,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
@@ -372,7 +359,7 @@ impl<
     /// Handle a network response from a peer.
     async fn handle_network_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         peer: P,
         id: u64,
         response: Bytes,
@@ -402,7 +389,7 @@ impl<
     /// Handle a network response from a peer that did not have the data.
     async fn handle_network_error_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         peer: P,
         id: u64,
     ) {
