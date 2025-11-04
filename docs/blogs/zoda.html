@@ -18,7 +18,7 @@ updating state, requires disseminating (a lot of) data.">
     <meta property="og:url" content="https://commonware.xyz/blogs/zoda.html" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/blogs/zoda/card.png" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/zoda-card.png" />
     <meta property="og:title" content="Fast Block Dissemination with
 Immediate Guarantees" />
     <meta property="og:description" content="You can come to consensus
@@ -39,7 +39,7 @@ consensus over a mere fingerprint of the block—a hash for example—but
 doing anything interesting with that fingerprint, like processing
 transactions or updating state, requires disseminating (a lot of)
 data." />
-    <meta property="twitter:image" content="https://commonware.xyz/blogs/zoda/card.png" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/zoda-card.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/cronokirby" />
     
@@ -132,7 +132,7 @@ Meier</a></div>
         class="math inline">\(0\)</span> bytes, since they send
         nothing.</p>
         <figure>
-        <img src="/blogs/zoda/img-000.png"
+        <img src="/imgs/zoda-000.png"
         alt="Figure 1: A leader transmits a block of data to 4 followers" />
         <figcaption aria-hidden="true">Figure 1: A leader transmits a
         block of data to 4 followers</figcaption>
@@ -171,7 +171,7 @@ Meier</a></div>
         possible. (They do still need to communicate to recover the
         data, of course, but it is recoverable).</p>
         <figure>
-        <img src="/blogs/zoda/img-001.png"
+        <img src="/imgs/zoda-001.png"
         alt="Figure 2: A leader splits data into 4 chunks, each sent to 1 follower" />
         <figcaption aria-hidden="true">Figure 2: A leader splits data
         into 4 chunks, each sent to 1 follower</figcaption>
@@ -247,7 +247,7 @@ Meier</a></div>
         class="math inline">\(n\)</span> shards, the original matrix can
         be recovered, proceeding columnwise once more.</p>
         <figure>
-        <img src="/blogs/zoda/img-002.png"
+        <img src="/imgs/zoda-002.png"
         alt="Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers" />
         <figcaption aria-hidden="true">Figure 3: Data is encoded,
         growing from 2 pieces into 4, and split across the
@@ -298,7 +298,7 @@ Meier</a></div>
         scheme (but others might work better, e.g. playing with arity,
         or using a Polynomial Commitment Scheme).</p>
         <figure>
-        <img src="/blogs/zoda/img-003.png"
+        <img src="/imgs/zoda-003.png"
         alt="Figure 4: The encoded rows are hashed into a tree" />
         <figcaption aria-hidden="true">Figure 4: The encoded rows are
         hashed into a tree</figcaption>
