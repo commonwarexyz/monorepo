@@ -222,7 +222,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create and store new peer set
                 for public_key in peers.iter() {
                     // Create peer if it doesn't exist
-                    self.ensure_peer_exists(public_key);
+                    self.ensure_peer_exists(public_key).await;
 
                     // Increment reference count
                     *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
@@ -261,7 +261,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                self.ensure_peer_exists(&public_key);
+                self.ensure_peer_exists(&public_key).await;
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
@@ -305,7 +305,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                self.ensure_peer_exists(&public_key);
+                self.ensure_peer_exists(&public_key).await;
 
                 // Update bandwidth limits
                 let now = self.context.current();
@@ -327,10 +327,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If sender or receiver does not exist, then create it.
-                self.ensure_peer_exists(&sender);
-                self.ensure_peer_ready(&sender).await;
-                let receiver_socket = self.ensure_peer_exists(&receiver);
-                self.ensure_peer_ready(&receiver).await;
+                self.ensure_peer_exists(&sender).await;
+                let receiver_socket = self.ensure_peer_exists(&receiver).await;
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -374,8 +372,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Ensure a peer exists, creating it if necessary.
     ///
     /// Returns the socket address of the peer.
-    fn ensure_peer_exists(&mut self, public_key: &P) -> SocketAddr {
+    async fn ensure_peer_exists(&mut self, public_key: &P) -> SocketAddr {
         if !self.peers.contains_key(public_key) {
+            // Create peer
             let socket = self.get_next_socket();
             let peer = Peer::new(
                 self.context.with_label("peer"),
@@ -383,7 +382,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 socket,
                 self.max_size,
             );
+
+            // Ensure it is ready to listen for dial requests
+            peer.wait_until_ready().await;
+
+            // Once ready, add to peers
             self.peers.insert(public_key.clone(), peer);
+
             socket
         } else {
             self.peers.get(public_key).unwrap().socket
@@ -393,13 +398,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Get all tracked peers as an ordered set.
     fn all_tracked_peers(&self) -> Ordered<P> {
         self.peer_refs.keys().cloned().collect()
-    }
-
-    /// Wait for a peer's listener to be ready if it was freshly created.
-    async fn ensure_peer_ready(&mut self, public_key: &P) {
-        if let Some(peer) = self.peers.get_mut(public_key) {
-            peer.wait_until_ready().await;
-        }
     }
 }
 
