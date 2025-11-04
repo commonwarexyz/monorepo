@@ -14,12 +14,18 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use std::fmt::Debug;
 
+mod field;
+mod poly;
+
 mod reed_solomon;
 use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
+
+mod zoda;
+pub use zoda::{Error, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,6 +68,12 @@ impl Read for Config {
         })
     }
 }
+
+/// Codec configuration tuple.
+///
+/// The first element is the **maximum** chunk size (in bytes) that any shard may contain.
+/// The second element is the encoding scheme [`Config`] specifying the number of minimum and extra shards.
+pub type Cfg = (usize, Config);
 
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.
 ///
@@ -108,13 +120,13 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Clone + Eq + Codec + Send + Sync + 'static;
+    type Shard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Clone + Eq + Codec + Send + Sync + 'static;
+    type ReShard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
     /// Data which can assist in checking shards.
     type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
@@ -194,191 +206,123 @@ pub trait ValidatingScheme: Scheme {}
 mod test {
     use super::*;
     use crate::reed_solomon::ReedSolomon;
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use std::cmp::Reverse;
+
+    const MAX_DATA_BYTES: usize = 1 << 31;
+
+    fn general_test<S: Scheme>(
+        name: &str,
+        data: &[u8],
+        min_shards: u16,
+        total_shards: u16,
+        indices: &[u16],
+    ) {
+        // If the indices reference some larger shard, use that as the total.
+        let total_shards = indices
+            .iter()
+            .map(|&x| x + 1)
+            .max()
+            .map_or(total_shards, |x| x.max(total_shards));
+        assert!(min_shards >= 1, "min_shards must be at least 1");
+        assert!(
+            indices.len() >= min_shards as usize,
+            "you need to supply at least {min_shards} indices"
+        );
+        assert!(
+            total_shards >= min_shards,
+            "total_shards ({total_shards}) must be >= min_shards ({min_shards})"
+        );
+
+        let config = Config {
+            minimum_shards: min_shards,
+            extra_shards: total_shards - min_shards,
+        };
+        let read_cfg = (MAX_DATA_BYTES, config);
+        let (commitment, shards) = S::encode(&config, data).unwrap();
+        // Pick out the packets we want, in reverse order.
+        let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
+            let mut out = shards
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, shard)| {
+                    let shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+                    let i = i as u16;
+                    let pos_of_i = indices.iter().position(|&x| x == i)?;
+                    let (x0, x1, x2) = S::reshard(&config, &commitment, i, shard).unwrap();
+                    Some((pos_of_i, i, x0, x1, x2))
+                })
+                .collect::<Vec<_>>();
+            out.sort_by_key(|&(pos_of_i, _, _, _, _)| Reverse(pos_of_i));
+            let first = out.pop().unwrap();
+            (first, out)
+        };
+        let checked_shards = {
+            let mut others = other_packets
+                .into_iter()
+                .map(|(_, i, _, _, reshard)| {
+                    let reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
+                    S::check(&config, &commitment, &checking_data, i, reshard).unwrap()
+                })
+                .collect::<Vec<_>>();
+            others.push(my_checked_shard);
+            others
+        };
+        let decoded = S::decode(&config, &commitment, checking_data, &checked_shards).unwrap();
+        assert_eq!(&decoded, data, "{name} failed");
+    }
 
     fn test_basic<S: Scheme>() {
-        let data = b"Hello, Reed-Solomon!";
-        let config = Config {
-            minimum_shards: 4,
-            extra_shards: 3,
-        };
-
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[..config.minimum_shards as usize],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_basic_failed");
+        general_test::<S>("test_basic", b"Hello, Reed-Solomon!", 4, 7, &[0, 1, 2, 3]);
     }
 
     fn test_moderate<S: Scheme>() {
-        let data = b"Testing with more pieces than minimum";
-        let config = Config {
-            minimum_shards: 4,
-            extra_shards: 6,
-        };
-
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, mut checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        // Try to decode with a mix of original and recovery pieces
-        {
-            let (part1, part2) = checked_shards.split_at_mut(config.minimum_shards as usize);
-            std::mem::swap(&mut part1[0], &mut part2[0]);
-        }
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[..config.minimum_shards as usize],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_moderate_failed");
+        general_test::<S>(
+            "test_moderate",
+            b"Testing with more pieces than minimum",
+            4,
+            10,
+            &[0, 1, 2, 8, 9],
+        );
     }
 
     fn test_odd_shard_len<S: Scheme>() {
-        let data = b"a";
-        let config = Config {
-            minimum_shards: 2,
-            extra_shards: 1,
-        };
-
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[..config.minimum_shards as usize],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_odd_shard_len_failed");
+        general_test::<S>("test_odd_shard_len", b"?", 2, 3, &[0, 1]);
     }
 
     fn test_recovery<S: Scheme>() {
-        let data = b"Testing recovery pieces";
-        let config = Config {
-            minimum_shards: 3,
-            extra_shards: 5,
-        };
-
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[checked_shards.len() - config.minimum_shards as usize..],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_recovery_failed");
+        general_test::<S>(
+            "test_recovery",
+            b"Testing recovery pieces",
+            3,
+            8,
+            &[5, 6, 7],
+        );
     }
 
     fn test_empty_data<S: Scheme>() {
-        let data = b"";
-        let config = Config {
-            minimum_shards: 30,
-            extra_shards: 100,
-        };
-
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[..config.minimum_shards as usize],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_empty_data_failed");
+        general_test::<S>(
+            "test_empty_data",
+            b"",
+            30,
+            100,
+            (0..30u16).collect::<Vec<_>>().as_slice(),
+        );
     }
 
     fn test_large_data<S: Scheme>() {
-        let data = vec![42u8; 1000]; // 1KB of data
-        let config = Config {
-            minimum_shards: 4,
-            extra_shards: 3,
-        };
+        general_test::<S>(
+            "test_large_data",
+            vec![42u8; 1000].as_slice(),
+            3,
+            4,
+            &[0, 1, 2],
+        );
+    }
 
-        // Encode the data
-        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
-
-        let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
-            .into_iter()
-            .enumerate()
-            .map(|(i, shard)| {
-                let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
-                (checking_data, checked_shard)
-            })
-            .collect();
-
-        let decoded = S::decode(
-            &config,
-            &commitment,
-            checking_data.pop().unwrap(),
-            &checked_shards[..config.minimum_shards as usize],
-        )
-        .unwrap();
-        assert_eq!(decoded, data, "test_large_data_failed");
+    fn test_no_data_two_shards<S: Scheme>() {
+        general_test::<S>("test_no_data_one_shard", b"", 1, 2, &[0]);
     }
 
     fn test_suite<S: Scheme>() {
@@ -388,6 +332,7 @@ mod test {
         test_recovery::<S>();
         test_empty_data::<S>();
         test_large_data::<S>();
+        test_no_data_two_shards::<S>();
     }
 
     #[test]
@@ -398,5 +343,10 @@ mod test {
     #[test]
     fn test_suite_no_coding() {
         test_suite::<NoCoding<Sha256>>();
+    }
+
+    #[test]
+    fn test_suite_zoda() {
+        test_suite::<Zoda<Sha256>>();
     }
 }

@@ -231,7 +231,7 @@ enum Variant {
 impl Variant {
     pub fn name(&self) -> &'static str {
         match self {
-            Variant::Store => "adb::store",
+            Variant::Store => "store",
             Variant::AnyUnordered => "any::fixed::unordered",
             Variant::AnyOrdered => "any::fixed::ordered",
             Variant::Variable => "any::variable",

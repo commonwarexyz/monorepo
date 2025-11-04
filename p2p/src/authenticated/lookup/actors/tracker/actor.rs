@@ -74,10 +74,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let releaser = Releaser::new(mailbox.clone());
 
         // Create the directory
-        let myself = (cfg.crypto.public_key(), cfg.address);
         let directory = Directory::init(
             context.with_label("directory"),
-            myself,
+            cfg.crypto.public_key(),
             directory_cfg,
             releaser,
         );
@@ -238,7 +237,6 @@ mod tests {
         (
             Config {
                 crypto,
-                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 tracked_peer_sets: 2,
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,

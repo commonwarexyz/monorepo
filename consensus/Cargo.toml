@@ -11,31 +11,31 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/consensus"
 documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
-commonware-codec = { workspace = true }
-commonware-broadcast = { workspace = true }
-commonware-cryptography = { workspace = true }
-commonware-resolver = { workspace = true }
-commonware-utils = { workspace = true }
-bytes = { workspace = true }
-cfg-if = { workspace = true }
-futures = { workspace = true }
-rand = { workspace = true }
-thiserror = { workspace = true }
+bytes.workspace = true
+cfg-if.workspace = true
+commonware-broadcast.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-resolver.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+rand.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true }
-commonware-runtime = { workspace = true }
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
-prometheus-client = { workspace = true }
-governor = { workspace = true }
-rand_distr = { workspace = true }
-tracing = { workspace = true }
-pin-project = { workspace = true }
+governor.workspace = true
+pin-project.workspace = true
+prometheus-client.workspace = true
+rand_distr.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 commonware-resolver = { workspace = true, features = ["mocks"] }
-tracing-subscriber = { workspace = true }
+tracing-subscriber.workspace = true
 
 [lib]
 bench = false

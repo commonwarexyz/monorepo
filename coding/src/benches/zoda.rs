@@ -1,14 +1,14 @@
 use crate::{benchmark_decode_generic, benchmark_encode_generic};
-use commonware_coding::NoCoding;
+use commonware_coding::Zoda;
 use commonware_cryptography::Sha256;
 use criterion::{criterion_group, Criterion};
 
 fn benchmark_encode(c: &mut Criterion) {
-    benchmark_encode_generic::<NoCoding<Sha256>>("no_coding::encode", c);
+    benchmark_encode_generic::<Zoda<Sha256>>("zoda_encode", c);
 }
 
 fn benchmark_decode(c: &mut Criterion) {
-    benchmark_decode_generic::<NoCoding<Sha256>>("no_coding::decode", c);
+    benchmark_decode_generic::<Zoda<Sha256>>("zoda_decode", c);
 }
 
 criterion_group! {
