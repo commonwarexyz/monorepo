@@ -39,7 +39,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 pub async fn run<S>(
     context: tokio::Context,
     args: super::ParticipantArgs,
-    update_cb: UpdateCallBack<MinSig, ed25519::PublicKey>,
+    update_cb: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
@@ -161,9 +161,10 @@ mod test {
     use super::*;
     use crate::{
         application::{Block, EdScheme, ThresholdScheme},
-        dkg::PostUpdate,
+        dkg::{ContinueOnUpdate, PostUpdate, Update},
         BLOCKS_PER_EPOCH,
     };
+    use anyhow::anyhow;
     use commonware_consensus::marshal::ingress::handler;
     use commonware_cryptography::{
         bls12381::{
@@ -180,12 +181,17 @@ mod test {
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
     use commonware_utils::{sequence::U64, set::Ordered, union};
-    use futures::channel::mpsc;
+    use futures::{
+        channel::{mpsc, oneshot},
+        SinkExt, StreamExt,
+    };
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use rand_core::CryptoRngCore;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+        future::Future,
+        pin::Pin,
         time::Duration,
     };
 
@@ -273,14 +279,48 @@ mod test {
         registrations
     }
 
+    struct TeamUpdate {
+        pk: PublicKey,
+        update: Update<MinSig, PublicKey>,
+        cb_in: oneshot::Sender<PostUpdate>,
+    }
+
+    struct UpdateHandler {
+        pk: PublicKey,
+        sender: mpsc::Sender<TeamUpdate>,
+    }
+
+    impl UpdateHandler {
+        fn boxed(pk: PublicKey, sender: mpsc::Sender<TeamUpdate>) -> Box<Self> {
+            Box::new(Self { pk, sender })
+        }
+    }
+
+    impl UpdateCallBack<MinSig, PublicKey> for UpdateHandler {
+        fn on_update(
+            &mut self,
+            update: Update<MinSig, PublicKey>,
+        ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+            let mut sender = self.sender.clone();
+            let pk = self.pk.clone();
+            Box::pin(async move {
+                let (cb_in, cb_out) = oneshot::channel();
+                if !sender.send(TeamUpdate { pk, update, cb_in }).await.is_ok() {
+                    return PostUpdate::Stop;
+                };
+                cb_out.await.unwrap_or(PostUpdate::Stop)
+            })
+        }
+    }
+
     #[derive(Clone)]
-    struct Setup {
+    struct Team {
         peer_config: PeerConfig,
         output: Output<MinSig, PublicKey>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
     }
 
-    impl Setup {
+    impl Team {
         fn reckon(mut rng: impl CryptoRngCore, total: u32, per_round: u32) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
@@ -301,6 +341,219 @@ mod test {
                 output,
                 participants,
             }
+        }
+
+        async fn start<S>(
+            self,
+            ctx: deterministic::Context,
+            mut oracle: Oracle<PublicKey>,
+            link: Link,
+            updates: mpsc::Sender<TeamUpdate>,
+        ) where
+            S: Scheme<PublicKey = PublicKey>,
+            SchemeProvider<S, PrivateKey>:
+                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
+        {
+            // First register all participants with oracle
+            oracle
+                .update(0, self.participants.keys().cloned().collect())
+                .await;
+
+            // Register channels for all participants first
+            let mut channels = HashMap::new();
+            for pk in self.participants.keys() {
+                let mut control = oracle.control(pk.clone());
+                let pending = control.register(PENDING_CHANNEL).await.unwrap();
+                let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
+                let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
+                let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
+                let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
+                let dkg = control.register(DKG_CHANNEL).await.unwrap();
+                let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+
+                channels.insert(
+                    pk.clone(),
+                    (
+                        pending,
+                        recovered,
+                        resolver,
+                        broadcast,
+                        marshal,
+                        dkg,
+                        orchestrator,
+                    ),
+                );
+            }
+
+            // Now add links between all participants
+            for v1 in self.participants.keys() {
+                for v2 in self.participants.keys() {
+                    if v1 == v2 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(v1.clone(), v2.clone(), link.clone())
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Now start all the engines
+            for (i, (pk, (sk, share))) in self.participants.into_iter().enumerate() {
+                let (pending, recovered, resolver, broadcast, marshal, dkg, orchestrator) =
+                    channels.remove(&pk).unwrap();
+
+                let resolver_cfg = marshal_resolver::Config {
+                    public_key: pk.clone(),
+                    manager: oracle.clone(),
+                    blocker: oracle.clone(),
+                    mailbox_size: 200,
+                    requester_config: requester::Config {
+                        me: Some(pk.clone()),
+                        rate_limit: Quota::per_second(NZU32!(5)),
+                        initial: Duration::from_secs(1),
+                        timeout: Duration::from_secs(2),
+                    },
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    priority_requests: false,
+                    priority_responses: false,
+                };
+                let marshal = marshal_resolver::init(&ctx, resolver_cfg, marshal);
+
+                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                    ctx.with_label(&format!("validator_{i}")),
+                    engine::Config {
+                        signer: sk,
+                        manager: oracle.clone(),
+                        blocker: oracle.control(pk.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        output: Some(self.output.clone()),
+                        share: share,
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{i}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                        peer_config: self.peer_config.clone(),
+                    },
+                )
+                .await;
+
+                engine.start(
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg,
+                    orchestrator,
+                    marshal,
+                    UpdateHandler::boxed(pk, updates.clone()),
+                );
+            }
+        }
+    }
+
+    struct Plan {
+        seed: u64,
+        total: u32,
+        link: Link,
+    }
+
+    impl Plan {
+        async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<()>
+        where
+            S: Scheme<PublicKey = PublicKey>,
+            SchemeProvider<S, PrivateKey>:
+                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
+        {
+            tracing::info!("starting test with {} participants", self.total);
+            // Create simulated network
+            let (network, oracle) = Network::<_, PublicKey>::new(
+                ctx.with_label("network"),
+                simulated::Config {
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network first to ensure a background task is running
+            tracing::debug!("starting network actor");
+            network.start();
+
+            tracing::debug!("creating team with {} participants", self.total);
+            let team = Team::reckon(&mut ctx, self.total, self.total);
+
+            let (updates_in, mut updates_out) = mpsc::channel(0);
+
+            tracing::debug!("starting team actors and connecting");
+            team.start::<S>(ctx.clone(), oracle, self.link, updates_in)
+                .await;
+
+            tracing::debug!("waiting for updates");
+            let mut finished = BTreeSet::<PublicKey>::new();
+            while let Some(update) = updates_out.next().await {
+                match &update.update {
+                    Update::Failure { epoch } => {
+                        tracing::info!(epoch = epoch, pk = ?update.pk, "DKG failure");
+                        return Err(anyhow!("dkg failure, pk = {:?}", &update.pk));
+                    }
+                    Update::Success { epoch, .. } => {
+                        tracing::info!(epoch = epoch, pk = ?update.pk, "DKG success");
+                        finished.insert(update.pk);
+                        update
+                            .cb_in
+                            .send(PostUpdate::Stop)
+                            .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
+                    }
+                }
+                if finished.len() == self.total as usize {
+                    return Ok(());
+                }
+            }
+
+            Err(anyhow!("plan terminated unexpectedly"))
+        }
+
+        fn run<S>(self) -> anyhow::Result<()>
+        where
+            S: Scheme<PublicKey = PublicKey>,
+            SchemeProvider<S, PrivateKey>:
+                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
+        {
+            Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_000() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_001() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
         }
     }
 
@@ -362,7 +615,7 @@ mod test {
             network.start();
 
             // Generate participants and shares
-            let setup = Setup::reckon(&mut context, n, n);
+            let setup = Team::reckon(&mut context, n, n);
             let mut registrations =
                 register_validators(&context, &mut oracle, setup.participants.keys()).await;
 
@@ -405,7 +658,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
             }
 
@@ -585,7 +838,7 @@ mod test {
             // Start network
             network.start();
 
-            let setup = Setup::reckon(&mut context, n, active);
+            let setup = Team::reckon(&mut context, n, active);
 
             let mut registrations =
                 register_validators(&context, &mut oracle, setup.participants.keys()).await;
@@ -632,7 +885,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
                 engine_handles.push(handle);
             }
@@ -745,7 +998,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
             }
 
@@ -834,7 +1087,7 @@ mod test {
             network.start();
 
             // Generate participants and shares
-            let setup = Setup::reckon(&mut context, n, n);
+            let setup = Team::reckon(&mut context, n, n);
             let mut registrations =
                 register_validators(&context, &mut oracle, setup.participants.keys()).await;
 
@@ -892,7 +1145,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
             }
 
@@ -972,7 +1225,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
-                Box::new(|_| PostUpdate::Continue),
+                Box::new(ContinueOnUpdate),
             );
 
             // Poll metrics
@@ -1058,7 +1311,7 @@ mod test {
             network.start();
 
             // Generate participants and shares
-            let setup = Setup::reckon(&mut context, n, n);
+            let setup = Team::reckon(&mut context, n, n);
             let mut registrations =
                 register_validators(&context, &mut oracle, setup.participants.keys()).await;
 
@@ -1117,7 +1370,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
             }
 
@@ -1197,7 +1450,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
-                Box::new(|_| PostUpdate::Continue),
+                Box::new(ContinueOnUpdate),
             );
 
             // Poll metrics
@@ -1295,7 +1548,7 @@ mod test {
             network.start();
 
             // Generate participants and shares (for n-1 active participants)
-            let setup = Setup::reckon(&mut context, n, n - 1);
+            let setup = Team::reckon(&mut context, n, n - 1);
 
             let mut registrations =
                 register_validators(&context, &mut oracle, setup.participants.keys()).await;
@@ -1352,7 +1605,7 @@ mod test {
                     dkg,
                     orchestrator,
                     marshal,
-                    Box::new(|_| PostUpdate::Continue),
+                    Box::new(ContinueOnUpdate),
                 );
             }
 
@@ -1434,7 +1687,7 @@ mod test {
                 dkg,
                 orchestrator,
                 marshal,
-                Box::new(|_| PostUpdate::Continue),
+                Box::new(ContinueOnUpdate),
             );
 
             // Poll metrics
@@ -1515,7 +1768,7 @@ mod test {
 
         // Generate participants and shares upfront
         let rng = StdRng::seed_from_u64(seed);
-        let setup = Setup::reckon(rng, n, n);
+        let setup = Team::reckon(rng, n, n);
 
         // Random restarts every x seconds
         let mut runs = 0;
@@ -1579,7 +1832,7 @@ mod test {
                         dkg,
                         orchestrator,
                         marshal,
-                        Box::new(|_| PostUpdate::Continue),
+                        Box::new(ContinueOnUpdate),
                     );
                 }
 

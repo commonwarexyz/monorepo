@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use commonware_cryptography::bls12381::{
     dkg2::Output,
     primitives::{group::Share, variant::Variant},
@@ -31,4 +33,21 @@ pub enum PostUpdate {
 /// This can be used to, e.g.
 /// - save the result to a file,
 /// - send the result across a channel.
-pub type UpdateCallBack<V, P> = Box<dyn FnMut(Update<V, P>) -> PostUpdate + Send>;
+pub trait UpdateCallBack<V: Variant, P>: Send {
+    fn on_update(
+        &mut self,
+        update: Update<V, P>,
+    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>>;
+}
+
+/// An implementor of [UpdateCallBack] which always continues.
+pub struct ContinueOnUpdate;
+
+impl<V: Variant, P> UpdateCallBack<V, P> for ContinueOnUpdate {
+    fn on_update(
+        &mut self,
+        _update: Update<V, P>,
+    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+        Box::pin(async { PostUpdate::Continue })
+    }
+}
