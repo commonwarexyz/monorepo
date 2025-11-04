@@ -316,7 +316,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
         // Ensure we haven't already broadcast
-        if !force && self.broadcast_notarization {
+        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
         }
@@ -726,11 +726,7 @@ impl<
         };
 
         // Request proposal from application
-        debug!(
-            view = self.view,
-            me = self.scheme.me(),
-            "requested proposal from automaton"
-        );
+        debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
             leader: self
@@ -789,23 +785,19 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            let mut did_broadcast = false;
             // If we have a previous finalization, broadcast it
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
                 self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), true)
                     .await;
-                did_broadcast = true;
-            }
+            } else {
+                // If we haven't broadcast a finalization, broadcast any other certificates from the
+                // previous view. If we have both a notarization and a nullification, we will broadcast
+                // both. Additionally, broadcast the latest finalization.
 
-            // If we haven't broadcast a finalization, broadcast any other certificates.
-            // If we have both a notarization and a nullification, we will broadcast both.
-            if !did_broadcast {
-                // If we have a previous notarization, broadcast it.
-                // The payload may not be certified.
+                // If we have a previous notarization, broadcast it (might not be certified).
                 if let Some(notarization) = self.construct_notarization(past_view, true).await {
                     self.broadcast_cert(recovered_sender, Voter::Notarization(notarization), true)
                         .await;
-                    did_broadcast = true;
                 }
 
                 // If we have a previous nullification, broadcast it
@@ -816,7 +808,6 @@ impl<
                         true,
                     )
                     .await;
-                    did_broadcast = true;
                 }
 
                 // If we have a latest finalization, broadcast it
@@ -827,13 +818,8 @@ impl<
                 {
                     self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), true)
                         .await;
-                    did_broadcast = true;
                 }
             }
-
-            // Log if we were unable to rebroadcast any certificates
-            (!did_broadcast)
-                .then(|| warn!(view = self.view, "unable to rebroadcast entry certificate"));
         }
 
         // Construct nullify
@@ -967,7 +953,7 @@ impl<
                 let parent_proposal = match self.is_certified(cursor) {
                     Some(parent) => parent,
                     None => {
-                        debug!(view = cursor, me = self.scheme.me(), views = ?self.views.keys().collect::<Vec<_>>(), "parent proposal is not certified");
+                        debug!(view = cursor, "parent proposal is not certified");
                         return None;
                     }
                 };
@@ -1704,7 +1690,6 @@ impl<
                 let parent = round.proposal.as_ref().unwrap().parent;
                 let missing_notarizations = match self.is_notarized(parent) {
                     Some(_) => Vec::new(),
-                    None if parent == GENESIS_VIEW => Vec::new(),
                     None => vec![parent],
                 };
                 let missing_nullifications = ((parent + 1)..view)
