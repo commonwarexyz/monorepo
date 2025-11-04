@@ -324,20 +324,28 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 egress_cap,
                 ingress_cap,
                 result,
-            } => match self.peers.contains_key(&public_key) {
-                true => {
-                    // Update bandwidth limits
-                    let now = self.context.current();
-                    let completions =
-                        self.transmitter
-                            .limit(now, &public_key, egress_cap, ingress_cap);
-                    self.process_completions(completions);
-
-                    // Alert application of update
-                    send_result(result, Ok(()));
+            } => {
+                // If peer does not exist, then create it.
+                if !self.peers.contains_key(&public_key) {
+                    let peer = Peer::new(
+                        self.context.with_label("peer"),
+                        public_key.clone(),
+                        self.get_next_socket(),
+                        self.max_size,
+                    );
+                    self.peers.insert(public_key.clone(), peer);
                 }
-                false => send_result(result, Err(Error::PeerMissing)),
-            },
+
+                // Update bandwidth limits
+                let now = self.context.current();
+                let completions = self
+                    .transmitter
+                    .limit(now, &public_key, egress_cap, ingress_cap);
+                self.process_completions(completions);
+
+                // Alert application of update
+                send_result(result, Ok(()));
+            }
             ingress::Message::AddLink {
                 sender,
                 receiver,
@@ -345,13 +353,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 success_rate,
                 result,
             } => {
-                // Require both peers to be registered
-                if !self.peers.contains_key(&sender) {
-                    return send_result(result, Err(Error::PeerMissing));
-                }
-                let peer = match self.peers.get(&receiver) {
-                    Some(peer) => peer,
-                    None => return send_result(result, Err(Error::PeerMissing)),
+                // If peer does not exist, then create it.
+                let socket = if !self.peers.contains_key(&sender) {
+                    let socket = self.get_next_socket();
+                    let peer = Peer::new(
+                        self.context.with_label("peer"),
+                        sender.clone(),
+                        socket,
+                        self.max_size,
+                    );
+                    self.peers.insert(sender.clone(), peer);
+                    socket
+                } else {
+                    self.peers.get_mut(&sender).unwrap().socket
                 };
 
                 // Require link to not already exist
@@ -364,7 +378,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     &mut self.context,
                     sender,
                     receiver,
-                    peer.socket,
+                    socket,
                     sampler,
                     success_rate,
                     self.max_size,
