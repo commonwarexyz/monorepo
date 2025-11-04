@@ -442,8 +442,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
     }
 
-    /// Returns the pruning boundary: oldest retained position if any items are retained,
-    /// otherwise the journal size.
+    /// Returns the location before which all items have been pruned.
     pub fn pruning_boundary(&self) -> u64 {
         self.oldest_retained_pos().unwrap_or(self.size)
     }
