@@ -154,6 +154,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
     ///
     /// # Errors

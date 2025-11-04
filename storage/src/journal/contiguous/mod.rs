@@ -50,6 +50,11 @@ pub trait Contiguous {
     /// passed to `prune()`.
     fn oldest_retained_pos(&self) -> impl std::future::Future<Output = Result<Option<u64>, Error>>;
 
+    /// Return the location before which all items have been pruned.
+    ///
+    /// If this is the same as `size()`, then all items have been pruned.
+    fn pruning_boundary(&self) -> impl std::future::Future<Output = Result<u64, Error>>;
+
     /// Prune items at positions strictly less than `min_position`.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
