@@ -212,10 +212,9 @@ mod test {
             let dkg = control.register(DKG_CHANNEL).await.unwrap();
             let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
 
-            let manager = oracle.ordered_manager();
             let resolver_cfg = marshal_resolver::Config {
                 public_key: validator.clone(),
-                manager,
+                manager: oracle.ordered_manager(),
                 mailbox_size: 200,
                 requester_config: requester::Config {
                     me: Some(validator.clone()),
