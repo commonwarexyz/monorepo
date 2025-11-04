@@ -7,7 +7,7 @@ use futures::{
     SinkExt,
 };
 use rand_distr::Normal;
-use std::{os::unix::net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 pub enum Message<P: PublicKey> {
     Update {
