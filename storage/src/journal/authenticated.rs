@@ -134,18 +134,20 @@ where
     }
 
     /// Append an operation.
-    pub async fn append(&mut self, op: O) -> Result<(), Error> {
+    ///
+    /// Returns the location where the operation was appended.
+    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
         // Append operation to the journal and update the MMR in parallel.
-        try_join!(
+        let (_, loc) = try_join!(
             self.mmr
                 .add_batched(&mut self.hasher, &encoded_op)
                 .map_err(Error::Mmr),
             self.journal.append(op).map_err(Into::into)
         )?;
 
-        Ok(())
+        Ok(Location::new_unchecked(loc))
     }
 
     /// Prune both the MMR and journal to the given location.
@@ -537,7 +539,8 @@ mod tests {
 
         for i in 0..count {
             let op = create_operation(i as u8);
-            journal.append(op).await.unwrap();
+            let loc = journal.append(op).await.unwrap();
+            assert_eq!(loc, Location::new_unchecked(i as u64));
         }
 
         journal.sync().await.unwrap();
@@ -677,7 +680,8 @@ mod tests {
 
             // Add 20 uncommitted operations
             for i in 0..20 {
-                journal.append(create_operation(i as u8)).await.unwrap();
+                let loc = journal.append(create_operation(i as u8)).await.unwrap();
+                assert_eq!(loc, Location::new_unchecked(i as u64));
             }
 
             // Don't sync - these are uncommitted
@@ -694,7 +698,8 @@ mod tests {
         });
     }
 
-    /// Verify that apply_op() increments the operation count and operations can be read back correctly.
+    /// Verify that append() increments the operation count, returns correct locations, and
+    /// operations can be read back correctly.
     #[test_traced("INFO")]
     fn test_apply_op_and_read_operations() {
         let executor = deterministic::Runner::default();
@@ -706,7 +711,8 @@ mod tests {
             // Add 50 operations
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                journal.append(op.clone()).await.unwrap();
+                let loc = journal.append(op.clone()).await.unwrap();
+                assert_eq!(loc, Location::new_unchecked(i as u64));
                 assert_eq!(journal.op_count(), Location::new_unchecked((i + 1) as u64));
             }
 
@@ -823,15 +829,21 @@ mod tests {
 
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
-            for op in &expected_ops {
-                journal.append(op.clone()).await.unwrap();
+            for (i, op) in expected_ops.iter().enumerate() {
+                let loc = journal.append(op.clone()).await.unwrap();
+                assert_eq!(loc, Location::new_unchecked(i as u64),);
             }
 
             // Add commit operation to commit the operations
-            journal
+            let commit_loc = journal
                 .append(Operation::CommitFloor(Location::new_unchecked(0)))
                 .await
                 .unwrap();
+            assert_eq!(
+                commit_loc,
+                Location::new_unchecked(20),
+                "commit should be at location 20"
+            );
             journal.close().await.unwrap();
 
             // Reopen and verify the operations persisted
