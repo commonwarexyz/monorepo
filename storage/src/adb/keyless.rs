@@ -220,7 +220,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Create a future that updates and syncs the log.
         let log_fut = async {
             self.log.append(operation).await?;
-            self.log.sync_data().await?;
+            self.log.commit().await?;
             Ok::<(), Error>(())
         };
 

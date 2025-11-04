@@ -389,7 +389,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// The position returned is a stable, consecutively increasing value starting from 0.
     /// This position remains constant after pruning.
     ///
-    /// When a section becomes full, both the data journal and offsets journal are synced
+    /// When a section becomes full, both the data journal and offsets journal are persisted
     /// to maintain the invariant that all non-final sections are full and consistent.
     ///
     /// # Errors
@@ -548,23 +548,18 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.data.get(section, offset).await
     }
 
-    /// Sync only the data journal to storage, without syncing the offsets journal.
+    /// Durably persist the journal.
     ///
-    /// This is faster than `sync()` and can be used to ensure data durability without
-    /// the overhead of syncing the offsets journal.
-    ///
-    /// We call `sync` when appending to a section, so the offsets journal will eventually be
-    /// synced as well, maintaining the invariant that all nonfinal sections are fully synced.
-    /// In other words, the journal will remain in a consistent, recoverable state even if a crash
-    /// occurs after calling this method but before calling `sync`.
-    pub async fn sync_data(&mut self) -> Result<(), Error> {
+    /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
+    /// before the next call to `sync()`.
+    pub async fn commit(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         self.data.sync(section).await
     }
 
-    /// Sync all pending writes to storage.
+    /// Durably persist the journal and ensure recovery is not required on startup.
     ///
-    /// This syncs both the data journal and the offsets journal concurrently.
+    /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Sync only the current (final) section of the data journal.
         // All non-final sections are already synced per Invariant #1.
@@ -1548,7 +1543,7 @@ mod tests {
             }
 
             // Manually sync only data to simulate crash during concurrent sync
-            journal.sync_data().await.unwrap();
+            journal.commit().await.unwrap();
 
             // Simulate a crash (offsets not synced)
             drop(journal);

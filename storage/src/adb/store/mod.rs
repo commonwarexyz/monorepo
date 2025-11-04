@@ -349,7 +349,7 @@ where
         self.last_commit = Some(Location::new_unchecked(last_commit_loc));
 
         // Sync the log data to ensure durability.
-        self.log.sync_data().await?;
+        self.log.commit().await?;
 
         Ok(())
     }
