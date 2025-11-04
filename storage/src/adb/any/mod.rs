@@ -134,9 +134,13 @@ where
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
     ///
+    /// TODO(MONOREPO-1829): callers of this method should migrate to using
+    /// [Self::raise_floor_with_bitmap] instead.
+    ///
     /// # Panics
     ///
-    /// Expects there is at least one active operation above the inactivity floor, and panics otherwise.
+    /// Expects there is at least one active operation above the inactivity floor, and panics
+    /// otherwise.
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,
@@ -144,9 +148,6 @@ where
         H: Hasher,
         O: Keyed,
     {
-        // Search for the first active operation above the inactivity floor and move it to tip.
-        //
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
         let tip_loc = Location::new_unchecked(self.log.size().await);
         loop {
             assert!(

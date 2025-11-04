@@ -53,13 +53,14 @@ pub trait Keyed: Codec {
     /// If this operation deletes its key's value.
     fn is_delete(&self) -> bool;
 
-    /// The commit floor location if this operation is a commit operation with a floor value, None
-    /// otherwise.
-    fn commit_floor(&self) -> Option<Location>;
+    /// The inactivity floor location if this operation is a commit operation with a floor value,
+    /// None otherwise.
+    fn has_floor(&self) -> Option<Location>;
 }
 
 /// A trait for operations used by database variants that support commit operations.
 pub trait Committable {
+    /// If this operation is a commit operation.
     fn is_commit(&self) -> bool;
 }
 

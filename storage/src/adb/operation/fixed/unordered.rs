@@ -67,7 +67,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
         matches!(self, Self::Update(_, _))
     }
 
-    fn commit_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<Location> {
         match self {
             Self::CommitFloor(loc) => Some(*loc),
             _ => None,
