@@ -304,10 +304,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let _ = response.send(self.peer_sets.get(&id).cloned());
                 }
             }
-            ingress::Message::Subscribe { response } => {
-                // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded();
-
+            ingress::Message::Subscribe { sender } => {
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
                     let all = self.peer_refs.keys().cloned().collect();
@@ -315,9 +312,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let _ = sender.unbounded_send(notification);
                 }
                 self.subscribers.push(sender);
-
-                // Return the receiver to the caller
-                let _ = response.send(receiver);
             }
             ingress::Message::LimitBandwidth {
                 public_key,

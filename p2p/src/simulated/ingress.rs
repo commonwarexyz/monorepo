@@ -25,8 +25,7 @@ pub enum Message<P: PublicKey> {
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     Subscribe {
-        #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)>>,
+        sender: mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>,
     },
     LimitBandwidth {
         public_key: P,
@@ -206,10 +205,7 @@ impl<P: PublicKey> Oracle<P> {
 
     /// Set the peers for a given id.
     async fn update(&mut self, id: u64, peers: Ordered<P>) {
-        self.sender
-            .send(Message::Update { id, peers })
-            .await
-            .unwrap();
+        let _ = self.sender.send(Message::Update { id, peers }).await;
     }
 
     /// Get the peers for a given id.
@@ -221,18 +217,15 @@ impl<P: PublicKey> Oracle<P> {
                 response: sender,
             })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .ok()?;
+        receiver.await.ok().flatten()
     }
 
     /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Subscribe { response: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        let (sender, receiver) = mpsc::unbounded();
+        let _ = self.sender.send(Message::Subscribe { sender }).await;
+        receiver
     }
 }
 
@@ -316,8 +309,8 @@ impl<P: PublicKey> Control<P> {
                 result: tx,
             })
             .await
-            .unwrap();
-        rx.await.unwrap()
+            .map_err(|_| Error::NetworkClosed)?;
+        rx.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
