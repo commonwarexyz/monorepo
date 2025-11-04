@@ -26,6 +26,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 pub mod any;
+pub mod authenticated_journal;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
