@@ -19,8 +19,7 @@ use commonware_utils::set::Ordered;
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future::{self, FutureExt, Shared},
-    SinkExt, StreamExt,
+    future, SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
@@ -381,10 +380,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 public_key.clone(),
                 socket,
                 self.max_size,
-            );
-
-            // Ensure it is ready to listen for dial requests
-            peer.wait_until_ready().await;
+            )
+            .await;
 
             // Once ready, add to peers
             self.peers.insert(public_key.clone(), peer);
@@ -689,9 +686,6 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
-
-    // Signals when the listener has finished binding
-    ready: Shared<oneshot::Receiver<()>>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -699,7 +693,7 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork + Metrics + Clock>(
+    async fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: E,
         public_key: P,
         socket: SocketAddr,
@@ -772,7 +766,6 @@ impl<P: PublicKey> Peer<P> {
 
         // Spawn a task that accepts new connections and spawns a task for each connection
         let (ready_tx, ready_rx) = oneshot::channel();
-        let ready_rx = ready_rx.shared();
         context
             .with_label("listener")
             .spawn(move |context| async move {
@@ -818,17 +811,14 @@ impl<P: PublicKey> Peer<P> {
                 }
             });
 
+        // Wait for listener to start before returning
+        let _ = ready_rx.await;
+
         // Return peer
         Self {
             socket,
             control: control_sender,
-            ready: ready_rx,
         }
-    }
-
-    async fn wait_until_ready(&self) {
-        let ready = self.ready.clone();
-        let _ = ready.await;
     }
 
     /// Register a channel with the peer.
@@ -836,7 +826,6 @@ impl<P: PublicKey> Peer<P> {
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
     async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
-        self.wait_until_ready().await;
         let (sender, receiver) = oneshot::channel();
         self.control
             .send((channel, sender))
