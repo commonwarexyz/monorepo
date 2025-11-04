@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    secp256r1::{PrivateKey, PublicKey, Signature},
+    secp256r1::recoverable::{PrivateKey, PublicKey, Signature},
     Signer, Verifier,
 };
 use libfuzzer_sys::fuzz_target;
@@ -18,7 +18,7 @@ use p256::{
 pub struct FuzzInput {
     pub private_key_32: [u8; 32],
     pub public_key_33: [u8; 33],
-    pub signature_64: [u8; 64],
+    pub signature_65: [u8; 65],
     #[arbitrary(with = |u: &mut arbitrary::Unstructured| {
         let lengths = [0, 31, 32, 33, 34, 63, 64, 65, 128, 256];
         let len = u.choose(&lengths)?;
@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
     match input.case_selector % 10 {
         0 => test_private_key(&input.private_key_32),
         1 => test_public_key(&input.public_key_33),
-        2 => test_signature(&input.signature_64),
+        2 => test_signature(&input.signature_65),
         3 => test_private_key(&input.variable_data),
         4 => test_public_key(&input.variable_data),
         5 => test_signature(&input.variable_data),
