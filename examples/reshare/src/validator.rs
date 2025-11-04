@@ -456,6 +456,7 @@ mod test {
     struct Plan {
         seed: u64,
         total: u32,
+        per_round: u32,
         link: Link,
         epochs: Vec<EpochPlan>,
     }
@@ -487,7 +488,7 @@ mod test {
             network.start();
 
             tracing::debug!("creating team with {} participants", self.total);
-            let team = Team::reckon(&mut ctx, self.total, self.total);
+            let team = Team::reckon(&mut ctx, self.total, self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
 
@@ -506,7 +507,7 @@ mod test {
                         return Err(anyhow!("dkg failure, pk = {:?}", &update.pk));
                     }
                     Update::Success { epoch, output, .. } => {
-                        tracing::info!(epoch = epoch, pk = ?update.pk, "DKG success");
+                        tracing::info!(epoch = epoch, pk = ?update.pk, ?output, "DKG success");
                         match status.get(&update.pk) {
                             None if epoch == 0 => {}
                             Some(e) if e + 1 == epoch => {}
@@ -559,6 +560,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -577,6 +579,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -595,6 +598,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -613,6 +617,45 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_004() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_005() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
