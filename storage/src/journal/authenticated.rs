@@ -423,7 +423,8 @@ where
         self.journal.sync_data().await.map_err(Error::Journal)
     }
 
-    /// Durably persist the data.
+    /// Durably persist the data. This is slower than `commit()` but ensures recovery is not
+    /// required on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             // Sync only the data journal, not the offsets journal.
