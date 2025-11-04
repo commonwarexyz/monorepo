@@ -92,9 +92,6 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     round: Rnd,
 
-    // Leader is set as soon as we know the seed for the view (if any).
-    leader: Option<u32>,
-
     // We explicitly distinguish between the proposal being verified (we checked it)
     // and the proposal being recovered (network has determined its validity). As a sanity
     // check, we'll never notarize or finalize a proposal that we did not verify.
@@ -162,8 +159,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             round,
 
-            leader: None,
-
             requested_proposal_verify: false,
             verified_proposal: false,
 
@@ -194,13 +189,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             recover_latency,
         }
-    }
-
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) =
-            select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
-        self.leader = Some(leader_idx);
-        trace!(round=?self.round, ?leader, ?leader_idx, "leader elected");
     }
 
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
@@ -498,9 +486,10 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
+    last_finalized: View,
     view: View,
     views: BTreeMap<View, Round<E, S, D>>,
-    last_finalized: View,
+    leaders: BTreeMap<View, u32>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -604,6 +593,7 @@ impl<
                 last_finalized: 0,
                 view: 0,
                 views: BTreeMap::new(),
+                leaders: BTreeMap::new(),
 
                 current_view,
                 tracked_views,
@@ -698,8 +688,8 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<Request<D, P, D>> {
         // Check if we are leader
+        let leader = self.get_leader(self.view)?;
         let round = self.views.get_mut(&self.view).unwrap();
-        let leader = round.leader?;
         if !Self::is_me(&self.scheme, leader) {
             return None;
         }
@@ -920,7 +910,7 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader) = round.leader else {
+            let Some(leader) = self.get_leader(self.view) else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
@@ -1043,7 +1033,7 @@ impl<
 
         // If the leader is not set, we need the seed for this round. If the parent view is not
         // the previous view, then a nullification is missing.
-        let leader_opt = round.leader;
+        let leader_opt = self.get_leader(self.view);
         if leader_opt.is_none() {
             let prev_view = view - 1;
             if parent_view != prev_view {
@@ -1146,13 +1136,8 @@ impl<
         // Log the result and exit early if certification failed since we should not move to the
         // next view until a nullification is formed.
         if success {
-            // Enter next view. We should have a notarization for this view,
-            // otherwise we would not have asked for certification in the first place.
-            let notarization = round.notarization.as_ref().unwrap();
-            let seed = self
-                .scheme
-                .seed(notarization.round(), &notarization.certificate);
-            self.enter_view(view + 1, seed);
+            // Enter next view.
+            self.enter_view(view + 1);
         } else {
             // If the failed certification is for the current view, timeout ASAP.
             // This round may not be for the current view; it's safe to set its deadline anyway.
@@ -1166,20 +1151,43 @@ impl<
             return None;
         };
         Some((
-            Self::is_me(&self.scheme, round.leader?),
+            Self::is_me(&self.scheme, self.get_leader(view)?),
             elapsed.as_secs_f64(),
         ))
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
+    /// Sets the leader from a given round and certificate.
+    ///
+    /// The leader will be set for the next view.
+    fn set_leader(&mut self, prev_round: Rnd, certificate: Option<&S::Certificate>) {
+        // If the leader is already set, do nothing
+        let next_round = Rnd::new(self.epoch, prev_round.view() + 1);
+        if self.leaders.contains_key(&next_round.view()) {
+            return;
+        }
+
+        // Calculate the seed if there is a certificate
+        let seed = certificate.and_then(|c| self.scheme.seed(prev_round, c));
+
+        // Select and insert the leader
+        let (leader, leader_idx) =
+            select_leader::<S, _>(self.scheme.participants().as_ref(), next_round, seed);
+        self.leaders.insert(next_round.view(), leader_idx);
+
+        // This view may be eligible for certification
+        self.certification_candidates.insert(next_round.view());
+
+        // Log the leader election
+        trace!(round=?next_round, ?leader, ?leader_idx, "leader elected");
+    }
+
+    fn get_leader(&self, view: View) -> Option<u32> {
+        self.leaders.get(&view).copied()
+    }
+
+    fn enter_view(&mut self, view: u64) {
         // Don't need to create a new view
         if view <= self.view {
-            // Set leader if round already exists.
-            if let Some(round) = self.views.get_mut(&view) {
-                if round.leader.is_none() {
-                    round.set_leader(seed);
-                }
-            }
             return;
         }
 
@@ -1187,7 +1195,6 @@ impl<
         let leader_deadline = self.context.current() + self.leader_timeout;
         let advance_deadline = self.context.current() + self.notarization_timeout;
         let round = self.round_mut(view);
-        round.set_leader(seed);
         round.leader_deadline = Some(leader_deadline);
         round.advance_deadline = Some(advance_deadline);
         self.view = view;
@@ -1199,39 +1206,66 @@ impl<
     async fn prune_views(&mut self) {
         // Get last min
         let min = min_active(self.activity_timeout, self.last_finalized);
-        let mut pruned = false;
-        loop {
-            // Get next key
-            let next = match self.views.keys().next() {
-                Some(next) => *next,
-                None => return,
-            };
+        let kept_views = self.views.split_off(&min);
+        let kept_leaders = self.leaders.split_off(&min);
 
-            // If less than min, prune
-            if next >= min {
-                break;
-            }
-            self.views.remove(&next);
+        // Log and prune journal if we pruned any views
+        {
+            let pruned_views = self.views.keys().collect::<Vec<_>>();
             debug!(
-                view = next,
+                views = ?pruned_views,
                 last_finalized = self.last_finalized,
-                "pruned view"
+                "pruned views"
             );
-            pruned = true;
+            if !pruned_views.is_empty() {
+                self.journal
+                    .as_mut()
+                    .unwrap()
+                    .prune(min)
+                    .await
+                    .expect("unable to prune journal");
+            }
         }
 
-        // Prune journal up to min
-        if pruned {
-            self.journal
-                .as_mut()
-                .unwrap()
-                .prune(min)
-                .await
-                .expect("unable to prune journal");
-        }
+        // Update leaders and views with the kept ones
+        self.leaders = kept_leaders;
+        self.views = kept_views;
 
         // Update metrics
         self.tracked_views.set(self.views.len() as i64);
+    }
+
+    /// Handles common logic when certificates are created. This includes:
+    /// - Setting the leader for the next view
+    /// - Adding the view to the certification candidates
+    /// - Adding the children of the view to the certification candidates
+    fn handle_cert(&mut self, certificate: &Voter<S, D>) {
+        let view = certificate.view();
+        let next_view = view + 1;
+
+        // Set the leader for the next view
+        let (rnd, cert) = match &certificate {
+            Voter::Nullification(n) => (n.round(), &n.certificate),
+            Voter::Notarization(n) => (n.round(), &n.certificate),
+            Voter::Finalization(f) => (f.round(), &f.certificate),
+            _ => unreachable!(),
+        };
+        self.set_leader(rnd, Some(cert));
+
+        // If this is a notarization, it may be eligible for certification.
+        if let Voter::Notarization(_) = &certificate {
+            self.certification_candidates.insert(view);
+        }
+
+        // If this is a notarization or a finalization, its children may be eligible for certification.
+        if let Voter::Notarization(_) | Voter::Finalization(_) = &certificate {
+            self.certification_candidates.extend(
+                self.views
+                    .range(next_view..)
+                    .filter(|(_, r)| r.proposal.as_ref().is_some_and(|p| p.parent == view))
+                    .map(|(v, _)| *v),
+            );
+        }
     }
 
     /// Broadcasts a certificate (notarization, nullification, or finalization) to all validators.
@@ -1245,8 +1279,8 @@ impl<
     ) {
         // Log the broadcast and record metrics
         let (metric, name) = match &certificate {
-            Voter::Notarization(_) => (metrics::Outbound::notarization(), "notarization"),
             Voter::Nullification(_) => (metrics::Outbound::nullification(), "nullification"),
+            Voter::Notarization(_) => (metrics::Outbound::notarization(), "notarization"),
             Voter::Finalization(_) => (metrics::Outbound::finalization(), "finalization"),
             _ => unreachable!(),
         };
@@ -1255,7 +1289,8 @@ impl<
             true => format!("rebroadcast {}", name),
             false => format!("broadcast {}", name),
         };
-        debug!(view=?certificate.view(), debug_msg);
+        let view = certificate.view();
+        debug!(view=?view, debug_msg);
 
         // Send the certificate
         sender
@@ -1344,46 +1379,23 @@ impl<
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
-        // Get view for notarization
-        let view = notarization.view();
-
-        // If the next view does not yet have a leader, set it and add to certification candidates.
-        let next_view = view + 1;
-        if let Some(round) = self.views.get_mut(&next_view) {
-            if round.leader.is_none() {
-                let seed = self
-                    .scheme
-                    .seed(notarization.round(), &notarization.certificate);
-                round.set_leader(seed);
-                self.certification_candidates.insert(next_view);
-            }
-        }
+        let msg = Voter::Notarization(notarization.clone());
+        self.handle_cert(&msg);
 
         // Create round (if it doesn't exist) and add verified notarization
+        let view = notarization.view();
         if self
             .round_mut(view)
             .add_verified_notarization(notarization.clone())
         {
             if let Some(journal) = self.journal.as_mut() {
                 // Store notarization
-                let msg = Voter::Notarization(notarization);
                 journal
                     .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
         }
-
-        // Record that this view may be eligible for certification.
-        self.certification_candidates.insert(view);
-
-        // Any known children of this view may also be eligible for certification.
-        self.certification_candidates.extend(
-            self.views
-                .range(view + 1..)
-                .filter(|(_, r)| r.proposal.as_ref().is_some_and(|p| p.parent == view))
-                .map(|(v, _)| *v),
-        );
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1419,9 +1431,7 @@ impl<
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
-        let seed = self
-            .scheme
-            .seed(nullification.round(), &nullification.certificate);
+        self.handle_cert(&msg);
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
@@ -1438,7 +1448,7 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view + 1);
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
@@ -1492,9 +1502,7 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
-        let seed = self
-            .scheme
-            .seed(finalization.round(), &finalization.certificate);
+        self.handle_cert(&msg);
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
@@ -1511,14 +1519,7 @@ impl<
         self.last_finalized = self.last_finalized.max(view);
 
         // Enter next view
-        self.enter_view(view + 1, seed);
-
-        self.certification_candidates.extend(
-            self.views
-                .range(view + 1..)
-                .filter(|(_, r)| r.proposal.as_ref().is_some_and(|p| p.parent == view))
-                .map(|(v, _)| *v),
-        );
+        self.enter_view(view + 1);
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
@@ -1633,8 +1634,8 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
+            if let Some((is_me, elapsed)) = self.since_view_start(view) {
+                if is_me {
                     self.notarization_latency.observe(elapsed);
                 }
             }
@@ -1659,7 +1660,8 @@ impl<
                 .await;
 
             // Broadcast the notarization
-            self.broadcast_cert(recovered_sender, Voter::Notarization(notarization), false)
+            let notarization = Voter::Notarization(notarization);
+            self.broadcast_cert(recovered_sender, notarization, false)
                 .await;
         };
 
@@ -1687,7 +1689,8 @@ impl<
                 .await;
 
             // Broadcast the nullification
-            self.broadcast_cert(recovered_sender, Voter::Nullification(nullification), false)
+            let nullification = Voter::Nullification(nullification);
+            self.broadcast_cert(recovered_sender, nullification, false)
                 .await;
 
             // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
@@ -1743,8 +1746,8 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
+            if let Some((is_me, elapsed)) = self.since_view_start(view) {
+                if is_me {
                     self.finalization_latency.observe(elapsed);
                 }
             }
@@ -1769,7 +1772,8 @@ impl<
                 .await;
 
             // Broadcast the finalization
-            self.broadcast_cert(recovered_sender, Voter::Finalization(finalization), false)
+            let finalization = Voter::Finalization(finalization);
+            self.broadcast_cert(recovered_sender, finalization, false)
                 .await;
         };
     }
@@ -1818,7 +1822,8 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, None);
+        self.enter_view(1);
+        self.set_leader(Rnd::new(self.epoch, 0), None);
 
         // Initialize journal
         let journal = Journal::<_, Voter<S, D>>::init(
@@ -1948,8 +1953,7 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
 
         // Initialize verifier with leader
-        let round = self.views.get_mut(&observed_view).expect("missing round");
-        let leader = round.leader.unwrap();
+        let leader = self.get_leader(observed_view).expect("missing leader");
         batcher
             .update(observed_view, leader, self.last_finalized)
             .await;
@@ -2242,8 +2246,8 @@ impl<
 
             // Update the verifier if we have moved to a new view
             if self.view > start {
+                let leader = self.get_leader(self.view).expect("missing leader");
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let leader = round.leader.unwrap();
                 let is_active = batcher.update(self.view, leader, self.last_finalized).await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
