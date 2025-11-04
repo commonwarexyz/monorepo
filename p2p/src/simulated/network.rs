@@ -323,6 +323,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 public_key,
                 egress_cap,
                 ingress_cap,
+                result,
             } => {
                 // If peer does not exist, then create it.
                 if !self.peers.contains_key(&public_key) {
@@ -341,6 +342,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     .transmitter
                     .limit(now, &public_key, egress_cap, ingress_cap);
                 self.process_completions(completions);
+
+                // Alert application of update
+                send_result(result, Ok(()));
             }
             ingress::Message::AddLink {
                 sender,
