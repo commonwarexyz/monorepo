@@ -189,10 +189,12 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_utils::set::OrderedAssociated;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
+        net::SocketAddr,
         time::Duration,
     };
 
@@ -2183,6 +2185,55 @@ mod tests {
                 .await;
 
             assert_eq!(manager.peer_set(0xFF).await.unwrap(), [pk1, pk2].into());
+        });
+    }
+
+    #[test]
+    fn test_ordered_associated_manager() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
+            let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
+
+            let mut manager = oracle.ordered_associated_manager();
+            let peers: OrderedAssociated<_, _> = vec![(pk1.clone(), addr1), (pk2.clone(), addr2)]
+                .into_iter()
+                .collect();
+            manager.update(1, peers).await;
+
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
+            let keys: Vec<_> = Vec::from(peer_set.clone());
+            assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
+
+            let mut subscription = manager.subscribe().await;
+            let (id, latest, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            let latest_keys: Vec<_> = Vec::from(latest.clone());
+            assert_eq!(latest_keys, vec![pk1.clone(), pk2.clone()]);
+            let all_keys: Vec<_> = Vec::from(all.clone());
+            assert_eq!(all_keys, vec![pk1.clone(), pk2.clone()]);
+
+            let peers: OrderedAssociated<_, _> = vec![(pk2.clone(), addr2)].into_iter().collect();
+            manager.update(2, peers).await;
+
+            let (id, latest, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 2);
+            let latest_keys: Vec<_> = Vec::from(latest.clone());
+            assert_eq!(latest_keys, vec![pk2.clone()]);
+            let all_keys: Vec<_> = Vec::from(all);
+            assert_eq!(all_keys, vec![pk1, pk2]);
         });
     }
 
