@@ -341,14 +341,15 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         Some(finalization)
     }
 
-    /// Returns true if we are certain that the proposal for this view has a valid ancestry. This is
-    /// used to decide whether we can safely backfill missing certificates implied by a proposal. We
-    /// determine this by checking if at least one honest participant notarized the proposal for
+    /// Returns true if the proposal in this view has a valid ancestry (to determine if we should backfill
+    /// missing certificates implied by a proposal).
+    ///
+    /// We determine this by checking if at least one honest participant notarized the proposal for
     /// this view. That is, if any of the following are true:
     /// - a finalization for this view exists, or
     /// - a notarization certificate for this view exists, or
     /// - the number of notarize votes exceeds the maximum number of faulty participants.
-    pub fn proposal_must_have_valid_ancestry(&self) -> bool {
+    pub fn proposal_has_valid_ancestry(&self) -> bool {
         // While this check is not strictly necessary, it's a good sanity check.
         if self.proposal.is_none() {
             return false;
@@ -1424,10 +1425,10 @@ impl<
                 .await
                 .unwrap();
 
-            // If at least one honest node notarized a proposal in this view,
+            // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
             // then backfill any missing certificates.
             let round = self.views.get(&view).expect("missing round");
-            if view > self.last_finalized && round.proposal_must_have_valid_ancestry() {
+            if view > self.last_finalized && round.proposal_has_valid_ancestry() {
                 // Compute certificates that we know are missing
                 let parent = round.proposal.as_ref().unwrap().parent;
                 let missing_notarizations = match self.is_notarized(parent) {
