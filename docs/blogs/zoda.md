@@ -51,8 +51,8 @@ Some back-of-the-napkin math:
 if our leader has a 1 Gb / s link, and needs to send a 1 MB block to 50 followers,
 we would expect this to take at least 400 ms, assuming no overhead at all
 in transmitting.
-Our [estimator crate](https://docs.rs/commonware-estimator/latest/estimator/)
-can be used to test out this example, as well as [others](https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy).
+The [commonware-estimator](https://docs.rs/commonware-estimator/latest/estimator/)
+can be used to test out [this example](https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy).
 
 This protocol is bottlenecked more so, with all of its communication going through
 the single leader node.
