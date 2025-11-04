@@ -34,24 +34,18 @@ mod player;
 
 #[derive(Clone)]
 struct EpochState<V: Variant, P: PublicKey> {
+    // Increments every epoch.
     epoch: u64,
+    // Increments only when the DKG is successful.
+    round: u64,
     output: Option<Output<V, P>>,
     share: Option<Share>,
-}
-
-impl<V: Variant, P: PublicKey> Default for EpochState<V, P> {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            output: None,
-            share: None,
-        }
-    }
 }
 
 impl<V: Variant, P: PublicKey> Write for EpochState<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         UInt(self.epoch).write(buf);
+        UInt(self.round).write(buf);
         self.output.write(buf);
         self.share.write(buf);
     }
@@ -59,7 +53,10 @@ impl<V: Variant, P: PublicKey> Write for EpochState<V, P> {
 
 impl<V: Variant, P: PublicKey> EncodeSize for EpochState<V, P> {
     fn encode_size(&self) -> usize {
-        UInt(self.epoch).encode_size() + self.output.encode_size() + self.share.encode_size()
+        UInt(self.epoch).encode_size()
+            + UInt(self.round).encode_size()
+            + self.output.encode_size()
+            + self.share.encode_size()
     }
 }
 
@@ -72,6 +69,7 @@ impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             epoch: UInt::read(buf)?.into(),
+            round: UInt::read(buf)?.into(),
             output: Read::read_cfg(buf, &cfg)?,
             share: ReadExt::read(buf)?,
         })
@@ -195,6 +193,7 @@ where
                     FixedBytes::new([]),
                     EpochState {
                         epoch: 0,
+                        round: 0,
                         output,
                         share,
                     },
@@ -223,9 +222,9 @@ where
                 )
             } else {
                 (
-                    self.peer_config.dealers(state.epoch),
-                    self.peer_config.dealers(state.epoch + 1),
-                    self.peer_config.dealers(state.epoch + 2),
+                    self.peer_config.dealers(state.round),
+                    self.peer_config.dealers(state.round + 1),
+                    self.peer_config.dealers(state.round + 2),
                 )
             };
 
@@ -386,18 +385,31 @@ where
             }
 
             let logs = observer.logs().clone();
-            let (success, next_output, next_share) = if let Some(mb_player) = mb_player {
+            let (success, next_round, next_output, next_share) = if let Some(mb_player) = mb_player
+            {
                 let Ok(res) = mb_player.finalize(logs).await else {
                     break 'actor;
                 };
                 match res {
-                    Ok((new_output, new_share)) => (true, Some(new_output), Some(new_share)),
-                    Err(_) => (false, state.output.clone(), state.share.clone()),
+                    Ok((new_output, new_share)) => {
+                        (true, state.round + 1, Some(new_output), Some(new_share))
+                    }
+                    Err(_) => (
+                        false,
+                        state.round,
+                        state.output.clone(),
+                        state.share.clone(),
+                    ),
                 }
             } else {
                 match observe(round_info, logs) {
-                    Ok(output) => (true, Some(output), None),
-                    Err(_) => (false, state.output.clone(), state.share.clone()),
+                    Ok(output) => (true, state.round + 1, Some(output), None),
+                    Err(_) => (
+                        false,
+                        state.round,
+                        state.output.clone(),
+                        state.share.clone(),
+                    ),
                 }
             };
             if !success {
@@ -414,6 +426,7 @@ where
             // Persist the next epoch information
             let epoch_state = EpochState {
                 epoch: next_epoch,
+                round: next_round,
                 output: next_output.clone(),
                 share: next_share.clone(),
             };
