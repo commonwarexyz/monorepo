@@ -243,6 +243,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
     if tail_items > 0 {
         tail.resize(tail_size).await?;
     }
+    let pruning_boundary = size - (size % cfg.items_per_blob);
 
     // Initialize metrics
     let tracked = Gauge::default();
@@ -263,7 +264,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
         synced,
         pruned,
         size,
-        pruning_boundary: size,
+        pruning_boundary,
         _array: PhantomData,
     })
 }
