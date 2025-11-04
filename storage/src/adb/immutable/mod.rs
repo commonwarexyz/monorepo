@@ -135,10 +135,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
 
         // Get the start of the log.
-        let start_loc = match log.oldest_retained_pos() {
-            Some(pos) => Location::new_unchecked(pos),
-            None => Location::new_unchecked(log.size()),
-        };
+        let start_loc = Location::new_unchecked(log.pruning_boundary());
 
         // Build snapshot from the log.
         build_snapshot_from_log(start_loc, &log, &mut snapshot, |_, _| {}).await?;
@@ -188,10 +185,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         );
 
         // Get the start of the log.
-        let start_loc = match cfg.log.oldest_retained_pos() {
-            Some(pos) => Location::new_unchecked(pos),
-            None => Location::new_unchecked(log_size),
-        };
+        let start_loc = Location::new_unchecked(cfg.log.pruning_boundary());
 
         // Build snapshot from the log
         build_snapshot_from_log(start_loc, &cfg.log, &mut snapshot, |_, _| {}).await?;
@@ -213,6 +207,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Return the oldest location that remains retrievable.
     pub fn oldest_retained_loc(&self) -> Option<Location> {
         self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -261,11 +260,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(oldest) => oldest,
-            None => self.op_count(),
-        };
-        if loc < pruning_boundary {
+        if loc < self.pruning_boundary() {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -378,11 +373,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if start_loc >= op_count {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
-        let pruning_boundary = match self.oldest_retained_loc() {
-            Some(oldest) => oldest,
-            None => self.op_count(),
-        };
-        if start_loc < pruning_boundary {
+        if start_loc < self.pruning_boundary() {
             return Err(Error::OperationPruned(start_loc));
         }
 
