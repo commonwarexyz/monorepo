@@ -134,13 +134,12 @@ where
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
     ///
-    /// TODO(MONOREPO-1829): callers of this method should migrate to using
-    /// [Self::raise_floor_with_bitmap] instead.
-    ///
     /// # Panics
     ///
     /// Expects there is at least one active operation above the inactivity floor, and panics
     /// otherwise.
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): callers of this method should
+    // migrate to using [Self::raise_floor_with_bitmap] instead.
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,

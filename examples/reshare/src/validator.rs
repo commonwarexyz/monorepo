@@ -205,11 +205,7 @@ mod test {
         for validator in validators.iter() {
             let mut control = oracle.control(validator.clone());
             let pending = control.register(PENDING_CHANNEL).await.unwrap();
-            let recovered = oracle
-                .control(validator.clone())
-                .register(RECOVERED_CHANNEL)
-                .await
-                .unwrap();
+            let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
             let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
             let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
             let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
