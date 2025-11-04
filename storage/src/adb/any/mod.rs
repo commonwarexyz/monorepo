@@ -134,8 +134,8 @@ where
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
     ///
-    /// TODO(https://github.com/commonwarexyz/monorepo/issues/1829): callers of this method should
-    /// migrate to using [Self::raise_floor_with_bitmap] instead.
+    /// TODO(MONOREPO-1829): callers of this method should migrate to using
+    /// [Self::raise_floor_with_bitmap] instead.
     ///
     /// # Panics
     ///
