@@ -9,6 +9,9 @@ author_twitter: "https://x.com/cronokirby"
 katex: true
 ---
 
+TODO: ZK fanboys would say no (just need to send state diffs)
+TODO: talk about agreement then distributing blocks
+
 A crucial part of blockchain consensus is distributing the block among participants.
 You can come to consensus over a mere fingerprint of the block---a hash for example---
 but doing anything interesting with the block, like processing transactions, requires
@@ -379,5 +382,5 @@ Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
 can potentially allow for verifying arbitrary properties of the data, which
 we're excited about.
 
-Our work-in-progress implementation of this scheme can be found [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
+Our initial implementation of this scheme can be found [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
 
