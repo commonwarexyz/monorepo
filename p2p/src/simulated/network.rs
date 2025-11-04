@@ -326,7 +326,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                let socket = self.ensure_peer_exists(&sender);
+                self.ensure_peer_exists(&sender);
+                let receiver_socket = self.ensure_peer_exists(&receiver);
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -338,7 +339,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     &mut self.context,
                     sender,
                     receiver,
-                    socket,
+                    receiver_socket,
                     sampler,
                     success_rate,
                     self.max_size,
