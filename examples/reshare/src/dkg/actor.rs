@@ -191,6 +191,20 @@ where
     ) {
         let is_dkg = output.is_none();
 
+        if self.epoch_metadata.get(&FixedBytes::new([])).is_none() {
+            self.epoch_metadata
+                .put_sync(
+                    FixedBytes::new([]),
+                    EpochState {
+                        epoch: Default::default(),
+                        output,
+                        share,
+                    },
+                )
+                .await
+                .expect("should be able to update state");
+        }
+
         // Start a muxer for the physical channel used by DKG/reshare.
         // Make sure to use a channel allowing sending messages to ourselves.
         let (sender, receiver) = self_channel(self.signer.public_key(), 0, sender, receiver);
@@ -201,8 +215,8 @@ where
             let state = self
                 .epoch_metadata
                 .get(&FixedBytes::new([]))
-                .cloned()
-                .unwrap_or_default();
+                .expect("state has been initialized above")
+                .clone();
             let (dealers, players, next_players) = if is_dkg {
                 (
                     self.peer_config.participants.clone(),
@@ -237,11 +251,11 @@ where
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
-            if let Some(output) = output.as_ref() {
+            if let Some(output) = state.output.as_ref() {
                 let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                     epoch: state.epoch,
                     poly: Some(output.public().clone()),
-                    share: share.clone(),
+                    share: state.share.clone(),
                     dealers: dealers.clone(),
                 };
                 orchestrator
@@ -249,15 +263,9 @@ where
                     .await;
             }
 
-            dbg!(
-                &self.signer.public_key(),
-                &state.epoch,
-                &output,
-                &dealers,
-                &players
-            );
-            let round_info = RoundInfo::new(state.epoch.get(), output.clone(), dealers, players)
-                .expect("round info configuration should be correct");
+            let round_info =
+                RoundInfo::new(state.epoch.get(), state.output.clone(), dealers, players)
+                    .expect("round info configuration should be correct");
             let (to_players, from_dealers) = dkg_mux
                 .register(0)
                 .await
@@ -274,7 +282,7 @@ where
                     from_players,
                     round_info.clone(),
                     self.signer.clone(),
-                    share.clone(),
+                    state.share.clone(),
                 )
                 .await;
                 dealer.start();
@@ -318,7 +326,7 @@ where
                     Message::Act { response } => {
                         let outcome = dealer_result.take();
                         if outcome.is_some() {
-                            info!("including reshare outcome in proposed block");
+                            tracing::info!("including reshare outcome in proposed block");
                         }
                         if response.send(outcome).is_err() {
                             break 'actor;
@@ -375,7 +383,7 @@ where
                         // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                         // and not willing to enter the next epoch).
                         response.acknowledge();
-                        info!(?epoch, relative_height, "finalized block");
+                        tracing::debug!(?epoch, relative_height, "finalized block");
                     }
                 }
             }
@@ -387,19 +395,19 @@ where
                 };
                 match res {
                     Ok((new_output, new_share)) => (true, Some(new_output), Some(new_share)),
-                    Err(_) => (false, output.clone(), share.clone()),
+                    Err(_) => (false, state.output.clone(), state.share.clone()),
                 }
             } else {
                 match observe(round_info, logs) {
                     Ok(output) => (true, Some(output), None),
-                    Err(_) => (false, output.clone(), share.clone()),
+                    Err(_) => (false, state.output.clone(), state.share.clone()),
                 }
             };
             if !success {
                 self.failed_rounds.inc();
             }
 
-            info!(
+            tracing::info!(
                 success,
                 ?state.epoch,
                 "finalized epoch's reshare; instructing reconfiguration after reshare.",
@@ -421,7 +429,7 @@ where
                 Update::Success {
                     epoch: state.epoch,
                     output: next_output.expect("success => output exists"),
-                    share: next_share,
+                    share: next_share.clone(),
                 }
             } else {
                 Update::Failure { epoch: state.epoch }
@@ -439,7 +447,7 @@ where
                 //
                 // The initial DKG process will never be exited automatically, assuming coordination
                 // between participants is manual.
-                info!("DKG told to sto post update, now waiting...");
+                info!("DKG told to stop post update, now waiting...");
                 futures::future::pending::<()>().await;
                 break 'actor;
             }

@@ -57,7 +57,7 @@ pub enum Error {
     #[error("player is not present in the list of players")]
     UnknownPlayer,
     #[error("dealer is not present in the previous list of players")]
-    UnknownDealer,
+    UnknownDealer(String),
     #[error("dkg failed for some reason")]
     DkgFailed,
     #[error("not enough dealers: {0}")]
@@ -215,11 +215,11 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         assert!(dealers.len() <= u32::MAX as usize);
         assert!(players.len() <= u32::MAX as usize);
         if let Some(previous) = previous.as_ref() {
-            if dealers
+            if let Some(unknown) = dealers
                 .iter()
-                .any(|d| previous.players.position(d).is_none())
+                .find(|d| previous.players.position(d).is_none())
             {
-                return Err(Error::UnknownDealer);
+                return Err(Error::UnknownDealer(format!("{unknown:?}")));
             }
             if dealers.len() < previous.quorum() as usize {
                 return Err(Error::InsufficientDealers(dealers.len()));
