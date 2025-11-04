@@ -61,7 +61,7 @@ pub struct Config<C> {
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
-    /// All non-final sections will be full and synced.
+    /// All non-final sections will be full and persisted.
     pub items_per_section: NonZeroU64,
 
     /// Optional compression level for stored items.
@@ -98,7 +98,7 @@ impl<C> Config<C> {
 ///
 /// ## 1. Section Fullness
 ///
-/// All non-final sections are full (`items_per_section` items) and synced. This ensures
+/// All non-final sections are full (`items_per_section` items) and persisted. This ensures
 /// that on `init()`, we only need to replay the last section to determine the exact size.
 ///
 /// ## 2. Data Journal is Source of Truth
@@ -414,7 +414,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let position = self.size;
         self.size += 1;
 
-        // Maintain invariant that all full sections are synced.
+        // Maintain invariant that all full sections are persisted.
         if self.size.is_multiple_of(self.items_per_section) {
             futures::try_join!(self.data.sync(section), self.offsets.sync())?;
         }
@@ -561,17 +561,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync only the current (final) section of the data journal.
-        // All non-final sections are already synced per Invariant #1.
+        // Persist only the current (final) section of the data journal.
+        // All non-final sections are already persisted per Invariant #1.
         let section = self.current_section();
 
-        // Sync both journals concurrently
+        // Persist both journals concurrently
         futures::try_join!(self.data.sync(section), self.offsets.sync())?;
 
         Ok(())
     }
 
-    /// Close the journal, syncing all pending writes.
+    /// Close the journal, persisting all pending writes.
     ///
     /// This closes both the data journal and the offsets journal.
     pub async fn close(mut self) -> Result<(), Error> {
@@ -697,8 +697,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
             None if data_oldest_pos > 0 => {
                 // Offsets journal is empty (size == oldest_retained_pos).
-                // This can happen if we pruned all data, then appended new data, synced the
-                // data journal, but crashed before syncing the offsets journal.
+                // This can happen if we pruned all data, then appended new data, persisted the
+                // data journal, but crashed before persisting the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
                 let offsets_size = offsets.size().await;
                 if offsets_size != data_oldest_pos {
