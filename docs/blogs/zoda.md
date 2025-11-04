@@ -1,12 +1,12 @@
 ---
-title: "Optimizing Block Dispersal with the ZODA Hadamard Variant"
+title: "Fast Block Dissemination with Immediate Guarantees"
 description: "You can come to consensus over a mere fingerprint of the block---a hash for example---but doing anything interesting with that fingerprint, like processing transactions or updating state, requires disseminating (a lot of) data."
 date: "November 4th, 2025"
 published-time: "2025-11-04T00:00:00Z"
 modified-time: "2025-11-04T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
-url: "https://commonware.xyz/blogs/zoda"
+url: "https://commonware.xyz/blogs/zoda.html"
 katex: true
 ---
 
