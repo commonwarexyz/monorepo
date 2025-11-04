@@ -118,7 +118,6 @@ where
         let mailbox = Mailbox(outbox);
 
         let me_pk = me.public_key();
-        dbg!(&me_pk, &round_info);
         let player = Player::new(round_info.clone(), me)
             .expect(&format!("should be able to create player {:?}", me_pk));
 
