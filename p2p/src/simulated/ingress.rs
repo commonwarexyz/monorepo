@@ -88,7 +88,7 @@ impl<P: PublicKey> Oracle<P> {
         Self { sender }
     }
 
-    /// Spawn an individual control interface for a peer in the simulated network.
+    /// Create a new [Control] interface for some peer.
     pub fn control(&self, me: P) -> Control<P> {
         Control {
             me,
@@ -96,12 +96,18 @@ impl<P: PublicKey> Oracle<P> {
         }
     }
 
+    /// Create a new [OrderedManager].
+    ///
+    /// Useful for mocking [crate::authenticated::discovery].
     pub fn ordered_manager(&self) -> OrderedManager<P> {
         OrderedManager {
             oracle: self.clone(),
         }
     }
 
+    /// Create a new [OrderedAssociatedManager].
+    ///
+    /// Useful for mocking [crate::authenticated::lookup].
     pub fn ordered_associated_manager(&self) -> OrderedAssociatedManager<P> {
         OrderedAssociatedManager {
             oracle: self.clone(),
@@ -206,6 +212,7 @@ impl<P: PublicKey> Oracle<P> {
             .unwrap();
     }
 
+    /// Get the peers for a given id.
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<P>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
@@ -218,6 +225,7 @@ impl<P: PublicKey> Oracle<P> {
         receiver.await.unwrap()
     }
 
+    /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
