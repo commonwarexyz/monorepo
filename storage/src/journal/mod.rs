@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+pub mod authenticated;
 pub mod contiguous;
 pub mod segmented;
 

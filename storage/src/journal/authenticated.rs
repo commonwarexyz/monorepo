@@ -1,7 +1,11 @@
 //! Authenticated journal implementation.
+//!
+//! An authenticated journal maintains a sequential journal of operations alongside a Merkle Mountain
+//! Range (MMR). The operation at index i in the journal corresponds to the leaf at Location i in the
+//! MMR. This structure enables efficient proofs that an operation is included in the journal at a
+//! specific location.
 
 use crate::{
-    adb::{operation::Committable, rewind_uncommitted, Error},
     journal::contiguous::{fixed, variable, Contiguous},
     mmr::{journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
@@ -10,7 +14,53 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
+use thiserror::Error;
 use tracing::{debug, warn};
+
+/// Errors that can occur when interacting with an authenticated journal.
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("mmr error: {0}")]
+    Mmr(#[from] crate::mmr::Error),
+
+    #[error("journal error: {0}")]
+    Journal(#[from] super::Error),
+
+    #[error("prune beyond minimum required: requested={0} minimum={1}")]
+    PruneBeyondMinRequired(Location, Location),
+}
+
+/// Rewinds the journal to the last operation matching the rewind predicate, returning the size of the journal after rewinding.
+///
+/// Scans backwards from the end to find the last operation that matches the predicate, then rewinds everything after it.
+///
+/// Assumes there is at least one unpruned operation matching the predicate in the journal if the journal has been
+/// pruned.
+async fn rewind<O>(
+    journal: &mut impl Contiguous<Item = O>,
+    rewind_predicate: fn(&O) -> bool,
+) -> Result<u64, Error> {
+    let log_size = journal.size().await;
+    let mut rewind_size = log_size;
+    while rewind_size > 0 {
+        let op = journal.read(rewind_size - 1).await?;
+        if rewind_predicate(&op) {
+            break;
+        }
+        rewind_size -= 1;
+    }
+    if rewind_size != log_size {
+        let rewound_ops = log_size - rewind_size;
+        warn!(
+            log_size,
+            rewound_ops, "rewinding over uncommitted log operations"
+        );
+        journal.rewind(rewind_size).await?;
+        journal.sync().await?;
+    }
+
+    Ok(rewind_size)
+}
 
 /// An append-only data structure that maintains a sequential journal of operations alongside a
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
@@ -20,7 +70,7 @@ pub struct AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
-    O: Committable + Encode,
+    O: Encode,
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
@@ -38,7 +88,7 @@ impl<E, C, O, H> AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
-    O: Committable + Encode,
+    O: Encode,
     H: Hasher,
 {
     /// Align `mmr` to be consistent with `journal`.
@@ -78,7 +128,7 @@ where
                 mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
-            mmr.sync(hasher).await.map_err(Error::Mmr)?;
+            mmr.sync(hasher).await?;
         }
 
         // At this point the MMR and journal should be consistent.
@@ -147,8 +197,7 @@ where
         // Prune MMR to match the journal's actual boundary
         self.mmr
             .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
-            .await
-            .map_err(Error::Mmr)?;
+            .await?;
 
         Ok(pruning_boundary)
     }
@@ -165,7 +214,7 @@ where
     ///   [crate::mmr::MAX_LOCATION].
     /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
     ///   number of operations in the journal.
-    /// - Returns [Error::OperationPruned] if `start_loc` has been pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,
         op_count: Location,
@@ -188,7 +237,7 @@ where
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
-        let futures = (*start_loc..(*end_loc))
+        let futures = (*start_loc..*end_loc)
             .map(|i| self.journal.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -293,28 +342,25 @@ where
 impl<E, O, H> AuthenticatedJournal<E, fixed::Journal<E, O>, O, H>
 where
     E: Storage + Clock + Metrics,
-    O: CodecFixed<Cfg = ()> + Committable + Encode,
+    O: CodecFixed<Cfg = ()> + Encode,
     H: Hasher,
 {
-    /// Create a new [AuthenticatedJournal] with a fixed-length journal.
+    /// Create a new [AuthenticatedJournal] for fixed-length operations.
     ///
-    /// Creates both the MMR and journal from their respective configurations, then aligns them.
-    /// Any uncommitted operations in the journal are discarded.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if MMR or journal initialization fails, or if alignment fails.
+    /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
+    /// This is useful for discarding uncommitted operations after a crash.
     pub async fn new(
         context: E,
         mmr_cfg: crate::mmr::journaled::Config,
         journal_cfg: fixed::Config,
+        rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
-        // Rewind uncommitted operations in the journal.
-        rewind_uncommitted(&mut journal).await?;
+        // Rewind to last matching operation.
+        rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
         Self::align(&mut mmr, &mut journal, &mut hasher).await?;
@@ -339,29 +385,26 @@ where
 impl<E, O, H> AuthenticatedJournal<E, variable::Journal<E, O>, O, H>
 where
     E: Storage + Clock + Metrics,
-    O: Codec + Committable + Encode,
+    O: Codec + Encode,
     H: Hasher,
 {
-    /// Create a new [AuthenticatedJournal] with a variable-length journal.
+    /// Create a new [AuthenticatedJournal] for variable-length operations.
     ///
-    /// Creates both the MMR and journal from their respective configurations, then aligns them.
-    /// Any uncommitted operations in the journal are discarded.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if MMR or journal initialization fails, or if alignment fails.
+    /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
+    /// This is useful for discarding uncommitted operations after a crash.
     pub async fn new(
         context: E,
         mmr_cfg: crate::mmr::journaled::Config,
         journal_cfg: variable::Config<O::Cfg>,
+        rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
-        // Rewind uncommitted operations in the journal.
-        rewind_uncommitted(&mut journal).await?;
+        // Rewind to last matching operation.
+        rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
         Self::align(&mut mmr, &mut journal, &mut hasher).await?;
@@ -393,7 +436,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        adb::operation::fixed::unordered::Operation,
+        adb::operation::{fixed::unordered::Operation, Committable},
         journal::contiguous::fixed::{Config as JConfig, Journal},
         mmr::{
             journaled::{Config as MmrConfig, Mmr},
@@ -451,7 +494,12 @@ mod tests {
             Journal<deterministic::Context, Operation<Digest, Digest>>,
             Operation<Digest, Digest>,
             Sha256,
-        >>::new(context, mmr_config(suffix), journal_config(suffix))
+        >>::new(
+            context,
+            mmr_config(suffix),
+            journal_config(suffix),
+            |op: &Operation<Digest, Digest>| op.is_commit(),
+        )
         .await
         .unwrap()
     }
