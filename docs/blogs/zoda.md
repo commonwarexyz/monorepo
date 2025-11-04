@@ -17,8 +17,8 @@ You can come to consensus over a mere fingerprint of the block---a hash for exam
 but doing anything interesting with the block, like processing transactions, requires
 the data.
 
-We've invested some effort in this part of the Commonware Library recently, and I'd
-like to share some fruits of that effort in this post.
+We've invested some effort in this part of the [Commonware Library](https://github.com/commonwarexyz/monorepo)
+recently, and I'd like to share some fruits of that effort in this post.
 As an outline, we'll cover:
 
 - data dissemination, naively,
@@ -383,4 +383,4 @@ Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
 can pave the way for verifying arbitrary properties of the sharded data, which
 we're excited about.
 
-Our initial implementation of this scheme can be found [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
+Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
