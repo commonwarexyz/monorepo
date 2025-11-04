@@ -7,7 +7,7 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableVec, Context, Finalization, Finalize, Notarization,
+            Activity, Attributable, AttributableMap, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
@@ -84,20 +84,20 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: AttributableVec<Notarize<S, D>>,
+    notarizes: AttributableMap<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: AttributableVec<Nullify<S>>,
+    nullifies: AttributableMap<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: AttributableVec<Finalize<S, D>>,
+    finalizes: AttributableMap<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -114,12 +114,12 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     ) -> Self {
         // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
         // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
-        // signatures to construct a notarization/nullification/finalization, we use an AttributableVec
+        // signatures to construct a notarization/nullification/finalization, we use an AttributableMap
         // to ensure we only count a message from a given signer once.
         let participants = scheme.participants().len();
-        let notarizes = AttributableVec::new(participants);
-        let nullifies = AttributableVec::new(participants);
-        let finalizes = AttributableVec::new(participants);
+        let notarizes = AttributableMap::new(participants);
+        let nullifies = AttributableMap::new(participants);
+        let finalizes = AttributableMap::new(participants);
 
         Self {
             start: context.current(),
@@ -179,19 +179,19 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if self.proposal.is_none() {
             self.proposal = Some(notarize.proposal.clone());
         }
-        self.notarizes.push(notarize);
+        self.notarizes.insert(notarize);
     }
 
     async fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
         // We don't consider a nullify vote as being active.
-        self.nullifies.push(nullify);
+        self.nullifies.insert(nullify);
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) {
         if self.proposal.is_none() {
             self.proposal = Some(finalize.proposal.clone());
         }
-        self.finalizes.push(finalize);
+        self.finalizes.insert(finalize);
     }
 
     fn add_verified_notarization(&mut self, notarization: Notarization<S, D>) -> bool {
