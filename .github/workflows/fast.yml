@@ -187,6 +187,26 @@ jobs:
         fi
         echo "✓ Cargo.lock remained unchanged after building everything"
 
+  Docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Install pandoc
+      run: sudo apt-get update && sudo apt-get install -y pandoc
+    - name: Build docs
+      run: cd docs && make
+    - name: Check docs unchanged
+      run: |
+        if ! git diff --exit-code docs/; then
+          echo "ERROR: Generated HTML files in docs/ were modified during build!"
+          echo "This suggests that the generated HTML files in the repository are not up to date."
+          echo "Please run 'make' in the docs directory locally and commit the updated files."
+          exit 1
+        fi
+        echo "✓ Generated docs remained unchanged after running make"
+
   WASM:
     runs-on: ubuntu-latest
     timeout-minutes: 10
