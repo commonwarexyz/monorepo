@@ -734,7 +734,11 @@ impl<
         };
 
         // Request proposal from application
-        debug!(view = self.view, "requested proposal from automaton");
+        debug!(
+            view = self.view,
+            me = self.scheme.me(),
+            "requested proposal from automaton"
+        );
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
             leader: self
@@ -771,6 +775,35 @@ impl<
         null_retry
     }
 
+    /// Sends a certificate to all validators.
+    async fn send_certificate<Sr: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate: Voter<S, D>,
+        is_rebroadcast: bool,
+    ) {
+        // Log the broadcast and record metrics
+        let (metric, name) = match &certificate {
+            Voter::Notarization(_) => (metrics::Outbound::notarization(), "notarization"),
+            Voter::Nullification(_) => (metrics::Outbound::nullification(), "nullification"),
+            Voter::Finalization(_) => (metrics::Outbound::finalization(), "finalization"),
+            _ => unreachable!(),
+        };
+        self.outbound_messages.get_or_create(metric).inc();
+        let debug_msg = match is_rebroadcast {
+            true => format!("rebroadcast {}", name),
+            false => format!("broadcast {}", name),
+        };
+        let view = certificate.view();
+        debug!(view = view, debug_msg);
+
+        // Send the certificate
+        sender
+            .send(Recipients::All, certificate, true)
+            .await
+            .unwrap();
+    }
+
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -796,15 +829,8 @@ impl<
             let mut did_broadcast = false;
             // If we have a previous finalization, broadcast it
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
-                self.outbound_messages
-                    .get_or_create(metrics::Outbound::finalization())
-                    .inc();
-                let msg = Voter::Finalization(finalization);
-                recovered_sender
-                    .send(Recipients::All, msg, true)
-                    .await
-                    .unwrap();
-                debug!(view = past_view, "rebroadcast entry finalization");
+                self.send_certificate(recovered_sender, Voter::Finalization(finalization), true)
+                    .await;
                 did_broadcast = true;
             }
 
@@ -814,29 +840,38 @@ impl<
                 // If we have a previous notarization, broadcast it.
                 // The payload may not be certified.
                 if let Some(notarization) = self.construct_notarization(past_view, true).await {
-                    self.outbound_messages
-                        .get_or_create(metrics::Outbound::notarization())
-                        .inc();
-                    let msg = Voter::Notarization(notarization);
-                    recovered_sender
-                        .send(Recipients::All, msg, true)
-                        .await
-                        .unwrap();
-                    debug!(view = past_view, "rebroadcast entry notarization");
+                    self.send_certificate(
+                        recovered_sender,
+                        Voter::Notarization(notarization),
+                        true,
+                    )
+                    .await;
                     did_broadcast = true;
                 }
 
                 // If we have a previous nullification, broadcast it
                 if let Some(nullification) = self.construct_nullification(past_view, true).await {
-                    self.outbound_messages
-                        .get_or_create(metrics::Outbound::nullification())
-                        .inc();
-                    let msg = Voter::Nullification(nullification);
-                    recovered_sender
-                        .send(Recipients::All, msg, true)
-                        .await
-                        .unwrap();
-                    debug!(view = past_view, "rebroadcast entry nullification");
+                    self.send_certificate(
+                        recovered_sender,
+                        Voter::Nullification(nullification),
+                        true,
+                    )
+                    .await;
+                    did_broadcast = true;
+                }
+
+                // If we have a latest finalization, broadcast it
+                if let Some(finalization) = self
+                    .views
+                    .get(&self.last_finalized)
+                    .and_then(|r| r.finalization.as_ref().cloned())
+                {
+                    self.send_certificate(
+                        recovered_sender,
+                        Voter::Finalization(finalization),
+                        true,
+                    )
+                    .await;
                     did_broadcast = true;
                 }
             }
@@ -873,7 +908,7 @@ impl<
         self.outbound_messages
             .get_or_create(metrics::Outbound::nullify())
             .inc();
-        debug!(round=?nullify.round(), "broadcasting nullify");
+        debug!(round=?nullify.round(), me = self.scheme.me(), "broadcasting nullify");
         let msg = Voter::Nullify(nullify);
         pending_sender
             .send(Recipients::All, msg, true)
@@ -984,7 +1019,7 @@ impl<
                 let parent_proposal = match self.is_certified(cursor) {
                     Some(parent) => parent,
                     None => {
-                        debug!(view = cursor, "parent proposal is not certified");
+                        debug!(view = cursor, me = self.scheme.me(), views = ?self.views.keys().collect::<Vec<_>>(), "parent proposal is not certified");
                         return None;
                     }
                 };
@@ -1048,32 +1083,40 @@ impl<
         // Get the context for the proposal.
         let parent_view = proposal.parent;
 
-        // Get the leader
-        let Some(leader) = round.leader else {
-            // If the leader is not set, then we may need the seed for this round.
-            // We should attempt to fetch a notarization or nullification for the previous round.
-            let last_view = view - 1;
-            let (missing_notarizations, missing_nullifications) = if parent_view == last_view {
-                (vec![last_view], vec![])
-            } else {
-                (vec![parent_view], vec![last_view])
-            };
-            resolver
-                .fetch(missing_notarizations, missing_nullifications)
-                .await;
-            self.certification_candidates.insert(view);
-            return None;
-        };
+        let mut missing_notarizations = None;
+        let mut missing_nullifications = None;
 
-        // Since we have a notarization, the parent does not need to be certified by us. It is
-        // implicitly certified by the fact that participants notarized the current proposal.
-        let Some(parent_payload) = self.is_notarized(parent_view) else {
-            // However, if the parent is not notarized, then we cannot be sure what the parent is.
-            // We should attempt to fetch its notarization and to certify this view later.
-            resolver.fetch(vec![parent_view], vec![]).await;
-            self.certification_candidates.insert(view);
+        // If the leader is not set, we need the seed for this round. If the parent view is not
+        // the previous view, then a nullification is missing.
+        let leader_opt = round.leader;
+        if leader_opt.is_none() {
+            let prev_view = view - 1;
+            if parent_view != prev_view {
+                missing_nullifications = Some(prev_view);
+            }
+        }
+
+        // Fetch the parent notarization if we don't have it. We need to guarantee the parent
+        // payload in order to certify this view.
+        let parent_payload_opt = self.is_notarized(parent_view).copied();
+        if parent_payload_opt.is_none() {
+            missing_notarizations = Some(parent_view);
+        }
+
+        // If any missing certificates are needed to certify this view, then we should fetch them.
+        if missing_notarizations.is_some() || missing_nullifications.is_some() {
+            resolver
+                .fetch(
+                    missing_notarizations.map_or_else(Vec::new, |v| vec![v]),
+                    missing_nullifications.map_or_else(Vec::new, |v| vec![v]),
+                )
+                .await;
             return None;
-        };
+        }
+
+        // At this point, the context is able to be constructed—the leader and parent payload exist
+        let leader = leader_opt.unwrap();
+        let parent_payload = parent_payload_opt.unwrap();
         let context = Context {
             round: proposal.round,
             leader: self
@@ -1082,7 +1125,7 @@ impl<
                 .key(leader)
                 .expect("leader not found")
                 .clone(),
-            parent: (parent_view, *parent_payload),
+            parent: (parent_view, parent_payload),
         };
 
         // Request certification.
@@ -1147,20 +1190,19 @@ impl<
 
         // Log the result and exit early if certification failed since we should not move to the
         // next view until a nullification is formed.
-        if !success {
-            return;
+        if success {
+            // Enter next view. We should have a notarization for this view,
+            // otherwise we would not have asked for certification in the first place.
+            let notarization = round.notarization.as_ref().unwrap();
+            let seed = self
+                .scheme
+                .seed(notarization.round(), &notarization.certificate);
+            self.enter_view(view + 1, seed);
+        } else {
+            // If the failed certification is for the current view, timeout ASAP.
+            // This round may not be for the current view; it's safe to set its deadline anyway.
+            round.advance_deadline = Some(self.context.current());
         }
-
-        // Enter next view. We should have a notarization for this view,
-        // otherwise we would not have asked for certification in the first place.
-        let notarization = round
-            .notarization
-            .as_ref()
-            .expect("certified proposal should have a notarization");
-        let seed = self
-            .scheme
-            .seed(notarization.round(), &notarization.certificate);
-        self.enter_view(view + 1, seed);
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
@@ -1197,9 +1239,9 @@ impl<
         let leader_deadline = self.context.current() + self.leader_timeout;
         let advance_deadline = self.context.current() + self.notarization_timeout;
         let round = self.round_mut(view);
+        round.set_leader(seed);
         round.leader_deadline = Some(leader_deadline);
         round.advance_deadline = Some(advance_deadline);
-        round.set_leader(seed);
         self.view = view;
 
         // Update metrics
@@ -1296,6 +1338,18 @@ impl<
         // Get view for notarization
         let view = notarization.view();
 
+        // If the next view does not yet have a leader, set it and add to certification candidates.
+        let next_view = view + 1;
+        if let Some(round) = self.views.get_mut(&next_view) {
+            if round.leader.is_none() {
+                let seed = self
+                    .scheme
+                    .seed(notarization.round(), &notarization.certificate);
+                round.set_leader(seed);
+                self.certification_candidates.insert(next_view);
+            }
+        }
+
         // Create round (if it doesn't exist) and add verified notarization
         if self
             .round_mut(view)
@@ -1314,7 +1368,13 @@ impl<
         // Record that this view may be eligible for certification.
         self.certification_candidates.insert(view);
 
-        // Do not yet move to the next view, we need to wait for certification.
+        // Any known children of this view may also be eligible for certification.
+        self.certification_candidates.extend(
+            self.views
+                .range(view + 1..)
+                .filter(|(_, r)| r.proposal.as_ref().is_some_and(|p| p.parent == view))
+                .map(|(v, _)| *v),
+        );
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1352,7 +1412,7 @@ impl<
         let msg = Voter::Nullification(nullification.clone());
         let seed = self
             .scheme
-            .seed(nullification.round, &nullification.certificate);
+            .seed(nullification.round(), &nullification.certificate);
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
@@ -1443,6 +1503,13 @@ impl<
 
         // Enter next view
         self.enter_view(view + 1, seed);
+
+        self.certification_candidates.extend(
+            self.views
+                .range(view + 1..)
+                .filter(|(_, r)| r.proposal.as_ref().is_some_and(|p| p.parent == view))
+                .map(|(v, _)| *v),
+        );
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
@@ -1553,7 +1620,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            debug!(round=?notarize.round(), proposal=?notarize.proposal, "broadcasting notarize");
+            debug!(round=?notarize.round(), proposal=?notarize.proposal, me = self.scheme.me(), "broadcasting notarize");
             let msg = Voter::Notarize(notarize);
             pending_sender
                 .send(Recipients::All, msg, true)
@@ -1574,9 +1641,6 @@ impl<
             resolver.notarized(notarization.clone()).await;
 
             // Handle the notarization
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::notarization())
-                .inc();
             self.handle_notarization(notarization.clone()).await;
 
             // Sync the journal
@@ -1593,12 +1657,8 @@ impl<
                 .await;
 
             // Broadcast the notarization
-            debug!(proposal=?notarization.proposal, "broadcasting notarization");
-            let msg = Voter::Notarization(notarization.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            self.send_certificate(recovered_sender, Voter::Notarization(notarization), false)
+                .await;
         };
 
         // Attempt to nullification
@@ -1609,9 +1669,6 @@ impl<
             resolver.nullified(nullification.clone()).await;
 
             // Handle the nullification
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::nullification())
-                .inc();
             self.handle_nullification(nullification.clone()).await;
 
             // Sync the journal
@@ -1628,12 +1685,8 @@ impl<
                 .await;
 
             // Broadcast the nullification
-            debug!(round=?nullification.round(), "broadcasting nullification");
-            let msg = Voter::Nullification(nullification.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            self.send_certificate(recovered_sender, Voter::Nullification(nullification), false)
+                .await;
 
             // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
             // then backfill any missing certificates.
@@ -1705,9 +1758,6 @@ impl<
             resolver.finalized(view).await;
 
             // Handle the finalization
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::finalization())
-                .inc();
             self.handle_finalization(finalization.clone()).await;
 
             // Sync the journal
@@ -1724,12 +1774,8 @@ impl<
                 .await;
 
             // Broadcast the finalization
-            debug!(proposal=?finalization.proposal, "broadcasting finalization");
-            let msg = Voter::Finalization(finalization.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            self.send_certificate(recovered_sender, Voter::Finalization(finalization), false)
+                .await;
         };
     }
 
@@ -1945,8 +1991,8 @@ impl<
 
             // Drain pending certifications triggered by notarizations
             let candidates = take(&mut self.certification_candidates)
-                .into_iter()
-                .filter(|v| v > &self.last_finalized)
+                .range(self.last_finalized + 1..)
+                .copied()
                 .collect::<Vec<_>>();
             for v in candidates {
                 if let Some(Request(ctx, receiver)) = self.certify(v, &mut resolver).await {

@@ -990,11 +990,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_unclean_shutdown_bls12381_threshold_min_pk() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_threshold_min_sig() {
         unclean_shutdown(bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_multisig_min_pk() {
         unclean_shutdown(bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_multisig_min_sig() {
         unclean_shutdown(bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_ed25519() {
         unclean_shutdown(ed25519);
     }
 
@@ -1009,7 +1025,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(720));
+        let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1142,7 +1158,7 @@ mod tests {
             .await;
 
             // Wait for nullifications to accrue
-            context.sleep(Duration::from_secs(120)).await;
+            context.sleep(Duration::from_secs(60)).await;
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -1248,11 +1264,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_backfill() {
+    fn test_backfill_bls12381_threshold_min_pk() {
         backfill(bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_threshold_min_sig() {
         backfill(bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_multisig_min_pk() {
         backfill(bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_multisig_min_sig() {
         backfill(bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_ed25519() {
         backfill(ed25519);
     }
 
@@ -2263,11 +2295,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_and_lossy_links() {
+    fn test_slow_and_lossy_links_bls_threshold_minpk() {
         slow_and_lossy_links(0, bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_threshold_minsig() {
         slow_and_lossy_links(0, bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_multisig_minpk() {
         slow_and_lossy_links(0, bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_multisig_minsig() {
         slow_and_lossy_links(0, bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_ed25519() {
         slow_and_lossy_links(0, ed25519);
     }
 
