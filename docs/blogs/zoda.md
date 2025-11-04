@@ -160,8 +160,6 @@ We had [a podcast episode](https://www.youtube.com/watch?v=0m2DgfyCi0w) with
 the folks from [Category Labs](https://www.category.xyz/) about their work using
 Raptor Codes for this problem.
 
-TODO: link ZODA instead
-
 ## Integrity
 
 We've described coding schemes as being able to tolerate erasure: missing
@@ -242,6 +240,9 @@ piece of data, as soon as we receive our shard.
 
 This involves sending, along with the shard, some additional data, of use not in
 recovering it, but in providing assurance that our shard results from an encoding of it.
+
+We had [a podcast episode](https://www.youtube.com/watch?v=eOGQOaqvgnI) with Guillermo Angeris
+and Alex Evans from [Bain Capital Crypto](https://baincapitalcrypto.com/) about ZODA.
 
 ### Some Details and Intuition
 
