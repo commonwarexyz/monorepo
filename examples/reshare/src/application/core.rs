@@ -97,7 +97,7 @@ where
 {
     async fn verify(
         &mut self,
-        _context: E,
+        _: (E, Self::Context),
         mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
         let Some(block) = ancestry.next().await else {
