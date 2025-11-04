@@ -102,16 +102,12 @@ where
     ) -> Result<(), Error> {
         let journal_size = journal.size().await;
 
-        // Pop any MMR elements that are ahead of the last journal commit point.
+        // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let mut mmr_size = mmr.leaves();
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
-            warn!(
-                journal_size,
-                ?pop_count,
-                "popping uncommitted MMR operations"
-            );
+            warn!(journal_size, ?pop_count, "popping MMR operations");
             mmr.pop(*pop_count as usize).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
@@ -138,9 +134,7 @@ where
     }
 
     /// Append an operation.
-    ///
-    /// The operation will be subject to rollback until the next successful commit.
-    pub async fn apply_op(&mut self, op: O) -> Result<(), Error> {
+    pub async fn append(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
         // Append operation to the journal and update the MMR in parallel.
@@ -200,6 +194,25 @@ where
             .await?;
 
         Ok(pruning_boundary)
+    }
+
+    /// Generate a proof for operations starting at `start_loc`.
+    ///
+    /// Returns a proof and the operations corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of the current operation count and `start_loc + max_ops`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= current operation count.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    pub async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
     }
 
     /// Generate a historical proof with respect to the state of the MMR when it had `op_count`
@@ -348,7 +361,6 @@ where
     /// Create a new [Journal] for fixed-length operations.
     ///
     /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
-    /// This is useful for discarding uncommitted operations after a crash.
     pub async fn new(
         context: E,
         mmr_cfg: crate::mmr::journaled::Config,
@@ -391,7 +403,6 @@ where
     /// Create a new [Journal] for variable-length operations.
     ///
     /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
-    /// This is useful for discarding uncommitted operations after a crash.
     pub async fn new(
         context: E,
         mmr_cfg: crate::mmr::journaled::Config,
@@ -526,7 +537,7 @@ mod tests {
 
         for i in 0..count {
             let op = create_operation(i as u8);
-            journal.apply_op(op).await.unwrap();
+            journal.append(op).await.unwrap();
         }
 
         journal.sync().await.unwrap();
@@ -666,7 +677,7 @@ mod tests {
 
             // Add 20 uncommitted operations
             for i in 0..20 {
-                journal.apply_op(create_operation(i as u8)).await.unwrap();
+                journal.append(create_operation(i as u8)).await.unwrap();
             }
 
             // Don't sync - these are uncommitted
@@ -695,7 +706,7 @@ mod tests {
             // Add 50 operations
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
             for (i, op) in expected_ops.iter().enumerate() {
-                journal.apply_op(op.clone()).await.unwrap();
+                journal.append(op.clone()).await.unwrap();
                 assert_eq!(journal.op_count(), Location::new_unchecked((i + 1) as u64));
             }
 
@@ -749,7 +760,7 @@ mod tests {
 
             // Add commit and prune
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -813,12 +824,12 @@ mod tests {
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
             for op in &expected_ops {
-                journal.apply_op(op.clone()).await.unwrap();
+                journal.append(op.clone()).await.unwrap();
             }
 
             // Add commit operation to commit the operations
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(0)))
+                .append(Operation::CommitFloor(Location::new_unchecked(0)))
                 .await
                 .unwrap();
             journal.close().await.unwrap();
@@ -863,7 +874,7 @@ mod tests {
 
             // Add commit at position 50
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -886,7 +897,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "prune_boundary", 100).await;
 
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -927,7 +938,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "prune_count", 100).await;
 
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -961,7 +972,7 @@ mod tests {
             // Test after pruning
             let mut journal = create_journal_with_ops(context, "oldest", 100).await;
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -999,7 +1010,7 @@ mod tests {
             // Test after pruning
             let mut journal = create_journal_with_ops(context, "boundary", 100).await;
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(Location::new_unchecked(50)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1022,7 +1033,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "mmr_boundary", 50).await;
 
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(Location::new_unchecked(25)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -1198,7 +1209,7 @@ mod tests {
 
             // Add more operations after the historical state
             for i in 50..100 {
-                journal.apply_op(create_operation(i as u8)).await.unwrap();
+                journal.append(create_operation(i as u8)).await.unwrap();
             }
             journal.sync().await.unwrap();
 
@@ -1233,7 +1244,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "proof_pruned", 50).await;
 
             journal
-                .apply_op(Operation::CommitFloor(Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(Location::new_unchecked(25)))
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
