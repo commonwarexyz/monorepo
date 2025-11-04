@@ -178,6 +178,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {

@@ -24,6 +24,7 @@ where
     test_empty_journal_oldest_retained_pos(&factory).await;
     test_oldest_retained_pos_with_items(&factory).await;
     test_oldest_retained_pos_after_prune(&factory).await;
+    test_pruning_boundary(&factory).await;
     test_append_and_size(&factory).await;
     test_sequential_appends(&factory).await;
     test_replay_from_start(&factory).await;
@@ -138,6 +139,55 @@ where
     let journal = factory("oldest_after_prune".to_string()).await.unwrap();
     assert!(journal.oldest_retained_pos().await.unwrap().is_none());
 
+    journal.destroy().await.unwrap();
+}
+
+/// Test that pruning_boundary returns the correct value in various states.
+///
+/// This test assumes items_per_section = 10.
+async fn test_pruning_boundary<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Contiguous<Item = u64>,
+{
+    // Test empty journal: should return size (0)
+    let journal = factory("pruning_boundary_empty".to_string()).await.unwrap();
+    assert_eq!(journal.pruning_boundary().await.unwrap(), 0);
+    journal.destroy().await.unwrap();
+
+    // Test journal with items: should return oldest_retained_pos
+    let mut journal = factory("pruning_boundary_with_items".to_string())
+        .await
+        .unwrap();
+    for i in 0..10 {
+        journal.append(i * 100).await.unwrap();
+    }
+    assert_eq!(journal.pruning_boundary().await.unwrap(), 0);
+    journal.destroy().await.unwrap();
+
+    // Test partially pruned journal: should return oldest_retained_pos
+    let mut journal = factory("pruning_boundary_partial_prune".to_string())
+        .await
+        .unwrap();
+    for i in 0..30 {
+        journal.append(i * 100).await.unwrap();
+    }
+    journal.prune(10).await.unwrap();
+    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    assert_eq!(journal.pruning_boundary().await.unwrap(), oldest);
+    journal.destroy().await.unwrap();
+
+    // Test fully pruned journal: should return size
+    let mut journal = factory("pruning_boundary_full_prune".to_string())
+        .await
+        .unwrap();
+    for i in 0..30 {
+        journal.append(i * 100).await.unwrap();
+    }
+    journal.prune(30).await.unwrap();
+    let size = journal.size().await;
+    assert_eq!(journal.pruning_boundary().await.unwrap(), size);
+    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
     journal.destroy().await.unwrap();
 }
 

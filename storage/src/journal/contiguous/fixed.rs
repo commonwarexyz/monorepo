@@ -411,6 +411,14 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(Some(oldest_blob_index * self.cfg.items_per_blob.get()))
     }
 
+    /// Return the location before which all items have been pruned.
+    pub async fn pruning_boundary(&self) -> Result<u64, Error> {
+        match self.oldest_retained_pos().await? {
+            Some(pos) => Ok(pos),
+            None => Ok(self.size().await),
+        }
+    }
+
     /// Read the item at position `pos` in the journal.
     ///
     /// # Errors
@@ -633,6 +641,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
 
     async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
         Journal::oldest_retained_pos(self).await
+    }
+
+    async fn pruning_boundary(&self) -> Result<u64, Error> {
+        Journal::pruning_boundary(self).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {

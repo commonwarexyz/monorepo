@@ -433,7 +433,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Return the position of the oldest item still retained in the journal.
     ///
     /// Returns `None` if the journal is empty or if all items have been pruned.
-    // TODO(#2056): Disambiguate between pruning boundary and oldest retained position.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
         if self.size == self.oldest_retained_pos {
             // No items retained: either never had data or fully pruned
@@ -441,6 +440,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         } else {
             Some(self.oldest_retained_pos)
         }
+    }
+
+    /// Returns the location before which all items have been pruned.
+    pub fn pruning_boundary(&self) -> u64 {
+        self.oldest_retained_pos().unwrap_or(self.size)
     }
 
     /// Prune items at positions strictly less than `min_position`.
@@ -814,6 +818,10 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
 
     async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
         Ok(Journal::oldest_retained_pos(self))
+    }
+
+    async fn pruning_boundary(&self) -> Result<u64, Error> {
+        Ok(Journal::pruning_boundary(self))
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
