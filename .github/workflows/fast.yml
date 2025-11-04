@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly
+  PANDOC_VERSION: 3.8.2.1
 
 jobs:
   Lint:
@@ -194,7 +195,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install pandoc
-      run: sudo apt-get update && sudo apt-get install -y pandoc
+      run: |
+        wget -q https://github.com/jgm/pandoc/releases/download/${{ env.PANDOC_VERSION }}/pandoc-${{ env.PANDOC_VERSION }}-1-amd64.deb
+        sudo dpkg -i pandoc-${{ env.PANDOC_VERSION }}-1-amd64.deb || sudo apt-get install -f -y
+        rm pandoc-${{ env.PANDOC_VERSION }}-1-amd64.deb
     - name: Build docs
       run: cd docs && make
     - name: Check docs unchanged
