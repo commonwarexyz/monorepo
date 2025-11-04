@@ -349,6 +349,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     /// - a notarization certificate for this view exists, or
     /// - the number of notarize votes exceeds the maximum number of faulty participants.
     pub fn proposal_must_have_valid_ancestry(&self) -> bool {
+        if self.proposal.is_none() {
+            return false;
+        }
         if self.finalization.is_some() {
             return true;
         }
