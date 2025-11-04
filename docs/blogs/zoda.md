@@ -233,9 +233,6 @@ piece of data, as soon as we receive our shard.
 This involves sending, along with the shard, some additional data, of use not in
 recovering it, but in providing assurance that our shard results from an encoding of it.
 
-We had [a podcast episode](https://www.youtube.com/watch?v=eOGQOaqvgnI) with Guillermo Angeris
-and Alex Evans from [Bain Capital Crypto](https://baincapitalcrypto.com/) about ZODA.
-
 ### Some Details and Intuition
 
 The inner workings of the protocol are not necessary to understand its utility nor
@@ -376,3 +373,6 @@ can pave the way for verifying arbitrary properties of the sharded data, which
 we're excited about.
 
 Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
+
+Want to learn more? Check out our [podcast](https://www.youtube.com/watch?v=eOGQOaqvgnI) with [Guillermo Angeris](https://x.com/GuilleAngeris) and
+[Alex Evans](https://x.com/alexhevans) from [Bain Capital Crypto](https://baincapitalcrypto.com/) about all things ZODA.
