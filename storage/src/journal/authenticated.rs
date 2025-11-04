@@ -684,6 +684,196 @@ mod tests {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_rewind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test 1: Matching operation is kept
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_match"),
+                    journal_config("rewind_match"),
+                )
+                .await
+                .unwrap();
+
+                // Add operations where operation 3 is a commit
+                for i in 0..3 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(0)))
+                    .await
+                    .unwrap();
+                for i in 4..7 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+
+                // Rewind to last commit
+                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                assert_eq!(final_size, 4);
+                assert_eq!(journal.size().await, 4);
+
+                // Verify the commit operation is still there
+                let op = journal.read(3).await.unwrap();
+                assert!(op.is_commit());
+            }
+
+            // Test 2: Last matching operation is chosen when multiple match
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_multiple"),
+                    journal_config("rewind_multiple"),
+                )
+                .await
+                .unwrap();
+
+                // Add multiple commits
+                journal.append(create_operation(0)).await.unwrap();
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(0)))
+                    .await
+                    .unwrap(); // pos 1
+                journal.append(create_operation(2)).await.unwrap();
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(1)))
+                    .await
+                    .unwrap(); // pos 3
+                journal.append(create_operation(4)).await.unwrap();
+
+                // Should rewind to last commit (pos 3)
+                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                assert_eq!(final_size, 4);
+
+                // Verify the last commit is still there
+                let op = journal.read(3).await.unwrap();
+                assert!(op.is_commit());
+
+                // Verify we can't read pos 4
+                assert!(journal.read(4).await.is_err());
+            }
+
+            // Test 3: Rewind to pruning boundary when no match
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_no_match"),
+                    journal_config("rewind_no_match"),
+                )
+                .await
+                .unwrap();
+
+                // Add operations with no commits
+                for i in 0..10 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+
+                // Rewind should go to pruning boundary (0 for unpruned)
+                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
+                assert_eq!(journal.size().await, 0);
+            }
+
+            // Test 4: Rewind with existing pruning boundary
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_with_pruning"),
+                    journal_config("rewind_with_pruning"),
+                )
+                .await
+                .unwrap();
+
+                // Add operations and a commit at position 10 (past first section boundary of 7)
+                for i in 0..10 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(0)))
+                    .await
+                    .unwrap(); // pos 10
+                for i in 11..15 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+
+                // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
+                journal.prune(8).await.unwrap();
+                let oldest = journal.oldest_retained_pos().await.unwrap();
+                assert_eq!(oldest, Some(7));
+
+                // Add more uncommitted operations
+                for i in 15..20 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+
+                // Rewind should keep the commit at position 10
+                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                assert_eq!(final_size, 11);
+
+                // Verify commit is still there
+                let op = journal.read(10).await.unwrap();
+                assert!(op.is_commit());
+            }
+
+            // Test 5: Rewind with no matches after pruning boundary
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_no_match_pruned"),
+                    journal_config("rewind_no_match_pruned"),
+                )
+                .await
+                .unwrap();
+
+                // Add operations with a commit at position 5 (in section 0: 0-6)
+                for i in 0..5 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(0)))
+                    .await
+                    .unwrap(); // pos 5
+                for i in 6..10 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+
+                // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
+                // Pruning boundary will be at position 7 (start of section 1)
+                journal.prune(8).await.unwrap();
+                let oldest = journal.oldest_retained_pos().await.unwrap();
+                assert_eq!(oldest, Some(7));
+
+                // Add uncommitted operations with no commits (in section 1: 7-13)
+                for i in 10..14 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+
+                // Rewind with no matching commits after the pruning boundary
+                // Should rewind to the pruning boundary at position 7
+                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                assert_eq!(final_size, 7);
+            }
+
+            // Test 6: Empty journal
+            {
+                let mut journal = ContiguousJournal::init(
+                    context.with_label("rewind_empty"),
+                    journal_config("rewind_empty"),
+                )
+                .await
+                .unwrap();
+
+                // Rewind empty journal should be no-op
+                let final_size = rewind(&mut journal, |op: &Operation<Digest, Digest>| {
+                    op.is_commit()
+                })
+                .await
+                .unwrap();
+                assert_eq!(final_size, 0);
+                assert_eq!(journal.size().await, 0);
+            }
+        });
+    }
+
     /// Verify that append() increments the operation count, returns correct locations, and
     /// operations can be read back correctly.
     #[test_traced("INFO")]
