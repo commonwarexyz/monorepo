@@ -466,24 +466,28 @@ mod tests {
     fn test_add_link_before_channel_registration() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: Some(3),
                 },
             );
             network.start();
 
+            // Create peers
             let pk1 = PrivateKey::from_seed(0).public_key();
             let pk2 = PrivateKey::from_seed(1).public_key();
 
+            // Register peer set
             let mut manager = oracle.ordered_manager();
             manager
                 .update(0, vec![pk1.clone(), pk2.clone()].into())
                 .await;
 
+            // Add link
             oracle
                 .add_link(
                     pk1.clone(),
@@ -497,9 +501,11 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Register channels
             let (mut sender1, _receiver1) = oracle.control(pk1.clone()).register(0).await.unwrap();
             let (_, mut receiver2) = oracle.control(pk2.clone()).register(0).await.unwrap();
 
+            // Send message
             let msg1 = Bytes::from("link-before-register-1");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
