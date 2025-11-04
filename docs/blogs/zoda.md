@@ -1,6 +1,6 @@
 ---
-title: "Optimizing Block Dispersal with Coding"
-description: "In which we describe how we use coding schemes, and ZODA to distribute blocks efficiently"
+title: "Optimizing Block Dispersal with the ZODA Hadamard Variant"
+description: "You can come to consensus over a mere fingerprint of the block---a hash for example---but doing anything interesting with that fingerprint, like processing transactions or updating state, requires disseminating (a lot of) data."
 date: "November 4th, 2025"
 published-time: "2025-11-04T00:00:00Z"
 modified-time: "2025-11-04T00:00:00Z"
