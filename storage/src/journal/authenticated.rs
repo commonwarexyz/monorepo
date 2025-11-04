@@ -602,7 +602,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
-            assert_eq!(journal.size().await, Location::new_unchecked(0));
+            assert_eq!(journal.size(), Location::new_unchecked(0));
         });
     }
 
@@ -633,7 +633,7 @@ mod tests {
 
             // MMR should have been popped to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
-            assert_eq!(journal.size().await, Location::new_unchecked(21));
+            assert_eq!(journal.size(), Location::new_unchecked(21));
         });
     }
 
@@ -663,7 +663,7 @@ mod tests {
 
             // MMR should have been replayed to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
-            assert_eq!(journal.size().await, Location::new_unchecked(21));
+            assert_eq!(journal.size(), Location::new_unchecked(21));
         });
     }
 
@@ -722,7 +722,7 @@ mod tests {
                 // Rewind to last commit
                 let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 4);
-                assert_eq!(journal.size().await, 4);
+                assert_eq!(journal.size(), 4);
 
                 // Verify the commit operation is still there
                 let op = journal.read(3).await.unwrap();
@@ -780,7 +780,7 @@ mod tests {
                 // Rewind should go to pruning boundary (0 for unpruned)
                 let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
-                assert_eq!(journal.size().await, 0);
+                assert_eq!(journal.size(), 0);
             }
 
             // Test 4: Rewind with existing pruning boundary
@@ -807,7 +807,7 @@ mod tests {
 
                 // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
                 journal.prune(8).await.unwrap();
-                let oldest = journal.oldest_retained_pos().await.unwrap();
+                let oldest = journal.oldest_retained_pos();
                 assert_eq!(oldest, Some(7));
 
                 // Add more uncommitted operations
@@ -849,7 +849,7 @@ mod tests {
                 // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
                 // Pruning boundary will be at position 7 (start of section 1)
                 journal.prune(8).await.unwrap();
-                let oldest = journal.oldest_retained_pos().await.unwrap();
+                let oldest = journal.oldest_retained_pos();
                 assert_eq!(oldest, Some(7));
 
                 // Add uncommitted operations with no commits (in section 1: 7-13)
@@ -879,7 +879,7 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(final_size, 0);
-                assert_eq!(journal.size().await, 0);
+                assert_eq!(journal.size(), 0);
             }
         });
     }
