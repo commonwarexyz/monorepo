@@ -229,7 +229,7 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for [Ordered] peers.
+/// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
 #[derive(Debug, Clone)]
@@ -257,7 +257,7 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for [OrderedAssociated] peers.
+/// Implementation of [crate::Manager] for peers with [SocketAddr]s.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 #[derive(Debug, Clone)]
