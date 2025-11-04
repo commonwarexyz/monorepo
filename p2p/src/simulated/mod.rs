@@ -174,7 +174,7 @@ pub enum Error {
     PeerMissing,
 }
 
-pub use ingress::{Link, Oracle};
+pub use ingress::{Control, Link, Oracle, OrderedAssociatedManager, OrderedManager};
 pub use network::{Config, Network, Receiver, Sender};
 
 #[cfg(test)]
