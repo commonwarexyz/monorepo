@@ -42,7 +42,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// configured to provide 8 cores.
 const THREADS: usize = 8;
 
-fn unauth_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -71,8 +71,8 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
     }
 }
 
-async fn get_unauthenticated(ctx: Context) -> UnauthDb {
-    let store_cfg = unauth_cfg();
+async fn get_store(ctx: Context) -> StoreDb {
+    let store_cfg = store_cfg();
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
@@ -122,24 +122,24 @@ async fn gen_random_kv<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Eight
 }
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type UnauthDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
+type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
-    Unauthenticated,
+    Store,
     VariableAny, // unordered
 }
 
 impl Variant {
     pub fn name(&self) -> &'static str {
         match self {
-            Variant::Unauthenticated => "adb::store",
+            Variant::Store => "store",
             Variant::VariableAny => "any::variable",
         }
     }
 }
 
-const VARIANTS: [Variant; 2] = [Variant::Unauthenticated, Variant::VariableAny];
+const VARIANTS: [Variant; 2] = [Variant::Store, Variant::VariableAny];
 
 /// Benchmark the generation of a large randomly generated any db.
 fn bench_variable_generate(c: &mut Criterion) {
@@ -164,8 +164,8 @@ fn bench_variable_generate(c: &mut Criterion) {
                                 let start = Instant::now();
                                 let commit_frequency = (operations / COMMITS_PER_ITERATION) as u32;
                                 match variant {
-                                    Variant::Unauthenticated => {
-                                        let db = get_unauthenticated(ctx.clone()).await;
+                                    Variant::Store => {
+                                        let db: StoreDb = get_store(ctx.clone()).await;
                                         let db = gen_random_kv(
                                             db,
                                             elements,

@@ -2,23 +2,26 @@
 
 use crate::{
     adb::{
-        any::fixed::{
-            historical_proof, init_mmr_and_log, prune_db, Config, SNAPSHOT_READ_BUFFER_SIZE,
+        any::{
+            fixed::{init_mmr_and_log, Config},
+            historical_proof, Shared,
         },
+        build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
-        store::{self, Db},
-        Error,
+        prune_db,
+        store::Db,
+        update_loc, Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Index as _},
     journal::contiguous::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher as Standard},
+    mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, try_join, StreamExt as _, TryFutureExt as _};
+use commonware_utils::Array;
+use futures::{try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -28,7 +31,7 @@ pub struct Any<
     E: Storage + Clock + Metrics,
     K: Array,
     V: CodecFixed<Cfg = ()>,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
 > {
     /// An MMR over digests of the operations applied to the db.
@@ -67,26 +70,25 @@ pub struct Any<
     pub(crate) steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(crate) hasher: Standard<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Any<E, K, V, H, T>
+/// Type alias for the shared state wrapper used by this Any database variant.
+type SharedState<'a, E, K, V, H, T> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        Self::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
             mmr,
@@ -98,44 +100,6 @@ impl<
         };
 
         Ok(db)
-    }
-
-    /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
-    /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
-    /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
-    /// status updates. The first argument of the callback is the activity status of the operation,
-    /// and the second argument is the location of the operation it inactivates (if any).
-    pub(crate) async fn build_snapshot_from_log<F>(
-        inactivity_floor_loc: Location,
-        log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, Location>,
-        mut callback: F,
-    ) -> Result<(), Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        let stream = log
-            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
-            .await?;
-        pin_mut!(stream);
-        let last_commit_loc = log.size().await.saturating_sub(1);
-        while let Some(result) = stream.next().await {
-            let (i, op) = result?;
-            match op {
-                Operation::Delete(key) => {
-                    let result = super::delete_key(snapshot, log, &key).await?;
-                    callback(false, result);
-                }
-                Operation::Update(key, _) => {
-                    let new_loc = Location::new_unchecked(i);
-                    let old_loc = super::update_loc(snapshot, log, &key, new_loc).await?;
-                    callback(true, old_loc);
-                }
-                Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
-            }
-        }
-
-        Ok(())
     }
 
     /// Get the update operation from `log` corresponding to a known location.
@@ -201,7 +165,7 @@ impl<
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res = super::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.as_shared().apply_op(op).await?;
@@ -216,7 +180,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let r = super::delete_key(&mut self.snapshot, &self.log, &key).await?;
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
@@ -226,10 +190,8 @@ impl<
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(
-        &mut self,
-    ) -> super::Shared<'_, E, Index<T, Location>, Operation<K, V>, H> {
-        super::Shared {
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+        Shared {
             snapshot: &mut self.snapshot,
             mmr: &mut self.mmr,
             log: &mut self.log,
@@ -242,7 +204,7 @@ impl<
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
         self.mmr.root(hasher)
     }
 
@@ -310,7 +272,7 @@ impl<
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
         // Sync the log and process the updates to the MMR.
-        shared.sync_and_process_updates().await
+        shared.sync_log_and_process_updates().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -320,22 +282,20 @@ impl<
         self.as_shared().sync().await
     }
 
-    /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
-    /// or current snapshot.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
     ///
     /// # Errors
     ///
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
-    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `target_prune_loc` is greater than the
-    ///   inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
         prune_db(
             &mut self.mmr,
             &mut self.log,
             &mut self.hasher,
-            target_prune_loc,
+            prune_loc,
             self.inactivity_floor_loc,
             op_count,
         )
@@ -389,13 +349,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: CHasher,
-        T: Translator,
-    > Db<E, K, V, T> for Any<E, K, V, H, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -405,36 +360,36 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
-        self.get(key).await.map_err(Into::into)
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get(key).await
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
-        self.update(key, value).await.map_err(Into::into)
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update(key, value).await
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
-        self.delete(key).await.map(|_| ()).map_err(Into::into)
+    async fn delete(&mut self, key: K) -> Result<(), Error> {
+        self.delete(key).await.map(|_| ())
     }
 
-    async fn commit(&mut self) -> Result<(), store::Error> {
-        self.commit().await.map_err(Into::into)
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit().await
     }
 
-    async fn sync(&mut self) -> Result<(), store::Error> {
-        self.sync().await.map_err(Into::into)
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
-        self.prune(target_prune_loc).await.map_err(Into::into)
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
     }
 
-    async fn close(self) -> Result<(), store::Error> {
-        self.close().await.map_err(Into::into)
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
-    async fn destroy(self) -> Result<(), store::Error> {
-        self.destroy().await.map_err(Into::into)
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
@@ -444,7 +399,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            operation::fixed::{unordered::Operation, FixedOperation as _},
+            operation::{fixed::unordered::Operation, Keyed as _},
             verify_proof,
         },
         index::{Index as IndexTrait, Unordered as Index},
@@ -452,14 +407,14 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZUsize, NZU64};
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
@@ -467,7 +422,7 @@ pub(super) mod test {
     use std::collections::{HashMap, HashSet};
     use tracing::warn;
 
-    const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    const SHA256_SIZE: usize = <Sha256 as Hasher>::Digest::SIZE;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: usize = 101;
@@ -690,7 +645,7 @@ pub(super) mod test {
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
-            let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
+            let d3 = <Sha256 as Hasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await, 9);
             db.sync().await.unwrap();
@@ -1106,11 +1061,11 @@ pub(super) mod test {
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
-            AnyTest::build_snapshot_from_log(
+            build_snapshot_from_log(
                 inactivity_floor_loc,
                 &log,
                 &mut snapshot,
-                |append, loc| {
+                |append: bool, loc: Option<Location>| {
                     bitmap.push(append);
                     if let Some(loc) = loc {
                         bitmap.set_bit(*loc, false);

@@ -1,10 +1,11 @@
 use crate::{
-    adb::operation::{self, fixed::FixedOperation},
+    adb::operation::{self, fixed::FixedSize, Committable, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, CodecFixed, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    util::at_least, CodecFixed, Error as CodecError, FixedSize as CodecFixedSize, Read,
+    ReadExt as _, Write,
 };
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
@@ -38,20 +39,12 @@ impl<K: Array, V: CodecFixed> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> FixedSize for Operation<K, V> {
+impl<K: Array, V: CodecFixed> CodecFixedSize for Operation<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
 }
 
-impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Operation<K, V> {
+impl<K: Array, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     type Key = K;
-    type Value = V;
-
-    fn commit_floor(&self) -> Option<Location> {
-        match self {
-            Self::CommitFloor(loc) => Some(*loc),
-            _ => None,
-        }
-    }
 
     fn key(&self) -> Option<&Self::Key> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
@@ -65,6 +58,31 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> FixedOperation for Operation<K, V> {
             Self::CommitFloor(_) => None,
         }
     }
+
+    fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete(_))
+    }
+
+    fn is_update(&self) -> bool {
+        matches!(self, Self::Update(_, _))
+    }
+
+    fn has_floor(&self) -> Option<Location> {
+        match self {
+            Self::CommitFloor(loc) => Some(*loc),
+            _ => None,
+        }
+    }
+}
+
+impl<K: Array, V: CodecFixed> Committable for Operation<K, V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_))
+    }
+}
+
+impl<K: Array, V: CodecFixed<Cfg = ()>> FixedSize for Operation<K, V> {
+    type Value = V;
 
     fn value(&self) -> Option<&Self::Value> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.

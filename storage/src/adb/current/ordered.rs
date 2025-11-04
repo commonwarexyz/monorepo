@@ -4,9 +4,10 @@
 use crate::{
     adb::{
         any::fixed::{init_mmr_and_log, ordered::Any, Config as AConfig},
+        build_snapshot_from_log,
         current::Config,
         operation::fixed::ordered::{KeyData, Operation},
-        store::{self, Db},
+        store::Db,
         Error,
     },
     index::Ordered as Index,
@@ -168,7 +169,7 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        Any::<E, K, V, H, T>::build_snapshot_from_log(
+        build_snapshot_from_log(
             inactivity_floor_loc,
             &log,
             &mut snapshot,
@@ -284,7 +285,7 @@ impl<
         for _ in 0..steps_to_take {
             if self.any.is_empty() {
                 self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(tip = ?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
+                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
                 break;
             }
             let loc = self.any.inactivity_floor_loc;
@@ -346,12 +347,14 @@ impl<
             .map_err(Into::into)
     }
 
-    /// Prune all operations prior to `target_prune_loc` from the db.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
     ///
     /// # Errors
     ///
-    /// Returns error if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
@@ -362,7 +365,7 @@ impl<
             )
             .await?;
 
-        self.any.prune(target_prune_loc).await
+        self.any.prune(prune_loc).await
     }
 
     /// Return the root of the db.
@@ -783,43 +786,47 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, store::Error> {
-        self.get(key).await.map_err(Into::into)
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get(key).await
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), store::Error> {
-        self.update(key, value).await.map_err(Into::into)
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update(key, value).await
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), store::Error> {
-        self.delete(key).await.map(|_| ()).map_err(Into::into)
+    async fn delete(&mut self, key: K) -> Result<(), Error> {
+        self.delete(key).await
     }
 
-    async fn commit(&mut self) -> Result<(), store::Error> {
-        self.commit().await.map_err(Into::into)
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit().await
     }
 
-    async fn sync(&mut self) -> Result<(), store::Error> {
-        self.sync().await.map_err(Into::into)
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
     }
 
-    async fn prune(&mut self, target_prune_loc: Location) -> Result<(), store::Error> {
-        self.prune(target_prune_loc).await.map_err(Into::into)
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
     }
 
-    async fn close(self) -> Result<(), store::Error> {
-        self.close().await.map_err(Into::into)
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
-    async fn destroy(self) -> Result<(), store::Error> {
-        self.destroy().await.map_err(Into::into)
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::operation::fixed::FixedOperation, mmr::mem::Mmr, translator::OneCap};
+    use crate::{
+        adb::operation::{fixed::FixedSize, Keyed as _},
+        mmr::mem::Mmr,
+        translator::OneCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

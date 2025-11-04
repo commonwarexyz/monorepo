@@ -53,7 +53,7 @@ type UAnyDb =
     UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type OAnyDb =
     OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type UnauthDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
+type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 type UCurrentDb = UCurrent<
@@ -73,7 +73,7 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 
-fn unauth_cfg() -> SConfig<EightCap, ()> {
+fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -133,8 +133,8 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     }
 }
 
-async fn get_unauthenticated(ctx: Context) -> UnauthDb {
-    let store_cfg = unauth_cfg();
+async fn get_store(ctx: Context) -> StoreDb {
+    let store_cfg = store_cfg();
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
@@ -220,7 +220,7 @@ async fn gen_random_kv<
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
-    Unauthenticated,
+    Store,
     AnyUnordered,
     AnyOrdered,
     Variable, // unordered
@@ -231,7 +231,7 @@ enum Variant {
 impl Variant {
     pub fn name(&self) -> &'static str {
         match self {
-            Variant::Unauthenticated => "adb::store",
+            Variant::Store => "store",
             Variant::AnyUnordered => "any::fixed::unordered",
             Variant::AnyOrdered => "any::fixed::ordered",
             Variant::Variable => "any::variable",
@@ -242,7 +242,7 @@ impl Variant {
 }
 
 const VARIANTS: [Variant; 6] = [
-    Variant::Unauthenticated,
+    Variant::Store,
     Variant::AnyUnordered,
     Variant::AnyOrdered,
     Variant::Variable,
@@ -296,8 +296,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         total_elapsed += start.elapsed();
                                         db.destroy().await.unwrap(); // don't time destroy
                                     }
-                                    Variant::Unauthenticated => {
-                                        let db = get_unauthenticated(ctx.clone()).await;
+                                    Variant::Store => {
+                                        let db: StoreDb = get_store(ctx.clone()).await;
                                         let db = gen_random_kv(
                                             db,
                                             elements,

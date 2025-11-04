@@ -1,4 +1,7 @@
-use crate::{adb::operation, mmr::Location};
+use crate::{
+    adb::operation::{self, Committable, Keyed},
+    mmr::Location,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
@@ -62,6 +65,35 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
             Self::Set(_, v) => K::SIZE + v.encode_size(),
             Self::Commit(v) => v.encode_size(),
         }
+    }
+}
+
+impl<K: Array, V: Codec> Keyed for Operation<K, V> {
+    type Key = K;
+
+    fn key(&self) -> Option<&Self::Key> {
+        self.key()
+    }
+
+    fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete(_))
+    }
+
+    fn is_update(&self) -> bool {
+        matches!(self, Self::Update(_, _) | Self::Set(_, _))
+    }
+
+    fn has_floor(&self) -> Option<Location> {
+        match self {
+            Self::CommitFloor(_, floor_loc) => Some(*floor_loc),
+            _ => None,
+        }
+    }
+}
+
+impl<K: Array, V: Codec> Committable for Operation<K, V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_, _) | Self::Commit(_))
     }
 }
 

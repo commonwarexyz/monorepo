@@ -8,7 +8,7 @@
 //! event of unclean shutdown, the mmr will be brought back into alignment with the log on startup.
 
 use crate::{
-    adb::{operation::keyless::Operation, Error},
+    adb::{align_mmr_and_log, operation::keyless::Operation, prune_db, Error},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -18,13 +18,9 @@ use crate::{
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::NZUsize;
-use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt as _};
+use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
-
-/// The size of the read buffer to use for replaying the operations log during recovery.
-const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
+use tracing::debug;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -83,87 +79,6 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
-    /// Walk backwards and removes uncommited operations after the last commit.
-    ///
-    /// Returns the log size after rewinding.
-    async fn rewind_uncommitted(log: &mut Journal<E, Operation<V>>) -> Result<u64, Error> {
-        let log_size = log.size();
-        if log_size == 0 {
-            return Ok(0);
-        }
-        let Some(oldest_retained_loc) = log.oldest_retained_pos() else {
-            // Log is fully pruned
-            return Ok(log_size);
-        };
-
-        // Walk backwards to find last commit
-        let mut first_uncommitted = None;
-        let mut loc = log_size - 1;
-
-        loop {
-            let op = log.read(loc).await?;
-            match op {
-                Operation::Commit(_) => break,
-                _ => first_uncommitted = Some(loc),
-            }
-            if loc == oldest_retained_loc {
-                break;
-            }
-            loc -= 1;
-        }
-
-        // Rewind operations after the last commit
-        if let Some(rewind_loc) = first_uncommitted {
-            let ops_to_rewind = log_size - rewind_loc;
-            warn!(ops_to_rewind, ?rewind_loc, "rewinding log to last commit");
-            log.rewind(rewind_loc).await?;
-            log.sync().await?;
-            Ok(rewind_loc)
-        } else {
-            Ok(log_size)
-        }
-    }
-
-    /// Align `mmr` with `log` by either popping excess operations or replaying missing ones.
-    async fn align_mmr_with_log(
-        mmr: &mut Mmr<E, H>,
-        hasher: &mut Standard<H>,
-        log: &Journal<E, Operation<V>>,
-    ) -> Result<(), Error> {
-        let mmr_size = *mmr.leaves();
-        let log_size = log.size();
-
-        if mmr_size > log_size {
-            // MMR is ahead - pop excess
-            let ops_to_pop = (mmr_size - log_size) as usize;
-            warn!(ops_to_pop, "popping excess MMR operations");
-            mmr.pop(ops_to_pop).await?;
-        } else if mmr_size < log_size {
-            // Should never happen because in `prune` we sync mmr before pruning log.
-            assert!(
-                log.oldest_retained_pos().is_some(),
-                "log is fully pruned but mmr_size ({mmr_size}) < log_size ({log_size})"
-            );
-
-            // MMR is behind - replay missing operations
-            let stream = log.replay(mmr_size, REPLAY_BUFFER_SIZE).await?;
-            pin_mut!(stream);
-
-            while let Some(result) = stream.next().await {
-                let (_pos, op) = result?;
-                let encoded_op = op.encode();
-                warn!(location = ?mmr.leaves(), "adding missing operation to MMR");
-                mmr.add_batched(hasher, &encoded_op).await?;
-            }
-        }
-
-        if mmr.is_dirty() {
-            mmr.sync(hasher).await?;
-        }
-
-        Ok(())
-    }
-
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -196,23 +111,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Rewind log to remove uncommitted operations
-        Self::rewind_uncommitted(&mut log).await?;
-
         // Align MMR with log
-        Self::align_mmr_with_log(&mut mmr, &mut hasher, &log).await?;
-        let log_size = Location::new_unchecked(log.size());
-        assert_eq!(
-            mmr.leaves(),
-            log_size,
-            "MMR size should match log size after alignment"
-        );
+        let log_size = align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
+        let last_commit_loc = log_size.checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
             mmr,
             log,
             hasher,
-            last_commit_loc: log_size.checked_sub(1),
+            last_commit_loc,
         })
     }
 
@@ -247,43 +154,24 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
-    /// Prunes the db of up to all operations that have location less than `loc`. The actual number
-    /// pruned may be fewer than requested due to blob boundaries in the underlying journals.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
     ///
     /// # Errors
     ///
-    /// Returns [Error::PruneBeyondCommit] if `loc` is beyond the last commit point.
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > last commit point.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION]
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
-        if loc > last_commit {
-            return Err(Error::PruneBeyondCommit(loc, last_commit));
-        }
-
-        // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-        // the operations between the MMR tip and the log pruning boundary.
-        self.mmr.sync(&mut self.hasher).await?;
-
-        // Prune the log first since it's always the source of truth. The log will prune at section boundaries,
-        // so the actual oldest retained location may be less than requested. We always prune the
-        // log first, and then prune the MMR based on the log's actual pruning boundary. This
-        // procedure ensures all log operations always have corresponding MMR entries, even in the
-        // event of failures, with no need for special recovery.
-        self.log.prune(*loc).await?;
-
-        let oldest_retained_loc = match self.log.oldest_retained_pos() {
-            Some(oldest) => Location::new_unchecked(oldest),
-            None => self.op_count(),
-        };
-
-        debug!(size = ?self.op_count(), loc = ?oldest_retained_loc, "pruned log");
-
-        // Prune the MMR up to the oldest retained item in the log after pruning.
-        self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(oldest_retained_loc)?)
-            .await?;
-
-        Ok(())
+        let op_count = self.op_count();
+        prune_db(
+            &mut self.mmr,
+            &mut self.log,
+            &mut self.hasher,
+            loc,
+            last_commit,
+            op_count,
+        )
+        .await
     }
 
     /// Append a value to the db, returning its location which can be used to retrieve it.
@@ -477,7 +365,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub(super) async fn simulate_prune_failure(mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
         if loc > last_commit {
-            return Err(Error::PruneBeyondCommit(loc, last_commit));
+            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
         }
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         self.mmr.sync(&mut self.hasher).await?;
@@ -1231,7 +1119,7 @@ mod test {
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
+                matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
                     if prune_loc == Location::new_unchecked(1) && commit_loc == Location::new_unchecked(0))
             );
 
@@ -1259,7 +1147,7 @@ mod test {
             let beyond = Location::new_unchecked(*new_last_commit + 1);
             let result = db.prune(beyond).await;
             assert!(
-                matches!(result, Err(Error::PruneBeyondCommit(prune_loc, commit_loc))
+                matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, commit_loc))
                     if prune_loc == beyond && commit_loc == new_last_commit)
             );
 

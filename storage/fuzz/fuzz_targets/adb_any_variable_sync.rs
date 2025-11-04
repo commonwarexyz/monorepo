@@ -36,12 +36,6 @@ enum Operation {
     Get {
         key: [u8; 32],
     },
-    GetLoc {
-        loc_offset: u32,
-    },
-    GetKeyLoc {
-        key: [u8; 32],
-    },
     GetMetadata,
     Proof {
         start_loc: Location,
@@ -67,7 +61,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 17 {
+        match choice % 15 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -95,23 +89,15 @@ impl<'a> Arbitrary<'a> for Operation {
                 let key = u.arbitrary()?;
                 Ok(Operation::Get { key })
             }
-            5 => {
-                let loc_offset = u.arbitrary()?;
-                Ok(Operation::GetLoc { loc_offset })
-            }
+            5 => Ok(Operation::GetMetadata),
             6 => {
-                let key = u.arbitrary()?;
-                Ok(Operation::GetKeyLoc { key })
-            }
-            7 => Ok(Operation::GetMetadata),
-            8 => {
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
             }
-            9 => {
+            7 => {
                 let size = u.arbitrary()?;
                 let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new(start_loc).unwrap();
@@ -123,12 +109,12 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            10 => Ok(Operation::Sync),
-            11 => Ok(Operation::OldestRetainedLoc),
-            12 => Ok(Operation::InactivityFloorLoc),
-            13 => Ok(Operation::OpCount),
-            14 => Ok(Operation::Root),
-            15 | 16 => {
+            8 => Ok(Operation::Sync),
+            9 => Ok(Operation::OldestRetainedLoc),
+            10 => Ok(Operation::InactivityFloorLoc),
+            11 => Ok(Operation::OpCount),
+            12 => Ok(Operation::Root),
+            13 | 14 => {
                 let sync_log: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
@@ -228,19 +214,6 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Get { key } => {
                     let _ = db.get(&Key::new(*key)).await;
-                }
-
-                Operation::GetLoc { loc_offset } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 {
-                        let loc = *loc_offset as u64 % *op_count;
-                        let loc = Location::new(loc).unwrap();
-                        let _ = db.get_loc(loc).await;
-                    }
-                }
-
-                Operation::GetKeyLoc { key } => {
-                    let _ = db.get_key_loc(&Key::new(*key)).await;
                 }
 
                 Operation::GetMetadata => {
