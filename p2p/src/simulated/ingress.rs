@@ -197,6 +197,34 @@ impl<P: PublicKey> Oracle<P> {
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?
     }
+
+    async fn update(&mut self, peer_set: u64, peers: Ordered<P>) {
+        self.sender
+            .send(Message::Update { peer_set, peers })
+            .await
+            .unwrap();
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<P>> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::PeerSet {
+                index: id,
+                response: sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Subscribe { response: sender })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -210,36 +238,17 @@ impl<P: PublicKey> crate::Manager for OrderedManager<P> {
     type Peers = Ordered<Self::PublicKey>;
 
     async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
-        self.oracle
-            .sender
-            .send(Message::Update { peer_set, peers })
-            .await
-            .unwrap();
+        self.oracle.update(peer_set, peers).await;
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
-        let (sender, receiver) = oneshot::channel();
-        self.oracle
-            .sender
-            .send(Message::PeerSet {
-                index: id,
-                response: sender,
-            })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        self.oracle.peer_set(id).await
     }
 
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
-        let (sender, receiver) = oneshot::channel();
-        self.oracle
-            .sender
-            .send(Message::Subscribe { response: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        self.oracle.subscribe().await
     }
 }
 
@@ -254,39 +263,17 @@ impl<P: PublicKey> crate::Manager for OrderedAssociatedManager<P> {
     type Peers = OrderedAssociated<Self::PublicKey, SocketAddr>;
 
     async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
-        self.oracle
-            .sender
-            .send(Message::Update {
-                peer_set,
-                peers: peers.into_keys(), // TODO: enforce sockets match registered listeners
-            })
-            .await
-            .unwrap();
+        self.oracle.update(peer_set, peers.into_keys()).await;
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
-        let (sender, receiver) = oneshot::channel();
-        self.oracle
-            .sender
-            .send(Message::PeerSet {
-                index: id,
-                response: sender,
-            })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        self.oracle.peer_set(id).await
     }
 
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
-        let (sender, receiver) = oneshot::channel();
-        self.oracle
-            .sender
-            .send(Message::Subscribe { response: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        self.oracle.subscribe().await
     }
 }
 
