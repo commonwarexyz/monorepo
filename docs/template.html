@@ -11,28 +11,22 @@
     <meta name="author" content="$author$">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-    $if(url)$
     <meta property="og:url" content="$url$" />
-    $endif$
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    $if(image)$
     <meta property="og:image" content="$image$" />
-    <meta property="twitter:image" content="$image$" />
-    $endif$
     <meta property="og:title" content="$title$" />
     <meta property="og:description" content="$description$" />
     <meta property="article:author" content="$author$" />
     <meta property="article:published_time" content="$published-time$" />
     <meta property="article:modified_time" content="$modified-time$" />
 
-    $if(twitter_card)$
-    <meta name="twitter:card" content="$twitter_card$" />
-    $endif$
+    <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="$url$" />
     <meta property="twitter:title" content="$title$" />
     <meta property="twitter:description" content="$description$" />
+    <meta property="twitter:image" content="$image$" />
     <meta property="twitter:site" content="@commonwarexyz" />
     $if(author_twitter)$
     <meta property="twitter:creator" content="$author_twitter$" />
@@ -41,11 +35,12 @@
     <link rel="stylesheet" type="text/css" href="/style.css">
 
     $if(katex)$
-     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
-     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
-     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" 
-             onload="renderMathInElement(document.body);"></script></head>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
     $endif$
+</head>
+
 <body>
     <div id="logo-placeholder">
         <div class="logo-line">
@@ -98,7 +93,8 @@
             <div class="date">$date$</div>
         </div>
         $body$
-    <div id="footer-placeholder"></div>
-    <script src="/shared.js"></script>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
 </body>
+
 </html>

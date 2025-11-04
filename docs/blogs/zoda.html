@@ -6,38 +6,51 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
-    <title>commonware > Optimizing Block Dispersal with Coding</title>
-    <meta name="description" content="In which we describe how we use
-coding schemes, and ZODA to distribute blocks efficiently">
+    <title>commonware > Fast Block Dissemination with Immediate
+Guarantees</title>
+    <meta name="description" content="You can come to consensus over a
+mere fingerprint of the block—a hash for example—but doing anything
+interesting with that fingerprint, like processing transactions or
+updating state, requires disseminating (a lot of) data.">
     <meta name="author" content="Lucas Meier">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-        <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://commonware.xyz/blogs/zoda.html" />
+    <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-        <meta property="og:title" content="Optimizing Block Dispersal
-with Coding" />
-    <meta property="og:description" content="In which we describe how we
-use coding schemes, and ZODA to distribute blocks efficiently" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/zoda-card.png" />
+    <meta property="og:title" content="Fast Block Dissemination with
+Immediate Guarantees" />
+    <meta property="og:description" content="You can come to consensus
+over a mere fingerprint of the block—a hash for example—but doing
+anything interesting with that fingerprint, like processing transactions
+or updating state, requires disseminating (a lot of) data." />
     <meta property="article:author" content="Lucas Meier" />
     <meta property="article:published_time" content="2025-11-04T00:00:00Z" />
     <meta property="article:modified_time" content="2025-11-04T00:00:00Z" />
 
-        <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="" />
-    <meta property="twitter:title" content="Optimizing Block Dispersal
-with Coding" />
-    <meta property="twitter:description" content="In which we describe
-how we use coding schemes, and ZODA to distribute blocks efficiently" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/zoda.html" />
+    <meta property="twitter:title" content="Fast Block Dissemination
+with Immediate Guarantees" />
+    <meta property="twitter:description" content="You can come to
+consensus over a mere fingerprint of the block—a hash for example—but
+doing anything interesting with that fingerprint, like processing
+transactions or updating state, requires disseminating (a lot of)
+data." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/zoda-card.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/cronokirby" />
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 
-         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
-     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
-     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" 
-             onload="renderMathInElement(document.body);"></script></head>
-    <body>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    </head>
+
+<body>
     <div id="logo-placeholder">
         <div class="logo-line">
             <span class="edge-logo-symbol">+</span>
@@ -78,20 +91,20 @@ how we use coding schemes, and ZODA to distribute blocks efficiently" />
         </div>
     </div>
     <div class="content">
-        <h1>Optimizing Block Dispersal with Coding</h1>
+        <h1>Fast Block Dissemination with Immediate Guarantees</h1>
         <div class="meta">
 
                         <div class="author">By <a href="https://x.com/cronokirby">Lucas
 Meier</a></div>
                         <div class="date">November 4th, 2025</div>
         </div>
-        <p>A crucial part of blockchain consensus is distributing the
-        block among participants. You can come to consensus over a mere
-        fingerprint of the block—a hash for example— but doing anything
-        interesting with the block, like processing transactions,
-        requires the data.</p>
-        <p>We’ve invested some effort in this part of the Commonware
-        Library recently, and I’d like to share some fruits of that
+        <p>You can come to consensus over a mere fingerprint of the
+        block—a hash for example— but doing anything interesting with
+        that fingerprint, like processing transactions or updating
+        state, requires disseminating (a lot of) data.</p>
+        <p>We’ve invested some effort in this part of the <a
+        href="https://github.com/commonwarexyz/monorepo">Commonware
+        Library</a> recently, and I’d like to share some fruits of that
         effort in this post. As an outline, we’ll cover:</p>
         <ul>
         <li>data dissemination, naively,</li>
@@ -119,7 +132,7 @@ Meier</a></div>
         class="math inline">\(0\)</span> bytes, since they send
         nothing.</p>
         <figure>
-        <img src="/blogs/zoda/img-000.png"
+        <img src="/imgs/zoda-000.png"
         alt="Figure 1: A leader transmits a block of data to 4 followers" />
         <figcaption aria-hidden="true">Figure 1: A leader transmits a
         block of data to 4 followers</figcaption>
@@ -131,10 +144,11 @@ Meier</a></div>
         <p>Some back-of-the-napkin math: if our leader has a 1 Gb / s
         link, and needs to send a 1 MB block to 50 followers, we would
         expect this to take at least 400 ms, assuming no overhead at all
-        in transmitting. Our <a
-        href="https://docs.rs/commonware-estimator/latest/estimator/">estimator
-        crate</a> can be used to test out this example, as well as <a
-        href="https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy">others</a>.</p>
+        in transmitting. The <a
+        href="https://docs.rs/commonware-estimator/latest/estimator/">commonware-estimator</a>
+        can be used to test out <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/examples/estimator/simplex_large_block.lazy">this
+        example</a>.</p>
         <p>This protocol is bottlenecked more so, with all of its
         communication going through the single leader node. While the
         leader sends the entire data <span
@@ -157,7 +171,7 @@ Meier</a></div>
         possible. (They do still need to communicate to recover the
         data, of course, but it is recoverable).</p>
         <figure>
-        <img src="/blogs/zoda/img-001.png"
+        <img src="/imgs/zoda-001.png"
         alt="Figure 2: A leader splits data into 4 chunks, each sent to 1 follower" />
         <figcaption aria-hidden="true">Figure 2: A leader splits data
         into 4 chunks, each sent to 1 follower</figcaption>
@@ -233,7 +247,7 @@ Meier</a></div>
         class="math inline">\(n\)</span> shards, the original matrix can
         be recovered, proceeding columnwise once more.</p>
         <figure>
-        <img src="/blogs/zoda/img-002.png"
+        <img src="/imgs/zoda-002.png"
         alt="Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers" />
         <figcaption aria-hidden="true">Figure 3: Data is encoded,
         growing from 2 pieces into 4, and split across the
@@ -250,13 +264,8 @@ Meier</a></div>
         before. We want some redundancy though, with <span
         class="math inline">\(m \gg n\)</span>, so the total cost will
         be <em>higher</em> than before. Nevertheless, it is distributed
-        far more fairly than the naive case, so we should expect it to
-        perform better.</p>
-        <p>We had <a
-        href="https://www.youtube.com/watch?v=0m2DgfyCi0w">a podcast
-        episode</a> with the folks from <a
-        href="https://www.category.xyz/">Category Labs</a> about using
-        Raptor Codes for this problem.</p>
+        far more fairly than the naive case, so we should expect data to
+        be disseminated more quickly all else being equal.</p>
         <h2 id="integrity">Integrity</h2>
         <p>We’ve described coding schemes as being able to tolerate
         erasure: missing pieces of data. This fits naturally in the
@@ -289,7 +298,7 @@ Meier</a></div>
         scheme (but others might work better, e.g. playing with arity,
         or using a Polynomial Commitment Scheme).</p>
         <figure>
-        <img src="/blogs/zoda/img-003.png"
+        <img src="/imgs/zoda-003.png"
         alt="Figure 4: The encoded rows are hashed into a tree" />
         <figcaption aria-hidden="true">Figure 4: The encoded rows are
         hashed into a tree</figcaption>
@@ -545,13 +554,21 @@ Meier</a></div>
         alleviates this by guaranteeing that a shard originates from a
         valid encoding of the data, by adding additional checksums to
         each shard. Some more advanced schemes, like <a
-        href="https://eprint.iacr.org/2025/1187">Ligerito</a> can
-        potentially allow for verifying arbitrary properties of the
-        data, which we’re excited about.</p>
-        <p>Our work-in-progress implementation of this scheme can be
-        found here: <a
-        href="https://github.com/commonwarexyz/monorepo/blob/cronokirby/ZODA/coding/src/zoda.rs"></a>.</p>
-    <div id="footer-placeholder"></div>
-    <script src="/shared.js"></script>
+        href="https://eprint.iacr.org/2025/1187">Ligerito</a> can pave
+        the way for verifying arbitrary properties of the sharded data,
+        which we’re excited about.</p>
+        <p>Our initial implementation of this scheme can be found <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">in
+        the Commonware Library</a>.</p>
+        <p>Looking to develop a better intuition for ZODA? Check out our
+        <a
+        href="https://www.youtube.com/watch?v=eOGQOaqvgnI">podcast</a>
+        with <a href="https://x.com/GuilleAngeris">Guillermo Angeris</a>
+        and <a href="https://x.com/alexhevans">Alex Evans</a> from <a
+        href="https://baincapitalcrypto.com/">Bain Capital
+        Crypto</a>.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
 </body>
+
 </html>

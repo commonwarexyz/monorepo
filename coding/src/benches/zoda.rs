@@ -4,11 +4,11 @@ use commonware_cryptography::Sha256;
 use criterion::{criterion_group, Criterion};
 
 fn benchmark_encode(c: &mut Criterion) {
-    benchmark_encode_generic::<Zoda<Sha256>>("zoda_encode", c);
+    benchmark_encode_generic::<Zoda<Sha256>>("zoda::encode", c);
 }
 
 fn benchmark_decode(c: &mut Criterion) {
-    benchmark_decode_generic::<Zoda<Sha256>>("zoda_decode", c);
+    benchmark_decode_generic::<Zoda<Sha256>>("zoda::decode", c);
 }
 
 criterion_group! {
