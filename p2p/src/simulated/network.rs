@@ -19,7 +19,8 @@ use commonware_utils::set::Ordered;
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
+    future::{self, FutureExt, Shared},
+    SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
@@ -327,7 +328,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => {
                 // If sender or receiver does not exist, then create it.
                 self.ensure_peer_exists(&sender);
+                self.ensure_peer_ready(&sender).await;
                 let receiver_socket = self.ensure_peer_exists(&receiver);
+                self.ensure_peer_ready(&receiver).await;
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -390,6 +393,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Get all tracked peers as an ordered set.
     fn all_tracked_peers(&self) -> Ordered<P> {
         self.peer_refs.keys().cloned().collect()
+    }
+
+    /// Wait for a peer's listener to be ready if it was freshly created.
+    async fn ensure_peer_ready(&mut self, public_key: &P) {
+        if let Some(peer) = self.peers.get_mut(public_key) {
+            peer.wait_until_ready().await;
+        }
     }
 }
 
@@ -681,6 +691,9 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
+
+    // Signals when the listener has finished binding
+    ready: Shared<oneshot::Receiver<()>>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -759,48 +772,55 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let ready = ready_rx.shared();
+
         // Spawn a task that accepts new connections and spawns a task for each connection
         context.with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
-            move |context| async move {
-                // Initialize listener
-                let mut listener = context.bind(socket).await.unwrap();
+            move |context| {
+                let ready_tx = ready_tx;
+                async move {
+                    // Initialize listener
+                    let mut listener = context.bind(socket).await.unwrap();
+                    let _ = ready_tx.send(());
 
-                // Continually accept new connections
-                while let Ok((_, _, mut stream)) = listener.accept().await {
-                    // New connection accepted. Spawn a task for this connection
-                    context.with_label("receiver").spawn({
-                        let mut inbox_sender = inbox_sender.clone();
-                        move |_| async move {
-                            // Receive dialer's public key as a handshake
-                            let dialer = match recv_frame(&mut stream, max_size).await {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    error!("failed to receive public key from dialer");
+                    // Continually accept new connections
+                    while let Ok((_, _, mut stream)) = listener.accept().await {
+                        // New connection accepted. Spawn a task for this connection
+                        context.with_label("receiver").spawn({
+                            let mut inbox_sender = inbox_sender.clone();
+                            move |_| async move {
+                                // Receive dialer's public key as a handshake
+                                let dialer = match recv_frame(&mut stream, max_size).await {
+                                    Ok(data) => data,
+                                    Err(_) => {
+                                        error!("failed to receive public key from dialer");
+                                        return;
+                                    }
+                                };
+                                let Ok(dialer) = P::decode(dialer.as_ref()) else {
+                                    error!("received public key is invalid");
                                     return;
-                                }
-                            };
-                            let Ok(dialer) = P::decode(dialer.as_ref()) else {
-                                error!("received public key is invalid");
-                                return;
-                            };
+                                };
 
-                            // Continually receive messages from the dialer and send them to the inbox
-                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                let channel = Channel::from_be_bytes(
-                                    data[..Channel::SIZE].try_into().unwrap(),
-                                );
-                                let message = data.slice(Channel::SIZE..);
-                                if let Err(err) = inbox_sender
-                                    .send((channel, (dialer.clone(), message)))
-                                    .await
-                                {
-                                    error!(?err, "failed to send message to mailbox");
-                                    break;
+                                // Continually receive messages from the dialer and send them to the inbox
+                                while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                                    let channel = Channel::from_be_bytes(
+                                        data[..Channel::SIZE].try_into().unwrap(),
+                                    );
+                                    let message = data.slice(Channel::SIZE..);
+                                    if let Err(err) = inbox_sender
+                                        .send((channel, (dialer.clone(), message)))
+                                        .await
+                                    {
+                                        error!(?err, "failed to send message to mailbox");
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         });
@@ -809,7 +829,13 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
+            ready,
         }
+    }
+
+    async fn wait_until_ready(&self) {
+        let ready = self.ready.clone();
+        let _ = ready.await;
     }
 
     /// Register a channel with the peer.
@@ -817,6 +843,7 @@ impl<P: PublicKey> Peer<P> {
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
     async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
+        self.wait_until_ready().await;
         let (sender, receiver) = oneshot::channel();
         self.control
             .send((channel, sender))
