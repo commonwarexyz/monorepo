@@ -380,8 +380,7 @@ and re-encoding it to see if it matches our commitment.
 that a shard originates from a valid encoding of the data,
 by adding additional checksums to each shard.
 Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
-can potentially allow for verifying arbitrary properties of the data, which
+can pave the way for verifying arbitrary properties of the sharded data, which
 we're excited about.
 
 Our initial implementation of this scheme can be found [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
-
