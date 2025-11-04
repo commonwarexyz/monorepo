@@ -770,64 +770,59 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let ready = ready_rx.shared();
-
         // Spawn a task that accepts new connections and spawns a task for each connection
-        context.with_label("listener").spawn({
-            let inbox_sender = inbox_sender.clone();
-            move |context| {
-                let ready_tx = ready_tx;
-                async move {
-                    // Initialize listener
-                    let mut listener = context.bind(socket).await.unwrap();
-                    let _ = ready_tx.send(());
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let ready_rx = ready_rx.shared();
+        context
+            .with_label("listener")
+            .spawn(move |context| async move {
+                // Initialize listener
+                let mut listener = context.bind(socket).await.unwrap();
+                let _ = ready_tx.send(());
 
-                    // Continually accept new connections
-                    while let Ok((_, _, mut stream)) = listener.accept().await {
-                        // New connection accepted. Spawn a task for this connection
-                        context.with_label("receiver").spawn({
-                            let mut inbox_sender = inbox_sender.clone();
-                            move |_| async move {
-                                // Receive dialer's public key as a handshake
-                                let dialer = match recv_frame(&mut stream, max_size).await {
-                                    Ok(data) => data,
-                                    Err(_) => {
-                                        error!("failed to receive public key from dialer");
-                                        return;
-                                    }
-                                };
-                                let Ok(dialer) = P::decode(dialer.as_ref()) else {
-                                    error!("received public key is invalid");
+                // Continually accept new connections
+                while let Ok((_, _, mut stream)) = listener.accept().await {
+                    // New connection accepted. Spawn a task for this connection
+                    context.with_label("receiver").spawn({
+                        let mut inbox_sender = inbox_sender.clone();
+                        move |_| async move {
+                            // Receive dialer's public key as a handshake
+                            let dialer = match recv_frame(&mut stream, max_size).await {
+                                Ok(data) => data,
+                                Err(_) => {
+                                    error!("failed to receive public key from dialer");
                                     return;
-                                };
+                                }
+                            };
+                            let Ok(dialer) = P::decode(dialer.as_ref()) else {
+                                error!("received public key is invalid");
+                                return;
+                            };
 
-                                // Continually receive messages from the dialer and send them to the inbox
-                                while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                    let channel = Channel::from_be_bytes(
-                                        data[..Channel::SIZE].try_into().unwrap(),
-                                    );
-                                    let message = data.slice(Channel::SIZE..);
-                                    if let Err(err) = inbox_sender
-                                        .send((channel, (dialer.clone(), message)))
-                                        .await
-                                    {
-                                        error!(?err, "failed to send message to mailbox");
-                                        break;
-                                    }
+                            // Continually receive messages from the dialer and send them to the inbox
+                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                                let channel = Channel::from_be_bytes(
+                                    data[..Channel::SIZE].try_into().unwrap(),
+                                );
+                                let message = data.slice(Channel::SIZE..);
+                                if let Err(err) = inbox_sender
+                                    .send((channel, (dialer.clone(), message)))
+                                    .await
+                                {
+                                    error!(?err, "failed to send message to mailbox");
+                                    break;
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
-            }
-        });
+            });
 
         // Return peer
         Self {
             socket,
             control: control_sender,
-            ready,
+            ready: ready_rx,
         }
     }
 
