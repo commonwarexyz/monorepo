@@ -96,6 +96,18 @@ impl<P: PublicKey> Oracle<P> {
         }
     }
 
+    pub fn ordered_manager(&self) -> OrderedManager<P> {
+        OrderedManager {
+            oracle: self.clone(),
+        }
+    }
+
+    pub fn ordered_associated_manager(&self) -> OrderedAssociatedManager<P> {
+        OrderedAssociatedManager {
+            oracle: self.clone(),
+        }
+    }
+
     /// Return a list of all blocked peers.
     pub async fn blocked(&mut self) -> Result<Vec<(P, P)>, Error> {
         let (s, r) = oneshot::channel();

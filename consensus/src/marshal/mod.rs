@@ -208,11 +208,12 @@ mod tests {
         };
 
         // Create the resolver
+        let manager = oracle.ordered_manager();
         let mut control = oracle.control(validator.clone());
         let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.clone(),
+            manager,
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),

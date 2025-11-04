@@ -2107,7 +2107,7 @@ mod tests {
     fn register_peer_set() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2117,13 +2117,16 @@ mod tests {
             );
             network.start();
 
-            assert_eq!(oracle.peer_set(0).await, Some([].into()));
+            let mut manager = oracle.ordered_manager();
+            assert_eq!(manager.peer_set(0).await, Some([].into()));
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            oracle.update(0xFF, [pk1.clone(), pk2.clone()].into()).await;
+            manager
+                .update(0xFF, [pk1.clone(), pk2.clone()].into())
+                .await;
 
-            assert_eq!(oracle.peer_set(0xFF).await.unwrap(), [pk1, pk2].into());
+            assert_eq!(manager.peer_set(0xFF).await.unwrap(), [pk1, pk2].into());
         });
     }
 
@@ -2148,7 +2151,8 @@ mod tests {
             let pk4 = PrivateKey::from_seed(4).public_key();
 
             // Register first peer set with pk1 and pk2
-            oracle
+            let mut manager = oracle.ordered_manager();
+            manager
                 .update(1, vec![pk1.clone(), pk2.clone()].into())
                 .await;
 
@@ -2193,7 +2197,7 @@ mod tests {
             assert_eq!(sent.len(), 0);
 
             // Register second peer set with pk2 and pk3
-            oracle
+            manager
                 .update(2, vec![pk2.clone(), pk3.clone()].into())
                 .await;
 
@@ -2205,7 +2209,7 @@ mod tests {
             assert_eq!(sent.len(), 1);
 
             // Register third peer set with pk3 and pk4 (this will evict peer set 1)
-            oracle
+            manager
                 .update(3, vec![pk3.clone(), pk4.clone()].into())
                 .await;
 
@@ -2232,16 +2236,16 @@ mod tests {
             assert_eq!(sent.len(), 1);
 
             // Verify peer set contents
-            let peer_set_2 = oracle.peer_set(2).await.unwrap();
+            let peer_set_2 = manager.peer_set(2).await.unwrap();
             assert!(peer_set_2.as_ref().contains(&pk2));
             assert!(peer_set_2.as_ref().contains(&pk3));
 
-            let peer_set_3 = oracle.peer_set(3).await.unwrap();
+            let peer_set_3 = manager.peer_set(3).await.unwrap();
             assert!(peer_set_3.as_ref().contains(&pk3));
             assert!(peer_set_3.as_ref().contains(&pk4));
 
             // Peer set 1 should no longer exist
-            assert!(oracle.peer_set(1).await.is_none());
+            assert!(manager.peer_set(1).await.is_none());
         });
     }
 
@@ -2249,7 +2253,7 @@ mod tests {
     fn test_subscribe_to_peer_sets() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2260,7 +2264,8 @@ mod tests {
             network.start();
 
             // Subscribe to peer set updates
-            let mut subscription = oracle.subscribe().await;
+            let mut manager = oracle.ordered_manager();
+            let mut subscription = manager.subscribe().await;
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -2268,7 +2273,7 @@ mod tests {
             let pk3 = PrivateKey::from_seed(3).public_key();
 
             // Register first peer set
-            oracle
+            manager
                 .update(1, vec![pk1.clone(), pk2.clone()].into())
                 .await;
 
@@ -2279,7 +2284,7 @@ mod tests {
             assert_eq!(all, vec![pk1.clone(), pk2.clone()].into());
 
             // Register second peer set
-            oracle
+            manager
                 .update(2, vec![pk2.clone(), pk3.clone()].into())
                 .await;
 
@@ -2290,7 +2295,7 @@ mod tests {
             assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
 
             // Register third peer set
-            oracle
+            manager
                 .update(3, vec![pk1.clone(), pk3.clone()].into())
                 .await;
 
@@ -2301,7 +2306,7 @@ mod tests {
             assert_eq!(all, vec![pk1.clone(), pk2.clone(), pk3.clone()].into());
 
             // Register fourth peer set
-            oracle
+            manager
                 .update(4, vec![pk1.clone(), pk3.clone()].into())
                 .await;
 
@@ -2317,7 +2322,7 @@ mod tests {
     fn test_multiple_subscriptions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2328,16 +2333,17 @@ mod tests {
             network.start();
 
             // Create multiple subscriptions
-            let mut subscription1 = oracle.subscribe().await;
-            let mut subscription2 = oracle.subscribe().await;
-            let mut subscription3 = oracle.subscribe().await;
+            let mut manager = oracle.ordered_manager();
+            let mut subscription1 = manager.subscribe().await;
+            let mut subscription2 = manager.subscribe().await;
+            let mut subscription3 = manager.subscribe().await;
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
 
             // Register a peer set
-            oracle
+            manager
                 .update(1, vec![pk1.clone(), pk2.clone()].into())
                 .await;
 
@@ -2354,7 +2360,7 @@ mod tests {
             drop(subscription2);
 
             // Register another peer set
-            oracle
+            manager
                 .update(2, vec![pk1.clone(), pk2.clone()].into())
                 .await;
 

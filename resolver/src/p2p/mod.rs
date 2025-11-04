@@ -100,7 +100,7 @@ mod tests {
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -115,7 +115,8 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-        oracle.update(0, peers.clone().into()).await;
+        let mut manager = oracle.ordered_manager();
+        manager.update(0, peers.clone().into()).await;
 
         let mut connections = Vec::new();
         for peer in &peers {
@@ -155,7 +156,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                manager: oracle.clone(),
+                manager: oracle.ordered_manager(), // TODO: just accept manager as arg
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
