@@ -313,7 +313,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     .limit(now, &public_key, egress_cap, ingress_cap);
                 self.process_completions(completions);
 
-                // Alert application of update
+                // Alert application of update (even though we can't
+                // return an error here it is useful to know the bandwidth
+                // update was synchronously applied)
                 send_result(result, Ok(()));
             }
             ingress::Message::AddLink {
