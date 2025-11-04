@@ -78,6 +78,15 @@ pub enum Error {
     UncommittedOperations,
 }
 
+impl From<crate::journal::authenticated::Error> for Error {
+    fn from(e: crate::journal::authenticated::Error) -> Self {
+        match e {
+            crate::journal::authenticated::Error::Journal(j) => Error::Journal(j),
+            crate::journal::authenticated::Error::Mmr(m) => Error::Mmr(m),
+        }
+    }
+}
+
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);

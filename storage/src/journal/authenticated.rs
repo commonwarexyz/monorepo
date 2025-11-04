@@ -25,9 +25,6 @@ pub enum Error {
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
-
-    #[error("prune beyond minimum required: requested={0} minimum={1}")]
-    PruneBeyondMinRequired(Location, Location),
 }
 
 /// Rewinds the journal to the last operation matching the rewind predicate. If no operation
@@ -72,13 +69,13 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
-    journal: C,
+    pub(crate) journal: C,
 
-    hasher: StandardHasher<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
 impl<E, C, O, H> Journal<E, C, O, H>
@@ -150,18 +147,7 @@ where
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune(
-        &mut self,
-        prune_loc: Location,
-        inactivity_floor_loc: Location,
-    ) -> Result<Location, Error> {
-        if prune_loc > inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                inactivity_floor_loc,
-            ));
-        }
-
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
             return self.pruning_boundary().await;
@@ -956,10 +942,7 @@ mod tests {
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
-            let pruned_boundary = journal
-                .prune(Location::new_unchecked(50), Location::new_unchecked(50))
-                .await
-                .unwrap();
+            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
             // Try to read an operation before the pruned boundary
             let read_loc = Location::new_unchecked(0);
@@ -1054,10 +1037,7 @@ mod tests {
         executor.start(|context| async move {
             let mut journal = create_empty_journal(context, "prune_empty").await;
 
-            let boundary = journal
-                .prune(Location::new_unchecked(0), Location::new_unchecked(0))
-                .await
-                .unwrap();
+            let boundary = journal.prune(Location::new_unchecked(0)).await.unwrap();
 
             assert_eq!(boundary, Location::new_unchecked(0));
         });
@@ -1077,10 +1057,7 @@ mod tests {
                 .unwrap();
             journal.sync().await.unwrap();
 
-            let boundary = journal
-                .prune(Location::new_unchecked(50), Location::new_unchecked(50))
-                .await
-                .unwrap();
+            let boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
             // Boundary should be <= requested location (may align to section boundary)
             assert!(boundary <= Location::new_unchecked(50));
@@ -1101,7 +1078,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             let requested = Location::new_unchecked(50);
-            let actual = journal.prune(requested, requested).await.unwrap();
+            let actual = journal.prune(requested).await.unwrap();
 
             // Actual boundary should match oldest_retained_loc
             let oldest = journal.oldest_retained_loc().await.unwrap();
@@ -1109,22 +1086,6 @@ mod tests {
 
             // Actual may be <= requested due to section alignment
             assert!(actual <= requested);
-        });
-    }
-
-    /// Verify that pruning beyond the inactivity floor returns an error.
-    #[test_traced("INFO")]
-    fn test_prune_beyond_inactivity_floor_returns_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut journal = create_empty_journal(context, "prune_error").await;
-
-            // Try to prune beyond inactivity floor
-            let result = journal
-                .prune(Location::new_unchecked(5), Location::new_unchecked(3))
-                .await;
-
-            assert!(matches!(result, Err(Error::PruneBeyondMinRequired(_, _))));
         });
     }
 
@@ -1142,10 +1103,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             let count_before = journal.op_count();
-            journal
-                .prune(Location::new_unchecked(50), Location::new_unchecked(50))
-                .await
-                .unwrap();
+            journal.prune(Location::new_unchecked(50)).await.unwrap();
             let count_after = journal.op_count();
 
             assert_eq!(count_before, count_after);
@@ -1175,10 +1133,7 @@ mod tests {
                 .unwrap();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal
-                .prune(Location::new_unchecked(50), Location::new_unchecked(50))
-                .await
-                .unwrap();
+            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
             let oldest = journal.oldest_retained_loc().await.unwrap();
             assert!(oldest.is_some());
@@ -1213,10 +1168,7 @@ mod tests {
                 .unwrap();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal
-                .prune(Location::new_unchecked(50), Location::new_unchecked(50))
-                .await
-                .unwrap();
+            let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
             let boundary = journal.pruning_boundary().await.unwrap();
             assert_eq!(boundary, pruned_boundary);
@@ -1236,10 +1188,7 @@ mod tests {
                 .unwrap();
             journal.sync().await.unwrap();
 
-            let pruned_boundary = journal
-                .prune(Location::new_unchecked(25), Location::new_unchecked(25))
-                .await
-                .unwrap();
+            let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
 
             // Verify MMR and journal remain in sync
             let oldest_retained = journal.oldest_retained_loc().await.unwrap();
@@ -1446,10 +1395,7 @@ mod tests {
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
-            let pruned_boundary = journal
-                .prune(Location::new_unchecked(25), Location::new_unchecked(25))
-                .await
-                .unwrap();
+            let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
 
             // Try to get proof starting at a location before the pruned boundary
             let op_count = journal.op_count();
