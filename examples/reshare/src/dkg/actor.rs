@@ -5,8 +5,9 @@ use crate::{
     setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{varint::UInt, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
+    types::Epoch,
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
@@ -194,7 +195,7 @@ where
             if let Some(state) = self.epoch_metadata.get(&EPOCH_METADATA_KEY).cloned() {
                 (state.epoch, state.public, state.share)
             } else {
-                (0, initial_public, initial_share)
+                (Epoch::zero(), initial_public, initial_share)
             };
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
         let (dealers, mut players) = Self::select_participants(
@@ -233,10 +234,10 @@ where
             .chain(Self::choose_from_all(
                 &all_participants,
                 self.num_participants_per_epoch,
-                current_epoch + 1,
+                current_epoch.next(),
             ))
             .collect();
-        self.manager.update(current_epoch, peers).await;
+        self.manager.update(current_epoch.get(), peers).await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -274,9 +275,9 @@ where
                     let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
                     // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 0 && epoch > 0 {
+                    if relative_height == 0 && !epoch.is_zero() {
                         orchestrator
-                            .report(orchestrator::Message::Exit(epoch - 1))
+                            .report(orchestrator::Message::Exit(epoch.previous()))
                             .await;
                     }
 
@@ -308,28 +309,28 @@ where
                         Ordering::Less => {
                             // Continuously distribute shares to any players who haven't acknowledged
                             // receipt yet.
-                            manager.distribute(epoch).await;
+                            manager.distribute(epoch.get()).await;
 
                             // Process any incoming messages from other dealers/players.
-                            manager.process_messages(epoch).await;
+                            manager.process_messages(epoch.get()).await;
                         }
                         Ordering::Equal => {
                             // Process any final messages from other dealers/players.
-                            manager.process_messages(epoch).await;
+                            manager.process_messages(epoch.get()).await;
 
                             // At the midpoint of the epoch, construct the deal outcome for inclusion.
-                            manager.construct_deal_outcome(epoch).await;
+                            manager.construct_deal_outcome(epoch.get()).await;
                         }
                         Ordering::Greater => {
                             // Process any incoming deal outcomes from dealing contributors.
-                            manager.process_block(epoch, block).await;
+                            manager.process_block(epoch.get(), block).await;
                         }
                     }
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
                         let (next_dealers, next_public, next_share, success) =
-                            match manager.finalize(epoch).await {
+                            match manager.finalize(epoch.get()).await {
                                 (
                                     next_dealers,
                                     RoundResult::Output(Output { public, share }),
@@ -349,11 +350,11 @@ where
 
                         info!(
                             success,
-                            epoch,
+                            %epoch,
                             ?next_public,
                             "finalized epoch's reshare; instructing reconfiguration after reshare.",
                         );
-                        let next_epoch = epoch + 1;
+                        let next_epoch = epoch.next();
 
                         // Persist the next epoch information
                         let epoch_state = EpochState {
@@ -369,7 +370,7 @@ where
                         // Prune the round metadata for two epochs ago (if this block is replayed,
                         // we may still need the old metadata)
                         if let Some(epoch) = next_epoch.checked_sub(2) {
-                            self.round_metadata.remove(&epoch.into());
+                            self.round_metadata.remove(&U64::from(epoch.get()));
                             self.round_metadata
                                 .sync()
                                 .await
@@ -429,10 +430,10 @@ where
                             .chain(Self::choose_from_all(
                                 &all_participants,
                                 self.num_participants_per_epoch,
-                                next_epoch + 1,
+                                next_epoch.next(),
                             ))
                             .collect();
-                        self.manager.update(next_epoch, next_peers).await;
+                        self.manager.update(next_epoch.get(), next_peers).await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
@@ -468,7 +469,7 @@ where
                     // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                     // and not willing to enter the next epoch).
                     response.send(()).expect("response channel closed");
-                    info!(epoch, relative_height, "finalized block");
+                    info!(%epoch, relative_height, "finalized block");
                 }
             }
         }
@@ -497,7 +498,7 @@ where
     }
 
     fn select_participants(
-        current_epoch: u64,
+        current_epoch: Epoch,
         num_participants: usize,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
@@ -507,15 +508,19 @@ where
             &active_participants,
             num_participants,
         );
-        if current_epoch == 0 {
+        if current_epoch.is_zero() {
             return (active_participants, epoch0_players);
         }
 
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let dealers = if current_epoch == 1 {
+        let dealers = if current_epoch == 1.into() {
             epoch0_players.clone()
         } else {
-            Self::choose_from_all(&all_participants, num_participants, current_epoch - 1)
+            Self::choose_from_all(
+                &all_participants,
+                num_participants,
+                current_epoch.previous(),
+            )
         };
         let players = Self::choose_from_all(&all_participants, num_participants, current_epoch);
 
@@ -548,9 +553,9 @@ where
     fn choose_from_all(
         participants: &Ordered<C::PublicKey>,
         num_participants: usize,
-        seed: u64,
+        seed: Epoch,
     ) -> Vec<C::PublicKey> {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = StdRng::seed_from_u64(seed.get());
         participants
             .iter()
             .cloned()
@@ -571,14 +576,14 @@ where
 
 #[derive(Clone)]
 struct EpochState<V: Variant> {
-    epoch: u64,
+    epoch: Epoch,
     public: Option<Public<V>>,
     share: Option<Share>,
 }
 
 impl<V: Variant> Write for EpochState<V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        UInt(self.epoch).write(buf);
+        self.epoch.write(buf);
         self.public.write(buf);
         self.share.write(buf);
     }
@@ -586,7 +591,7 @@ impl<V: Variant> Write for EpochState<V> {
 
 impl<V: Variant> EncodeSize for EpochState<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.epoch).encode_size() + self.public.encode_size() + self.share.encode_size()
+        self.epoch.encode_size() + self.public.encode_size() + self.share.encode_size()
     }
 }
 
@@ -598,7 +603,7 @@ impl<V: Variant> Read for EpochState<V> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            epoch: UInt::read(buf)?.into(),
+            epoch: Epoch::read(buf)?,
             public: Option::<Public<V>>::read_cfg(buf, cfg)?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })

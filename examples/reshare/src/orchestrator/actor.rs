@@ -5,7 +5,7 @@ use crate::{
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{varint::UInt, DecodeExt, Encode};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
@@ -204,12 +204,13 @@ where
                         warn!("pending mux backup channel closed, shutting down orchestrator");
                         break;
                     };
+                    let their_epoch = Epoch::from(their_epoch);
                     let Some(our_epoch) = engines.keys().last().copied() else {
-                        debug!(their_epoch, ?from, "received message from unregistered epoch with no known epochs");
+                        debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
                     };
                     if their_epoch <= our_epoch {
-                        debug!(their_epoch, our_epoch, ?from, "received message from past epoch");
+                        debug!(%their_epoch, %our_epoch, ?from, "received message from past epoch");
                         continue;
                     }
 
@@ -225,7 +226,7 @@ where
                         continue;
                     };
                     debug!(
-                        their_epoch,
+                        %their_epoch,
                         ?from,
                         "received backup message from future epoch, requesting orchestrator"
                     );
@@ -233,7 +234,7 @@ where
                     // Send the request to the orchestrator. This operation is best-effort.
                     if orchestrator_sender.send(
                         Recipients::One(from),
-                        UInt(our_epoch).encode().freeze(),
+                        our_epoch.encode().freeze(),
                         true
                     ).await.is_err() {
                         warn!("failed to send orchestrator request, shutting down orchestrator");
@@ -245,8 +246,8 @@ where
                         warn!("orchestrator channel closed, shutting down orchestrator");
                         break;
                     };
-                    let epoch = match UInt::<Epoch>::decode(bytes.as_ref()) {
-                        Ok(epoch) => epoch.0,
+                    let epoch = match Epoch::decode(bytes.as_ref()) {
+                        Ok(epoch) => epoch,
                         Err(err) => {
                             debug!(?err, ?from, "failed to decode epoch from orchestrator request");
                             self.oracle.block(from).await;
@@ -259,11 +260,11 @@ where
                     // peer will need to fetch it from another node on the network.
                     let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
                     let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                        debug!(epoch, ?from, "missing finalization for old epoch");
+                        debug!(%epoch, ?from, "missing finalization for old epoch");
                         continue;
                     };
                     debug!(
-                        epoch,
+                        %epoch,
                         boundary_height,
                         ?from,
                         "received message on pending network from old epoch. forwarding orchestrator"
@@ -275,7 +276,7 @@ where
                     let message = Voter::<S, H::Digest>::Finalization(finalization);
                     if recovered_global_sender
                         .send(
-                            epoch,
+                            epoch.get(),
                             Recipients::One(from),
                             message.encode().freeze(),
                             false,
@@ -295,7 +296,7 @@ where
                         Message::Enter(transition) => {
                             // If the epoch is already in the map, ignore.
                             if engines.contains_key(&transition.epoch) {
-                                warn!(epoch = transition.epoch, "entered existing epoch");
+                                warn!(epoch = %transition.epoch, "entered existing epoch");
                                 continue;
                             }
 
@@ -315,12 +316,12 @@ where
                                 .await;
                             engines.insert(transition.epoch, engine);
 
-                            info!(epoch = transition.epoch, "entered epoch");
+                            info!(epoch = %transition.epoch, "entered epoch");
                         }
                         Message::Exit(epoch) => {
                             // Remove the engine and abort it.
                             let Some(engine) = engines.remove(&epoch) else {
-                                warn!(epoch, "exited non-existent epoch");
+                                warn!(%epoch, "exited non-existent epoch");
                                 continue;
                             };
                             engine.abort();
@@ -328,7 +329,7 @@ where
                             // Unregister the signing scheme for the epoch.
                             assert!(self.scheme_provider.unregister(&epoch));
 
-                            info!(epoch, "exited epoch");
+                            info!(%epoch, "exited epoch");
                         }
                     }
                 },
@@ -372,8 +373,8 @@ where
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 256,
-                skip_timeout: 10,
+                activity_timeout: 256.into(),
+                skip_timeout: 10.into(),
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
@@ -382,9 +383,9 @@ where
         );
 
         // Create epoch-specific subchannels
-        let pending_sc = pending_mux.register(epoch).await.unwrap();
-        let recovered_sc = recovered_mux.register(epoch).await.unwrap();
-        let resolver_sc = resolver_mux.register(epoch).await.unwrap();
+        let pending_sc = pending_mux.register(epoch.get()).await.unwrap();
+        let recovered_sc = recovered_mux.register(epoch.get()).await.unwrap();
+        let resolver_sc = resolver_mux.register(epoch.get()).await.unwrap();
 
         engine.start(pending_sc, recovered_sc, resolver_sc)
     }

@@ -74,7 +74,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 digests: BTreeMap::new(),
                 contiguous: None,
                 highest: None,
-                current_epoch: 111, // Initialize with the expected epoch
+                current_epoch: 111.into(), // Initialize with the expected epoch
             },
             Mailbox { sender },
         )

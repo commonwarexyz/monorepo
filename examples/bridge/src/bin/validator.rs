@@ -3,7 +3,10 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::simplex::{self, Engine};
+use commonware_consensus::{
+    simplex::{self, Engine},
+    types::{Epoch, ViewDelta},
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
@@ -240,7 +243,7 @@ fn main() {
                 reporter: mailbox.clone(),
                 partition: String::from("log"),
                 mailbox_size: 1024,
-                epoch: 0,
+                epoch: Epoch::zero(),
                 namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -248,8 +251,8 @@ fn main() {
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
+                activity_timeout: ViewDelta::from(10),
+                skip_timeout: ViewDelta::from(5),
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),

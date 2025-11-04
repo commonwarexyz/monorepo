@@ -216,7 +216,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::{
         simplex::{signing_scheme::bls12381_threshold, types::Proposal},
-        types::Round,
+        types::{Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::group::{self, Element},
@@ -248,7 +248,7 @@ mod tests {
         Finalization {
             proposal: Proposal {
                 round: Round::new(333, 12345),
-                parent: 54321,
+                parent: View::from(54321),
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {

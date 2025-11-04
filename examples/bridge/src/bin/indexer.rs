@@ -8,7 +8,7 @@ use commonware_bridge::{
     Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Finalization, Viewable};
+use commonware_consensus::{simplex::types::Finalization, types::View, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
@@ -117,7 +117,7 @@ fn main() {
     // Configure networks
     let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Scheme, Sha256Digest>>> =
+    let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
@@ -197,7 +197,7 @@ fn main() {
                         let _ = response.send(true);
                         info!(
                             network = ?incoming.network,
-                            view = view,
+                            view = %view,
                             "stored finalization"
                         );
                     }

@@ -11,7 +11,7 @@ use crate::{
     Scheme,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, Viewable};
+use commonware_consensus::{simplex::types::Activity, types::Epoch, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         poly,
@@ -65,7 +65,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
             match message {
                 Message::Genesis { epoch, response } => {
                     // Sanity check. We don't support multiple epochs.
-                    assert_eq!(epoch, 0, "epoch must be 0");
+                    assert_eq!(epoch, Epoch::zero(), "epoch must be 0");
 
                     // Use the digest of the genesis message as the initial payload.
                     self.hasher.update(GENESIS);
@@ -200,13 +200,13 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             let proposal_signature = notarization.certificate.vote_signature;
                             let seed_signature = notarization.certificate.seed_signature;
 
-                            info!(view, payload = ?notarization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "notarized");
+                            info!(view = %view, payload = ?notarization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
                             let proposal_signature = finalization.certificate.vote_signature;
                             let seed_signature = finalization.certificate.seed_signature;
 
-                            info!(view, payload = ?finalization.proposal.payload, signature=?proposal_signature, seed=?seed_signature, "finalized");
+                            info!(view = %view, payload = ?finalization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "finalized");
 
                             // Post finalization
                             let msg =
@@ -228,13 +228,13 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             let Outbound::Success(success) = message else {
                                 panic!("unexpected response");
                             };
-                            debug!(view, success, "finalization posted");
+                            debug!(view = %view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
                             let round_signature = nullification.certificate.vote_signature;
                             let seed_signature = nullification.certificate.seed_signature;
 
-                            info!(view, signature=?round_signature, seed=?seed_signature, "nullified");
+                            info!(view = %view, signature = ?round_signature, seed = ?seed_signature, "nullified");
                         }
                         _ => {}
                     }

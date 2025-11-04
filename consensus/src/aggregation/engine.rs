@@ -191,7 +191,7 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
             activity_timeout: cfg.activity_timeout,
-            epoch: 0,
+            epoch: Epoch::zero(),
             tip: 0,
             safe_tip: SafeTip::default(),
             digest_requests: FuturesPool::default(),
@@ -301,7 +301,7 @@ impl<
                     };
 
                     // Refresh the epoch
-                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
 
@@ -309,7 +309,9 @@ impl<
                     self.safe_tip.reconcile(self.validators.participants(epoch).unwrap());
 
                     // Update data structures by purging old epochs
-                    let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
+                    let min_epoch = self
+                        .epoch
+                        .saturating_sub(self.epoch_bounds.0);
                     self.pending.iter_mut().for_each(|(_, pending)| {
                         match pending {
                             Pending::Unverified(acks) => {
@@ -390,7 +392,7 @@ impl<
                     }
 
                     // Update the metrics
-                    debug!(?sender, epoch=ack.epoch, index=ack.item.index, "ack");
+                    debug!(?sender, epoch = %ack.epoch, index = ack.item.index, "ack");
                     guard.set(Status::Success);
                 },
 

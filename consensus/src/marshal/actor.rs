@@ -15,7 +15,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::Round,
+    types::{Round, ViewDelta},
     utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -83,7 +83,7 @@ pub struct Actor<
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
-    view_retention_timeout: u64,
+    view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
     max_repair: u64,
     // Codec configuration for block type
@@ -482,7 +482,10 @@ impl<
                             if let Some(finalization) = self.get_finalization_by_height(height).await {
                                 // Trail the previous processed finalized block by the timeout
                                 let lpr = self.last_processed_round;
-                                let prune_round = Round::new(lpr.epoch(), lpr.view().saturating_sub(self.view_retention_timeout));
+                                let prune_round = Round::new(
+                                    lpr.epoch(),
+                                    lpr.view().saturating_sub(self.view_retention_timeout),
+                                );
 
                                 // Prune archives
                                 self.cache.prune(prune_round).await;

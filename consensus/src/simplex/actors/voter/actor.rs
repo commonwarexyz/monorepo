@@ -11,7 +11,7 @@ use crate::{
             Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
         },
     },
-    types::{Epoch, Round as Rnd, View},
+    types::{Epoch, Round as Rnd, View, ViewDelta},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -45,7 +45,7 @@ use std::{
 };
 use tracing::{debug, info, trace, warn};
 
-const GENESIS_VIEW: View = 0;
+const GENESIS_VIEW: View = View::zero();
 
 /// Action to take after processing a message.
 enum Action {
@@ -402,7 +402,7 @@ pub struct Actor<
     leader_timeout: Duration,
     notarization_timeout: Duration,
     nullify_retry: Duration,
-    activity_timeout: View,
+    activity_timeout: ViewDelta,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -508,8 +508,8 @@ impl<
 
                 mailbox_receiver,
 
-                last_finalized: 0,
-                view: 0,
+                last_finalized: View::zero(),
+                view: View::zero(),
                 views: BTreeMap::new(),
 
                 current_view,
@@ -576,9 +576,9 @@ impl<
     }
 
     fn find_parent(&self) -> Result<(View, D), View> {
-        let mut cursor = self.view - 1; // self.view always at least 1
+        let mut cursor = self.view.previous().expect("self.view always at least 1");
         loop {
-            if cursor == 0 {
+            if cursor.is_zero() {
                 return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
             }
 
@@ -598,7 +598,7 @@ impl<
 
             // If have nullification, continue
             if self.is_nullified(cursor) {
-                cursor -= 1;
+                cursor = cursor.previous().expect("checked to be non-zero above");
                 continue;
             }
 
@@ -638,8 +638,8 @@ impl<
             Ok(parent) => parent,
             Err(view) => {
                 debug!(
-                    view = self.view,
-                    missing = view,
+                    view = %self.view,
+                    missing = %view,
                     "skipping proposal opportunity"
                 );
                 resolver.fetch(vec![view], vec![view]).await;
@@ -648,7 +648,7 @@ impl<
         };
 
         // Request proposal from application
-        debug!(view = self.view, "requested proposal from automaton");
+        debug!(view = %self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
             leader: self
@@ -704,8 +704,8 @@ impl<
         round.nullify_retry = None;
 
         // If retry, broadcast notarization that led us to enter this view
-        let past_view = self.view - 1;
-        if retry && past_view > 0 {
+        let past_view = self.view.previous().expect("self.view always at least 1");
+        if retry && !past_view.is_zero() {
             if let Some(finalization) = self.construct_finalization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::finalization())
@@ -715,7 +715,7 @@ impl<
                     .send(Recipients::All, msg, true)
                     .await
                     .unwrap();
-                debug!(view = past_view, "rebroadcast entry finalization");
+                debug!(view = %past_view, "rebroadcast entry finalization");
             } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::notarization())
@@ -725,7 +725,7 @@ impl<
                     .send(Recipients::All, msg, true)
                     .await
                     .unwrap();
-                debug!(view = past_view, "rebroadcast entry notarization");
+                debug!(view = %past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
                 self.outbound_messages
@@ -736,10 +736,10 @@ impl<
                     .send(Recipients::All, msg, true)
                     .await
                     .unwrap();
-                debug!(view = past_view, "rebroadcast entry nullification");
+                debug!(view = %past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
-                    current = self.view,
+                    current = %self.view,
                     "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
@@ -763,7 +763,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(self.view)
+                .sync(self.view.get())
                 .await
                 .expect("unable to sync journal");
         }
@@ -788,7 +788,7 @@ impl<
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Nullify(nullify.clone());
             journal
-                .append(view, msg)
+                .append(view.get(), msg)
                 .await
                 .expect("unable to append nullify");
         }
@@ -832,7 +832,7 @@ impl<
             // If we are the leader, drop peer proposals
             let Some(leader) = round.leader else {
                 debug!(
-                    view = self.view,
+                    view = %self.view,
                     "dropping peer proposal because leader is not set"
                 );
                 return None;
@@ -861,7 +861,7 @@ impl<
             if proposal.view() <= proposal.parent {
                 debug!(
                     round = ?proposal.round,
-                    parent = proposal.parent,
+                    parent = %proposal.parent,
                     "dropping peer proposal because parent is invalid"
                 );
                 return None;
@@ -869,8 +869,8 @@ impl<
             if proposal.parent < self.last_finalized {
                 debug!(
                     round = ?proposal.round,
-                    parent = proposal.parent,
-                    last_finalized = self.last_finalized,
+                    parent = %proposal.parent,
+                    last_finalized = %self.last_finalized,
                     "dropping peer proposal because parent is less than last finalized"
                 );
                 return None;
@@ -879,11 +879,8 @@ impl<
         };
 
         // Ensure we have required notarizations
-        let mut cursor = match self.view {
-            0 => {
-                return None;
-            }
-            _ => self.view - 1,
+        let Some(mut cursor) = self.view.previous() else {
+            return None;
         };
         let parent_payload = loop {
             if cursor == proposal.parent {
@@ -896,7 +893,7 @@ impl<
                 let parent_proposal = match self.is_notarized(cursor) {
                     Some(parent) => parent,
                     None => {
-                        debug!(view = cursor, "parent proposal is not notarized");
+                        debug!(view = %cursor, "parent proposal is not notarized");
                         return None;
                     }
                 };
@@ -908,12 +905,17 @@ impl<
             // Check nullification exists in gap
             if !self.is_nullified(cursor) {
                 debug!(
-                    view = cursor,
+                    view = %cursor,
                     "missing nullification during proposal verification"
                 );
                 return None;
             }
-            cursor -= 1;
+
+            if let Some(previous) = cursor.previous() {
+                cursor = previous;
+            } else {
+                return None;
+            }
         };
 
         // Request verification
@@ -966,7 +968,7 @@ impl<
         true
     }
 
-    fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
+    fn since_view_start(&self, view: View) -> Option<(bool, f64)> {
         let round = self.views.get(&view)?;
         let Ok(elapsed) = self.context.current().duration_since(round.start) else {
             return None;
@@ -977,12 +979,12 @@ impl<
         ))
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
+    fn enter_view(&mut self, view: View, seed: Option<S::Seed>) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
-                view = view,
-                our_view = self.view,
+                view = %view,
+                our_view = %self.view,
                 "skipping useless view change"
             );
             return;
@@ -998,7 +1000,7 @@ impl<
         self.view = view;
 
         // Update metrics
-        self.current_view.set(view as i64);
+        self.current_view.set(view.get() as i64);
     }
 
     async fn prune_views(&mut self) {
@@ -1018,8 +1020,8 @@ impl<
             }
             self.views.remove(&next);
             debug!(
-                view = next,
-                last_finalized = self.last_finalized,
+                view = %next,
+                last_finalized = %self.last_finalized,
                 "pruned view"
             );
             pruned = true;
@@ -1030,7 +1032,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .prune(min)
+                .prune(min.get())
                 .await
                 .expect("unable to prune journal");
         }
@@ -1047,7 +1049,7 @@ impl<
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Notarize(notarize.clone());
             journal
-                .append(view, msg)
+                .append(view.get(), msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1101,14 +1103,14 @@ impl<
         if self.round_mut(view).add_verified_notarization(notarization) {
             if let Some(journal) = self.journal.as_mut() {
                 journal
-                    .append(view, msg)
+                    .append(view.get(), msg)
                     .await
                     .expect("unable to append to journal");
             }
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1156,14 +1158,14 @@ impl<
         {
             if let Some(journal) = self.journal.as_mut() {
                 journal
-                    .append(view, msg)
+                    .append(view.get(), msg)
                     .await
                     .expect("unable to append to journal");
             }
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
@@ -1174,7 +1176,7 @@ impl<
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Finalize(finalize.clone());
             journal
-                .append(view, msg)
+                .append(view.get(), msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1226,7 +1228,7 @@ impl<
         if self.round_mut(view).add_verified_finalization(finalization) {
             if let Some(journal) = self.journal.as_mut() {
                 journal
-                    .append(view, msg)
+                    .append(view.get(), msg)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1238,10 +1240,10 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
+    fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
@@ -1262,7 +1264,7 @@ impl<
 
     async fn construct_notarization(
         &mut self,
-        view: u64,
+        view: View,
         force: bool,
     ) -> Option<Notarization<S, D>> {
         // Get requested view
@@ -1274,7 +1276,7 @@ impl<
 
     async fn construct_nullification(
         &mut self,
-        view: u64,
+        view: View,
         force: bool,
     ) -> Option<Nullification<S>> {
         // Get requested view
@@ -1284,7 +1286,7 @@ impl<
         round.nullifiable(force).await
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
+    fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
@@ -1310,7 +1312,7 @@ impl<
 
     async fn construct_finalization(
         &mut self,
-        view: u64,
+        view: View,
         force: bool,
     ) -> Option<Finalization<S, D>> {
         let round = self.views.get_mut(&view)?;
@@ -1325,7 +1327,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
@@ -1340,7 +1342,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(view)
+                .sync(view.get())
                 .await
                 .expect("unable to sync journal");
 
@@ -1375,7 +1377,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(view)
+                .sync(view.get())
                 .await
                 .expect("unable to sync journal");
 
@@ -1410,7 +1412,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(view)
+                .sync(view.get())
                 .await
                 .expect("unable to sync journal");
 
@@ -1438,15 +1440,15 @@ impl<
                     None if parent == GENESIS_VIEW => Vec::new(),
                     None => vec![parent],
                 };
-                let missing_nullifications = ((parent + 1)..view)
+                let missing_nullifications = View::range(parent.next(), view)
                     .filter(|v| !self.is_nullified(*v))
                     .collect::<Vec<_>>();
 
                 // Fetch any missing certificates
                 if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
                     warn!(
-                        proposal_view = view,
-                        parent,
+                        proposal_view = %view,
+                        %parent,
                         ?missing_notarizations,
                         ?missing_nullifications,
                         ">= 1 honest notarize for nullified parent"
@@ -1471,7 +1473,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(view)
+                .sync(view.get())
                 .await
                 .expect("unable to sync journal");
 
@@ -1506,7 +1508,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .sync(view)
+                .sync(view.get())
                 .await
                 .expect("unable to sync journal");
 
@@ -1569,7 +1571,7 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, None);
+        self.enter_view(1.into(), None);
 
         // Initialize journal
         let journal = Journal::<_, Voter<S, D>>::init(
@@ -1683,7 +1685,7 @@ impl<
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.view;
         info!(
-            current_view = observed_view,
+            current_view = %observed_view,
             ?elapsed,
             "consensus initialized"
         );
@@ -1692,7 +1694,7 @@ impl<
             round.leader_deadline = Some(self.context.current());
             round.advance_deadline = Some(self.context.current());
         }
-        self.current_view.set(observed_view as i64);
+        self.current_view.set(observed_view.get() as i64);
         self.tracked_views.set(self.views.len() as i64);
 
         // Initialize verifier with leader
@@ -1850,7 +1852,7 @@ impl<
                         view,
                         false,
                     ) {
-                        debug!(view, "verified message is not interesting");
+                        debug!(%view, "verified message is not interesting");
                         continue;
                     }
 
@@ -1865,14 +1867,14 @@ impl<
                         Voter::Finalize(finalize) => {
                             self.handle_finalize(finalize).await;
                         }
-                        Voter::Notarization(notarization)  => {
-                            trace!(view, "received notarization from resolver");
+                        Voter::Notarization(notarization) => {
+                            trace!(%view, "received notarization from resolver");
                             self.handle_notarization(notarization).await;
-                        },
+                        }
                         Voter::Nullification(nullification) => {
-                            trace!(view, "received nullification from resolver");
+                            trace!(%view, "received nullification from resolver");
                             self.handle_nullification(nullification).await;
-                        },
+                        }
                         Voter::Finalization(_) => {
                             unreachable!("unexpected message type");
                         }
@@ -1931,11 +1933,11 @@ impl<
                     match action {
                         Action::Process => {}
                         Action::Skip => {
-                            trace!(?sender, view, "dropped useless");
+                            trace!(?sender, %view, "dropped useless");
                             continue;
                         }
                         Action::Block => {
-                            warn!(?sender, view, "blocking peer");
+                            warn!(?sender, %view, "blocking peer");
                             self.blocker.block(sender).await;
                             continue;
                         }
@@ -1965,7 +1967,7 @@ impl<
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
                 if !is_active && !Self::is_me(&self.scheme, leader) {
-                    debug!(view, ?leader, "skipping leader timeout due to inactivity");
+                    debug!(%view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
                     round.leader_deadline = Some(self.context.current());
                 }

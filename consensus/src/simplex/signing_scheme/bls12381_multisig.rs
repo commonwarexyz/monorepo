@@ -320,7 +320,7 @@ mod tests {
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },
-        types::Round,
+        types::{Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -358,7 +358,7 @@ mod tests {
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(round, view),
-            view.saturating_sub(1),
+            View::from(view).previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }

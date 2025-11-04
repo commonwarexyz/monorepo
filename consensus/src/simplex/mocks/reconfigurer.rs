@@ -2,12 +2,9 @@
 //! in all outgoing votes (notarize/finalize/nullify). This helps ensure peers
 //! reject messages from an unexpected epoch.
 
-use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Finalize, Notarize, Nullify, Voter},
-    },
-    types::Epoch,
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Finalize, Notarize, Nullify, Voter},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -63,7 +60,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = notarize.proposal.clone();
                     let old_round = proposal.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
@@ -75,7 +72,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = finalize.proposal.clone();
                     let old_round = proposal.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
@@ -86,7 +83,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                 Voter::Nullify(nullify) => {
                     // Re-sign nullify for the next epoch
                     let old_round = nullify.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 
                     let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)

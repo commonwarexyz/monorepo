@@ -134,11 +134,11 @@ where
     /// available in storage. This indicates a critical error in the consensus engine startup
     /// sequence, as engines must always have the genesis block before starting.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch == 0 {
+        if epoch.is_zero() {
             return self.application.genesis().await.commitment();
         }
 
-        let height = utils::last_block_in_epoch(self.epoch_length, epoch - 1);
+        let height = utils::last_block_in_epoch(self.epoch_length, epoch.previous());
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.

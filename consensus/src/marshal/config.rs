@@ -1,5 +1,5 @@
 use super::SchemeProvider;
-use crate::{simplex::signing_scheme::Scheme, Block};
+use crate::{simplex::signing_scheme::Scheme, types::ViewDelta, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::{
     marker::PhantomData,
@@ -28,7 +28,7 @@ where
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
     /// Useful for keeping around information that peers may desire to have.
-    pub view_retention_timeout: u64,
+    pub view_retention_timeout: ViewDelta,
 
     /// Namespace for proofs.
     pub namespace: Vec<u8>,

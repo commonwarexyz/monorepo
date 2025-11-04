@@ -253,7 +253,7 @@ impl<
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
-            epoch: 0,
+            epoch: Epoch::zero(),
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
@@ -335,7 +335,7 @@ impl<
                     };
 
                     // Refresh the epoch
-                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
                     continue;
@@ -343,7 +343,7 @@ impl<
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!(epoch = self.epoch, sender=?self.crypto.public_key(), "rebroadcast");
+                    debug!(epoch = %self.epoch, sender = ?self.crypto.public_key(), "rebroadcast");
                     if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
@@ -440,7 +440,7 @@ impl<
                         guard.set(Status::Failure);
                         continue;
                     }
-                    debug!(?sender, epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "ack");
+                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -595,7 +595,7 @@ impl<
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
-            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered threshold");
+            debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered threshold");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, threshold)
                 .await;

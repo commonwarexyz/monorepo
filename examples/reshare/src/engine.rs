@@ -11,6 +11,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::signing_scheme::Scheme,
+    types::ViewDelta,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
@@ -151,7 +152,7 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ACTIVITY_TIMEOUT
+                view_retention_timeout: ViewDelta::from(ACTIVITY_TIMEOUT)
                     .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,

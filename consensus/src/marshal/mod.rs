@@ -107,7 +107,7 @@ mod tests {
             signing_scheme::bls12381_threshold,
             types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::{Epoch, Round},
+        types::{Epoch, Round, View},
         utils, Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
@@ -190,7 +190,7 @@ mod tests {
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
-            view_retention_timeout: 10,
+            view_retention_timeout: 10.into(),
             max_repair: 10,
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
@@ -391,7 +391,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
-                    parent: height.checked_sub(1).unwrap(),
+                    parent: height.checked_sub(1).unwrap().into(),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -405,7 +405,7 @@ mod tests {
                     // Always finalize 1) the last block in each epoch 2) the last block in the chain.
                     // Otherwise, finalize randomly.
                     if height == NUM_BLOCKS
-                        || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                        || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
                         || context.gen_bool(0.2)
                     // 20% chance to finalize randomly
                     {
@@ -482,7 +482,7 @@ mod tests {
 
             let proposal = Proposal {
                 round: Round::new(0, 1),
-                parent: 0,
+                parent: 0.into(),
                 payload: commitment,
             };
             let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -543,9 +543,10 @@ mod tests {
             actor.verified(Round::from((0, 2)), block2.clone()).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+                let view = View::from(view);
                 let proposal = Proposal {
                     round: Round::new(0, view),
-                    parent: view.checked_sub(1).unwrap(),
+                    parent: view.previous().unwrap(),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -613,9 +614,10 @@ mod tests {
             actor.verified(Round::from((0, 2)), block2.clone()).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+                let view = View::from(view);
                 let proposal = Proposal {
                     round: Round::new(0, view),
-                    parent: view.checked_sub(1).unwrap(),
+                    parent: view.previous().unwrap(),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -690,7 +692,7 @@ mod tests {
             // Block3: Notarized by the actor
             let proposal3 = Proposal {
                 round: Round::new(0, 3),
-                parent: 2,
+                parent: 2.into(),
                 payload: block3.digest(),
             };
             let notarization3 = make_notarization(proposal3.clone(), &schemes, QUORUM);
@@ -706,7 +708,7 @@ mod tests {
             let finalization4 = make_finalization(
                 Proposal {
                     round: Round::new(0, 4),
-                    parent: 3,
+                    parent: 3.into(),
                     payload: block4.digest(),
                 },
                 &schemes,
@@ -768,7 +770,7 @@ mod tests {
 
             let proposal = Proposal {
                 round,
-                parent: 0,
+                parent: 0.into(),
                 payload: digest,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -824,7 +826,7 @@ mod tests {
             let f1 = make_finalization(
                 Proposal {
                     round: Round::new(0, 1),
-                    parent: 0,
+                    parent: 0.into(),
                     payload: d1,
                 },
                 &schemes,
@@ -840,7 +842,7 @@ mod tests {
             let f2 = make_finalization(
                 Proposal {
                     round: Round::new(0, 2),
-                    parent: 1,
+                    parent: 1.into(),
                     payload: d2,
                 },
                 &schemes,
@@ -856,7 +858,7 @@ mod tests {
             let f3 = make_finalization(
                 Proposal {
                     round: Round::new(0, 3),
-                    parent: 2,
+                    parent: 2.into(),
                     payload: d3,
                 },
                 &schemes,
@@ -901,7 +903,7 @@ mod tests {
             actor.verified(round, block.clone()).await;
             let proposal = Proposal {
                 round,
-                parent: 0,
+                parent: 0.into(),
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -966,7 +968,7 @@ mod tests {
             actor.verified(round2, fin_block.clone()).await;
             let proposal = Proposal {
                 round: round2,
-                parent: 1,
+                parent: 1.into(),
                 payload: fin_commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1017,7 +1019,7 @@ mod tests {
             actor.verified(round, block.clone()).await;
             let proposal = Proposal {
                 round,
-                parent: 0,
+                parent: 0.into(),
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
@@ -1028,7 +1030,7 @@ mod tests {
                 .get_finalization(1)
                 .await
                 .expect("missing finalization by height");
-            assert_eq!(finalization.proposal.parent, 0);
+            assert_eq!(finalization.proposal.parent, 0.into());
             assert_eq!(finalization.proposal.round, Round::new(0, 1));
             assert_eq!(finalization.proposal.payload, commitment);
 
@@ -1065,7 +1067,7 @@ mod tests {
                 actor.verified(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
-                    parent: i - 1,
+                    parent: (i - 1).into(),
                     payload: commitment,
                 };
                 let finalization = make_finalization(proposal, &schemes, QUORUM);

@@ -615,7 +615,7 @@ mod tests {
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
-        types::Round,
+        types::{Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -647,7 +647,7 @@ mod tests {
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
             Round::new(round, view),
-            view.saturating_sub(1),
+            View::from(view).previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }
@@ -1053,7 +1053,7 @@ mod tests {
 
         let invalid_seed = schemes[0]
             .seed(
-                Round::new(proposal.epoch(), proposal.view() + 1),
+                Round::new(proposal.epoch(), proposal.view().next()),
                 &certificate,
             )
             .expect("extract seed");

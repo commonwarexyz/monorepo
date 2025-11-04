@@ -48,7 +48,10 @@ mod application;
 mod gui;
 
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex;
+use commonware_consensus::{
+    simplex,
+    types::{Epoch, ViewDelta},
+};
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -209,15 +212,15 @@ fn main() {
             namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
-            epoch: 0,
+            epoch: Epoch::zero(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
             notarization_timeout: Duration::from_secs(2),
             nullify_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
-            activity_timeout: 10,
-            skip_timeout: 5,
+            activity_timeout: ViewDelta::from(10),
+            skip_timeout: ViewDelta::from(5),
             max_fetch_count: 32,
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),

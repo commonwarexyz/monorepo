@@ -203,7 +203,7 @@ mod tests {
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
-            let monitor = mocks::Monitor::new(111);
+            let monitor = mocks::Monitor::new(111.into());
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
             let validators = mocks::Validators::<PublicKey, V>::new(
@@ -274,9 +274,11 @@ mod tests {
                     let mut mailbox = mailbox.clone();
                     move |context| async move {
                         loop {
-                            let (height, epoch) =
-                                mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
-                            debug!(height, epoch, ?sequencer, ?reporter, "reporter");
+                            let (height, epoch) = mailbox
+                                .get_tip(sequencer.clone())
+                                .await
+                                .unwrap_or((0, Epoch::zero()));
+                            debug!(height, epoch = %epoch, ?sequencer, ?reporter, "reporter");
                             let contiguous_height = mailbox
                                 .get_contiguous_tip(sequencer.clone())
                                 .await
@@ -310,7 +312,10 @@ mod tests {
     ) -> u64 {
         let mut max_height = 0;
         for (sequencer, mailbox) in reporters.iter_mut() {
-            let (height, _) = mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+            let (height, _) = mailbox
+                .get_tip(sequencer.clone())
+                .await
+                .unwrap_or((0, Epoch::zero()));
             if height > max_height {
                 max_height = height;
             }
@@ -356,7 +361,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, 111.into(), true),
             )
             .await;
         });
@@ -452,8 +457,10 @@ mod tests {
                         .with_label("reporter_unclean")
                         .spawn(|context| async move {
                             loop {
-                                let (height, _) =
-                                    mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
+                                let (height, _) = mailbox
+                                    .get_tip(validator.clone())
+                                    .await
+                                    .unwrap_or((0, Epoch::zero()));
                                 if height >= 100 {
                                     completed_clone.lock().unwrap().insert(validator.clone());
                                     break;
@@ -537,7 +544,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 111, false),
+                (max_height + 100, 111.into(), false),
             )
             .await;
         });
@@ -600,7 +607,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, 111, false),
+                (40, 111.into(), false),
             )
             .await;
 
@@ -672,7 +679,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, 111.into(), true),
             )
             .await;
         });
@@ -725,7 +732,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, 111.into(), true),
             )
             .await;
 
@@ -738,7 +745,7 @@ mod tests {
 
             // Update the epoch
             for monitor in monitors.values() {
-                monitor.update(112);
+                monitor.update(112.into());
             }
 
             // Heal the partition by re-adding links.
@@ -752,7 +759,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 112, true),
+                (max_height + 100, 112.into(), true),
             )
             .await;
         });
@@ -832,7 +839,7 @@ mod tests {
             // Spawn validator engines
             for (validator, scheme, share) in validators.iter() {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(111);
+                let monitor = mocks::Monitor::new(111.into());
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
                 let validators = mocks::Validators::<PublicKey, V>::new(
@@ -908,7 +915,7 @@ mod tests {
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
-                        monitor: mocks::Monitor::new(111),
+                        monitor: mocks::Monitor::new(111.into()),
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
@@ -944,7 +951,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, 111, true),
+                (100, 111.into(), true),
             )
             .await;
         });
@@ -1005,7 +1012,7 @@ mod tests {
                 context.with_label("reporter"),
                 sequencers.to_vec(),
                 &reporters,
-                (1_000, 111, false),
+                (1_000, 111.into(), false),
             )
             .await;
         })
