@@ -7,4 +7,4 @@ mod ingress;
 pub use ingress::{Mailbox, Message};
 
 mod egress;
-pub use egress::{PostUpdate, Update, UpdateCallBack};
+pub use egress::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack};

@@ -112,7 +112,7 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let threshold = config.peer_config.threshold() as usize;
+        let num_participants = config.peer_config.num_participants_per_epoch as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
@@ -133,7 +133,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: threshold,
+                codec_config: num_participants,
             },
         );
 
@@ -158,7 +158,7 @@ where
                 freezer_journal_buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                block_codec_config: threshold,
+                block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
                 _marker: PhantomData,
             },
@@ -232,7 +232,7 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
-        update_cb: UpdateCallBack<V, C::PublicKey>,
+        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -281,7 +281,7 @@ where
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>>,
         ),
-        update_cb: UpdateCallBack<V, C::PublicKey>,
+        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let dkg_handle = self.dkg.start(
             self.config.output,

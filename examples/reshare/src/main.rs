@@ -2,18 +2,18 @@
 
 use crate::{
     application::{EdScheme, ThresholdScheme},
-    dkg::{PostUpdate, Update},
+    dkg::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack},
     setup::ParticipantConfig,
 };
 use clap::{Args, Parser, Subcommand};
 use commonware_codec::Encode;
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
 };
 use commonware_utils::hex;
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf, pin::Pin};
 use tracing::Level;
 
 mod application;
@@ -23,6 +23,41 @@ mod orchestrator;
 mod self_channel;
 mod setup;
 mod validator;
+
+struct SaveFileOnUpdate {
+    path: PathBuf,
+}
+
+impl SaveFileOnUpdate {
+    pub fn boxed(path: PathBuf) -> Box<Self> {
+        Box::new(Self { path })
+    }
+}
+
+impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
+    fn on_update(
+        &mut self,
+        update: Update<MinSig, PublicKey>,
+    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+        let config_path = self.path.clone();
+        Box::pin(async move {
+            match update {
+                Update::Failure { .. } => PostUpdate::Continue,
+                Update::Success { output, share, .. } => {
+                    let config_str =
+                        std::fs::read_to_string(&config_path).expect("failed to read config file");
+                    let config: ParticipantConfig = serde_json::from_str(&config_str)
+                        .expect("Failed to deserialize participant configuration");
+                    config.update_and_write(&config_path, |config| {
+                        config.output = Some(hex(output.encode().as_ref()));
+                        config.share = share;
+                    });
+                    PostUpdate::Stop
+                }
+            }
+        })
+    }
+}
 
 /// The number of blocks in an epoch.
 ///
@@ -124,29 +159,12 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => {
                 let config_path = args.config_path.clone();
-                let update_cb = Box::new(move |update| match update {
-                    Update::Failure { .. } => PostUpdate::Continue,
-                    Update::Success { output, share, .. } => {
-                        let config_str = std::fs::read_to_string(&config_path)
-                            .expect("failed to read config file");
-                        let config: ParticipantConfig = serde_json::from_str(&config_str)
-                            .expect("Failed to deserialize participant configuration");
-                        config.update_and_write(&config_path, |config| {
-                            config.output = Some(hex(output.encode().as_ref()));
-                            config.share = share;
-                        });
-                        PostUpdate::Stop
-                    }
-                });
-                validator::run::<EdScheme>(context, args, update_cb).await;
+                validator::run::<EdScheme>(context, args, SaveFileOnUpdate::boxed(config_path))
+                    .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(
-                    context,
-                    args,
-                    Box::new(|_| PostUpdate::Continue),
-                )
-                .await
+                validator::run::<ThresholdScheme<MinSig>>(context, args, Box::new(ContinueOnUpdate))
+                    .await
             }
         }
     });

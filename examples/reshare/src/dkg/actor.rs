@@ -123,7 +123,7 @@ where
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", &config.partition_prefix),
-                codec_config: config.peer_config.threshold() as usize,
+                codec_config: config.peer_config.num_participants_per_epoch as usize,
             },
         )
         .await
@@ -164,7 +164,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        update_cb: UpdateCallBack<V, C::PublicKey>,
+        update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
@@ -185,7 +185,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        mut update_cb: UpdateCallBack<V, C::PublicKey>,
+        mut update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let is_dkg = output.is_none();
 
@@ -424,7 +424,7 @@ where
             } else {
                 Update::Failure { epoch: state.epoch }
             };
-            if let PostUpdate::Stop = update_cb(update) {
+            if let PostUpdate::Stop = update_cb.on_update(update).await {
                 // Close the mailbox to prevent accepting any new messages.
                 drop(self.mailbox);
                 // Exit last consensus instance to avoid useless work while we wait for shutdown (we
