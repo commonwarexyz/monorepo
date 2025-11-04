@@ -189,7 +189,7 @@ mod test {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use rand_core::CryptoRngCore;
     use std::{
-        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+        collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
         future::Future,
         pin::Pin,
         time::Duration,
@@ -451,13 +451,23 @@ mod test {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum EpochPlan {
+        Success,
+    }
+
     struct Plan {
         seed: u64,
         total: u32,
         link: Link,
+        epochs: Vec<EpochPlan>,
     }
 
     impl Plan {
+        fn is_last_epoch(&self, epoch: u64) -> bool {
+            epoch + 1 >= self.epochs.len() as u64
+        }
+
         async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<()>
         where
             S: Scheme<PublicKey = PublicKey>,
@@ -485,28 +495,52 @@ mod test {
             let (updates_in, mut updates_out) = mpsc::channel(0);
 
             tracing::debug!("starting team actors and connecting");
-            team.start::<S>(ctx.clone(), oracle, self.link, updates_in)
+            team.start::<S>(ctx.clone(), oracle, self.link.clone(), updates_in)
                 .await;
 
             tracing::debug!("waiting for updates");
-            let mut finished = BTreeSet::<PublicKey>::new();
+            let mut outputs = Vec::<Output<MinSig, PublicKey>>::new();
+            let mut status = BTreeMap::<PublicKey, u64>::new();
+            let mut current_epoch = 0u64;
             while let Some(update) = updates_out.next().await {
-                match &update.update {
+                match update.update {
                     Update::Failure { epoch } => {
                         tracing::info!(epoch = epoch, pk = ?update.pk, "DKG failure");
                         return Err(anyhow!("dkg failure, pk = {:?}", &update.pk));
                     }
-                    Update::Success { epoch, .. } => {
+                    Update::Success { epoch, output, .. } => {
                         tracing::info!(epoch = epoch, pk = ?update.pk, "DKG success");
-                        finished.insert(update.pk);
+                        match status.get(&update.pk) {
+                            None if epoch == 0 => {}
+                            Some(e) if e + 1 == epoch => {}
+                            other => return Err(anyhow!("unexpected update epoch {other:?}")),
+                        }
+                        status.insert(update.pk, epoch);
+                        match outputs.get(current_epoch as usize) {
+                            None => outputs.push(output),
+                            Some(o) => {
+                                if o != &output {
+                                    return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
+                                }
+                            }
+                        }
+                        let post_update = if self.is_last_epoch(epoch) {
+                            PostUpdate::Stop
+                        } else {
+                            PostUpdate::Continue
+                        };
                         update
                             .cb_in
-                            .send(PostUpdate::Stop)
+                            .send(post_update)
                             .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
                     }
                 }
-                if finished.len() == self.total as usize {
-                    return Ok(());
+                if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
+                    if self.is_last_epoch(current_epoch) {
+                        return Ok(());
+                    } else {
+                        current_epoch += 1;
+                    }
                 }
             }
 
@@ -533,6 +567,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
+            epochs: vec![EpochPlan::Success],
         }
         .run::<EdScheme>())
         {
@@ -550,6 +585,43 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
+            epochs: vec![EpochPlan::Success],
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_002() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_003() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
         }
         .run::<ThresholdScheme<MinSig>>())
         {
