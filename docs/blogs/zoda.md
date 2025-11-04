@@ -7,6 +7,7 @@ modified-time: "2025-11-04T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/zoda.html"
+image: "https://commonware.xyz/blogs/zoda/card.png"
 katex: true
 ---
 
