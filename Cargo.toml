@@ -45,6 +45,18 @@ license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 
 [workspace.dependencies]
+anyhow = { version = "1.0.99", default-features = false }
+arbitrary = "1.4.1"
+async-lock = "3.4.0"
+axum = "0.8.1"
+bimap = "0.6.3"
+blake3 = { version = "1.8.2", default-features = false }
+blst = { version = "0.3.13", default-features = false }
+bytes = { version = "1.7.1", default-features = false }
+cfg-if = "1.0.0"
+chacha20poly1305 = { version = "0.10.1", default-features = false }
+chrono = "0.4.39"
+clap = "4.5.18"
 commonware-broadcast = { version = "0.0.63", path = "broadcast" }
 commonware-codec = { version = "0.0.63", path = "codec", default-features = false }
 commonware-coding = { version = "0.0.63", path = "coding" }
@@ -59,64 +71,52 @@ commonware-runtime = { version = "0.0.63", path = "runtime" }
 commonware-storage = { version = "0.0.63", path = "storage", default-features = false }
 commonware-stream = { version = "0.0.63", path = "stream" }
 commonware-utils = { version = "0.0.63", path = "utils", default-features = false }
-anyhow = { version = "1.0.99", default-features = false }
-thiserror = { version = "2.0.12", default-features = false }
-bytes = { version = "1.7.1", default-features = false }
-sha2 = { version = "0.10.8", default-features = false }
-blake3 = { version = "1.8.2", default-features = false }
+console-subscriber = "0.5.0"
+criterion = "0.5.1"
+crossterm = "0.28.1"
+either = "1.13.0"
+futures = "0.3.31"
+futures-util = "0.3.31"
+governor = "0.6.3"
+io-uring = "0.7.4"
+libc = "0.2.172"
+libfuzzer-sys = "0.4.9"
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-rational = { version = "0.4.2", features = ["num-bigint"] }
+num-traits = "0.2.19"
+opentelemetry = "0.28.0"
+opentelemetry-otlp = "0.28.0"
+opentelemetry_sdk = "0.28.0"
+p256 = { version = "0.13.2", default-features = false }
+paste = "1.0.15"
+pin-project = "1.1.10"
+prometheus-client = "0.22.3"
+proptest = "1.8.0"
+prost = "0.13.5"
+prost-build = "0.13.5"
 rand = { version = "0.8.5", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = "0.6.4"
 rand_distr = "0.4.3"
-futures = "0.3.31"
-futures-util = "0.3.31"
+ratatui = "0.27.0"
+rayon = { version = "1.10.0", default-features = false }
+reqwest = "0.12.12"
+serde = "1.0.218"
+serde_json = "1.0.122"
+serde_yaml = "0.9.34"
+sha2 = { version = "0.10.8", default-features = false }
+sysinfo = "0.33.0"
+test-case = "3.3.1"
+thiserror = { version = "2.0.12", default-features = false }
 tokio = "1.43.0"
 tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
-paste = "1.0.15"
-pin-project = "1.1.10"
-prost = "0.13.5"
-prost-build = "0.13.5"
-governor = "0.6.3"
-prometheus-client = "0.22.3"
-clap = "4.5.18"
-criterion = "0.5.1"
-zstd = "0.13.2"
-chrono = "0.4.39"
-ratatui = "0.27.0"
-crossterm = "0.28.1"
-serde_json = "1.0.122"
-cfg-if = "1.0.0"
-axum = "0.8.1"
-bimap = "0.6.3"
-reqwest = "0.12.12"
-uuid = "1.15.1"
-serde = "1.0.218"
-serde_yaml = "0.9.34"
-either = "1.13.0"
-opentelemetry = "0.28.0"
-opentelemetry-otlp = "0.28.0"
-opentelemetry_sdk =  "0.28.0"
 tracing-opentelemetry = "0.29.0"
-io-uring = "0.7.4"
-rayon = { version = "1.10.0", default-features = false }
-async-lock = "3.4.0"
-libc = "0.2.172"
-sysinfo = "0.33.0"
-zeroize = "1.5.7"
-blst = { version = "0.3.13", default-features = false }
-p256 = { version = "0.13.2", default-features = false }
-test-case = "3.3.1"
-chacha20poly1305 = { version = "0.10.1", default-features = false }
+tracing-subscriber = "0.3.19"
+uuid = "1.15.1"
 x25519-dalek = "2.0.1"
-num-bigint = "0.4.6"
-num-rational = { version = "0.4.2", features = ["num-bigint"] }
-num-traits = "0.2.19"
-num-integer = "0.1.46"
-
-# Fuzz deps
-libfuzzer-sys = "0.4.9"
-arbitrary = "1.4.1"
+zeroize = "1.5.7"
+zstd = "0.13.2"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

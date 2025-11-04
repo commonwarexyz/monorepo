@@ -79,7 +79,7 @@
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
 //! let my_sk = ed25519::PrivateKey::from_seed(0);
-//! let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
+//! let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 //!
 //! // Generate peers
 //! //
@@ -104,7 +104,6 @@
 //! let p2p_cfg = lookup::Config::local(
 //!     my_sk.clone(),
 //!     application_namespace,
-//!     my_addr,
 //!     my_addr,
 //!     MAX_MESSAGE_SIZE,
 //! );

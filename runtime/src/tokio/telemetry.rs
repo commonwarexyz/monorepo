@@ -11,6 +11,7 @@ use axum::{
     routing::get,
     serve, Extension, Router,
 };
+use cfg_if::cfg_if;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::Level;
@@ -62,11 +63,24 @@ pub fn init(
         tracing_opentelemetry::layer().with_tracer(tracer)
     });
 
+    // Create tracing registry.
+    cfg_if! {
+        if #[cfg(feature = "tokio-console")] {
+            let console_layer = console_subscriber::spawn();
+            let registry = Registry::default()
+                .with(filter)
+                .with(log_layer)
+                .with(trace_layer)
+                .with(console_layer);
+        } else {
+            let registry = Registry::default()
+                .with(filter)
+                .with(log_layer)
+                .with(trace_layer);
+        }
+    }
+
     // Set the global subscriber
-    let registry = Registry::default()
-        .with(filter)
-        .with(log_layer)
-        .with(trace_layer);
     tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
 
     // Expose metrics over HTTP

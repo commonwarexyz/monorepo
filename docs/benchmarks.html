@@ -72,11 +72,11 @@
     </div>
     <div class="content">
         <h1>Benchmarks</h1>
-        <div class="meta">
+        <div class="meta" id="meta-section" style="display: none;">
             <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
         <div id="main"></div>
-        <button id="toggle-expand" onclick="toggleExpand()">expand all</button>
+        <button id="toggle-expand" onclick="toggleExpand()" style="display: none;">expand all</button>
     </div>
 
     <div id="footer-placeholder"></div>
@@ -102,48 +102,27 @@
             updateExpandButton();
         }
 
-        // Compute all-time and 7-day performance changes for a single benchmark
+        // Compute all-time performance change for a single benchmark
         function computeSingleBenchSummary(benches) {
             if (!benches || benches.length < 1) {
-                return { pct30Day: "N/A", latest: "N/A" };
+                return { pctAllTime: "N/A", latest: "N/A" };
             }
             // Sort by date ascending
             const sorted = [...benches].sort((a, b) => a.date - b.date);
             const earliestVal = sorted[0].bench.value;      // first
-            const earliestDate = sorted[0].date;
             const latestVal = sorted[sorted.length - 1].bench.value; // last
-            const latestDate = sorted[sorted.length - 1].date;
             if (benches.length < 2) {
-                return { pct30Day: "N/A", latest: latestVal };
+                return { pctAllTime: "N/A", latest: latestVal };
             }
 
-            // 30-day ratio
-            const thirtyDaysInMs = 30 * 24 * 3600 * 1000;
-            const cutoffDate = latestDate - thirtyDaysInMs;
-            // find the bench value for the point in time just after or near that date
-            let thirtyDayVal = null;
-            let minDelta = Number.MAX_VALUE;
-            for (const point of sorted) {
-                if (point.date >= cutoffDate) {
-                    const delta = point.date - cutoffDate;
-                    if (delta < minDelta) {
-                        minDelta = delta;
-                        thirtyDayVal = point.bench.value;
-                    }
-                }
-            }
-            // if we never found anything after the cutoffDate, fallback to earliest
-            if (!thirtyDayVal) {
-                thirtyDayVal = earliestVal;
+            // All-time ratio
+            let pctAllTime = "N/A";
+            if (earliestVal > 0) {
+                const ratio = (latestVal - earliestVal) / earliestVal;
+                pctAllTime = (ratio * 100).toFixed(1) + "%";
             }
 
-            let pct30Day = "N/A";
-            if (thirtyDayVal > 0) {
-                const ratio30 = (latestVal - thirtyDayVal) / thirtyDayVal;
-                pct30Day = (ratio30 * 100).toFixed(1) + "%";
-            }
-
-            return { pct30Day, latest: latestVal };
+            return { pctAllTime, latest: latestVal };
         }
 
         function setupBenchmark() {
@@ -193,6 +172,10 @@
 
                 const data = window.BENCHMARK_DATA;
 
+                // Show meta section and expand button
+                document.getElementById('meta-section').style.display = '';
+                document.getElementById('toggle-expand').style.display = '';
+
                 // Render header
                 document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
 
@@ -216,13 +199,13 @@
                     // <summary> that shows/hides the graph
                     const summary = document.createElement('summary');
                     summary.textContent = name;
-                    const { pct30Day, latest } = computeSingleBenchSummary(dataset);
+                    const { pctAllTime, latest } = computeSingleBenchSummary(dataset);
                     const value = latest / 1e6;
                     const units = "ms";
                     summary.innerHTML = `
                         <span class="benchmark-graph-title">${name}</span>
                         <br>
-                        <span class="benchmark-performance">${value} ${units} (Last 30 Days: ${pct30Day})</span>
+                        <span class="benchmark-performance">${value} ${units} (Change: ${pctAllTime})</span>
                     `;
                     graphDetails.appendChild(summary);
 
@@ -231,113 +214,127 @@
                     canvas.className = 'benchmark-chart';
                     graphDetails.appendChild(canvas);
 
-                    // Create chart
-                    const data = {
-                        datasets: [{
-                            label: name,
-                            data: dataset.map(d => {
-                                return { x: new Date(d.commit.timestamp), y: d.bench.value };
-                            }),
-                            borderColor: '#000000',
-                            backgroundColor: '#000000' + '60'
-                        }]
-                    };
-                    const options = {
-                        scales: {
-                            xAxes: [{
-                                type: 'time',
-                                time: {
-                                    unit: 'day',
-                                    displayFormats: {
-                                        day: 'M/D'
-                                    },
-                                },
-                                ticks: {
-                                    autoSkip: true,
-                                    maxTicksLimit: 5,
-                                },
-                                scaleLabel: {
-                                    display: false,
-                                },
-                                gridLines: {
-                                    display: true,
-                                }
-                            }],
-                            yAxes: [{
-                                scaleLabel: {
-                                    display: true,
-                                    labelString: 'ms/iter',
-                                },
-                                ticks: {
-                                    beginAtZero: true,
-                                    autoSkip: true,
-                                    maxTicksLimit: 7,
-                                    callback: function (value) {
-                                        return (value / 1e6);
-                                    }
-                                },
-                                gridLines: {
-                                    display: true,
-                                }
+                    // Define chart generator
+                    let chartInstance = null;
+                    function createChart() {
+                        if (chartInstance) return; // Already created
+
+                        const data = {
+                            datasets: [{
+                                label: name,
+                                data: dataset.map(d => {
+                                    return { x: new Date(d.commit.timestamp), y: d.bench.value };
+                                }),
+                                borderColor: '#000000',
+                                backgroundColor: '#000000' + '60',
+                                lineTension: 0
                             }]
-                        },
-                        legend: { display: false },
-                        tooltips: {
-                            callbacks: {
-                                afterTitle: items => {
-                                    const { index } = items[0];
-                                    const data = dataset[index];
-                                    return '\n' + data.commit.message
-                                        + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
-                                },
-                                label: function (item) {
-                                    let rawVal = Number(item.value);
-                                    // Convert from ns -> ms (divide by 1e6)
-                                    let val = rawVal / 1e6;
-
-                                    // Format numeric output
-                                    let label = val.toLocaleString(undefined, {
-                                        minimumFractionDigits: 3,
-                                        maximumFractionDigits: 3
-                                    });
-
-                                    const { range, unit } = dataset[item.index].bench;
-                                    label += ' ms/iter';
-
-                                    if (range) {
-                                        // parse numeric range if it exists, also convert to ms if needed
-                                        let rangeVal = range.replace(/[^\d.]/g, '');
-                                        let rangeNum = Number(rangeVal);
-                                        if (!isNaN(rangeNum)) {
-                                            rangeNum = rangeNum / 1e6;
+                        };
+                        const options = {
+                            scales: {
+                                xAxes: [{
+                                    type: 'time',
+                                    time: {
+                                        unit: 'day',
+                                        displayFormats: {
+                                            day: 'M/D'
+                                        },
+                                    },
+                                    ticks: {
+                                        autoSkip: true,
+                                        maxTicksLimit: 5,
+                                    },
+                                    scaleLabel: {
+                                        display: false,
+                                    },
+                                    gridLines: {
+                                        display: true,
+                                    }
+                                }],
+                                yAxes: [{
+                                    scaleLabel: {
+                                        display: true,
+                                        labelString: 'ms/iter',
+                                    },
+                                    ticks: {
+                                        beginAtZero: true,
+                                        autoSkip: true,
+                                        maxTicksLimit: 7,
+                                        callback: function (value) {
+                                            return (value / 1e6);
                                         }
-                                        label += ' (' + rangeNum.toLocaleString(undefined, {
+                                    },
+                                    gridLines: {
+                                        display: true,
+                                    }
+                                }]
+                            },
+                            animation: false,
+                            legend: { display: false },
+                            tooltips: {
+                                callbacks: {
+                                    afterTitle: items => {
+                                        const { index } = items[0];
+                                        const data = dataset[index];
+                                        return '\n' + data.commit.message
+                                            + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
+                                    },
+                                    label: function (item) {
+                                        let rawVal = Number(item.value);
+                                        // Convert from ns -> ms (divide by 1e6)
+                                        let val = rawVal / 1e6;
+
+                                        // Format numeric output
+                                        let label = val.toLocaleString(undefined, {
                                             minimumFractionDigits: 3,
                                             maximumFractionDigits: 3
-                                        }) + ' ms)';
+                                        });
+
+                                        const { range, unit } = dataset[item.index].bench;
+                                        label += ' ms/iter';
+
+                                        if (range) {
+                                            // parse numeric range if it exists, also convert to ms if needed
+                                            let rangeVal = range.replace(/[^\d.]/g, '');
+                                            let rangeNum = Number(rangeVal);
+                                            if (!isNaN(rangeNum)) {
+                                                rangeNum = rangeNum / 1e6;
+                                            }
+                                            label += ' (' + rangeNum.toLocaleString(undefined, {
+                                                minimumFractionDigits: 3,
+                                                maximumFractionDigits: 3
+                                            }) + ' ms)';
+                                        }
+                                        return label;
+                                    },
+                                    afterLabel: item => {
+                                        const { extra } = dataset[item.index].bench;
+                                        return extra ? '\n' + extra : '';
                                     }
-                                    return label;
-                                },
-                                afterLabel: item => {
-                                    const { extra } = dataset[item.index].bench;
-                                    return extra ? '\n' + extra : '';
                                 }
-                            }
-                        },
-                        onClick: (_mouseEvent, activeElems) => {
-                            if (activeElems.length === 0) return;
-                            const index = activeElems[0]._index;
-                            const url = dataset[index].commit.url;
-                            window.open(url, '_blank');
-                        },
-                        title: {
-                            display: false,
-                        },
-                    };
-                    new Chart(canvas, {
-                        type: 'line',
-                        data,
-                        options,
+                            },
+                            onClick: (_mouseEvent, activeElems) => {
+                                if (activeElems.length === 0) return;
+                                const index = activeElems[0]._index;
+                                const url = dataset[index].commit.url;
+                                window.open(url, '_blank');
+                            },
+                            title: {
+                                display: false,
+                            },
+                        };
+                        chartInstance = new Chart(canvas, {
+                            type: 'line',
+                            data,
+                            options,
+                        });
+                    }
+
+                    // Create chart when opened (instead of all at once on load)
+                    graphDetails.addEventListener('toggle', function () {
+                        if (graphDetails.open && !chartInstance) {
+                            createChart();
+                        }
                     });
                 }
 
@@ -417,8 +414,19 @@
             // Update buttons
             updateExpandButton();
         };
+
+        // Explicitly fetch latest benchmark data
+        fetch('https://benchmark-data.commonware.xyz/data.js', { cache: 'no-store' })
+            .then(response => response.text())
+            .then(code => {
+                eval(code);
+                setupBenchmark();
+            })
+            .catch(error => {
+                console.error('Failed to load benchmark data:', error);
+                document.getElementById('main').innerHTML = '<p style="color: red;">Failed to load benchmark data. Please check your connection and try again.</p>';
+            });
     </script>
-    <script src="https://benchmark-data.commonware.xyz/data.js" onload="setupBenchmark()"></script>
     <script src="/shared.js"></script>
 </body>
 

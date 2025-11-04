@@ -57,10 +57,10 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
-    pub fn init(context: E, myself: (C, SocketAddr), cfg: Config, releaser: Releaser<C>) -> Self {
+    pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
-        peers.insert(myself.0, Record::myself(myself.1));
+        peers.insert(myself, Record::myself());
 
         // Other initialization.
         let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
@@ -303,7 +303,6 @@ mod tests {
     fn test_add_set_return_value() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
@@ -320,7 +319,7 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context, (my_pk, my_addr), config, releaser);
+            let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let deleted = directory.add_set(
                 0,
@@ -369,28 +368,27 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context, (my_pk.clone(), my_addr), config, releaser);
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             directory.add_set(
                 0,
                 OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
             );
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_1));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Update address
             directory.add_set(1, OrderedAssociated::from([(pk_1.clone(), addr_4)]));
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ignore update to me
             directory.add_set(2, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
-            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), Some(my_addr));
+            assert_eq!(directory.peers.get(&my_pk).unwrap().socket(), None);
             assert_eq!(directory.peers.get(&pk_1).unwrap().socket(), Some(addr_4));
             assert_eq!(directory.peers.get(&pk_2).unwrap().socket(), Some(addr_2));
             assert!(!directory.peers.contains_key(&pk_3));
@@ -411,7 +409,6 @@ mod tests {
     fn test_blocked_peer_remains_blocked_on_update() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
@@ -425,8 +422,7 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2235);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context, (my_pk.clone(), my_addr), config, releaser);
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             directory.add_set(0, OrderedAssociated::from([(pk_1.clone(), addr_1)]));
             directory.block(&pk_1);
