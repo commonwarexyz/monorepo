@@ -66,7 +66,7 @@ async fn rewind<O>(
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-pub struct AuthenticatedJournal<E, C, O, H>
+pub struct Journal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -84,7 +84,7 @@ where
     hasher: StandardHasher<H>,
 }
 
-impl<E, C, O, H> AuthenticatedJournal<E, C, O, H>
+impl<E, C, O, H> Journal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -339,13 +339,13 @@ where
     }
 }
 
-impl<E, O, H> AuthenticatedJournal<E, fixed::Journal<E, O>, O, H>
+impl<E, O, H> Journal<E, fixed::Journal<E, O>, O, H>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixed<Cfg = ()> + Encode,
     H: Hasher,
 {
-    /// Create a new [AuthenticatedJournal] for fixed-length operations.
+    /// Create a new [Journal] for fixed-length operations.
     ///
     /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
     /// This is useful for discarding uncommitted operations after a crash.
@@ -382,13 +382,13 @@ where
     }
 }
 
-impl<E, O, H> AuthenticatedJournal<E, variable::Journal<E, O>, O, H>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Encode,
     H: Hasher,
 {
-    /// Create a new [AuthenticatedJournal] for variable-length operations.
+    /// Create a new [Journal] for variable-length operations.
     ///
     /// The journal will be rewound to the last operation that matches the `rewind_predicate` on initialization.
     /// This is useful for discarding uncommitted operations after a crash.
@@ -437,7 +437,7 @@ mod tests {
     use super::*;
     use crate::{
         adb::operation::{fixed::unordered::Operation, Committable},
-        journal::contiguous::fixed::{Config as JConfig, Journal},
+        journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         mmr::{
             journaled::{Config as MmrConfig, Mmr},
             Location,
@@ -483,15 +483,15 @@ mod tests {
     async fn create_empty_journal(
         context: Context,
         suffix: &str,
-    ) -> AuthenticatedJournal<
+    ) -> Journal<
         deterministic::Context,
-        Journal<deterministic::Context, Operation<Digest, Digest>>,
+        ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Operation<Digest, Digest>,
         Sha256,
     > {
-        <AuthenticatedJournal<
+        <Journal<
             deterministic::Context,
-            Journal<deterministic::Context, Operation<Digest, Digest>>,
+            ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
             Operation<Digest, Digest>,
             Sha256,
         >>::new(
@@ -516,9 +516,9 @@ mod tests {
         context: Context,
         suffix: &str,
         count: usize,
-    ) -> AuthenticatedJournal<
+    ) -> Journal<
         deterministic::Context,
-        Journal<deterministic::Context, Operation<Digest, Digest>>,
+        ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Operation<Digest, Digest>,
         Sha256,
     > {
@@ -542,16 +542,17 @@ mod tests {
         suffix: &str,
     ) -> (
         Mmr<deterministic::Context, Sha256>,
-        Journal<deterministic::Context, Operation<Digest, Digest>>,
+        ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
         let mut hasher = StandardHasher::new();
         let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_config(suffix))
             .await
             .unwrap();
-        let journal = Journal::init(context.with_label("journal"), journal_config(suffix))
-            .await
-            .unwrap();
+        let journal =
+            ContiguousJournal::init(context.with_label("journal"), journal_config(suffix))
+                .await
+                .unwrap();
         (mmr, journal, hasher)
     }
 
@@ -586,7 +587,7 @@ mod tests {
             let (mut mmr, mut journal, mut hasher) =
                 create_components(context, "align_empty").await;
 
-            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
+            Journal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
@@ -616,7 +617,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
+            Journal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
@@ -646,7 +647,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
+            Journal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
