@@ -1,16 +1,4 @@
 //! Authenticated journal implementation.
-//!
-//! An [AuthenticatedJournal] is an append-only data structure that maintains a sequential journal
-//! of operations alongside a Merkle Mountain Range (MMR). The operation at index i in the journal
-//! corresponds to the leaf at Location i in the MMR. This structure enables efficient
-//! proofs that an operation is included in the journal at a specific location.
-//!
-//! # Pruning Behavior
-//!
-//! When pruning, the journal may align to section/blob boundaries, meaning the actual pruned
-//! location can be less than the requested location. The MMR is then pruned to match the
-//! journal's actual boundary, not the requested location. This ensures the invariant that MMR
-//! leaves correspond to journal positions is maintained.
 
 use crate::{
     adb::{operation::Committable, rewind_uncommitted, Error},
@@ -24,7 +12,10 @@ use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use tracing::{debug, warn};
 
-/// Wrapper around an [Mmr] and a [Contiguous] journal.
+/// An append-only data structure that maintains a sequential journal of operations alongside a
+/// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
+/// Location i in the MMR. This structure enables efficient proofs that an operation is included in
+/// the journal at a specific location.
 pub struct AuthenticatedJournal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
@@ -33,9 +24,11 @@ where
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
+    /// Invariant: leaf i corresponds to operation i in the journal.
     pub(crate) mmr: Mmr<E, H>,
 
     /// Journal of operations.
+    /// Invariant: operation i corresponds to leaf i in the MMR.
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
@@ -48,19 +41,15 @@ where
     O: Committable + Encode,
     H: Hasher,
 {
-    /// Align an existing MMR and journal to ensure they're synchronized.
-    ///
-    /// This method takes pre-existing MMR and journal components and ensures they're consistent:
-    /// - Uncommitted operations in the journal are discarded
-    /// - MMR elements ahead of the journal are popped
-    /// - MMR elements behind the journal are caught up by replaying journal operations
+    /// Align `mmr` to be consistent with `journal`.
+    /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
+    /// that aren't in `mmr` are added to `mmr`.
+    /// Returns the aligned MMR and journal.
     async fn align(
-        mut mmr: Mmr<E, H>,
-        mut journal: C,
-        mut hasher: StandardHasher<H>,
-    ) -> Result<Self, Error> {
-        // Remove any uncommitted operations from the end of the journal.
-        rewind_uncommitted(&mut journal).await?;
+        mmr: &mut Mmr<E, H>,
+        journal: &mut C,
+        hasher: &mut StandardHasher<H>,
+    ) -> Result<(), Error> {
         let journal_size = journal.size().await;
 
         // Pop any MMR elements that are ahead of the last journal commit point.
@@ -86,20 +75,16 @@ where
             );
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                mmr.add_batched(&mut hasher, &op.encode()).await?;
+                mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
-            mmr.sync(&mut hasher).await.map_err(Error::Mmr)?;
+            mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size().await, mmr.leaves());
 
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
+        Ok(())
     }
 
     /// Append an operation.
@@ -325,12 +310,22 @@ where
         journal_cfg: fixed::Config,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
-        Self::align(mmr, journal, hasher).await
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
+
+        // Rewind uncommitted operations in the journal.
+        rewind_uncommitted(&mut journal).await?;
+
+        // Align the MMR and journal.
+        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        Ok(Self {
+            mmr,
+            journal,
+            hasher,
+        })
     }
 
-    /// Sync the journal to disk.
+    /// Durably persist the data.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
@@ -361,12 +356,23 @@ where
         journal_cfg: variable::Config<O::Cfg>,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let journal = variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
-        Self::align(mmr, journal, hasher).await
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut journal =
+            variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
+
+        // Rewind uncommitted operations in the journal.
+        rewind_uncommitted(&mut journal).await?;
+
+        // Align the MMR and journal.
+        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        Ok(Self {
+            mmr,
+            journal,
+            hasher,
+        })
     }
 
-    /// Sync the journal to disk.
+    /// Durably persist the data.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             // Sync only the data journal, not the offsets journal.
@@ -529,13 +535,15 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, hasher) = create_components(context, "align_empty").await;
+            let (mut mmr, mut journal, mut hasher) =
+                create_components(context, "align_empty").await;
 
-            let aligned = AuthenticatedJournal::align(mmr, journal, hasher)
+            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
-            assert_eq!(aligned.op_count(), Location::new_unchecked(0));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
+            assert_eq!(journal.size().await, Location::new_unchecked(0));
         });
     }
 
@@ -560,12 +568,13 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let aligned = AuthenticatedJournal::align(mmr, journal, hasher)
+            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
             // MMR should have been popped to match journal
-            assert_eq!(aligned.op_count(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(journal.size().await, Location::new_unchecked(21));
         });
     }
 
@@ -574,7 +583,8 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, mut journal, hasher) = create_components(context, "journal_ahead").await;
+            let (mut mmr, mut journal, mut hasher) =
+                create_components(context, "journal_ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -588,12 +598,13 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            let aligned = AuthenticatedJournal::align(mmr, journal, hasher)
+            AuthenticatedJournal::align(&mut mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
             // MMR should have been replayed to match journal
-            assert_eq!(aligned.op_count(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(journal.size().await, Location::new_unchecked(21));
         });
     }
 
