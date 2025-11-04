@@ -101,8 +101,8 @@ where
         self.commit(None).await
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&mut self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+        self.root()
     }
 
     fn op_count(&self) -> Location {
@@ -111,6 +111,8 @@ where
 
     fn lower_bound(&self) -> Location {
         self.oldest_retained_loc()
+            .await
+            .unwrap()
             .unwrap_or(Location::new(0).unwrap())
     }
 

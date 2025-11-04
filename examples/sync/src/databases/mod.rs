@@ -59,7 +59,7 @@ pub trait Syncable {
     fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Get the database's root digest.
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
+    fn root(&mut self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
 
     /// Get the operation count of the database.
     fn op_count(&self) -> Location;
