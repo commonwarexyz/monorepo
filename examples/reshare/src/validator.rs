@@ -165,11 +165,11 @@ mod test {
         BLOCKS_PER_EPOCH,
     };
     use anyhow::anyhow;
-    use commonware_consensus::marshal::ingress::handler;
+    use commonware_consensus::{marshal::ingress::handler, types::Epoch};
     use commonware_cryptography::{
         bls12381::{
             dkg2::{deal, Output},
-            primitives::{group::Share, variant::MinSig},
+            primitives::{group::Share, ops, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
@@ -180,7 +180,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner, Storage,
     };
-    use commonware_utils::{sequence::U64, set::Ordered, union};
+    use commonware_utils::{quorum, sequence::U64, set::Ordered, union};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -459,13 +459,14 @@ mod test {
     struct Plan {
         seed: u64,
         total: u32,
+        per_round: u32,
         link: Link,
         epochs: Vec<EpochPlan>,
     }
 
     impl Plan {
-        fn is_last_epoch(&self, epoch: u64) -> bool {
-            epoch + 1 >= self.epochs.len() as u64
+        fn is_last_epoch(&self, epoch: Epoch) -> bool {
+            epoch.next().get() >= self.epochs.len() as u64
         }
 
         async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<()>
@@ -490,7 +491,7 @@ mod test {
             network.start();
 
             tracing::debug!("creating team with {} participants", self.total);
-            let team = Team::reckon(&mut ctx, self.total, self.total);
+            let team = Team::reckon(&mut ctx, self.total, self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
 
@@ -500,23 +501,23 @@ mod test {
 
             tracing::debug!("waiting for updates");
             let mut outputs = Vec::<Output<MinSig, PublicKey>>::new();
-            let mut status = BTreeMap::<PublicKey, u64>::new();
-            let mut current_epoch = 0u64;
+            let mut status = BTreeMap::<PublicKey, Epoch>::new();
+            let mut current_epoch = Epoch::zero();
             while let Some(update) = updates_out.next().await {
                 match update.update {
                     Update::Failure { epoch } => {
-                        tracing::info!(epoch = epoch, pk = ?update.pk, "DKG failure");
+                        tracing::info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
                         return Err(anyhow!("dkg failure, pk = {:?}", &update.pk));
                     }
                     Update::Success { epoch, output, .. } => {
-                        tracing::info!(epoch = epoch, pk = ?update.pk, "DKG success");
+                        tracing::info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
                         match status.get(&update.pk) {
-                            None if epoch == 0 => {}
-                            Some(e) if e + 1 == epoch => {}
+                            None if epoch.is_zero() => {}
+                            Some(e) if e.next() == epoch => {}
                             other => return Err(anyhow!("unexpected update epoch {other:?}")),
                         }
                         status.insert(update.pk, epoch);
-                        match outputs.get(current_epoch as usize) {
+                        match outputs.get(current_epoch.get() as usize) {
                             None => outputs.push(output),
                             Some(o) => {
                                 if o != &output {
@@ -539,7 +540,7 @@ mod test {
                     if self.is_last_epoch(current_epoch) {
                         return Ok(());
                     } else {
-                        current_epoch += 1;
+                        current_epoch = current_epoch.next();
                     }
                 }
             }
@@ -562,6 +563,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -580,6 +582,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -598,6 +601,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -616,6 +620,45 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_004() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            epochs: vec![EpochPlan::Success; 4],
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_005() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: 4,
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -2051,7 +2094,8 @@ mod test {
             }
             validators.sort();
             signers.sort_by_key(|s| s.public_key());
-            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
+            let mut registrations =
+                register_validators(&context, &mut oracle, validators.iter()).await;
 
             // Link all validators
             link_validators(&mut oracle, &validators, link, None).await;

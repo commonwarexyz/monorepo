@@ -1,5 +1,6 @@
 use std::{future::Future, pin::Pin};
 
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
     dkg2::Output,
     primitives::{group::Share, variant::Variant},
@@ -8,10 +9,10 @@ use commonware_cryptography::bls12381::{
 /// An update from the DKG Actor.
 pub enum Update<V: Variant, P> {
     /// DKG at this epoch has failed.
-    Failure { epoch: u64 },
+    Failure { epoch: Epoch },
     /// DKG at this epoch has succeeded.
     Success {
-        epoch: u64,
+        epoch: Epoch,
         /// The public output, shared by all parties.
         output: Output<V, P>,
         /// We will be missing a share if we were not a player.
