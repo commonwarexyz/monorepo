@@ -1,6 +1,6 @@
 //! Utilities for working with `num_rational::BigRational`.
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, ToPrimitive, Zero};
@@ -140,47 +140,38 @@ impl BigRationalExt for BigRational {
             return BigRational::new(numerator, denominator);
         }
 
-        // Step 5: Extract binary fractional digits using a fixed-point representation to avoid
-        // exponential growth of bignums. Represent the normalized ratio in Q(W) with guard bits.
-        // We iteratively square in fixed-point and compare against 2 to extract bits.
+        // Step 5: Extract binary fractional digits using the square-and-compare method.
+        // At this point, normalized is in (1, 2), so log2(normalized) is in (0, 1).
+        // We use integer-only arithmetic to avoid BigRational division overhead:
+        // Instead of squaring the rational and comparing to 2, we square the numerator
+        // and denominator separately and check if numer^2 >= 2 * denom^2.
         let mut fractional_bits = BigInt::zero();
         let one = BigInt::one();
-
-        let w = binary_digits + 2; // add a couple guard bits for safe comparisons
-        let one_q: BigUint = BigUint::one() << w; // 1.0 in Q(W)
-        let two_q: BigUint = &one_q << 1; // 2.0 in Q(W)
-
-        let (mut x_q, rem0) = (normalized_numer << w).div_rem(&normalized_denom);
-        let mut lost_mass = !rem0.is_zero();
         let mut produced = 0usize;
 
         for _ in 0..binary_digits {
+            // Square both numerator and denominator to shift the next binary digit into position.
+            let numer_squared = &normalized_numer * &normalized_numer;
+            let denom_squared = &normalized_denom * &normalized_denom;
+
             // Left-shift the fractional bits accumulator to make room for the new bit.
             fractional_bits <<= 1;
             produced += 1;
 
-            // Square in fixed-point: y_q = (x_q * x_q) >> W
-            let y_num = &x_q * &x_q;
-            // Track any lost low bits when shifting down by W (these indicate residual mass)
-            let low_mask = one_q.clone() - BigUint::one();
-            if !(&y_num & &low_mask).is_zero() {
-                lost_mass = true;
-            }
-            let mut y_q = y_num >> w;
-
-            // If y_q >= 2, the next binary digit is 1. Renormalize by dividing by 2.
-            if y_q >= two_q {
+            // If squared value >= 2, the next binary digit is 1.
+            // We renormalize by dividing by 2, which is equivalent to multiplying the denominator by 2.
+            let two_denom_squared = &denom_squared << 1;
+            if numer_squared >= two_denom_squared {
                 fractional_bits |= &one;
-                if y_q.is_odd() {
-                    lost_mass = true; // shifting right by 1 drops the LSB
-                }
-                y_q >>= 1;
+                normalized_numer = numer_squared;
+                normalized_denom = two_denom_squared;
+            } else {
+                normalized_numer = numer_squared;
+                normalized_denom = denom_squared;
             }
 
-            x_q = y_q;
-
-            // Early termination: if the value is exactly 1.0 in Q(W), remaining bits are zeros.
-            if x_q == one_q {
+            // Early termination: if the ratio is exactly 1, there are no more fractional bits.
+            if normalized_numer == normalized_denom {
                 break;
             }
         }
@@ -191,11 +182,15 @@ impl BigRationalExt for BigRational {
         }
 
         // Step 6: Combine integer and fractional parts, then apply ceiling operation.
-        // Represent result as: integer_part + fractional_bits / (2^binary_digits)
+        // We need to return a single rational number with denominator 2^binary_digits.
+        // By left-shifting the integer part, we convert it to the same "units" as fractional_bits,
+        // allowing us to add them: numerator = (integer_part * 2^binary_digits) + fractional_bits.
+        // This represents: integer_part + fractional_bits / (2^binary_digits)
         let mut numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
 
-        // Round up if there is any residual mass (x_q > 1.0) or if any bits were truncated.
-        if x_q > one_q || lost_mass {
+        // If there's any leftover mass in the normalized value after extracting all digits,
+        // we need to round up (ceiling operation). This happens when normalized_numer > normalized_denom.
+        if normalized_numer > normalized_denom {
             numerator += &one;
         }
 
