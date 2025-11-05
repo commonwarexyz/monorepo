@@ -162,7 +162,7 @@ pub(super) async fn align_mmr_and_floored_log<
 pub(super) async fn rewind_uncommitted<O: Committable>(
     log: &mut impl Contiguous<Item = O>,
 ) -> Result<u64, Error> {
-    let log_size = log.size().await;
+    let log_size = log.size();
     let mut rewind_size = log_size;
     while rewind_size > 0 {
         if log.read(rewind_size - 1).await?.is_commit() {
@@ -203,7 +203,7 @@ where
         .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
         .await?;
     pin_mut!(stream);
-    let last_commit_loc = log.size().await.saturating_sub(1);
+    let last_commit_loc = log.size().saturating_sub(1);
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
@@ -344,7 +344,7 @@ where
 
     debug!(
         ?op_count,
-        oldest_retained_loc = log.oldest_retained_pos().await?,
+        oldest_retained_loc = log.oldest_retained_pos(),
         ?prune_loc,
         "pruned inactive ops"
     );

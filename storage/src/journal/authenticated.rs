@@ -36,11 +36,8 @@ async fn rewind<O>(
     journal: &mut impl Contiguous<Item = O>,
     rewind_predicate: fn(&O) -> bool,
 ) -> Result<u64, Error> {
-    let journal_size = journal.size().await;
-    let pruning_boundary = journal
-        .oldest_retained_pos()
-        .await?
-        .unwrap_or(journal.size().await);
+    let journal_size = journal.size();
+    let pruning_boundary = journal.pruning_boundary();
     let mut rewind_size = journal_size;
     while rewind_size > pruning_boundary {
         let op = journal.read(rewind_size - 1).await?;
@@ -96,7 +93,7 @@ where
         journal: &mut C,
         hasher: &mut StandardHasher<H>,
     ) -> Result<(), Error> {
-        let journal_size = journal.size().await;
+        let journal_size = journal.size();
 
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
@@ -124,7 +121,7 @@ where
         }
 
         // At this point the MMR and journal should be consistent.
-        assert_eq!(journal.size().await, mmr.leaves());
+        assert_eq!(journal.size(), mmr.leaves());
 
         Ok(())
     }
@@ -232,7 +229,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
-        let size = Location::new_unchecked(self.journal.size().await);
+        let size = Location::new_unchecked(self.journal.size());
         if op_count > size {
             return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
         }
@@ -287,7 +284,6 @@ where
         Ok(self
             .journal
             .oldest_retained_pos()
-            .await?
             .map(Location::new_unchecked))
     }
 

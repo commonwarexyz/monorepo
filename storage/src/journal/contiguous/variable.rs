@@ -812,16 +812,16 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         Journal::append(self, item).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Journal::size(self)
     }
 
-    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        Ok(Journal::oldest_retained_pos(self))
+    fn oldest_retained_pos(&self) -> Option<u64> {
+        Journal::oldest_retained_pos(self)
     }
 
-    async fn pruning_boundary(&self) -> Result<u64, Error> {
-        Ok(Journal::pruning_boundary(self))
+    fn pruning_boundary(&self) -> u64 {
+        Journal::pruning_boundary(self)
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
