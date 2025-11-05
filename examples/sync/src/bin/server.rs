@@ -157,7 +157,7 @@ where
         let mut database = state.database.write().await;
         (
             database.root(&mut hasher),
-            database.lower_bound().await,
+            database.lower_bound(),
             database.op_count(),
         )
     };
