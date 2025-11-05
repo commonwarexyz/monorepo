@@ -687,11 +687,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(
-        Channel,
-        oneshot::Sender<MessageReceiverResult<P>>,
-        Handle<()>,
-    )>,
+    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiver<P>>, Handle<()>)>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -724,7 +720,7 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result, handle): (Channel, oneshot::Sender<MessageReceiverResult<P>>, Handle<()>) = match control {
+                        let (channel, result, handle): (Channel, oneshot::Sender<MessageReceiver<P>>, Handle<()>) = match control {
                             Some(control) => control,
                             None => break,
                         };
@@ -735,7 +731,7 @@ impl<P: PublicKey> Peer<P> {
                             warn!(?public_key, ?channel, "overwriting existing channel");
                             existing.1.abort();
                         }
-                        result.send(Ok(receiver)).unwrap();
+                        result.send(receiver).unwrap();
                     },
 
                     // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -834,7 +830,7 @@ impl<P: PublicKey> Peer<P> {
             .send((channel, sender, handle))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
