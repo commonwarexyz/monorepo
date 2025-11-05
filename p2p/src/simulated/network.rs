@@ -745,7 +745,7 @@ impl<P: PublicKey> Peer<P> {
                         match mailboxes.get_mut(&channel) {
                             Some((receiver_tx, _)) => {
                                 if let Err(err) = receiver_tx.send(message).await {
-                                    error!(?err, "failed to send message to mailbox");
+                                    debug!(?err, "failed to send message to mailbox");
                                 }
                             }
                             None => {
@@ -800,7 +800,7 @@ impl<P: PublicKey> Peer<P> {
                                     .send((channel, (dialer.clone(), message)))
                                     .await
                                 {
-                                    error!(?err, "failed to send message to mailbox");
+                                    debug!(?err, "failed to send message to mailbox");
                                     break;
                                 }
                             }

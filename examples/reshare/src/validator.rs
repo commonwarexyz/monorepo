@@ -1770,7 +1770,8 @@ mod test {
         n: u32,
         seed: u64,
         link: Link,
-        initial_required: u64,
+        shutdown_height: u64,
+        restart_height: u64,
         final_required: u64,
     ) -> String
     where
@@ -1884,7 +1885,7 @@ mod test {
                     // If ends with contiguous_height, ensure it is at least required_container
                     if metric.ends_with("_processed_height") {
                         let value = value.parse::<u64>().unwrap();
-                        if value >= initial_required {
+                        if value >= shutdown_height {
                             success += 1;
                         }
                     }
@@ -1899,12 +1900,45 @@ mod test {
 
             // Abort a validator
             let idx = context.gen_range(0..engines.len());
-            let handle = engines.remove(idx);
-            handle.abort();
-
-            // Create signer context
             let signer = signers[idx].clone();
             let public_key = signer.public_key();
+            let handle = engines.remove(idx);
+            handle.abort();
+            info!(idx, ?public_key, "aborted validator");
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = 0;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= restart_height {
+                            success += 1;
+                        }
+                    }
+                }
+                if success == n - 1 {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
 
             // Get networking
             let context = context.with_label(&format!("validator_{idx}_restarted"));
@@ -1995,6 +2029,7 @@ mod test {
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
                 2 * BLOCKS_PER_EPOCH + 1,
+                3 * BLOCKS_PER_EPOCH + 1,
             );
             assert_eq!(
                 state,
@@ -2003,7 +2038,8 @@ mod test {
                     seed,
                     link.clone(),
                     BLOCKS_PER_EPOCH + 1,
-                    2 * BLOCKS_PER_EPOCH + 1
+                    2 * BLOCKS_PER_EPOCH + 1,
+                    3 * BLOCKS_PER_EPOCH + 1
                 )
             );
         }
@@ -2024,6 +2060,7 @@ mod test {
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
                 2 * BLOCKS_PER_EPOCH + 1,
+                3 * BLOCKS_PER_EPOCH + 1,
             );
             assert_eq!(
                 state,
@@ -2032,7 +2069,8 @@ mod test {
                     seed,
                     link.clone(),
                     BLOCKS_PER_EPOCH + 1,
-                    2 * BLOCKS_PER_EPOCH + 1
+                    2 * BLOCKS_PER_EPOCH + 1,
+                    3 * BLOCKS_PER_EPOCH + 1
                 )
             );
         }
