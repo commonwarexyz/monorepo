@@ -633,7 +633,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
         if data_empty {
-            let size = offsets.size().await;
+            let size = offsets.size();
 
             if !data.blobs.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
@@ -653,7 +653,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
-            if let Some(oldest) = offsets.oldest_retained_pos().await? {
+            if let Some(oldest) = offsets.oldest_retained_pos() {
                 if oldest < size {
                     // Offsets has unpruned entries but data is gone - align by pruning
                     info!("crash repair: pruning offsets to {size} (prune-all crash)");
@@ -686,7 +686,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Align pruning state. We always prune the data journal before the offsets journal,
         // so we validate that invariant and repair crash faults or detect corruption.
-        match offsets.oldest_retained_pos().await? {
+        match offsets.oldest_retained_pos() {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
                 // Offsets behind on pruning -- prune to catch up
                 info!("crash repair: pruning offsets journal to {data_oldest_pos}");
@@ -705,7 +705,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 // This can happen if we pruned all data, then appended new data, synced the
                 // data journal, but crashed before syncing the offsets journal.
                 // We can recover if offsets.size() matches data_oldest_pos (proper pruning).
-                let offsets_size = offsets.size().await;
+                let offsets_size = offsets.size();
                 if offsets_size != data_oldest_pos {
                     return Err(Error::Corruption(format!(
                         "offsets journal empty: size ({offsets_size}) != data oldest pos ({data_oldest_pos})"
@@ -718,7 +718,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
         }
 
-        let offsets_size = offsets.size().await;
+        let offsets_size = offsets.size();
         if offsets_size > data_size {
             // We must have crashed after writing offsets but before writing data.
             info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
@@ -729,9 +729,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
         }
 
-        assert_eq!(offsets.size().await, data_size);
+        assert_eq!(offsets.size(), data_size);
         // Oldest retained position is always Some because the data journal is non-empty.
-        assert_eq!(offsets.oldest_retained_pos().await?, Some(data_oldest_pos));
+        assert_eq!(offsets.oldest_retained_pos(), Some(data_oldest_pos));
 
         offsets.sync().await?;
         Ok((data_oldest_pos, data_size))
@@ -760,7 +760,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Find where to start replaying
         let (start_section, resume_offset, skip_first) =
-            if let Some(oldest) = offsets.oldest_retained_pos().await? {
+            if let Some(oldest) = offsets.oldest_retained_pos() {
                 if oldest < offsets_size {
                     // Offsets has items -- resume from last indexed position
                     let last_offset = offsets.read(offsets_size - 1).await?;
@@ -812,16 +812,16 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         Journal::append(self, item).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Journal::size(self)
     }
 
-    async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
-        Ok(Journal::oldest_retained_pos(self))
+    fn oldest_retained_pos(&self) -> Option<u64> {
+        Journal::oldest_retained_pos(self)
     }
 
-    async fn pruning_boundary(&self) -> Result<u64, Error> {
-        Ok(Journal::pruning_boundary(self))
+    fn pruning_boundary(&self) -> u64 {
+        Journal::pruning_boundary(self)
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
@@ -1324,7 +1324,7 @@ mod tests {
             }
 
             // Offsets journal should be fully rebuilt to match data journal
-            assert_eq!(variable.offsets.size().await, 20);
+            assert_eq!(variable.offsets.size(), 20);
 
             variable.destroy().await.unwrap();
         });
@@ -1445,7 +1445,7 @@ mod tests {
             }
 
             // Verify offsets journal fully rebuilt
-            assert_eq!(variable.offsets.size().await, 25);
+            assert_eq!(variable.offsets.size(), 25);
 
             // Verify next append gets position 25
             let pos = variable.append(2500).await.unwrap();
