@@ -367,6 +367,25 @@ impl<H: CHasher> Mmr<H, Clean> {
         )
     }
 
+    /// Add multiple elements in batch mode and merkleize the result.
+    ///
+    /// This is a convenience method that adds all elements in batched mode (delaying merkleization)
+    /// and then merkleizes once at the end, returning a Clean MMR. This is more efficient than
+    /// calling `add` multiple times when you have many elements to add at once.
+    ///
+    /// If the slice is empty, returns `self` unchanged.
+    pub fn add_batch(self, hasher: &mut impl Hasher<H>, elements: &[&[u8]]) -> Mmr<H, Clean> {
+        if elements.is_empty() {
+            return self;
+        }
+
+        let (mut dirty_mmr, _) = self.add_batched(hasher, elements[0]);
+        for element in &elements[1..] {
+            dirty_mmr.add_batched(hasher, element);
+        }
+        dirty_mmr.merkleize(hasher)
+    }
+
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
     /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
     ///

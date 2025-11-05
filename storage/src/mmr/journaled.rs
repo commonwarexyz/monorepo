@@ -556,6 +556,28 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         ))
     }
 
+    /// Add multiple elements in batch mode and merkleize the result.
+    ///
+    /// This is a convenience method that adds all elements in batched mode (delaying merkleization)
+    /// and then merkleizes once at the end, returning a Clean MMR. This is more efficient than
+    /// calling `add` multiple times when you have many elements to add at once.
+    ///
+    /// If the slice is empty, returns `self` unchanged.
+    pub async fn add_batch(
+        self,
+        h: &mut impl Hasher<H>,
+        elements: &[&[u8]],
+    ) -> Result<Mmr<E, H, Clean>, Error> {
+        let clean_mem = self.mem_mmr.add_batch(h, elements);
+        Ok(Mmr {
+            mem_mmr: clean_mem,
+            journal: self.journal,
+            journal_size: self.journal_size,
+            metadata: self.metadata,
+            pruned_to_pos: self.pruned_to_pos,
+        })
+    }
+
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
     /// return Empty or ElementPruned errors. The backing journal is synced to disk before
     /// returning.

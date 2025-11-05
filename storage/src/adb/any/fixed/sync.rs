@@ -86,20 +86,18 @@ where
         let start_leaves = *mmr.leaves();
         let mut i = start_leaves;
         while i < log_size {
-            // Transition to Dirty state with first operation
-            let op = log.read(i).await?;
-            let (mut dirty_mmr, _) = mmr.add_batched(&mut hasher, &op.encode()).await?;
-            i += 1;
-
-            // Continue in Dirty state until sync threshold
-            while i < log_size && i % apply_batch_size as u64 != 0 {
+            // Collect operations for this batch
+            let mut batch_ops = Vec::with_capacity(apply_batch_size);
+            while batch_ops.len() < apply_batch_size && i < log_size {
                 let op = log.read(i).await?;
-                dirty_mmr.add_batched(&mut hasher, &op.encode()).await?;
+                batch_ops.push(op.encode());
                 i += 1;
             }
 
-            // Sync back to Clean state
-            mmr = dirty_mmr.sync(&mut hasher).await?;
+            // Add the batch and sync
+            let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
+            mmr = mmr.add_batch(&mut hasher, &elements).await?;
+            mmr.sync(&mut hasher).await?;
         }
 
         // Build the snapshot from the log.
