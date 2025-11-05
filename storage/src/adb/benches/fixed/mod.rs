@@ -1,4 +1,4 @@
-//! Shared code for fixed-size ADB benchmarks.
+//! Benchmarks of ADB variants on fixed-size values.
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
@@ -18,6 +18,9 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU64, NonZeroUsize};
+
+pub mod generate;
+pub mod init;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Variant {

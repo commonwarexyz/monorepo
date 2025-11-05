@@ -1,9 +1,10 @@
-//! Benchmark the generation of a large database with fixed-size values across each (a)db variant.
+//! Benchmark the startup initialization performance of each ADB variant on a large randomly
+//! generated database with fixed-size values.
 
-use crate::common_fixed::{
+use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_ordered_any, get_ordered_current, get_store,
     get_unordered_any, get_unordered_current, get_variable_any, store_cfg, variable_any_cfg,
-    OAnyDb, OCurrentDb, StoreDb, UAnyDb, UCurrentDb, VariableAnyDb, Variant, VARIANTS,
+    OAnyDb, OCurrentDb, StoreDb, UAnyDb, UCurrentDb, VariableAnyDb, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -99,11 +100,8 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = commonware_runtime::create_pool(
-                                ctx.clone(),
-                                crate::common_fixed::THREADS,
-                            )
-                            .unwrap();
+                            let pool =
+                                commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool.clone());
                             let variable_any_cfg = variable_any_cfg(pool);
@@ -165,9 +163,7 @@ fn bench_fixed_init(c: &mut Criterion) {
 
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    let pool =
-                        commonware_runtime::create_pool(ctx.clone(), crate::common_fixed::THREADS)
-                            .unwrap();
+                    let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                     let any_cfg = any_cfg(pool.clone());
                     let current_cfg = current_cfg(pool.clone());
                     let variable_any_cfg = variable_any_cfg(pool);

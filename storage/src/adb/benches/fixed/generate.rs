@@ -1,4 +1,7 @@
-use crate::common_fixed::{
+//! Benchmark each ADB variant on the generation of a large randomly generated database with
+//! fixed-size values.
+
+use crate::fixed::{
     gen_random_kv, get_ordered_any, get_ordered_current, get_store, get_unordered_any,
     get_unordered_current, get_variable_any, Variant, VARIANTS,
 };
