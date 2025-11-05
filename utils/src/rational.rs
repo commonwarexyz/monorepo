@@ -127,7 +127,7 @@ impl BigRationalExt for BigRational {
             normalized_numer <<= 1;
             integer_part -= 1;
         }
-        debug_assert!(
+        assert!(
             normalized_numer >= normalized_denom && normalized_numer < (&normalized_denom << 1)
         );
 
