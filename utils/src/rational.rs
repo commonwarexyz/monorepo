@@ -261,6 +261,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "log2 undefined for non-positive numbers")]
+    fn log2_ceil_negative_panics() {
+        <BigRational as num_traits::FromPrimitive>::from_i64(-1)
+            .unwrap()
+            .log2_ceil(8);
+    }
+
+    #[test]
     fn log2_ceil_exact_powers_of_two() {
         // Test exact powers of 2: log2(2^n) = n
         let value = BigRational::from_u64(1); // 2^0
