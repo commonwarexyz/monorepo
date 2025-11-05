@@ -191,7 +191,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = Position::new(journal.size().await);
+        let mut journal_size = Position::new(journal.size());
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -230,13 +230,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             ),
             None => 0,
         };
-        let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
+        let oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
         if metadata_prune_pos != oldest_retained_pos {
             assert!(metadata_prune_pos >= oldest_retained_pos);
             // These positions may differ only due to blob boundary alignment, so this case isn't
             // unusual.
             journal.prune(metadata_prune_pos).await?;
-            if journal.oldest_retained_pos().await?.unwrap_or(0) != oldest_retained_pos {
+            if journal.oldest_retained_pos().unwrap_or(0) != oldest_retained_pos {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -295,7 +295,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             s.mem_mmr.add_leaf_digest(hasher, leaf);
             assert_eq!(pos, journal_size);
             s.sync(hasher).await?;
-            assert_eq!(s.size(), s.journal.size().await);
+            assert_eq!(s.size(), s.journal.size());
         }
 
         Ok(s)
@@ -349,7 +349,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             *cfg.range.start..*cfg.range.end,
         )
         .await?;
-        let journal_size = Position::new(journal.size().await);
+        let journal_size = Position::new(journal.size());
         assert!(journal_size <= *cfg.range.end);
 
         // Open the metadata.
@@ -585,7 +585,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
         self.journal_size = self.size();
         self.journal.sync().await?;
-        assert_eq!(self.journal_size, self.journal.size().await);
+        assert_eq!(self.journal_size, self.journal.size());
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
