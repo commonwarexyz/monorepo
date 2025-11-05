@@ -109,18 +109,19 @@ impl BigRationalExt for BigRational {
         // floor(log2(x)) + 1, we can compute the integer part directly.
         let numer_bits = numer.bits();
         let denom_bits = denom.bits();
-        let mut integer_part = BigInt::from(numer_bits as i64 - denom_bits as i64);
+        let mut integer_part = numer_bits as i128 - denom_bits as i128;
 
         // Step 3: Align the most significant bits of numerator and denominator to bring
         // the ratio into the range [1, 2). By shifting both values to have the same bit
         // length, we normalize the ratio in a single operation.
-        let (mut normalized_numer, mut normalized_denom) = if denom_bits > numer_bits {
-            (numer << (denom_bits - numer_bits), denom)
-        } else if numer_bits > denom_bits {
-            (numer, denom << (numer_bits - denom_bits))
-        } else {
-            (numer, denom)
-        };
+        let mut normalized_numer = numer;
+        if denom_bits > numer_bits {
+            normalized_numer <<= denom_bits - numer_bits;
+        }
+        let mut normalized_denom = denom;
+        if numer_bits > denom_bits {
+            normalized_denom <<= numer_bits - denom_bits;
+        }
 
         // After alignment, we may need one additional shift to ensure normalized value is in [1, 2).
         if normalized_numer < normalized_denom {
@@ -134,7 +135,7 @@ impl BigRationalExt for BigRational {
         // Step 4: Handle the special case where the value is exactly a power of 2.
         // In this case, log2(x) is exact and has no fractional component.
         if normalized_numer == normalized_denom {
-            let numerator = integer_part << binary_digits;
+            let numerator = BigInt::from(integer_part) << binary_digits;
             let denominator = BigInt::one() << binary_digits;
             return BigRational::new(numerator, denominator);
         }
@@ -145,14 +146,9 @@ impl BigRationalExt for BigRational {
         // Instead of squaring the rational and comparing to 2, we square the numerator
         // and denominator separately and check if numer^2 >= 2 * denom^2.
         let mut fractional_bits = BigInt::zero();
-        let one_int = BigInt::one();
+        let one = BigInt::one();
 
         for _ in 0..binary_digits {
-            // Early termination: if the ratio is exactly 1, there are no more fractional bits.
-            if normalized_numer == normalized_denom {
-                break;
-            }
-
             // Square both numerator and denominator to shift the next binary digit into position.
             let numer_squared = &normalized_numer * &normalized_numer;
             let denom_squared = &normalized_denom * &normalized_denom;
@@ -164,12 +160,17 @@ impl BigRationalExt for BigRational {
             // We renormalize by dividing by 2, which is equivalent to multiplying the denominator by 2.
             let two_denom_squared = &denom_squared << 1;
             if numer_squared >= two_denom_squared {
-                fractional_bits |= &one_int;
+                fractional_bits |= &one;
                 normalized_numer = numer_squared;
                 normalized_denom = two_denom_squared;
             } else {
                 normalized_numer = numer_squared;
                 normalized_denom = denom_squared;
+            }
+
+            // Early termination: if the ratio is exactly 1, there are no more fractional bits.
+            if normalized_numer == normalized_denom {
+                break;
             }
         }
 
@@ -178,15 +179,15 @@ impl BigRationalExt for BigRational {
         // By left-shifting the integer part, we convert it to the same "units" as fractional_bits,
         // allowing us to add them: numerator = (integer_part * 2^binary_digits) + fractional_bits.
         // This represents: integer_part + fractional_bits / (2^binary_digits)
-        let mut numerator = (integer_part << binary_digits) + fractional_bits;
+        let mut numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
 
         // If there's any leftover mass in the normalized value after extracting all digits,
         // we need to round up (ceiling operation). This happens when normalized_numer > normalized_denom.
         if normalized_numer > normalized_denom {
-            numerator += &one_int;
+            numerator += &one;
         }
 
-        let denominator = BigInt::one() << binary_digits;
+        let denominator = one << binary_digits;
         BigRational::new(numerator, denominator)
     }
 }
