@@ -213,8 +213,8 @@ pub async fn get_variable_any(ctx: Context) -> VariableAnyDb {
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
-/// ratio of updates to deletes is configured with `delete_frequency`. The database is committed
-/// after every `commit_frequency` operations (if Some), or at the end (if None).
+/// database is committed after every `commit_frequency` operations (if Some), or at the end (if
+/// None).
 pub async fn gen_random_kv<
     A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
 >(
