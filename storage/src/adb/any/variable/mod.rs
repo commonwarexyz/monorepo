@@ -352,7 +352,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             self.mmr.merkleize(&mut self.hasher);
             Ok::<(), Error>(())
         };
-        try_join!(self.log.sync_data().map_err(Into::into), mmr_fut)?;
+        try_join!(self.log.commit().map_err(Into::into), mmr_fut)?;
 
         Ok(())
     }
