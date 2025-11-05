@@ -82,7 +82,7 @@ where
 
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
-        let log_size = log.size().await;
+        let log_size = log.size();
         for i in *mmr.leaves()..log_size {
             let op = log.read(i).await?;
             mmr.add_batched(&mut hasher, &op.encode()).await?;
@@ -123,7 +123,7 @@ where
         config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, adb::Error> {
-        let size = journal.size().await;
+        let size = journal.size();
 
         if size <= range.start {
             // Create a new journal with the new bounds
@@ -164,7 +164,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 
     let mut journal =
         fixed::Journal::<E, A>::init(context.with_label("journal"), cfg.clone()).await?;
-    let journal_size = journal.size().await;
+    let journal_size = journal.size();
     let journal = if journal_size <= range.start {
         debug!(
             journal_size,
@@ -186,7 +186,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
             journal_size,
         )));
     };
-    let journal_size = journal.size().await;
+    let journal_size = journal.size();
     assert!(journal_size <= range.end);
     assert!(journal_size >= range.start);
     Ok(journal)
@@ -243,6 +243,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
     if tail_items > 0 {
         tail.resize(tail_size).await?;
     }
+    let pruning_boundary = size - (size % cfg.items_per_blob);
 
     // Initialize metrics
     let tracked = Gauge::default();
@@ -262,6 +263,8 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
         tracked,
         synced,
         pruned,
+        size,
+        pruning_boundary,
         _array: PhantomData,
     })
 }
@@ -347,7 +350,7 @@ mod tests {
                 .unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_log_size = target_db.log.size().await;
+            let target_log_size = target_db.log.size();
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
@@ -398,7 +401,7 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(got_db.log.size().await, target_log_size);
+            assert_eq!(got_db.log.size(), target_log_size);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
@@ -441,7 +444,7 @@ mod tests {
 
             // Capture the database state before closing
             let final_synced_op_count = got_db.op_count();
-            let final_synced_log_size = got_db.log.size().await;
+            let final_synced_log_size = got_db.log.size();
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_root = got_db.root(&mut hasher);
 
@@ -457,7 +460,7 @@ mod tests {
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor
             );
-            assert_eq!(reopened_db.log.size().await, final_synced_log_size);
+            assert_eq!(reopened_db.log.size(), final_synced_log_size);
             assert_eq!(
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor,
@@ -643,10 +646,7 @@ mod tests {
                 target_db.read().await.inactivity_floor_loc
             );
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(
-                sync_db.log.size().await,
-                target_db.read().await.log.size().await
-            );
+            assert_eq!(sync_db.log.size(), target_db.read().await.log.size());
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -740,7 +740,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.op_count(), target_db.op_count());
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(sync_db.log.size().await, target_db.log.size().await);
+            assert_eq!(sync_db.log.size(), target_db.log.size());
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
@@ -1137,7 +1137,7 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size().await;
+                    let log_size = client.journal().size();
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -1346,7 +1346,7 @@ mod tests {
             // Verify database state
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(synced_db.log.size().await, 0);
+            assert_eq!(synced_db.log.size(), 0);
             assert_eq!(synced_db.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
@@ -1435,7 +1435,7 @@ mod tests {
             assert_eq!(db.op_count(), upper_bound);
             assert_eq!(db.inactivity_floor_loc, lower_bound);
             assert_eq!(db.mmr.size(), source_db.mmr.size());
-            assert_eq!(db.log.size().await, source_db.log.size().await);
+            assert_eq!(db.log.size(), source_db.log.size());
 
             // Verify the root digest matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
@@ -1527,7 +1527,7 @@ mod tests {
                 .unwrap();
 
                 // Verify database state
-                assert_eq!(db.log.size().await, upper_bound);
+                assert_eq!(db.log.size(), upper_bound);
                 assert_eq!(
                     db.mmr.size(),
                     Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
@@ -1604,7 +1604,7 @@ mod tests {
             // Capture target db state for comparison
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
-            let target_db_log_size = target_db.log.size().await;
+            let target_db_log_size = target_db.log.size();
             let target_db_mmr_size = target_db.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
@@ -1632,7 +1632,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.size().await, target_db_log_size);
+            assert_eq!(sync_db.log.size(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
 
             // Verify the root digest matches the target
@@ -1679,7 +1679,7 @@ mod tests {
             let sync_upper_bound = db.op_count();
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
-            let target_db_log_size = db.log.size().await;
+            let target_db_log_size = db.log.size();
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
@@ -1713,7 +1713,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.size().await, target_db_log_size);
+            assert_eq!(sync_db.log.size(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
 
             sync_db.destroy().await.unwrap();
@@ -1741,8 +1741,8 @@ mod tests {
                     .expect("Failed to initialize journal with sync boundaries");
 
             // Verify the journal is initialized at the lower bound
-            assert_eq!(sync_journal.size().await, lower_bound);
-            assert_eq!(sync_journal.oldest_retained_pos().await.unwrap(), None);
+            assert_eq!(sync_journal.size(), lower_bound);
+            assert_eq!(sync_journal.oldest_retained_pos(), None);
 
             // Verify the journal structure matches expected state
             // With items_per_blob=5 and lower_bound=10, we expect:
@@ -1791,7 +1791,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let journal_size = journal.size().await;
+            let journal_size = journal.size();
             assert_eq!(journal_size, 20);
             journal.close().await.unwrap();
 
@@ -1805,13 +1805,10 @@ mod tests {
                 .expect("Failed to initialize journal with overlap");
 
             // Verify the journal size matches the original (no rewind needed)
-            assert_eq!(journal.size().await, journal_size);
+            assert_eq!(journal.size(), journal_size);
 
             // Verify the journal has been pruned to the lower bound
-            assert_eq!(
-                journal.oldest_retained_pos().await.unwrap(),
-                Some(lower_bound)
-            );
+            assert_eq!(journal.oldest_retained_pos(), Some(lower_bound));
 
             // Verify operations before the lower bound are pruned
             for i in 0..lower_bound {
@@ -1860,7 +1857,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let initial_size = journal.size().await;
+            let initial_size = journal.size();
             assert_eq!(initial_size, 20);
             journal.close().await.unwrap();
 
@@ -1874,13 +1871,10 @@ mod tests {
                 .expect("Failed to initialize journal with exact match");
 
             // Verify the journal size remains the same (no rewinding needed)
-            assert_eq!(journal.size().await, initial_size);
+            assert_eq!(journal.size(), initial_size);
 
             // Verify the journal has been pruned to the lower bound
-            assert_eq!(
-                journal.oldest_retained_pos().await.unwrap(),
-                Some(lower_bound)
-            );
+            assert_eq!(journal.oldest_retained_pos(), Some(lower_bound));
 
             // Verify operations before the lower bound are pruned
             for i in 0..lower_bound {
@@ -1929,7 +1923,7 @@ mod tests {
                 journal.append(test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            let initial_size = journal.size().await;
+            let initial_size = journal.size();
             assert_eq!(initial_size, 30);
             journal.close().await.unwrap();
 
@@ -1990,10 +1984,10 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 0");
 
-                assert_eq!(journal.size().await, 0);
+                assert_eq!(journal.size(), 0);
                 assert_eq!(journal.tail_index, 0);
                 assert_eq!(journal.blobs.len(), 0);
-                assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+                assert_eq!(journal.oldest_retained_pos(), None);
 
                 // Should be able to append from position 0
                 let append_pos = journal.append(test_digest(100)).await.unwrap();
@@ -2008,10 +2002,10 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 10");
 
-                assert_eq!(journal.size().await, 10);
+                assert_eq!(journal.size(), 10);
                 assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
-                assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Tail is empty
+                assert_eq!(journal.oldest_retained_pos(), None); // Tail is empty
 
                 // Operations 0-9 should be pruned
                 for i in 0..10 {
@@ -2033,11 +2027,11 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 7");
 
-                assert_eq!(journal.size().await, 7);
+                assert_eq!(journal.size(), 7);
                 assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
                                                     // Tail blob should have 2 items worth of space (7 % 5 = 2)
-                assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(5)); // First item in tail blob
+                assert_eq!(journal.oldest_retained_pos(), Some(5)); // First item in tail blob
 
                 // Operations 0-4 should be pruned (blob 0 doesn't exist)
                 for i in 0..5 {
@@ -2065,10 +2059,10 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal at size 23");
 
-                assert_eq!(journal.size().await, 23);
+                assert_eq!(journal.size(), 23);
                 assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
                 assert_eq!(journal.blobs.len(), 0); // No historical blobs
-                assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(20)); // First item in tail blob
+                assert_eq!(journal.oldest_retained_pos(), Some(20)); // First item in tail blob
 
                 // Operations 0-19 should be pruned (blobs 0-3 don't exist)
                 for i in 0..20 {

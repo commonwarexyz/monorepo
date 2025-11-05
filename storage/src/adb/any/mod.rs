@@ -38,7 +38,7 @@ where
     O: Keyed,
     H: Hasher,
 {
-    let size = Location::new_unchecked(log.size().await);
+    let size = Location::new_unchecked(log.size());
     if op_count > size {
         return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
     }
@@ -120,7 +120,7 @@ where
         }
 
         // Update the operation's snapshot location to point to tip.
-        cursor.update(Location::new_unchecked(self.log.size().await));
+        cursor.update(Location::new_unchecked(self.log.size()));
         drop(cursor);
 
         // Apply the operation at tip.
@@ -147,7 +147,7 @@ where
         H: Hasher,
         O: Keyed,
     {
-        let tip_loc = Location::new_unchecked(self.log.size().await);
+        let tip_loc = Location::new_unchecked(self.log.size());
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

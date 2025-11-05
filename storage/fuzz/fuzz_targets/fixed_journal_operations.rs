@@ -86,7 +86,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size().await;
+                    let size = journal.size();
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -103,7 +103,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::OldestRetainedPos => {
-                    let _pos = journal.oldest_retained_pos().await.unwrap();
+                    let _pos = journal.oldest_retained_pos().unwrap();
                 }
 
                 JournalOperation::Prune { min_pos } => {
