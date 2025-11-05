@@ -727,16 +727,11 @@ impl<
 
         // Request proposal from application
         debug!(view = self.view, "requested proposal from automaton");
-        let context = Context {
-            round: Rnd::new(self.epoch, self.view),
-            leader: self
-                .scheme
-                .participants()
-                .key(leader)
-                .expect("leader not found")
-                .clone(),
-            parent: (parent_view, parent_payload),
-        };
+        let context = self.build_context(
+            Rnd::new(self.epoch, self.view),
+            leader,
+            (parent_view, parent_payload),
+        );
         let receiver = self.automaton.propose(context.clone()).await;
         Some(Request(context, receiver))
     }
@@ -837,12 +832,7 @@ impl<
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(self.view)
-                .await
-                .expect("unable to sync journal");
+            self.journal_sync(self.view).await;
         }
 
         // Broadcast nullify
@@ -855,13 +845,8 @@ impl<
         let view = nullify.view();
 
         // Handle nullify
-        if let Some(journal) = self.journal.as_mut() {
-            let msg = Voter::Nullify(nullify.clone());
-            journal
-                .append(view, msg)
-                .await
-                .expect("unable to append nullify");
-        }
+        self.journal_append(view, Voter::Nullify(nullify.clone()))
+            .await;
 
         // Create round (if it doesn't exist) and add verified nullify
         self.round_mut(view).add_verified_nullify(nullify).await
@@ -975,16 +960,8 @@ impl<
 
         // Request verification
         debug!(?proposal, "requested proposal verification",);
-        let context = Context {
-            round: proposal.round,
-            leader: self
-                .scheme
-                .participants()
-                .key(leader)
-                .expect("leader not found")
-                .clone(),
-            parent: (proposal.parent, *parent_payload),
-        };
+        let context =
+            self.build_context(proposal.round, leader, (proposal.parent, *parent_payload));
         let proposal = proposal.clone();
         let payload = proposal.payload;
         let round = self.views.get_mut(&context.view()).unwrap();
@@ -993,6 +970,10 @@ impl<
         Some(Request(context, receiver))
     }
 
+    /// Returns a request to certify a proposal if it should be requested.
+    ///
+    /// Returns `None` if the proposal should not be certified for any reason, for example if it
+    /// already has a certification request or does not have enough information to make the request.
     async fn certify(
         &mut self,
         view: View,
@@ -1017,6 +998,7 @@ impl<
         // Get the context for the proposal.
         let parent_view = proposal.parent;
 
+        // If the leader or the parent for this view are not set, we need to fetch them.
         let mut missing_notarizations = None;
         let mut missing_nullifications = None;
 
@@ -1048,21 +1030,11 @@ impl<
             return None;
         }
 
-        // At this point, the context is able to be constructed—the leader and parent payload exist
+        // At this point, the context is able to be constructed since the leader and parent payload
+        // exist. Request certification.
         let leader = leader_opt.unwrap();
         let parent_payload = parent_payload_opt.unwrap();
-        let context = Context {
-            round: proposal.round,
-            leader: self
-                .scheme
-                .participants()
-                .key(leader)
-                .expect("leader not found")
-                .clone(),
-            parent: (parent_view, parent_payload),
-        };
-
-        // Request certification.
+        let context = self.build_context(proposal.round, leader, (parent_view, parent_payload));
         let receiver = self
             .automaton
             .certify(context.clone(), proposal.payload)
@@ -1101,26 +1073,22 @@ impl<
         true
     }
 
-    /// Handles the successful certification of a proposal.
+    /// Handles the certification of a proposal.
+    ///
+    /// The certification may succeed, in which case the proposal can be used in future views—
+    /// or fail, in which case we should nullify the view as fast as possible.
     async fn certified(&mut self, view: View, success: bool) {
-        // If the view has been pruned, skip safely.
-        let Some(round) = self.views.get_mut(&view) else {
-            debug!(view, reason = "view missing", "dropping certified result");
-            return;
-        };
-
         // Mark proposal as certified
-        round.certified_proposal = Some(success);
+        if let Some(round) = self.views.get_mut(&view) {
+            round.certified_proposal = Some(success);
+        } else {
+            // If the view has been pruned, skip safely.
+            return;
+        }
 
         // Persist certification result for recovery
-        if let Some(journal) = self.journal.as_mut() {
-            let msg = Voter::Certification(Rnd::new(self.epoch, view), success);
-            journal
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-            debug!(certified = ?success, view, "certify result");
-        }
+        let msg = Voter::Certification(Rnd::new(self.epoch, view), success);
+        self.journal_append(view, msg).await;
 
         // Log the result and exit early if certification failed since we should not move to the
         // next view until a nullification is formed.
@@ -1130,19 +1098,22 @@ impl<
         } else {
             // If the failed certification is for the current view, timeout ASAP.
             // This round may not be for the current view; it's safe to set its deadline anyway.
-            round.advance_deadline = Some(self.context.current());
+            self.views.get_mut(&view).unwrap().advance_deadline = Some(self.context.current());
         }
     }
 
-    fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
+    /// If I am the leader for a given view, returns the elapsed time since the view started.
+    ///
+    /// Returns `None` if I am not the leader for the view.
+    fn since_view_start(&self, view: View) -> Option<Duration> {
+        // Check if I am the leader for the view
         let round = self.views.get(&view)?;
-        let Ok(elapsed) = self.context.current().duration_since(round.start) else {
+        if !Self::is_me(&self.scheme, self.get_leader(view)?) {
             return None;
-        };
-        Some((
-            Self::is_me(&self.scheme, self.get_leader(view)?),
-            elapsed.as_secs_f64(),
-        ))
+        }
+
+        // Return the elapsed time since the view started
+        self.context.current().duration_since(round.start).ok()
     }
 
     /// Sets the leader from a given round and certificate.
@@ -1170,10 +1141,49 @@ impl<
         trace!(round=?next_round, ?leader, ?leader_idx, "leader elected");
     }
 
+    /// Returns the leader, if known, for a given view.
     fn get_leader(&self, view: View) -> Option<u32> {
         self.leaders.get(&view).copied()
     }
 
+    /// Builds a context for a given round, leader index, and parent.
+    fn build_context(&self, round: Rnd, leader_idx: u32, parent: (View, D)) -> Context<D, P> {
+        let leader = self
+            .scheme
+            .participants()
+            .key(leader_idx)
+            .expect("leader not found")
+            .clone();
+        Context {
+            round,
+            leader,
+            parent,
+        }
+    }
+
+    /// Appends a message to the journal.
+    ///
+    /// Does not append if the journal is not set (i.e. during replay/restart).
+    async fn journal_append(&mut self, view: View, msg: Voter<S, D>) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append to journal");
+        }
+    }
+
+    /// Syncs the journal, panicking if it fails.
+    ///
+    /// Does not sync if the journal is not set (i.e. during replay/restart).
+    async fn journal_sync(&mut self, view: View) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.sync(view).await.expect("unable to sync journal");
+        }
+    }
+
+    /// Initializes a new view if it is ahead of our current view.
+    /// Sets the current view as the new view.
     fn enter_view(&mut self, view: u64) {
         // Don't need to create a new view
         if view <= self.view {
@@ -1192,6 +1202,7 @@ impl<
         let _ = self.current_view.try_set(view);
     }
 
+    /// Removes views and leaders that are no longer needed, and prunes the journal.
     async fn prune_views(&mut self) {
         // Get last min
         let min = min_active(self.activity_timeout, self.last_finalized);
@@ -1288,6 +1299,9 @@ impl<
             .unwrap();
     }
 
+    /// Broadcasts a vote (notarize, nullify, or finalize) to all validators.
+    ///
+    /// Also logs and updates metrics properly.
     async fn broadcast_vote<Sp: Sender>(
         &mut self,
         sender: &mut WrappedSender<Sp, Voter<S, D>>,
@@ -1324,13 +1338,8 @@ impl<
         let view = notarize.view();
 
         // Handle notarize
-        if let Some(journal) = self.journal.as_mut() {
-            let msg = Voter::Notarize(notarize.clone());
-            journal
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-        }
+        self.journal_append(view, Voter::Notarize(notarize.clone()))
+            .await;
 
         // Create round (if it doesn't exist) and add verified notarize
         self.round_mut(view).add_verified_notarize(notarize).await;
@@ -1377,13 +1386,7 @@ impl<
             .round_mut(view)
             .add_verified_notarization(notarization.clone())
         {
-            if let Some(journal) = self.journal.as_mut() {
-                // Store notarization
-                journal
-                    .append(view, msg)
-                    .await
-                    .expect("unable to append to journal");
-            }
+            self.journal_append(view, msg).await;
         }
     }
 
@@ -1428,12 +1431,7 @@ impl<
             .round_mut(view)
             .add_verified_nullification(nullification)
         {
-            if let Some(journal) = self.journal.as_mut() {
-                journal
-                    .append(view, msg)
-                    .await
-                    .expect("unable to append to journal");
-            }
+            self.journal_append(view, msg).await;
         }
 
         // Enter next view
@@ -1445,13 +1443,8 @@ impl<
         let view = finalize.view();
 
         // Handle finalize
-        if let Some(journal) = self.journal.as_mut() {
-            let msg = Voter::Finalize(finalize.clone());
-            journal
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-        }
+        self.journal_append(view, Voter::Finalize(finalize.clone()))
+            .await;
 
         // Create round (if it doesn't exist) and add verified finalize
         self.round_mut(view).add_verified_finalize(finalize).await
@@ -1496,12 +1489,7 @@ impl<
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
         if self.round_mut(view).add_verified_finalization(finalization) {
-            if let Some(journal) = self.journal.as_mut() {
-                journal
-                    .append(view, msg)
-                    .await
-                    .expect("unable to append to journal");
-            }
+            self.journal_append(view, msg).await;
         }
 
         // Track view finalized
@@ -1608,12 +1596,7 @@ impl<
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
+            self.journal_sync(view).await;
 
             // Broadcast the notarize
             self.broadcast_vote(pending_sender, Voter::Notarize(notarize))
@@ -1623,10 +1606,8 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((is_me, elapsed)) = self.since_view_start(view) {
-                if is_me {
-                    self.notarization_latency.observe(elapsed);
-                }
+            if let Some(elapsed) = self.since_view_start(view) {
+                self.notarization_latency.observe(elapsed.as_secs_f64());
             }
 
             // Update resolver
@@ -1636,12 +1617,7 @@ impl<
             self.handle_notarization(notarization.clone()).await;
 
             // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
+            self.journal_sync(view).await;
 
             // Alert application
             self.reporter
@@ -1665,12 +1641,7 @@ impl<
             self.handle_nullification(nullification.clone()).await;
 
             // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
+            self.journal_sync(view).await;
 
             // Alert application
             self.reporter
@@ -1719,12 +1690,7 @@ impl<
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
+            self.journal_sync(view).await;
 
             // Broadcast the finalize
             self.broadcast_vote(pending_sender, Voter::Finalize(finalize))
@@ -1734,10 +1700,8 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((is_me, elapsed)) = self.since_view_start(view) {
-                if is_me {
-                    self.finalization_latency.observe(elapsed);
-                }
+            if let Some(elapsed) = self.since_view_start(view) {
+                self.finalization_latency.observe(elapsed.as_secs_f64());
             }
 
             // Update resolver
