@@ -31,7 +31,7 @@ pub enum Message<P: PublicKey> {
         public_key: P,
         egress_cap: Option<usize>,
         ingress_cap: Option<usize>,
-        result: oneshot::Sender<Result<(), Error>>,
+        result: oneshot::Sender<()>,
     },
     AddLink {
         sender: P,
@@ -145,7 +145,7 @@ impl<P: PublicKey> Oracle<P> {
             })
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 
     /// Create a unidirectional link between two peers.
