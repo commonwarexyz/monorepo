@@ -96,6 +96,7 @@ fn bench_update(c: &mut Criterion) {
                                     for (pos, element) in leaf_map {
                                         mmr.update_leaf(&mut h, pos, &element).unwrap();
                                     }
+                                    // NoBatching updates are immediate, no merkleize needed
                                 }
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates
@@ -103,10 +104,11 @@ fn bench_update(c: &mut Criterion) {
                                         Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    mmr.update_leaf_batched(&mut h, &updates).unwrap();
+                                    let dirty_mmr =
+                                        mmr.update_leaf_batched(&mut h, &updates).unwrap();
+                                    dirty_mmr.merkleize(&mut h);
                                 }
                             }
-                            mmr.merkleize(&mut h);
 
                             start.elapsed()
                         });

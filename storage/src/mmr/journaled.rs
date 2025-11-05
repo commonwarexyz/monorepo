@@ -15,7 +15,7 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{Config as MemConfig, Mmr as MemMmr},
+        mem::{Clean, Config as MemConfig, Dirty, Mmr as MemMmr},
         position::Position,
         storage::Storage,
         verification,
@@ -78,12 +78,174 @@ pub struct SyncConfig<D: Digest> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
+/// Wrapper enum to hold either a clean or dirty in-memory MMR.
+enum MmrState<H: CHasher> {
+    Clean(MemMmr<H, Clean>),
+    Dirty(MemMmr<H, Dirty<H>>),
+}
+
+impl<H: CHasher> MmrState<H> {
+    /// Returns true if the MMR has pending updates.
+    fn is_dirty(&self) -> bool {
+        matches!(self, MmrState::Dirty(_))
+    }
+
+    fn size(&self) -> Position {
+        match self {
+            MmrState::Clean(mmr) => mmr.size(),
+            MmrState::Dirty(mmr) => mmr.size(),
+        }
+    }
+
+    fn leaves(&self) -> Location {
+        match self {
+            MmrState::Clean(mmr) => mmr.leaves(),
+            MmrState::Dirty(mmr) => mmr.leaves(),
+        }
+    }
+
+    fn last_leaf_pos(&self) -> Option<Position> {
+        match self {
+            MmrState::Clean(mmr) => mmr.last_leaf_pos(),
+            MmrState::Dirty(mmr) => mmr.last_leaf_pos(),
+        }
+    }
+
+    fn get_node(&self, pos: Position) -> Option<H::Digest> {
+        match self {
+            MmrState::Clean(mmr) => mmr.get_node(pos),
+            MmrState::Dirty(mmr) => mmr.get_node(pos),
+        }
+    }
+
+    fn get_node_unchecked(&self, pos: Position) -> &H::Digest {
+        match self {
+            MmrState::Clean(mmr) => mmr.get_node_unchecked(pos),
+            MmrState::Dirty(mmr) => mmr.get_node_unchecked(pos),
+        }
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        match self {
+            MmrState::Clean(mmr) => mmr.pruned_to_pos(),
+            MmrState::Dirty(mmr) => mmr.pruned_to_pos(),
+        }
+    }
+
+    fn oldest_retained_pos(&self) -> Option<Position> {
+        match self {
+            MmrState::Clean(mmr) => mmr.oldest_retained_pos(),
+            MmrState::Dirty(mmr) => mmr.oldest_retained_pos(),
+        }
+    }
+
+    fn node_digests_to_pin(&self, start_pos: Position) -> Vec<H::Digest> {
+        match self {
+            MmrState::Clean(mmr) => mmr.node_digests_to_pin(start_pos),
+            MmrState::Dirty(mmr) => mmr.node_digests_to_pin(start_pos),
+        }
+    }
+
+    fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position, H::Digest>) {
+        match self {
+            MmrState::Clean(mmr) => mmr.add_pinned_nodes(pinned_nodes),
+            MmrState::Dirty(mmr) => mmr.add_pinned_nodes(pinned_nodes),
+        }
+    }
+
+    fn re_init(
+        &mut self,
+        nodes: Vec<H::Digest>,
+        pruned_to_pos: Position,
+        pinned_nodes: Vec<H::Digest>,
+    ) {
+        match self {
+            MmrState::Clean(mmr) => mmr.re_init(nodes, pruned_to_pos, pinned_nodes),
+            MmrState::Dirty(mmr) => mmr.re_init(nodes, pruned_to_pos, pinned_nodes),
+        }
+    }
+
+    #[cfg(test)]
+    fn pinned_nodes(&self) -> BTreeMap<Position, H::Digest> {
+        match self {
+            MmrState::Clean(mmr) => mmr.pinned_nodes(),
+            MmrState::Dirty(mmr) => std::unreachable!(),
+        }
+    }
+
+    /// Add an element and return its position. Mutates in place.
+    fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
+        match self {
+            MmrState::Clean(mmr) => mmr.add(hasher, element),
+            MmrState::Dirty(_) => panic!("Cannot add without batching when dirty"),
+        }
+    }
+
+    /// Add an element in batched mode, returning its position. Mutates in place.
+    fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
+        let temp = std::mem::replace(self, MmrState::Clean(MemMmr::new()));
+        match temp {
+            MmrState::Clean(mmr) => {
+                let (dirty_mmr, pos) = mmr.add_batched(hasher, element);
+                *self = MmrState::Dirty(dirty_mmr);
+                pos
+            }
+            MmrState::Dirty(mut mmr) => {
+                let pos = mmr.add_batched(hasher, element);
+                *self = MmrState::Dirty(mmr);
+                pos
+            }
+        }
+    }
+
+    /// Add a leaf's digest to the MMR.
+    fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, digest: H::Digest) {
+        match self {
+            MmrState::Clean(mmr) => mmr.add_leaf_digest(hasher, digest),
+            MmrState::Dirty(_) => panic!("Cannot add leaf digest when dirty"),
+        }
+    }
+
+    /// Pop the most recent leaf. Mutates in place.
+    fn pop(&mut self) -> Result<(), Error> {
+        match self {
+            MmrState::Clean(mmr) => mmr.pop().map(|_| ()),
+            MmrState::Dirty(_) => panic!("Cannot pop when dirty"),
+        }
+    }
+
+    /// Merkleize any pending updates, transitioning from Dirty to Clean. Mutates in place.
+    fn merkleize(&mut self, hasher: &mut impl Hasher<H>) {
+        let temp = std::mem::replace(self, MmrState::Clean(MemMmr::new()));
+        *self = match temp {
+            MmrState::Clean(mmr) => MmrState::Clean(mmr),
+            MmrState::Dirty(mmr) => MmrState::Clean(mmr.merkleize(hasher)),
+        };
+    }
+
+    /// Compute the root (only available when Clean).
+    fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
+        match self {
+            MmrState::Clean(mmr) => mmr.root(hasher),
+            MmrState::Dirty(_) => panic!("Cannot compute root when dirty"),
+        }
+    }
+
+    /// Prune all nodes (only available when Clean). Mutates in place.
+    fn prune_all(&mut self) {
+        match self {
+            MmrState::Clean(mmr) => mmr.prune_all(),
+            MmrState::Dirty(_) => panic!("Cannot prune when dirty"),
+        }
+    }
+}
+
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<H>,
+    mem_mmr: MmrState<H>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, H::Digest>,
@@ -165,12 +327,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         // Create in-memory MMR in fully pruned state
-        let mem_mmr = MemMmr::init(MemConfig {
+        let mem_mmr = MmrState::Clean(MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: mmr_size,
             pinned_nodes,
             pool: config.thread_pool,
-        })?;
+        })?);
 
         Ok(Self {
             mem_mmr,
@@ -202,12 +364,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 .await?;
 
         if journal_size == 0 {
-            let mem_mmr = MemMmr::init(MemConfig {
+            let mem_mmr = MmrState::Clean(MemMmr::init(MemConfig {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
                 pool: cfg.thread_pool,
-            })?;
+            })?);
             return Ok(Self {
                 mem_mmr,
                 journal,
@@ -271,12 +433,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
-        let mut mem_mmr = MemMmr::init(MemConfig {
+        let mut mem_mmr = MmrState::Clean(MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes,
             pool: cfg.thread_pool,
-        })?;
+        })?);
         let prune_pos = Position::new(metadata_prune_pos);
         Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
 
@@ -303,7 +465,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<H>,
+        mem_mmr: &mut MmrState<H>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
         prune_pos: Position,
@@ -382,12 +544,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
-        let mut mem_mmr = MemMmr::init(MemConfig {
+        let mut mem_mmr = MmrState::Clean(MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
             pool: cfg.config.thread_pool,
-        })?;
+        })?);
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         if cfg.range.start < journal_size {
