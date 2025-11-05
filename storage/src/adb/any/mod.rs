@@ -195,19 +195,19 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
+    /// Sync only the log to disk (MMR is already clean, no merkleization needed).
+    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
+        // For Clean MMR, we just sync the log. No merkleization needed since add() keeps it clean.
+        self.log.sync().await.map_err(Into::into)
+    }
+
     /// Sync the log and the MMR to disk.
-    pub(super) async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
             self.mmr.sync(self.hasher).map_err(Error::Mmr)
         )?;
 
         Ok(())
-    }
-
-    /// Sync only the log to disk (MMR is already clean, no merkleization needed).
-    pub(super) async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        // For Clean MMR, we just sync the log. No merkleization needed since add() keeps it clean.
-        self.log.sync().await.map_err(Into::into)
     }
 }
