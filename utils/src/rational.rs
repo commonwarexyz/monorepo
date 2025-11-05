@@ -390,4 +390,28 @@ mod tests {
         let result = value.log2_ceil(4);
         assert_eq!(result, BigRational::new(BigInt::from(3), BigInt::from(16)));
     }
+
+    #[test]
+    fn log2_ceil_padding_alignment_regression() {
+        // Values extremely close to 1 should still align fractional bits correctly
+        // if the extraction loop exits before producing all bits (guards future variants).
+
+        // log2(257/256) * 256 ≈ 1.439 → ceil = 2
+        let value = BigRational::from_frac_u64(257, 256);
+        let result = value.log2_ceil(8);
+        assert_eq!(result, BigRational::new(BigInt::from(2), BigInt::from(256)));
+
+        // log2(513/512) * 256 ≈ 0.720 → ceil = 1
+        let value = BigRational::from_frac_u64(513, 512);
+        let result = value.log2_ceil(8);
+        assert_eq!(result, BigRational::new(BigInt::from(1), BigInt::from(256)));
+
+        // log2(65537/65536) * 65536 ≈ 1.44 → ceil = 2
+        let value = BigRational::from_frac_u64(65537, 65536);
+        let result = value.log2_ceil(16);
+        assert_eq!(
+            result,
+            BigRational::new(BigInt::from(2), BigInt::from(65536))
+        );
+    }
 }
