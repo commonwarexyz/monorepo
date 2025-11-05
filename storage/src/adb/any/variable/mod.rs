@@ -177,6 +177,33 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         })
     }
 
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -207,33 +234,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         }
 
         Ok(None)
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
     }
 
     fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
