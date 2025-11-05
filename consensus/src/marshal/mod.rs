@@ -59,7 +59,6 @@ pub mod cache;
 pub mod config;
 pub use config::Config;
 pub mod finalizer;
-pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
@@ -85,7 +84,12 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 pub enum Update<B: Block> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block.
+    /// A new finalized block and a channel to acknowledge the update.
+    ///
+    /// To ensure all blocks are delivered at least once, marshal waits to mark
+    /// a block as delivered until the application explicitly acknowledges the update.
+    /// If the sender is dropped before acknowledgement, marshal will exit (assuming
+    /// the application is shutting down).
     Block(B, oneshot::Sender<()>),
 }
 
