@@ -910,7 +910,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: |context| context.round.view() % 11 < 9,
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1061,7 +1061,9 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 3);
+                    // Current view is 1 since a notarization (without certification)
+                    // does not advance the view.
+                    assert_eq!(current, 1);
                     assert_eq!(finalized, 0);
                     active.send(true).unwrap();
                 }
@@ -1097,6 +1099,22 @@ mod tests {
                     }
                 }
                 context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Expect the batcher to be notified properly.
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 3);
+                    assert_eq!(finalized, 2);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
             }
         });
     }
