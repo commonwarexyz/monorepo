@@ -600,7 +600,7 @@ mod tests {
             .await;
 
             // Fetch keyA multiple times to ensure that Peer2 is blocked.
-            for _ in 0..10 {
+            for _ in 0..20 {
                 // Fetch keyA
                 mailbox1.fetch(key_a.clone()).await;
 
