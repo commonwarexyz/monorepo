@@ -264,6 +264,12 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
 /// Implementation of [crate::Manager] for peers with [SocketAddr]s.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
+///
+/// # Note on [SocketAddr]
+///
+/// Because [SocketAddr]s are never exposed in [crate::simulated],
+/// there is nothing to assert submitted data against. We thus consider
+/// all [SocketAddr]s to be valid.
 #[derive(Debug, Clone)]
 pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.
@@ -275,9 +281,7 @@ impl<P: PublicKey> crate::Manager for SocketManager<P> {
     type Peers = OrderedAssociated<Self::PublicKey, SocketAddr>;
 
     async fn update(&mut self, id: u64, peers: Self::Peers) {
-        // Because SocketAddrs are never exposed in p2p::simulated,
-        // there is nothing to check the provided data against. The
-        // only reasonable thing to do is to just ignore the data.
+        // Ignore all SocketAddrs
         self.oracle.update(id, peers.into_keys()).await;
     }
 
