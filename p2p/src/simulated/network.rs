@@ -261,22 +261,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => {
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
-
-                // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel).await {
-                    Ok(receiver) => Receiver { receiver },
-                    Err(err) => return send_result(result, Err(err)),
-                };
 
                 // Create a sender that allows sending messages to the network for a certain channel
-                let sender = Sender::new(
+                let (sender, handle) = Sender::new(
                     self.context.with_label("sender"),
                     public_key,
                     channel,
                     self.max_size,
                     self.sender.clone(),
                 );
+
+                // Create a receiver that allows receiving messages from the network for a certain channel
+                let receiver = match peer.register(channel, handle).await {
+                    Ok(receiver) => Receiver { receiver },
+                    Err(err) => return send_result(result, Err(err)),
+                };
+
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
@@ -590,11 +591,11 @@ impl<P: PublicKey> Sender<P> {
         channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task<P>>,
-    ) -> Self {
+    ) -> (Self, Handle<()>) {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        context.with_label("sender").spawn(move |_| async move {
+        let handle = context.with_label("sender").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -621,13 +622,16 @@ impl<P: PublicKey> Sender<P> {
         });
 
         // Return sender
-        Self {
-            me,
-            channel,
-            max_size,
-            high,
-            low,
-        }
+        (
+            Self {
+                me,
+                channel,
+                max_size,
+                high,
+                low,
+            },
+            handle,
+        )
     }
 }
 
@@ -683,7 +687,11 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
+    control: mpsc::UnboundedSender<(
+        Channel,
+        oneshot::Sender<MessageReceiverResult<P>>,
+        Handle<()>,
+    )>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -716,19 +724,17 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult<P>>) = match control {
+                        let (channel, result, handle): (Channel, oneshot::Sender<MessageReceiverResult<P>>, Handle<()>) = match control {
                             Some(control) => control,
                             None => break,
                         };
 
-                        // Check if channel is registered
-                        if mailboxes.contains_key(&channel) {
-                            warn!(?public_key, ?channel, "overwriting existing channel");
-                        }
-
                         // Register channel
                         let (sender, receiver) = mpsc::unbounded();
-                        mailboxes.insert(channel, sender);
+                        if let Some(existing) = mailboxes.insert(channel, (sender, handle)) {
+                            warn!(?public_key, ?channel, "overwriting existing channel");
+                            existing.1.abort();
+                        }
                         result.send(Ok(receiver)).unwrap();
                     },
 
@@ -743,7 +749,7 @@ impl<P: PublicKey> Peer<P> {
                         // Send message to mailbox
                         match mailboxes.get_mut(&channel) {
                             Some(mailbox) => {
-                                if let Err(err) = mailbox.send(message).await {
+                                if let Err(err) = mailbox.0.send(message).await {
                                     error!(?err, "failed to send message to mailbox");
                                 }
                             }
@@ -822,10 +828,10 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
-    async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
+    async fn register(&mut self, channel: Channel, handle: Handle<()>) -> MessageReceiverResult<P> {
         let (sender, receiver) = oneshot::channel();
         self.control
-            .send((channel, sender))
+            .send((channel, sender, handle))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
