@@ -145,11 +145,9 @@ where
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
-        let pruning_boundary = self.pruning_boundary();
-
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
-            return Ok(pruning_boundary);
+            return Ok(self.pruning_boundary());
         }
 
         // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
@@ -159,9 +157,10 @@ where
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
-            return Ok(pruning_boundary);
+            return Ok(self.pruning_boundary());
         }
 
+        let pruning_boundary = self.pruning_boundary();
         let op_count = self.op_count();
         debug!(
             ?op_count,
