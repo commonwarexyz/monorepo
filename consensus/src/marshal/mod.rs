@@ -212,7 +212,7 @@ mod tests {
         let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.clone(),
+            manager: oracle.manager(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -342,7 +342,8 @@ mod tests {
             let mut actors = Vec::new();
 
             // Register the initial peer set.
-            oracle.update(0, participants.clone().into()).await;
+            let mut manager = oracle.manager();
+            manager.update(0, participants.clone().into()).await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),

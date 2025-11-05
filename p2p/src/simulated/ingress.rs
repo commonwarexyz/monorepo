@@ -1,38 +1,37 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use rand_distr::Normal;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 pub enum Message<P: PublicKey> {
-    Update {
-        peer_set: u64,
-        peers: Ordered<P>,
-    },
     Register {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
+    Update {
+        id: u64,
+        peers: Ordered<P>,
+    },
     PeerSet {
-        index: u64,
+        id: u64,
         response: oneshot::Sender<Option<Ordered<P>>>,
     },
     Subscribe {
-        #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)>>,
+        sender: mpsc::UnboundedSender<(u64, Ordered<P>, Ordered<P>)>,
     },
     LimitBandwidth {
         public_key: P,
         egress_cap: Option<usize>,
         ingress_cap: Option<usize>,
-        result: oneshot::Sender<Result<(), Error>>,
+        result: oneshot::Sender<()>,
     },
     AddLink {
         sender: P,
@@ -88,11 +87,29 @@ impl<P: PublicKey> Oracle<P> {
         Self { sender }
     }
 
-    /// Spawn an individual control interface for a peer in the simulated network.
+    /// Create a new [Control] interface for some peer.
     pub fn control(&self, me: P) -> Control<P> {
         Control {
             me,
             sender: self.sender.clone(),
+        }
+    }
+
+    /// Create a new [Manager].
+    ///
+    /// Useful for mocking [crate::authenticated::discovery].
+    pub fn manager(&self) -> Manager<P> {
+        Manager {
+            oracle: self.clone(),
+        }
+    }
+
+    /// Create a new [SocketManager].
+    ///
+    /// Useful for mocking [crate::authenticated::lookup].
+    pub fn socket_manager(&self) -> SocketManager<P> {
+        SocketManager {
+            oracle: self.clone(),
         }
     }
 
@@ -110,6 +127,8 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
     /// rates in bytes per second. Use `None` for unlimited bandwidth.
+    ///
+    /// Bandwidth can be specified before a peer is registered or linked.
     pub async fn limit_bandwidth(
         &mut self,
         public_key: P,
@@ -126,13 +145,15 @@ impl<P: PublicKey> Oracle<P> {
             })
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 
     /// Create a unidirectional link between two peers.
     ///
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
+    ///
+    /// Link can be called before a peer is registered or bandwidth is specified.
     pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
@@ -185,40 +206,93 @@ impl<P: PublicKey> Oracle<P> {
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?
     }
-}
 
-impl<P: PublicKey> crate::Manager for Oracle<P> {
-    type PublicKey = P;
-    type Peers = Ordered<Self::PublicKey>;
-
-    async fn update(&mut self, peer_set: u64, peers: Self::Peers) {
-        self.sender
-            .send(Message::Update { peer_set, peers })
-            .await
-            .unwrap();
+    /// Set the peers for a given id.
+    async fn update(&mut self, id: u64, peers: Ordered<P>) {
+        let _ = self.sender.send(Message::Update { id, peers }).await;
     }
 
-    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+    /// Get the peers for a given id.
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<P>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::PeerSet {
-                index: id,
+                id,
                 response: sender,
             })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .ok()?;
+        receiver.await.ok().flatten()
+    }
+
+    /// Subscribe to notifications when new peer sets are added.
+    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
+        let (sender, receiver) = mpsc::unbounded();
+        let _ = self.sender.send(Message::Subscribe { sender }).await;
+        receiver
+    }
+}
+
+/// Implementation of [crate::Manager] for peers.
+///
+/// Useful for mocking [crate::authenticated::discovery].
+#[derive(Debug, Clone)]
+pub struct Manager<P: PublicKey> {
+    /// The oracle to send messages to.
+    oracle: Oracle<P>,
+}
+
+impl<P: PublicKey> crate::Manager for Manager<P> {
+    type PublicKey = P;
+    type Peers = Ordered<Self::PublicKey>;
+
+    async fn update(&mut self, id: u64, peers: Self::Peers) {
+        self.oracle.update(id, peers).await;
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
     }
 
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Subscribe { response: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+        self.oracle.subscribe().await
+    }
+}
+
+/// Implementation of [crate::Manager] for peers with [SocketAddr]s.
+///
+/// Useful for mocking [crate::authenticated::lookup].
+///
+/// # Note on [SocketAddr]
+///
+/// Because [SocketAddr]s are never exposed in [crate::simulated],
+/// there is nothing to assert submitted data against. We thus consider
+/// all [SocketAddr]s to be valid.
+#[derive(Debug, Clone)]
+pub struct SocketManager<P: PublicKey> {
+    /// The oracle to send messages to.
+    oracle: Oracle<P>,
+}
+
+impl<P: PublicKey> crate::Manager for SocketManager<P> {
+    type PublicKey = P;
+    type Peers = OrderedAssociated<Self::PublicKey, SocketAddr>;
+
+    async fn update(&mut self, id: u64, peers: Self::Peers) {
+        // Ignore all SocketAddrs
+        self.oracle.update(id, peers.into_keys()).await;
+    }
+
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
+    }
+
+    async fn subscribe(
+        &mut self,
+    ) -> mpsc::UnboundedReceiver<(u64, Ordered<Self::PublicKey>, Ordered<Self::PublicKey>)> {
+        self.oracle.subscribe().await
     }
 }
 
@@ -243,8 +317,8 @@ impl<P: PublicKey> Control<P> {
                 result: tx,
             })
             .await
-            .unwrap();
-        rx.await.unwrap()
+            .map_err(|_| Error::NetworkClosed)?;
+        rx.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
