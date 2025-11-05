@@ -167,11 +167,6 @@ impl BigRationalExt for BigRational {
                 normalized_numer = numer_squared;
                 normalized_denom = denom_squared;
             }
-
-            // Early termination: if the ratio is exactly 1, there are no more fractional bits.
-            if normalized_numer == normalized_denom {
-                break;
-            }
         }
 
         // Step 6: Combine integer and fractional parts, then apply ceiling operation.
