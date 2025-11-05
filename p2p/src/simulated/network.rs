@@ -662,7 +662,6 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 }
 
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
-type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
@@ -824,7 +823,11 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
-    async fn register(&mut self, channel: Channel, sender: Handle<()>) -> MessageReceiverResult<P> {
+    async fn register(
+        &mut self,
+        channel: Channel,
+        sender: Handle<()>,
+    ) -> Result<MessageReceiver<P>, Error> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
             .send((channel, sender, result_tx))
