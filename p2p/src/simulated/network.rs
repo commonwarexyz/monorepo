@@ -723,8 +723,7 @@ impl<P: PublicKey> Peer<P> {
 
                         // Check if channel is registered
                         if mailboxes.contains_key(&channel) {
-                            result.send(Err(Error::ChannelAlreadyRegistered(channel))).unwrap();
-                            continue;
+                            warn!(?public_key, ?channel, "overwriting existing channel");
                         }
 
                         // Register channel
@@ -942,11 +941,8 @@ mod tests {
             control.register(0).await.unwrap();
             control.register(1).await.unwrap();
 
-            // Expect error when registering again
-            assert!(matches!(
-                control.register(1).await,
-                Err(Error::ChannelAlreadyRegistered(_))
-            ));
+            // Overwrite if registering again
+            control.register(1).await.unwrap();
 
             // Add link
             let link = ingress::Link {

@@ -159,8 +159,6 @@ pub enum Error {
     LinkMissing,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
-    #[error("channel already registered: {0}")]
-    ChannelAlreadyRegistered(u64),
     #[error("send_frame failed")]
     SendFrameFailed,
     #[error("recv_frame failed")]
@@ -416,10 +414,9 @@ mod tests {
             // Register agents
             let pk = PrivateKey::from_seed(0).public_key();
             oracle.control(pk.clone()).register(0).await.unwrap();
-            let result = oracle.control(pk.clone()).register(0).await;
 
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
+            // Overwrite if registering again
+            oracle.control(pk.clone()).register(0).await.unwrap();
         });
     }
 
