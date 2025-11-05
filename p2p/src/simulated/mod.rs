@@ -2376,7 +2376,6 @@ mod tests {
             // Register a peer set
             let sender_pk = PrivateKey::from_seed(1).public_key();
             let recipient_pk = PrivateKey::from_seed(2).public_key();
-            let mut manager = oracle.manager();
             manager
                 .update(1, vec![sender_pk.clone(), recipient_pk.clone()].into())
                 .await;
