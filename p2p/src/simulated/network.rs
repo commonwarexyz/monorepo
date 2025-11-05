@@ -595,7 +595,7 @@ impl<P: PublicKey> Sender<P> {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        let handle = context.with_label("sender").spawn(move |_| async move {
+        let processor = context.with_label("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -630,7 +630,7 @@ impl<P: PublicKey> Sender<P> {
                 high,
                 low,
             },
-            handle,
+            processor,
         )
     }
 }
