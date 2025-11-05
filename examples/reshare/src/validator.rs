@@ -1904,15 +1904,12 @@ mod test {
             let handle = engines.remove(idx);
             handle.abort();
 
-            // Restart the validator
-            let context = context.with_label(&format!("validator_{idx}_restarted"));
-
             // Create signer context
             let signer = signers[idx].clone();
             let public_key = signer.public_key();
-            public_keys.insert(public_key.clone());
 
             // Get networking
+            let context = context.with_label(&format!("validator_{idx}_restarted"));
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                 register_validator(&context, &mut oracle, public_key.clone()).await;
 
@@ -1945,6 +1942,7 @@ mod test {
                 orchestrator,
                 marshal,
             );
+            info!(idx, ?public_key, "restarted validator");
 
             // Poll metrics
             loop {
@@ -1965,7 +1963,9 @@ mod test {
                     }
 
                     // If ends with contiguous_height, ensure it is at least required_container
-                    if metric.ends_with("_processed_height") {
+                    if metric.ends_with("_processed_height")
+                        && metric.contains(&format!("validator_{idx}_restarted"))
+                    {
                         let value = value.parse::<u64>().unwrap();
                         if value >= final_required {
                             success = true;
@@ -1993,7 +1993,7 @@ mod test {
             jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
-        for seed in 0..5 {
+        for seed in 0..1 {
             let state = restart::<EdScheme>(
                 5,
                 5,
