@@ -195,9 +195,8 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
-    /// Sync only the log to disk (MMR is already clean, no merkleization needed).
-    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        // For Clean MMR, we just sync the log. No merkleization needed since add() keeps it clean.
+    // Sync the log to disk.
+    async fn sync_log(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
