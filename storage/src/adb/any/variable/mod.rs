@@ -110,11 +110,18 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T, S> =
-    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
+type SharedState<'a, E, K, V, H, T> = super::Shared<
+    'a,
+    E,
+    Index<T, Location>,
+    Journal<E, Operation<K, V>>,
+    Operation<K, V>,
+    H,
+    Clean,
+>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Any<E, K, V, H, T, Clean>
+    Any<E, K, V, H, T>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -187,20 +194,21 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         Ok(())
     }
 
-    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, Clean> {
-        SharedState {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            let Operation::Update(k, v) = self.log.read(*loc).await? else {
+                unreachable!("location does not reference update operation. loc={loc}");
+            };
+            if &k == key {
+                return Ok(Some(v));
+            }
         }
-    }
-}
 
-// Methods that work on any state
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S>
-    Any<E, K, V, H, T, S>
-{
+        Ok(None)
+    }
+
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
@@ -228,26 +236,15 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.inactivity_floor_loc
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            let Operation::Update(k, v) = self.log.read(*loc).await? else {
-                unreachable!("location does not reference update operation. loc={loc}");
-            };
-            if &k == key {
-                return Ok(Some(v));
-            }
+    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+        SharedState {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
         }
-
-        Ok(None)
     }
-}
 
-// Additional methods that require Clean state
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Any<E, K, V, H, T, Clean>
-{
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
     ///

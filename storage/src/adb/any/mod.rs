@@ -194,17 +194,7 @@ where
 
         Ok(inactivity_floor_loc + 1)
     }
-}
 
-// Additional Clean-only methods
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean>
-where
-    E: Storage + Clock + Metrics,
-    I: Index<Value = Location>,
-    C: Contiguous<Item = O>,
-    O: Keyed,
-    H: Hasher,
-{
     /// Sync the log and the MMR to disk.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(

@@ -78,41 +78,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S = crate
     last_commit_loc: Option<Location>,
 }
 
-// State-agnostic methods
-impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S> Keyless<E, V, H, S> {
-    /// Returns the number of items appended to the Keyless db (including any uncommitted).
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Get the value at location `loc` in the database.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.op_count()`.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        let op_count = self.op_count();
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(loc, op_count));
-        }
-        let op = self.log.read(*loc).await?;
-
-        Ok(op.into_value())
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
-    }
-}
-
-// Clean-state initialization and methods
-impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, crate::mmr::mem::Clean> {
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -157,9 +123,40 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, crate:
         })
     }
 
+    /// Get the value at location `loc` in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.op_count()`.
+    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+        let op_count = self.op_count();
+        if loc >= op_count {
+            return Err(Error::LocationOutOfBounds(loc, op_count));
+        }
+        let op = self.log.read(*loc).await?;
+
+        Ok(op.into_value())
+    }
+
+    /// Get the number of operations (appends + commits) that have been applied to the db since
+    /// inception.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
     /// Returns the location of the last commit, if any.
     pub fn last_commit_loc(&self) -> Option<Location> {
         self.last_commit_loc
+    }
+
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
