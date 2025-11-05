@@ -17,7 +17,7 @@ pub mod generate;
 pub mod init;
 
 #[derive(Debug, Clone, Copy)]
-pub enum Variant {
+enum Variant {
     Store,
     Any,
 }
@@ -31,26 +31,26 @@ impl Variant {
     }
 }
 
-pub const VARIANTS: [Variant; 2] = [Variant::Store, Variant::Any];
+const VARIANTS: [Variant; 2] = [Variant::Store, Variant::Any];
 
-pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-pub const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
+const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores.
-pub const THREADS: usize = 8;
+const THREADS: usize = 8;
 
 /// Use a "prod sized" page size to test the performance of the journal.
-pub const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
 
 /// The number of pages to cache in the buffer pool.
-pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Default delete frequency (1/10th of the updates will be deletes).
-pub const DELETE_FREQUENCY: u32 = 10;
+const DELETE_FREQUENCY: u32 = 10;
 
 /// Default write buffer size.
-pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
