@@ -102,7 +102,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -129,7 +129,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let log_size = align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr, &mut log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
@@ -158,7 +158,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         mut cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // Initialize MMR for sync
-        let mut mmr = Mmr::init_sync(
+        let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: MmrConfig {
@@ -177,7 +177,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-        let log_size = align_mmr_and_log(&mut mmr, &mut cfg.log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -313,9 +313,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // Create a future that updates the MMR.
+        // Create a future that updates the MMR (add() keeps it Clean).
         let mmr_fut = async {
-            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
         };
 
@@ -402,10 +402,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
 
-        // Create a future that updates the MMR.
+        // Create a future that updates the MMR (add() keeps it Clean).
         let mmr_fut = async {
-            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
-            self.mmr.merkleize(&mut self.hasher);
+            self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
         };
 

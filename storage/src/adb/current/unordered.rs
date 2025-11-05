@@ -278,12 +278,11 @@ impl<
         self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
         self.status.push(true); // Always treat most recent commit op as active.
 
-        // Sync the log and merkleize the MMR updates in parallel.
-        let mmr_fut = async {
-            self.any.mmr.merkleize(&mut self.any.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.any.log.sync().map_err(Error::Journal), mmr_fut)?;
+        // Sync the log and MMR in parallel (MMR is already Clean from add() calls).
+        try_join!(
+            self.any.log.sync().map_err(Error::Journal),
+            self.any.mmr.sync(&mut self.any.hasher).map_err(Error::Mmr)
+        )?;
 
         Ok(())
     }

@@ -60,13 +60,13 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
+pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S = crate::mmr::mem::Clean> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned log.
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H, S>,
 
     /// A journal of all operations ever applied to the db.
     log: Journal<E, Operation<V>>,
@@ -78,13 +78,47 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
+// State-agnostic methods
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S> Keyless<E, V, H, S> {
+    /// Returns the number of items appended to the Keyless db (including any uncommitted).
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Get the value at location `loc` in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.op_count()`.
+    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+        let op_count = self.op_count();
+        if loc >= op_count {
+            return Err(Error::LocationOutOfBounds(loc, op_count));
+        }
+        let op = self.log.read(*loc).await?;
+
+        Ok(op.into_value())
+    }
+
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+}
+
+// Clean-state initialization and methods
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, crate::mmr::mem::Clean> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -112,7 +146,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         .await?;
 
         // Align MMR with log
-        let log_size = align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr, &mut log, &mut hasher).await?;
         let last_commit_loc = log_size.checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
@@ -123,40 +157,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         })
     }
 
-    /// Get the value at location `loc` in the database.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.op_count()`.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        let op_count = self.op_count();
-        if loc >= op_count {
-            return Err(Error::LocationOutOfBounds(loc, op_count));
-        }
-        let op = self.log.read(*loc).await?;
-
-        Ok(op.into_value())
-    }
-
-    /// Get the number of operations (appends + commits) that have been applied to the db since
-    /// inception.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
     /// Returns the location of the last commit, if any.
     pub fn last_commit_loc(&self) -> Option<Location> {
         self.last_commit_loc
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
@@ -191,11 +194,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             Ok::<(), Error>(())
         };
 
-        // Create a future that updates the MMR.
+        // Create a future that updates the MMR (add() keeps it Clean).
         let mmr_fut = async {
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_operation)
-                .await?;
+            self.mmr.add(&mut self.hasher, &encoded_operation).await?;
             Ok::<(), Error>(())
         };
 
@@ -224,12 +225,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             Ok::<(), Error>(())
         };
 
-        // Create a future that adds the commit operation to the MMR and merkleizes all updates.
+        // Create a future that adds the commit operation to the MMR (add() keeps it Clean).
         let mmr_fut = async {
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_operation)
-                .await?;
-            self.mmr.merkleize(&mut self.hasher);
+            self.mmr.add(&mut self.hasher, &encoded_operation).await?;
 
             Ok::<(), Error>(())
         };

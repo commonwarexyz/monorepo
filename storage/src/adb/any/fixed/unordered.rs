@@ -33,6 +33,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S = crate::mmr::mem::Clean,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -41,7 +42,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -74,11 +75,67 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
+// State-agnostic methods
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        S,
+    > Any<E, K, V, H, T, S>
+{
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        self.mmr.leaves()
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
+    /// Return the inactivity floor location.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        for &loc in self.snapshot.get(key) {
+            let Operation::Update(k, v) = self.log.read(*loc).await? else {
+                unreachable!("location does not reference update operation. loc={loc}");
+            };
+            if &k == key {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the value & location of the active operation for `key` in the db, or None if it has no value.
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
+        for &loc in self.snapshot.get(key) {
+            let Operation::Update(k, v) = self.log.read(*loc).await? else {
+                unreachable!("location does not reference update operation. loc={loc}");
+            };
+            if k == *key {
+                return Ok(Some((v, loc)));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+// Clean-state initialization and methods
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, crate::mmr::mem::Clean>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -102,51 +159,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(db)
     }
 
-    /// Get the update operation from `log` corresponding to a known location.
-    async fn get_update_op(
-        log: &Journal<E, Operation<K, V>>,
-        loc: Location,
-    ) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(*loc).await? else {
-            unreachable!("location does not reference update operation. loc={loc}");
-        };
-
-        Ok((k, v))
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
-    }
-
-    /// Get the value & location of the active operation for `key` in the db, or None if it has no
-    /// value.
-    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
-        for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, loc).await?;
-            if k == *key {
-                return Ok(Some((v, loc)));
-            }
+    /// Helper to create SharedState reference.
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, crate::mmr::mem::Clean> {
+        Shared {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
         }
-
-        Ok(None)
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.mmr.leaves()
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
     }
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
@@ -187,16 +207,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         };
 
         Ok(r)
-    }
-
-    /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        Shared {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
-        }
     }
 
     /// Return the root of the db.
@@ -350,7 +360,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Db<E, K, V, T> for Any<E, K, V, H, T>
+    Db<E, K, V, T> for Any<E, K, V, H, T, crate::mmr::mem::Clean>
 {
     fn op_count(&self) -> Location {
         self.op_count()

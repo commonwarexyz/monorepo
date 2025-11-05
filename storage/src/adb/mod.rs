@@ -85,6 +85,8 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
 /// log. Returns the size of the log after alignment.
 ///
+/// Consumes the MMR and returns it in Clean state along with the log size.
+///
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit operation.
 /// - The number of leaves in the MMR will be equal to the number of operations in the log.
@@ -93,10 +95,10 @@ pub(super) async fn align_mmr_and_log<
     O: Codec + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mut mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<u64, Error> {
+) -> Result<(Mmr<E, H>, u64), Error> {
     // Back up over / discard any uncommitted operations in the log.
     let log_size = rewind_uncommitted(log).await?;
 
@@ -116,22 +118,41 @@ pub(super) async fn align_mmr_and_log<
             log_size,
             replay_count, "MMR lags behind log, replaying log to catch up"
         );
+
+        // Transition to Dirty state with first operation
+        let op = log.read(*next_mmr_leaf_num).await?;
+        let (mut dirty_mmr, _) = mmr
+            .add_batched(hasher, &op.encode())
+            .await
+            .map_err(Error::Mmr)?;
+        next_mmr_leaf_num += 1;
+
+        // Continue in Dirty state
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;
-            mmr.add_batched(hasher, &op.encode()).await?;
+            dirty_mmr
+                .add_batched(hasher, &op.encode())
+                .await
+                .map_err(Error::Mmr)?;
             next_mmr_leaf_num += 1;
         }
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+
+        // Sync back to Clean state and return
+        let mmr = dirty_mmr.sync(hasher).await.map_err(Error::Mmr)?;
+        assert_eq!(log_size, mmr.leaves());
+        return Ok((mmr, log_size));
     }
 
     // At this point the MMR and log should be consistent.
     assert_eq!(log_size, mmr.leaves());
 
-    Ok(log_size)
+    Ok((mmr, log_size))
 }
 
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
 /// log. Returns the inactivity floor location set by the last commit.
+///
+/// Consumes the MMR and returns it in Clean state along with the inactivity floor location.
 ///
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit operation.
@@ -141,20 +162,21 @@ pub(super) async fn align_mmr_and_floored_log<
     O: Keyed + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error> {
-    let log_size = align_mmr_and_log(mmr, log, hasher).await?;
+) -> Result<(Mmr<E, H>, Location), Error> {
+    let (mmr, log_size) = align_mmr_and_log(mmr, log, hasher).await?;
     if log_size == 0 {
-        return Ok(Location::new_unchecked(0));
+        return Ok((mmr, Location::new_unchecked(0)));
     };
     let op = log.read(log_size - 1).await?;
 
     // The final operation in the log must be a commit wrapping the inactivity floor.
-    Ok(op
+    let floor = op
         .has_floor()
-        .expect("last operation should be a commit floor"))
+        .expect("last operation should be a commit floor");
+    Ok((mmr, floor))
 }
 
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.

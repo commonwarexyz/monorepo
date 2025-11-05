@@ -13,6 +13,7 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
+        mem::Clean,
         Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -66,14 +67,21 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+    S = Clean,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence.
     log: Journal<E, Operation<K, V>>,
@@ -102,11 +110,11 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, Clean>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -116,7 +124,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
 
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -143,8 +151,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         )
         .await?;
 
-        let inactivity_floor_loc =
-            align_mmr_and_floored_log(&mut mmr, &mut log, &mut hasher).await?;
+        let (mmr, inactivity_floor_loc) =
+            align_mmr_and_floored_log(mmr, &mut log, &mut hasher).await?;
 
         // Build snapshot from the log
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
@@ -162,6 +170,37 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         })
     }
 
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let new_loc = Location::new_unchecked(self.log.size());
+        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
+            .await?
+            .is_some()
+        {
+            self.steps += 1;
+        }
+        self.as_shared()
+            .apply_op(Operation::Update(key, value))
+            .await?;
+
+        Ok(())
+    }
+
+    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, Clean> {
+        SharedState {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
+        }
+    }
+}
+
+// Methods that work on any state
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S>
+    Any<E, K, V, H, T, S>
+{
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
@@ -189,23 +228,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.op_count();
-        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
-            .await?
-            .is_some()
-        {
-            self.steps += 1;
-        }
-        self.as_shared()
-            .apply_op(Operation::Update(key, value))
-            .await?;
-
-        Ok(())
-    }
-
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
@@ -220,16 +242,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 
         Ok(None)
     }
+}
 
-    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        SharedState {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
-        }
-    }
-
+// Additional methods that require Clean state
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Any<E, K, V, H, T, Clean>
+{
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
     ///
@@ -347,12 +365,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .apply_op(Operation::CommitFloor(metadata, loc))
             .await?;
 
-        // "Commit" the log and process the updates to the MMR.
-        let mmr_fut = async {
-            self.mmr.merkleize(&mut self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync_data().map_err(Into::into), mmr_fut)?;
+        // "Commit" the log (MMR merkleization will happen during next sync)
+        self.log.sync_data().await?;
 
         Ok(())
     }
@@ -449,7 +463,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> Db<E, K, V, T>
-    for Any<E, K, V, H, T>
+    for Any<E, K, V, H, T, Clean>
 {
     fn op_count(&self) -> Location {
         self.op_count()

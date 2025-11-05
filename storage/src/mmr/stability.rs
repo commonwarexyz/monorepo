@@ -7,7 +7,7 @@ use commonware_cryptography::{Hasher as CHasher, Sha256};
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
 pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256, Clean>) {
-    let temp_mmr = std::mem::replace(mmr, Mmr::new());
+    let temp_mmr = std::mem::take(mmr);
     hasher.inner().update(&0u64.to_be_bytes());
     let element = hasher.inner().finalize();
     let (mut dirty_mmr, _) = temp_mmr.add_batched(hasher, &element);

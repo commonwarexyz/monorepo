@@ -5,7 +5,7 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
+    mmr::{bitmap::BitMap, journaled::Mmr, mem::Clean, Location, Position, Proof, StandardHasher},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -72,14 +72,16 @@ pub(crate) struct Shared<
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
+    S,
 > {
     pub snapshot: &'a mut I,
-    pub mmr: &'a mut Mmr<E, H>,
+    pub mmr: &'a mut Mmr<E, H, S>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
 }
 
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
+// Methods that work on Clean MMR
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean>
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
@@ -87,16 +89,13 @@ where
     O: Keyed,
     H: Hasher,
 {
-    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
-    /// until the next successful `commit`.
+    /// Append `op` to the log and add it to the MMR. Uses add() which keeps the MMR Clean.
     pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // Append operation to the log and update the MMR in parallel.
+        // add() on Clean MMR keeps it Clean
         try_join!(
-            self.mmr
-                .add_batched(self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
+            self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
         )?;
 
@@ -195,25 +194,30 @@ where
 
         Ok(inactivity_floor_loc + 1)
     }
+}
 
-    /// Sync only the log and process the updates to the MMR in parallel.
-    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        let mmr_fut = async {
-            self.mmr.merkleize(self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync().map_err(Into::into), mmr_fut)?;
+// Additional Clean-only methods
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean>
+where
+    E: Storage + Clock + Metrics,
+    I: Index<Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
+    H: Hasher,
+{
+    /// Sync the log and the MMR to disk.
+    pub(super) async fn sync(&mut self) -> Result<(), Error> {
+        try_join!(
+            self.log.sync().map_err(Error::Journal),
+            self.mmr.sync(self.hasher).map_err(Error::Mmr)
+        )?;
 
         Ok(())
     }
 
-    /// Sync the log and the MMR to disk.
-    async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(self.hasher).map_err(Into::into)
-        )?;
-
-        Ok(())
+    /// Sync only the log to disk (MMR is already clean, no merkleization needed).
+    pub(super) async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
+        // For Clean MMR, we just sync the log. No merkleization needed since add() keeps it clean.
+        self.log.sync().await.map_err(Into::into)
     }
 }

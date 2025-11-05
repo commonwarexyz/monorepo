@@ -75,7 +75,7 @@ pub(crate) async fn init_mmr_and_log<
     cfg: Config<T>,
     hasher: &mut StandardHasher<H>,
 ) -> Result<(Location, Mmr<E, H>, Journal<E, O>), Error> {
-    let mut mmr = Mmr::init(
+    let mmr = Mmr::init(
         context.with_label("mmr"),
         hasher,
         MmrConfig {
@@ -100,7 +100,7 @@ pub(crate) async fn init_mmr_and_log<
     )
     .await?;
 
-    let inactivity_floor_loc = align_mmr_and_floored_log(&mut mmr, &mut log, hasher).await?;
+    let (mmr, inactivity_floor_loc) = align_mmr_and_floored_log(mmr, &mut log, hasher).await?;
 
     Ok((inactivity_floor_loc, mmr, log))
 }

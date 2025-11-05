@@ -257,7 +257,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
-        let mut temp_mmr = std::mem::replace(&mut self.mmr, Mmr::new());
+        let mut temp_mmr = std::mem::take(&mut self.mmr);
         temp_mmr.prune_to_pos(mmr_pos);
         self.mmr = temp_mmr;
         Ok(())
@@ -349,35 +349,14 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let temp_mmr = std::mem::replace(&mut self.mmr, Mmr::new());
+        let temp_mmr = std::mem::take(&mut self.mmr);
 
         // Build up new chunks
         let new_chunks = (start..end)
             .map(|i| self.bitmap.get_chunk(i))
             .collect::<Vec<_>>();
 
-        // Add new chunks if any
-        let mut mmr_after_adds = if !new_chunks.is_empty() {
-            let (mut dirty_mmr, _) = temp_mmr.add_batched(hasher, new_chunks[0]);
-            for chunk in &new_chunks[1..] {
-                dirty_mmr.add_batched(hasher, *chunk);
-            }
-            dirty_mmr
-        } else {
-            // No new chunks, but we need to transition to Dirty for update_leaf_batched
-            // We can do this by calling add_batched then immediately popping, or better yet,
-            // we can make update_leaf_batched work on Clean. For now, let's ensure there are
-            // no dirty chunks to update if we're not adding any new chunks.
-            if self.dirty_chunks.is_empty() {
-                self.mmr = temp_mmr;
-                return Ok(());
-            }
-            let (dirty_mmr, _) = temp_mmr.add_batched(hasher, &[]);
-            dirty_mmr
-        };
-        self.authenticated_len = end;
-
-        // Inform the MMR of modified chunks.
+        // Inform the MMR of modified chunks (prepare updates before branching).
         let pruned_chunks = self.bitmap.pruned_chunks();
         let updates = self
             .dirty_chunks
@@ -388,9 +367,34 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        mmr_after_adds.update_leaf_batched(hasher, &updates)?;
-        self.dirty_chunks.clear();
-        self.mmr = mmr_after_adds.merkleize(hasher);
+
+        // Add new chunks if any
+        if !new_chunks.is_empty() {
+            // Transition Clean -> Dirty with first add
+            let (mut dirty_mmr, _) = temp_mmr.add_batched(hasher, new_chunks[0]);
+            for chunk in &new_chunks[1..] {
+                dirty_mmr.add_batched(hasher, *chunk);
+            }
+
+            // Update dirty chunks
+            dirty_mmr.update_leaf_batched(hasher, &updates)?;
+            self.dirty_chunks.clear();
+            self.authenticated_len = end;
+
+            // Merkleize Dirty -> Clean
+            self.mmr = dirty_mmr.merkleize(hasher);
+        } else if !updates.is_empty() {
+            // No new chunks, but we have dirty chunks to update
+            // Use Clean::update_leaf_batched which transitions Clean -> Dirty
+            let dirty_mmr = temp_mmr.update_leaf_batched(hasher, &updates)?;
+            self.dirty_chunks.clear();
+
+            // Merkleize Dirty -> Clean
+            self.mmr = dirty_mmr.merkleize(hasher);
+        } else {
+            // No new chunks and no dirty chunks, just restore the MMR
+            self.mmr = temp_mmr;
+        }
 
         Ok(())
     }

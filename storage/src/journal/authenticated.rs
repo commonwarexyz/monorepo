@@ -91,11 +91,13 @@ where
     /// Align `mmr` to be consistent with `journal`.
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
+    ///
+    /// Consumes the MMR and returns it in Clean state.
     async fn align(
-        mmr: &mut Mmr<E, H>,
+        mut mmr: Mmr<E, H>,
         journal: &mut C,
         hasher: &mut StandardHasher<H>,
-    ) -> Result<(), Error> {
+    ) -> Result<Mmr<E, H>, Error> {
         let journal_size = journal.size().await;
 
         // Pop any MMR elements that are ahead of the journal.
@@ -115,18 +117,27 @@ where
                 journal_size,
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
+
+            // Transition to Dirty state with first operation
+            let op = journal.read(*mmr_size).await?;
+            let (mut dirty_mmr, _) = mmr.add_batched(hasher, &op.encode()).await?;
+            mmr_size += 1;
+
+            // Continue in Dirty state
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                mmr.add_batched(hasher, &op.encode()).await?;
+                dirty_mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
-            mmr.sync(hasher).await?;
+
+            // Sync back to Clean state and return
+            return Ok(dirty_mmr.sync(hasher).await?);
         }
 
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size().await, mmr.leaves());
 
-        Ok(())
+        Ok(mmr)
     }
 
     /// Append an operation.
@@ -135,10 +146,10 @@ where
     pub async fn append(&mut self, op: O) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
-        // Append operation to the journal and update the MMR in parallel.
+        // Append operation to the journal and update the MMR in parallel (add() keeps it Clean).
         let (_, loc) = try_join!(
             self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
+                .add(&mut self.hasher, &encoded_op)
                 .map_err(Error::Mmr),
             self.journal.append(op).map_err(Into::into)
         )?;
@@ -276,7 +287,6 @@ where
 
     /// Return the root of the MMR.
     pub fn root(&mut self) -> H::Digest {
-        self.mmr.merkleize(&mut self.hasher);
         self.mmr.root(&mut self.hasher)
     }
 
@@ -353,14 +363,14 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
         // Rewind to last matching operation.
         rewind(&mut journal, rewind_predicate).await?;
 
-        // Align the MMR and journal.
-        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        // Align the MMR and journal (consumes and returns MMR).
+        let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -401,15 +411,15 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
         // Rewind to last matching operation.
         rewind(&mut journal, rewind_predicate).await?;
 
-        // Align the MMR and journal.
-        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        // Align the MMR and journal (consumes and returns MMR).
+        let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -594,10 +604,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, mut journal, mut hasher) =
-                create_components(context, "align_empty").await;
+            let (mmr, mut journal, mut hasher) = create_components(context, "align_empty").await;
 
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
+            let mmr = Journal::align(mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
@@ -614,12 +623,22 @@ mod tests {
             let (mut mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
 
             // Add 20 operations to both MMR and journal
-            for i in 0..20 {
+            // First operation transitions Clean -> Dirty
+            let op = create_operation(0);
+            let encoded = op.encode();
+            let (mut dirty_mmr, _) = mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+            journal.append(op).await.unwrap();
+
+            // Subsequent operations keep it Dirty
+            for i in 1..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
+
+            // Sync Dirty -> Clean
+            mmr = dirty_mmr.sync(&mut hasher).await.unwrap();
 
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(Location::new_unchecked(0));
@@ -627,7 +646,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
+            mmr = Journal::align(mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 
@@ -657,7 +676,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
+            mmr = Journal::align(mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 

@@ -48,6 +48,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S = crate::mmr::mem::Clean,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -56,7 +57,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -89,8 +90,8 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 impl<
         E: Storage + Clock + Metrics,
@@ -98,7 +99,7 @@ impl<
         V: CodecFixed<Cfg = ()>,
         H: Hasher,
         T: Translator,
-    > Any<E, K, V, H, T>
+    > Any<E, K, V, H, T, crate::mmr::mem::Clean>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -565,7 +566,7 @@ impl<
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, crate::mmr::mem::Clean> {
         Shared {
             snapshot: &mut self.snapshot,
             mmr: &mut self.mmr,

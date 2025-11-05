@@ -83,18 +83,24 @@ where
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size().await;
-        for i in *mmr.leaves()..log_size {
+        let start_leaves = *mmr.leaves();
+        let mut i = start_leaves;
+        while i < log_size {
+            // Transition to Dirty state with first operation
             let op = log.read(i).await?;
-            mmr.add_batched(&mut hasher, &op.encode()).await?;
-            if i % apply_batch_size as u64 == 0 {
-                // Periodically sync the MMR to avoid memory bloat.
-                // Since the first value i takes may not be a multiple of `apply_batch_size`,
-                // the first sync may occur before `apply_batch_size` operations are applied.
-                // This is fine.
-                mmr.sync(&mut hasher).await?;
+            let (mut dirty_mmr, _) = mmr.add_batched(&mut hasher, &op.encode()).await?;
+            i += 1;
+
+            // Continue in Dirty state until sync threshold
+            while i < log_size && i % apply_batch_size as u64 != 0 {
+                let op = log.read(i).await?;
+                dirty_mmr.add_batched(&mut hasher, &op.encode()).await?;
+                i += 1;
             }
+
+            // Sync back to Clean state
+            mmr = dirty_mmr.sync(&mut hasher).await?;
         }
-        mmr.sync(&mut hasher).await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
