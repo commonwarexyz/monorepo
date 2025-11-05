@@ -179,6 +179,58 @@ mod test {
         time::Duration,
     };
 
+    async fn register_validator(
+        context: &deterministic::Context,
+        oracle: &mut Oracle<PublicKey>,
+        validator: PublicKey,
+    ) -> (
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (Sender<PublicKey>, Receiver<PublicKey>),
+        (
+            mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
+            commonware_resolver::p2p::Mailbox<handler::Request<Block<Sha256, PrivateKey, MinSig>>>,
+        ),
+    ) {
+        let mut control = oracle.control(validator.clone());
+        let pending = control.register(PENDING_CHANNEL).await.unwrap();
+        let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
+        let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
+        let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
+        let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
+        let dkg = control.register(DKG_CHANNEL).await.unwrap();
+        let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+
+        let resolver_cfg = marshal_resolver::Config {
+            public_key: validator.clone(),
+            manager: oracle.manager(),
+            mailbox_size: 200,
+            requester_config: requester::Config {
+                me: Some(validator),
+                rate_limit: Quota::per_second(NZU32!(5)),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+            },
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        };
+        let marshal = marshal_resolver::init(context, resolver_cfg, marshal);
+
+        (
+            pending,
+            recovered,
+            resolver,
+            broadcast,
+            dkg,
+            orchestrator,
+            marshal,
+        )
+    }
+
     /// Registers all validators using the oracle.
     async fn register_validators(
         context: &deterministic::Context,
@@ -203,43 +255,8 @@ mod test {
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let mut control = oracle.control(validator.clone());
-            let pending = control.register(PENDING_CHANNEL).await.unwrap();
-            let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
-            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-            let dkg = control.register(DKG_CHANNEL).await.unwrap();
-            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
-
-            let resolver_cfg = marshal_resolver::Config {
-                public_key: validator.clone(),
-                manager: oracle.manager(),
-                mailbox_size: 200,
-                requester_config: requester::Config {
-                    me: Some(validator.clone()),
-                    rate_limit: Quota::per_second(NZU32!(5)),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            };
-            let marshal = marshal_resolver::init(context, resolver_cfg, marshal);
-
-            registrations.insert(
-                validator.clone(),
-                (
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg,
-                    orchestrator,
-                    marshal,
-                ),
-            );
+            let registration = register_validator(context, oracle, validator.clone()).await;
+            registrations.insert(validator.clone(), registration);
         }
         registrations
     }
@@ -1747,5 +1764,315 @@ mod test {
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1)
         );
+    }
+
+    fn restart<S>(
+        n: u32,
+        seed: u64,
+        link: Link,
+        shutdown_height: u64,
+        restart_height: u64,
+        final_required: u64,
+    ) -> String
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        SchemeProvider<S, ed25519::PrivateKey>:
+            EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+    {
+        // Create context
+        let threshold = quorum(n);
+        let cfg = deterministic::Config::default().with_seed(seed);
+        let executor = Runner::from(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Register participants
+            let mut signers = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let signer = PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
+                signers.push(signer);
+                validators.push(pk);
+            }
+            validators.sort();
+            signers.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&context, &mut oracle, &validators).await;
+
+            // Link all validators
+            link_validators(&mut oracle, &validators, link, None).await;
+
+            // Create instances
+            let mut engines = Vec::new();
+            let mut public_keys = HashSet::new();
+            for (idx, signer) in signers.iter().enumerate() {
+                let context = context.with_label(&format!("validator_{idx}"));
+
+                // Create signer context
+                let public_key = signer.public_key();
+                public_keys.insert(public_key.clone());
+
+                // Get networking
+                let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
+                    registrations.remove(&public_key).unwrap();
+
+                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                    context.with_label("engine"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: shares.get(idx).cloned(),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: n as usize,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
+
+                let handle = engine.start(
+                    pending,
+                    recovered,
+                    resolver,
+                    broadcast,
+                    dkg,
+                    orchestrator,
+                    marshal,
+                );
+                engines.push(handle);
+            }
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = 0;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= shutdown_height {
+                            success += 1;
+                        }
+                    }
+                }
+                if success == n {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            // Abort a validator
+            let idx = context.gen_range(0..engines.len());
+            let signer = signers[idx].clone();
+            let public_key = signer.public_key();
+            let handle = engines.remove(idx);
+            handle.abort();
+            info!(idx, ?public_key, "aborted validator");
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = 0;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= restart_height {
+                            success += 1;
+                        }
+                    }
+                }
+                if success == n - 1 {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            // Get networking
+            let context = context.with_label(&format!("validator_{idx}_restarted"));
+            let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
+                register_validator(&context, &mut oracle, public_key.clone()).await;
+
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                context.with_label("engine"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: shares.get(idx).cloned(),
+                    active_participants: validators,
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: n as usize,
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: format!("validator_{idx}"),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
+            engine.start(
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg,
+                orchestrator,
+                marshal,
+            );
+            info!(idx, ?public_key, "restarted validator");
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = 0;
+                for line in metrics.lines() {
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_processed_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= final_required {
+                            success += 1;
+                        }
+                    }
+                }
+                if success == n {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced("INFO")]
+    #[ignore]
+    fn test_restart_ed() {
+        let link = Link {
+            latency: Duration::from_millis(10),
+            jitter: Duration::from_millis(1),
+            success_rate: 1.0,
+        };
+        for seed in 0..5 {
+            let state = restart::<EdScheme>(
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+                2 * BLOCKS_PER_EPOCH + 1,
+                3 * BLOCKS_PER_EPOCH + 1,
+            );
+            assert_eq!(
+                state,
+                restart::<EdScheme>(
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1,
+                    2 * BLOCKS_PER_EPOCH + 1,
+                    3 * BLOCKS_PER_EPOCH + 1
+                )
+            );
+        }
+    }
+
+    #[test_traced("INFO")]
+    #[ignore]
+    fn test_restart_threshold() {
+        let link = Link {
+            latency: Duration::from_millis(10),
+            jitter: Duration::from_millis(1),
+            success_rate: 1.0,
+        };
+        for seed in 0..5 {
+            let state = restart::<ThresholdScheme<MinSig>>(
+                5,
+                seed,
+                link.clone(),
+                BLOCKS_PER_EPOCH + 1,
+                2 * BLOCKS_PER_EPOCH + 1,
+                3 * BLOCKS_PER_EPOCH + 1,
+            );
+            assert_eq!(
+                state,
+                restart::<ThresholdScheme<MinSig>>(
+                    5,
+                    seed,
+                    link.clone(),
+                    BLOCKS_PER_EPOCH + 1,
+                    2 * BLOCKS_PER_EPOCH + 1,
+                    3 * BLOCKS_PER_EPOCH + 1
+                )
+            );
+        }
     }
 }
