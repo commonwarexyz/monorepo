@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 libfuzzer-sys.workspace = true
 rand_chacha.workspace = true
@@ -37,6 +38,20 @@ bench = false
 [[bin]]
 name = "zoda"
 path = "fuzz_targets/zoda.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_read"
+path = "fuzz_targets/codec_read.rs"
 test = false
 doc = false
 bench = false

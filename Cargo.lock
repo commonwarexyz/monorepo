@@ -1100,6 +1100,7 @@ name = "commonware-coding-fuzz"
 version = "0.0.63"
 dependencies = [
  "arbitrary",
+ "commonware-codec",
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
