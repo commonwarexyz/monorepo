@@ -189,7 +189,7 @@ mod test {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use rand_core::CryptoRngCore;
     use std::{
-        collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet},
         future::Future,
         pin::Pin,
         time::Duration,
@@ -451,24 +451,15 @@ mod test {
         }
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum EpochPlan {
-        Success,
-    }
-
     struct Plan {
         seed: u64,
         total: u32,
         per_round: u32,
         link: Link,
-        epochs: Vec<EpochPlan>,
+        target: u64,
     }
 
     impl Plan {
-        fn is_last_epoch(&self, epoch: Epoch) -> bool {
-            epoch.next().get() >= self.epochs.len() as u64
-        }
-
         async fn run_inner<S>(self, mut ctx: deterministic::Context) -> anyhow::Result<()>
         where
             S: Scheme<PublicKey = PublicKey>,
@@ -500,44 +491,53 @@ mod test {
                 .await;
 
             tracing::debug!("waiting for updates");
-            let mut outputs = Vec::<Output<MinSig, PublicKey>>::new();
+            let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
+            let mut successes = 0u64;
             while let Some(update) = updates_out.next().await {
-                match update.update {
+                let (epoch, output) = match update.update {
                     Update::Failure { epoch } => {
                         tracing::info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
-                        return Err(anyhow!("dkg failure, pk = {:?}", &update.pk));
+                        (epoch, None)
                     }
                     Update::Success { epoch, output, .. } => {
                         tracing::info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
-                        match status.get(&update.pk) {
-                            None if epoch.is_zero() => {}
-                            Some(e) if e.next() == epoch => {}
-                            other => return Err(anyhow!("unexpected update epoch {other:?}")),
+
+                        (epoch, Some(output))
+                    }
+                };
+                match status.get(&update.pk) {
+                    None if epoch.is_zero() => {}
+                    Some(e) if e.next() == epoch => {}
+                    other => return Err(anyhow!("unexpected update epoch {other:?}")),
+                }
+                status.insert(update.pk, epoch);
+
+                match outputs.get(current_epoch.get() as usize) {
+                    None => {
+                        outputs.push(output);
+                        successes += 1;
+                    }
+                    Some(o) => {
+                        if o.as_ref() != output.as_ref() {
+                            return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
                         }
-                        status.insert(update.pk, epoch);
-                        match outputs.get(current_epoch.get() as usize) {
-                            None => outputs.push(output),
-                            Some(o) => {
-                                if o != &output {
-                                    return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
-                                }
-                            }
-                        }
-                        let post_update = if self.is_last_epoch(epoch) {
-                            PostUpdate::Stop
-                        } else {
-                            PostUpdate::Continue
-                        };
-                        update
-                            .cb_in
-                            .send(post_update)
-                            .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
                     }
                 }
+
+                let post_update = if successes >= self.target {
+                    PostUpdate::Stop
+                } else {
+                    PostUpdate::Continue
+                };
+                update
+                    .cb_in
+                    .send(post_update)
+                    .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
+
                 if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
-                    if self.is_last_epoch(current_epoch) {
+                    if successes >= self.target {
                         return Ok(());
                     } else {
                         current_epoch = current_epoch.next();
@@ -569,7 +569,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success],
+            target: 1,
         }
         .run::<EdScheme>())
         {
@@ -588,7 +588,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success],
+            target: 1,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -607,7 +607,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success; 4],
+            target: 4,
         }
         .run::<EdScheme>())
         {
@@ -626,7 +626,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success; 4],
+            target: 4,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -645,7 +645,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success; 4],
+            target: 4,
         }
         .run::<EdScheme>())
         {
@@ -664,7 +664,7 @@ mod test {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             },
-            epochs: vec![EpochPlan::Success; 4],
+            target: 4,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
