@@ -1,3 +1,6 @@
+//! Benchmark the initialization performance of each ADB variant on a large randomly generated
+//! database with variable-sized values.
+
 use crate::variable::{gen_random_kv, get_any, get_store, Variant, VARIANTS};
 use commonware_runtime::{
     benchmarks::{context, tokio},
