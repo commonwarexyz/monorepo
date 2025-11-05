@@ -2357,6 +2357,99 @@ mod tests {
     }
 
     #[test]
+    fn test_sender_removed_from_tracked_peer_set_drops_message() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(1),
+                },
+            );
+            network.start();
+            let mut manager = oracle.manager();
+            let mut subscription = manager.subscribe().await;
+
+            // Register a peer set
+            let sender_pk = PrivateKey::from_seed(1).public_key();
+            let recipient_pk = PrivateKey::from_seed(2).public_key();
+            let mut manager = oracle.manager();
+            manager
+                .update(1, vec![sender_pk.clone(), recipient_pk.clone()].into())
+                .await;
+            let (id, _, _) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+
+            // Register channels
+            let (mut sender, _) = oracle.control(sender_pk.clone()).register(0).await.unwrap();
+            let (_sender2, mut receiver) = oracle
+                .control(recipient_pk.clone())
+                .register(0)
+                .await
+                .unwrap();
+
+            // Add link
+            oracle
+                .add_link(
+                    sender_pk.clone(),
+                    recipient_pk.clone(),
+                    Link {
+                        latency: Duration::from_millis(1),
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Send and confirm message
+            let initial_msg = Bytes::from("tracked");
+            let sent = sender
+                .send(
+                    Recipients::One(recipient_pk.clone()),
+                    initial_msg.clone(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], recipient_pk);
+            let (_pk, received) = receiver.recv().await.unwrap();
+            assert_eq!(received, initial_msg);
+
+            // Register another peer set
+            let other_pk = PrivateKey::from_seed(3).public_key();
+            manager
+                .update(2, vec![recipient_pk.clone(), other_pk].into())
+                .await;
+            let (id, _, _) = subscription.next().await.unwrap();
+            assert_eq!(id, 2);
+
+            // Send message from untracked peer
+            let sent = sender
+                .send(
+                    Recipients::One(recipient_pk.clone()),
+                    Bytes::from("untracked"),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(sent.is_empty());
+
+            // Confirm message was not delivered
+            select! {
+                _ = receiver.recv() => {
+                    panic!("unexpected message");
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {},
+            }
+        });
+    }
+
+    #[test]
     fn test_subscribe_to_peer_sets() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
