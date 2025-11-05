@@ -83,9 +83,6 @@ impl From<crate::journal::authenticated::Error> for Error {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Error::Journal(j),
             crate::journal::authenticated::Error::Mmr(m) => Error::Mmr(m),
-            crate::journal::authenticated::Error::PruneBeyondMinRequired(loc, min) => {
-                Error::PruneBeyondMinRequired(loc, min)
-            }
         }
     }
 }

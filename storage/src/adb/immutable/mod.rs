@@ -128,7 +128,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
 
         // Get the start of the log.
-        let start_loc = journal.pruning_boundary().await?;
+        let start_loc = journal.pruning_boundary();
 
         // Build snapshot from the log.
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
@@ -200,7 +200,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         );
 
         // Get the start of the log.
-        let start_loc = journal.pruning_boundary().await?;
+        let start_loc = journal.pruning_boundary();
 
         // Build snapshot from the log
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
@@ -218,13 +218,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the oldest location that remains retrievable.
-    pub async fn oldest_retained_loc(&self) -> Result<Option<Location>, Error> {
-        self.journal.oldest_retained_loc().await.map_err(Into::into)
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.journal.oldest_retained_loc()
     }
 
     /// Return the location before which all operations have been pruned.
-    pub async fn pruning_boundary(&self) -> Result<Location, Error> {
-        self.journal.pruning_boundary().await.map_err(Into::into)
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary()
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -239,7 +239,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if loc > last_commit {
             return Err(Error::PruneBeyondMinRequired(loc, last_commit));
         }
-        self.journal.prune(loc, last_commit).await?;
+        self.journal.prune(loc).await?;
         Ok(())
     }
 
@@ -248,7 +248,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let oldest = self
             .oldest_retained_loc()
-            .await?
             .unwrap_or(Location::new_unchecked(0));
         let iter = self.snapshot.get(key);
         for &loc in iter {
@@ -267,7 +266,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc < self.pruning_boundary().await? {
+        if loc < self.pruning_boundary() {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -298,7 +297,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let op_count = self.op_count();
         let oldest = self
             .oldest_retained_loc()
-            .await?
             .unwrap_or(Location::new_unchecked(0));
         self.snapshot
             .insert_and_prune(&key, op_count, |v| *v < oldest);
@@ -500,7 +498,7 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             let mut hasher = StandardHasher::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
+            assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.root(), MemMmr::default().root(&mut hasher));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -769,7 +767,7 @@ pub(super) mod test {
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
@@ -787,14 +785,14 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 1);
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
             let loc = Location::new_unchecked(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
             db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
@@ -803,7 +801,7 @@ pub(super) mod test {
             // Confirm boundary persists across restart.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            let oldest_retained_loc = db.oldest_retained_loc().await.unwrap().unwrap();
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)

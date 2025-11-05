@@ -111,8 +111,6 @@ where
 
     fn lower_bound(&self) -> Location {
         self.oldest_retained_loc()
-            .await
-            .unwrap()
             .unwrap_or(Location::new(0).unwrap())
     }
 
