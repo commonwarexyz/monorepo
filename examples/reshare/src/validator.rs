@@ -160,124 +160,38 @@ pub async fn run<S>(
 mod test {
     use super::*;
     use crate::{
-        application::{Block, EdScheme, ThresholdScheme},
-        dkg::{ContinueOnUpdate, PostUpdate, Update},
-        BLOCKS_PER_EPOCH,
+        application::{EdScheme, ThresholdScheme},
+        dkg::{PostUpdate, Update},
     };
     use anyhow::anyhow;
-    use commonware_consensus::{marshal::ingress::handler, types::Epoch};
+    use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
             dkg2::{deal, Output},
-            primitives::{group::Share, ops, variant::MinSig},
+            primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
-    use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
+    use commonware_macros::{test_group, test_traced};
+    use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Metrics, Runner as _, Spawner, Storage,
+        Runner as _,
     };
-    use commonware_utils::{quorum, sequence::U64, set::Ordered, union};
+    use commonware_utils::union;
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
     };
     use governor::Quota;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
     use rand_core::CryptoRngCore;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashMap},
         future::Future,
         pin::Pin,
         time::Duration,
     };
-
-    async fn register_validator(
-        context: &deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
-        validator: PublicKey,
-    ) -> (
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (
-            mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<Block<Sha256, PrivateKey, MinSig>>>,
-        ),
-    ) {
-        let mut control = oracle.control(validator.clone());
-        let pending = control.register(PENDING_CHANNEL).await.unwrap();
-        let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
-        let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-        let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-        let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-        let dkg = control.register(DKG_CHANNEL).await.unwrap();
-        let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
-
-        let resolver_cfg = marshal_resolver::Config {
-            public_key: validator.clone(),
-            manager: oracle.manager(),
-            blocker: control.clone(),
-            mailbox_size: 200,
-            requester_config: requester::Config {
-                me: Some(validator),
-                rate_limit: Quota::per_second(NZU32!(5)),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-            },
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        };
-        let marshal = marshal_resolver::init(context, resolver_cfg, marshal);
-
-        (
-            pending,
-            recovered,
-            resolver,
-            broadcast,
-            dkg,
-            orchestrator,
-            marshal,
-        )
-    }
-
-    /// Registers all validators using the oracle.
-    async fn register_validators(
-        context: &deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
-        validators: impl Iterator<Item = &PublicKey>,
-    ) -> HashMap<
-        PublicKey,
-        (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (
-                mpsc::Receiver<handler::Message<Block<Sha256, PrivateKey, MinSig>>>,
-                commonware_resolver::p2p::Mailbox<
-                    handler::Request<Block<Sha256, PrivateKey, MinSig>>,
-                >,
-            ),
-        ),
-    > {
-        let mut registrations = HashMap::new();
-        let ordered_validators = validators.cloned().collect::<Ordered<_>>();
-        for validator in &ordered_validators {
-            let registration = register_validator(context, oracle, validator.clone()).await;
-            registrations.insert(validator.clone(), registration);
-        }
-        registrations
-    }
 
     struct TeamUpdate {
         pk: PublicKey,
@@ -355,7 +269,8 @@ mod test {
                 EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             // First register all participants with oracle
-            oracle
+            let mut manager = oracle.manager();
+            manager
                 .update(0, self.participants.keys().cloned().collect())
                 .await;
 
@@ -405,8 +320,8 @@ mod test {
 
                 let resolver_cfg = marshal_resolver::Config {
                     public_key: pk.clone(),
-                    manager: oracle.clone(),
-                    blocker: oracle.clone(),
+                    manager: manager.clone(),
+                    blocker: oracle.control(pk.clone()),
                     mailbox_size: 200,
                     requester_config: requester::Config {
                         me: Some(pk.clone()),
@@ -424,7 +339,7 @@ mod test {
                     ctx.with_label(&format!("validator_{i}")),
                     engine::Config {
                         signer: sk,
-                        manager: oracle.clone(),
+                        manager: manager.clone(),
                         blocker: oracle.control(pk.clone()),
                         namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
                         output: Some(self.output.clone()),
