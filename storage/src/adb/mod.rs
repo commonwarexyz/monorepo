@@ -119,26 +119,19 @@ pub(super) async fn align_mmr_and_log<
             replay_count, "MMR lags behind log, replaying log to catch up"
         );
 
-        // Transition to Dirty state with first operation
-        let op = log.read(*next_mmr_leaf_num).await?;
-        let (mut dirty_mmr, _) = mmr
-            .add_batched(hasher, &op.encode())
-            .await
-            .map_err(Error::Mmr)?;
-        next_mmr_leaf_num += 1;
-
-        // Continue in Dirty state
+        // Collect all operations to replay
+        let mut batch_ops = Vec::with_capacity(replay_count as usize);
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;
-            dirty_mmr
-                .add_batched(hasher, &op.encode())
-                .await
-                .map_err(Error::Mmr)?;
+            batch_ops.push(op.encode());
             next_mmr_leaf_num += 1;
         }
 
-        // Sync back to Clean state and return
-        let mmr = dirty_mmr.sync(hasher).await.map_err(Error::Mmr)?;
+        // Add the batch and sync
+        let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
+        mmr = mmr.add_batch(hasher, &elements).await.map_err(Error::Mmr)?;
+        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+
         assert_eq!(log_size, mmr.leaves());
         return Ok((mmr, log_size));
     }

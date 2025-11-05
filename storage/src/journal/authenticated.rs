@@ -111,20 +111,19 @@ where
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
 
-            // Transition to Dirty state with first operation
-            let op = journal.read(*mmr_size).await?;
-            let (mut dirty_mmr, _) = mmr.add_batched(hasher, &op.encode()).await?;
-            mmr_size += 1;
-
-            // Continue in Dirty state
+            // Collect all operations to replay
+            let mut batch_ops = Vec::with_capacity(replay_count as usize);
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                dirty_mmr.add_batched(hasher, &op.encode()).await?;
+                batch_ops.push(op.encode());
                 mmr_size += 1;
             }
 
-            // Sync back to Clean state and return
-            return Ok(dirty_mmr.sync(hasher).await?);
+            // Add the batch and sync
+            let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
+            mmr = mmr.add_batch(hasher, &elements).await?;
+            mmr.sync(hasher).await?;
+            return Ok(mmr);
         }
 
         // At this point the MMR and journal should be consistent.
