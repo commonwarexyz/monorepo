@@ -177,7 +177,7 @@ mod test {
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Runner as _,
+        Handle, Runner as _,
     };
     use commonware_utils::union;
     use futures::{
@@ -186,12 +186,7 @@ mod test {
     };
     use governor::Quota;
     use rand_core::CryptoRngCore;
-    use std::{
-        collections::{BTreeMap, HashMap},
-        future::Future,
-        pin::Pin,
-        time::Duration,
-    };
+    use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
 
     struct TeamUpdate {
         pk: PublicKey,
@@ -227,11 +222,11 @@ mod test {
         }
     }
 
-    #[derive(Clone)]
     struct Team {
         peer_config: PeerConfig,
         output: Output<MinSig, PublicKey>,
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
+        handles: BTreeMap<PublicKey, Handle<()>>,
     }
 
     impl Team {
@@ -254,13 +249,88 @@ mod test {
                 peer_config,
                 output,
                 participants,
+                handles: Default::default(),
             }
         }
 
+        async fn start_one<S>(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) where
+            S: Scheme<PublicKey = PublicKey>,
+            SchemeProvider<S, PrivateKey>:
+                EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
+        {
+            if let Some(handle) = self.handles.remove(&pk) {
+                handle.abort();
+            }
+            let Some((sk, share)) = self.participants.get(&pk) else {
+                return;
+            };
+
+            let mut control = oracle.control(pk.clone());
+            let pending = control.register(PENDING_CHANNEL).await.unwrap();
+            let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
+            let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
+            let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
+            let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
+            let dkg = control.register(DKG_CHANNEL).await.unwrap();
+            let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
+
+            let resolver_cfg = marshal_resolver::Config {
+                public_key: pk.clone(),
+                manager: oracle.manager(),
+                blocker: oracle.control(pk.clone()),
+                mailbox_size: 200,
+                requester_config: requester::Config {
+                    me: Some(pk.clone()),
+                    rate_limit: Quota::per_second(NZU32!(5)),
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                },
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            };
+            let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
+
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                ctx.with_label(&format!("validator_{}", &pk)),
+                engine::Config {
+                    signer: sk.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(pk.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    output: Some(self.output.clone()),
+                    share: share.clone(),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: format!("validator_{}", &pk),
+                    freezer_table_initial_size: 1024, // 1mb
+                    peer_config: self.peer_config.clone(),
+                },
+            )
+            .await;
+
+            let handle = engine.start(
+                pending,
+                recovered,
+                resolver,
+                broadcast,
+                dkg,
+                orchestrator,
+                marshal,
+                UpdateHandler::boxed(pk.clone(), updates.clone()),
+            );
+            self.handles.insert(pk, handle);
+        }
+
         async fn start<S>(
-            self,
-            ctx: deterministic::Context,
-            mut oracle: Oracle<PublicKey>,
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
         ) where
@@ -273,32 +343,6 @@ mod test {
             manager
                 .update(0, self.participants.keys().cloned().collect())
                 .await;
-
-            // Register channels for all participants first
-            let mut channels = HashMap::new();
-            for pk in self.participants.keys() {
-                let mut control = oracle.control(pk.clone());
-                let pending = control.register(PENDING_CHANNEL).await.unwrap();
-                let recovered = control.register(RECOVERED_CHANNEL).await.unwrap();
-                let resolver = control.register(RESOLVER_CHANNEL).await.unwrap();
-                let broadcast = control.register(BROADCASTER_CHANNEL).await.unwrap();
-                let marshal = control.register(MARSHAL_CHANNEL).await.unwrap();
-                let dkg = control.register(DKG_CHANNEL).await.unwrap();
-                let orchestrator = control.register(ORCHESTRATOR_CHANNEL).await.unwrap();
-
-                channels.insert(
-                    pk.clone(),
-                    (
-                        pending,
-                        recovered,
-                        resolver,
-                        broadcast,
-                        marshal,
-                        dkg,
-                        orchestrator,
-                    ),
-                );
-            }
 
             // Now add links between all participants
             for v1 in self.participants.keys() {
@@ -313,55 +357,9 @@ mod test {
                 }
             }
 
-            // Now start all the engines
-            for (i, (pk, (sk, share))) in self.participants.into_iter().enumerate() {
-                let (pending, recovered, resolver, broadcast, marshal, dkg, orchestrator) =
-                    channels.remove(&pk).unwrap();
-
-                let resolver_cfg = marshal_resolver::Config {
-                    public_key: pk.clone(),
-                    manager: manager.clone(),
-                    blocker: oracle.control(pk.clone()),
-                    mailbox_size: 200,
-                    requester_config: requester::Config {
-                        me: Some(pk.clone()),
-                        rate_limit: Quota::per_second(NZU32!(5)),
-                        initial: Duration::from_secs(1),
-                        timeout: Duration::from_secs(2),
-                    },
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    priority_requests: false,
-                    priority_responses: false,
-                };
-                let marshal = marshal_resolver::init(&ctx, resolver_cfg, marshal);
-
-                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
-                    ctx.with_label(&format!("validator_{i}")),
-                    engine::Config {
-                        signer: sk,
-                        manager: manager.clone(),
-                        blocker: oracle.control(pk.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        output: Some(self.output.clone()),
-                        share: share,
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: format!("validator_{i}"),
-                        freezer_table_initial_size: 1024, // 1mb
-                        peer_config: self.peer_config.clone(),
-                    },
-                )
-                .await;
-
-                engine.start(
-                    pending,
-                    recovered,
-                    resolver,
-                    broadcast,
-                    dkg,
-                    orchestrator,
-                    marshal,
-                    UpdateHandler::boxed(pk, updates.clone()),
-                );
+            for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
+                self.start_one(ctx, oracle, updates.clone(), pk.clone())
+                    .await;
             }
         }
     }
@@ -383,7 +381,7 @@ mod test {
         {
             tracing::info!("starting test with {} participants", self.total);
             // Create simulated network
-            let (network, oracle) = Network::<_, PublicKey>::new(
+            let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
@@ -397,12 +395,12 @@ mod test {
             network.start();
 
             tracing::debug!("creating team with {} participants", self.total);
-            let team = Team::reckon(&mut ctx, self.total, self.per_round);
+            let mut team = Team::reckon(&mut ctx, self.total, self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
 
             tracing::debug!("starting team actors and connecting");
-            team.start::<S>(ctx.clone(), oracle, self.link.clone(), updates_in)
+            team.start::<S>(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
                 .await;
 
             tracing::debug!("waiting for updates");
