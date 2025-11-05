@@ -1768,7 +1768,6 @@ mod test {
 
     fn restart<S>(
         n: u32,
-        n_active: u32,
         seed: u64,
         link: Link,
         initial_required: u64,
@@ -1780,7 +1779,7 @@ mod test {
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
         // Create context
-        let threshold = quorum(n_active);
+        let threshold = quorum(n);
         let cfg = deterministic::Config::default().with_seed(seed);
         let executor = Runner::from(cfg);
         executor.start(|mut context| async move {
@@ -1799,7 +1798,7 @@ mod test {
 
             // Derive threshold
             let (polynomial, shares) =
-                ops::generate_shares::<_, MinSig>(&mut context, None, n_active, threshold);
+                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
             // Register participants
             let mut signers = Vec::new();
@@ -1841,9 +1840,9 @@ mod test {
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
                         share: shares.get(idx).cloned(),
-                        active_participants: validators[..n_active as usize].to_vec(),
-                        inactive_participants: validators[n_active as usize..].to_vec(),
-                        num_participants_per_epoch: n_active as usize,
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: n as usize,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -1869,7 +1868,7 @@ mod test {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut success = false;
+                let mut success = 0;
                 for line in metrics.lines() {
                     // Split metric and value
                     let mut parts = line.split_whitespace();
@@ -1886,12 +1885,11 @@ mod test {
                     if metric.ends_with("_processed_height") {
                         let value = value.parse::<u64>().unwrap();
                         if value >= initial_required {
-                            success = true;
-                            break;
+                            success += 1;
                         }
                     }
                 }
-                if success {
+                if success == n {
                     break;
                 }
 
@@ -1923,9 +1921,9 @@ mod test {
                     participant_config: None,
                     polynomial: Some(polynomial.clone()),
                     share: shares.get(idx).cloned(),
-                    active_participants: validators[..n_active as usize].to_vec(),
-                    inactive_participants: validators[n_active as usize..].to_vec(),
-                    num_participants_per_epoch: n_active as usize,
+                    active_participants: validators,
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: n as usize,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: format!("validator_{idx}"),
@@ -1949,7 +1947,7 @@ mod test {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut success = false;
+                let mut success = 0;
                 for line in metrics.lines() {
                     // Split metric and value
                     let mut parts = line.split_whitespace();
@@ -1963,17 +1961,14 @@ mod test {
                     }
 
                     // If ends with contiguous_height, ensure it is at least required_container
-                    if metric.ends_with("_processed_height")
-                        && metric.contains(&format!("validator_{idx}_restarted"))
-                    {
+                    if metric.ends_with("_processed_height") {
                         let value = value.parse::<u64>().unwrap();
                         if value >= final_required {
-                            success = true;
-                            break;
+                            success += 1;
                         }
                     }
                 }
-                if success {
+                if success == n {
                     break;
                 }
 
@@ -1993,9 +1988,8 @@ mod test {
             jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
-        for seed in 0..1 {
+        for seed in 0..5 {
             let state = restart::<EdScheme>(
-                5,
                 5,
                 seed,
                 link.clone(),
@@ -2005,7 +1999,6 @@ mod test {
             assert_eq!(
                 state,
                 restart::<EdScheme>(
-                    5,
                     5,
                     seed,
                     link.clone(),
@@ -2027,7 +2020,6 @@ mod test {
         for seed in 0..5 {
             let state = restart::<ThresholdScheme<MinSig>>(
                 5,
-                5,
                 seed,
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
@@ -2036,7 +2028,6 @@ mod test {
             assert_eq!(
                 state,
                 restart::<ThresholdScheme<MinSig>>(
-                    5,
                     5,
                     seed,
                     link.clone(),
