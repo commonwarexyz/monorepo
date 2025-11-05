@@ -687,7 +687,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiver<P>>, Handle<()>)>,
+    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -720,18 +720,18 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result, handle): (Channel, oneshot::Sender<MessageReceiver<P>>, Handle<()>) = match control {
+                        let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
                             Some(control) => control,
                             None => break,
                         };
 
                         // Register channel
-                        let (sender, receiver) = mpsc::unbounded();
-                        if let Some(existing) = mailboxes.insert(channel, (sender, handle)) {
+                        let (receiver_tx, receiver_rx) = mpsc::unbounded();
+                        if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
                             warn!(?public_key, ?channel, "overwriting existing channel");
-                            existing.1.abort();
+                            existing_sender.abort();
                         }
-                        result.send(receiver).unwrap();
+                        result_tx.send(receiver_rx).unwrap();
                     },
 
                     // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -744,8 +744,8 @@ impl<P: PublicKey> Peer<P> {
 
                         // Send message to mailbox
                         match mailboxes.get_mut(&channel) {
-                            Some(mailbox) => {
-                                if let Err(err) = mailbox.0.send(message).await {
+                            Some((receiver_tx, _)) => {
+                                if let Err(err) = receiver_tx.send(message).await {
                                     error!(?err, "failed to send message to mailbox");
                                 }
                             }
@@ -824,13 +824,13 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
-    async fn register(&mut self, channel: Channel, handle: Handle<()>) -> MessageReceiverResult<P> {
-        let (sender, receiver) = oneshot::channel();
+    async fn register(&mut self, channel: Channel, sender: Handle<()>) -> MessageReceiverResult<P> {
+        let (result_tx, result_rx) = oneshot::channel();
         self.control
-            .send((channel, sender, handle))
+            .send((channel, sender, result_tx))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
+        result_rx.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
