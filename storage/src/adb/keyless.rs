@@ -135,13 +135,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Return the oldest location that remains retrievable.
-    pub async fn oldest_retained_loc(&self) -> Result<Option<Location>, Error> {
-        self.journal.oldest_retained_loc().await.map_err(Into::into)
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.journal.oldest_retained_loc()
     }
 
     /// Return the location before which all operations have been pruned.
-    pub async fn pruning_boundary(&self) -> Result<Location, Error> {
-        self.journal.pruning_boundary().await.map_err(Into::into)
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary()
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
@@ -353,7 +353,7 @@ mod test {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
+            assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.root(), MemMmr::default().root(&mut hasher));
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.last_commit_loc(), None);
@@ -810,11 +810,7 @@ mod test {
             db.prune(Location::new_unchecked(PRUNE_LOC)).await.unwrap();
 
             // Verify pruning worked
-            let oldest_retained = db.oldest_retained_loc().await.unwrap();
-            assert!(
-                oldest_retained.is_some(),
-                "Should have oldest retained location after pruning"
-            );
+            let oldest_retained = db.oldest_retained_loc().unwrap();
 
             // Root should remain the same after pruning
             assert_eq!(
@@ -827,10 +823,10 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
-            assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
+            assert!(db.oldest_retained_loc().unwrap() <= PRUNE_LOC);
 
             // Test that we can't get pruned values
-            for i in 0..*oldest_retained.unwrap() {
+            for i in 0..*oldest_retained {
                 let result = db.get(Location::new_unchecked(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
                 match result {
@@ -844,7 +840,7 @@ mod test {
 
             // Test proof generation after pruning - should work for non-pruned ranges
             let test_cases = vec![
-                (oldest_retained.unwrap(), 10), // Starting from oldest retained
+                (oldest_retained, 10), // Starting from oldest retained
                 (Location::new_unchecked(50), 20),                       // Middle range (if not pruned)
                 (Location::new_unchecked(150), 10),                      // Later range
                 (Location::new_unchecked(190), 15),                      // Near the end
@@ -852,7 +848,7 @@ mod test {
 
             for (start_loc, max_ops) in test_cases {
                 // Skip if start_loc is before oldest retained
-                if start_loc < oldest_retained.unwrap() {
+                if start_loc < oldest_retained {
                     continue;
                 }
 
@@ -878,7 +874,7 @@ mod test {
             const AGGRESSIVE_PRUNE: Location = Location::new_unchecked(150);
             db.prune(AGGRESSIVE_PRUNE).await.unwrap();
 
-            let new_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
+            let new_oldest = db.oldest_retained_loc().unwrap();
             assert!(new_oldest <= AGGRESSIVE_PRUNE);
 
             // Can still generate proofs for the remaining data
@@ -892,7 +888,7 @@ mod test {
             let almost_all = db.op_count() - 5;
             db.prune(almost_all).await.unwrap();
 
-            let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
+            let final_oldest = db.oldest_retained_loc().unwrap();
 
             // Should still be able to prove the remaining operations
             if final_oldest < db.op_count() {

@@ -203,7 +203,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc().await;
+                    let _ = db.oldest_retained_loc();
                 }
 
                 Operation::Root => {
