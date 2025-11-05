@@ -243,6 +243,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         } else {
             blobs[0].0 * cfg.items_per_blob.get()
         };
+        assert!(size >= pruning_boundary);
 
         Ok(Self {
             context,
@@ -408,6 +409,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         self.tail.resize(rewind_to_offset).await?;
 
         self.size = size;
+        assert!(size >= self.pruning_boundary);
 
         Ok(())
     }
@@ -847,6 +849,8 @@ mod tests {
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos(), None);
+            // Pruning boundary should equal size when oldest_retained is None.
+            assert_eq!(journal.pruning_boundary(), size);
 
             {
                 let stream = journal
