@@ -68,6 +68,7 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 mod tests {
     use super::{mocks, Config, Engine};
+    use super::types::TipAck;
     use crate::{aggregation::mocks::Strategy, types::Epoch};
     use commonware_cryptography::{
         bls12381::{
@@ -100,7 +101,13 @@ mod tests {
     };
     use tracing::debug;
 
-    type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
+    type Registrations<P, V> = BTreeMap<
+        P,
+        (
+            Sender<P, TipAck<V, Sha256Digest>>,
+            Receiver<P, TipAck<V, Sha256Digest>>,
+        ),
+    >;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -113,15 +120,15 @@ mod tests {
     };
 
     /// Register all participants with the network oracle.
-    async fn register_participants(
+    async fn register_participants<V: Variant>(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
-    ) -> Registrations<PublicKey> {
+    ) -> Registrations<PublicKey, V> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let (sender, receiver) = oracle
                 .control(participant.clone())
-                .register(0)
+                .register::<TipAck<V, Sha256Digest>>(0, ())
                 .await
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
@@ -149,7 +156,7 @@ mod tests {
     }
 
     /// Initialize a simulated network environment.
-    async fn initialize_simulation(
+    async fn initialize_simulation<V: Variant>(
         context: Context,
         num_validators: u32,
         shares_vec: &mut [Share],
@@ -158,7 +165,7 @@ mod tests {
         Oracle<PublicKey>,
         Vec<(PublicKey, PrivateKey, Share)>,
         Vec<PublicKey>,
-        Registrations<PublicKey>,
+        Registrations<PublicKey, V>,
     ) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
@@ -184,7 +191,7 @@ mod tests {
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_participants(&mut oracle, &pks).await;
+        let registrations = register_participants::<V>(&mut oracle, &pks).await;
         link_participants(&mut oracle, &pks, link).await;
         (oracle, validators, pks, registrations)
     }
@@ -196,7 +203,7 @@ mod tests {
         polynomial: poly::Public<V>,
         validator_pks: &[PublicKey],
         validators: &[(PublicKey, PrivateKey, Share)],
-        registrations: &mut Registrations<PublicKey>,
+        registrations: &mut Registrations<PublicKey, V>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
         oracle: &mut Oracle<PublicKey>,
@@ -330,7 +337,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -373,7 +380,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -438,7 +445,7 @@ mod tests {
             let polynomial = polynomial.clone();
             let f = move |mut context: Context| {
                 async move {
-                    let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                    let (oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                         context.with_label("simulation"),
                         num_validators,
                         &mut shares_vec,
@@ -595,7 +602,7 @@ mod tests {
             let mut shares_vec_clone = shares_vec.clone();
             let polynomial_clone = polynomial.clone();
             async move {
-                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                let (oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                     context.with_label("simulation"),
                     num_validators,
                     &mut shares_vec_clone,
@@ -687,7 +694,7 @@ mod tests {
         // Second run: restart and verify the skip_index gets confirmed
         let f2 = move |context: Context| {
             async move {
-                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                let (oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                     context.with_label("simulation"),
                     num_validators,
                     &mut shares_vec,
@@ -797,7 +804,7 @@ mod tests {
                 success_rate: 0.5,
             };
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -861,7 +868,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -909,7 +916,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -982,7 +989,7 @@ mod tests {
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
             let identity = *poly::public::<V>(&polynomial);
 
-            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (oracle, validators, pks, mut registrations) = initialize_simulation::<V>(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,

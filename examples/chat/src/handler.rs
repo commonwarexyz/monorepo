@@ -308,12 +308,19 @@ pub async fn run<S, R>(
                 match result {
                     Ok((peer, msg)) => {
                         let peer = hex(&peer);
+                        let payload = match msg {
+                            Ok(bytes) => String::from_utf8_lossy(bytes.as_ref()).into_owned(),
+                            Err(err) => {
+                                warn!(?err, peer, "failed to decode incoming message");
+                                continue;
+                            }
+                        };
                         messages.push(format!(
                             "[{}] {}**{}: {}",
                             chrono::Local::now().format("%m/%d %H:%M:%S"),
                             &peer[..4],
                             &peer[peer.len() - 4..],
-                            String::from_utf8_lossy(&msg)
+                            payload
                         ).into());
                     }
                     Err(err) => {

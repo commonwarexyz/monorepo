@@ -11,6 +11,8 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/chat"
 documentation = "https://docs.rs/commonware-chat"
 
 [dependencies]
+bytes.workspace = true
+commonware-codec.workspace = true
 chrono.workspace = true
 clap.workspace = true
 commonware-cryptography.workspace = true

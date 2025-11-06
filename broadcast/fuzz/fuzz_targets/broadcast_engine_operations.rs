@@ -174,7 +174,7 @@ fn fuzz(input: FuzzInput) {
             // Create channel
             let (sender, receiver) = oracle
                 .control(public_key.clone())
-                .register(0)
+                .register::<FuzzMessage>(0, RangeCfg::from(..))
                 .await
                 .unwrap();
 

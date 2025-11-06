@@ -4,7 +4,10 @@ use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select;
-use commonware_p2p::simulated::{Config, Link, Network, Receiver, Sender};
+use commonware_p2p::{
+    simulated::{Config, Link, Network, Receiver, Sender},
+    Receiver as _, Sender as _,
+};
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };

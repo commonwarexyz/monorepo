@@ -55,7 +55,9 @@ mod handler;
 #[doc(hidden)]
 mod logger;
 
+use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
+use commonware_codec::RangeCfg;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Runner as _};
@@ -176,10 +178,12 @@ fn main() {
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;
-        let (chat_sender, chat_receiver) = network.register(
+        let codec_cfg = RangeCfg::from(..=MAX_MESSAGE_SIZE);
+        let (chat_sender, chat_receiver) = network.register::<Bytes>(
             handler::CHANNEL,
             Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
+            codec_cfg,
         );
 
         // Start network

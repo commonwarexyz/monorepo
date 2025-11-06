@@ -15,10 +15,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
-};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     buffer::PoolRef,
     spawn_cell,
@@ -222,14 +219,23 @@ impl<
     ///   - Acks from other validators
     pub fn start(
         mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        network: (
+            impl Sender<Codec = TipAck<V, D>, PublicKey = P>,
+            impl Receiver<Codec = TipAck<V, D>, PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+    async fn run(
+        mut self,
+        network: (
+            impl Sender<Codec = TipAck<V, D>, PublicKey = P>,
+            impl Receiver<Codec = TipAck<V, D>, PublicKey = P>,
+        ),
+    ) {
+        let (mut sender, mut receiver) = network;
         let mut shutdown = self.context.stopped();
 
         // Initialize the epoch
@@ -422,7 +428,7 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        sender: &mut impl Sender<Codec = TipAck<V, D>, PublicKey = P>,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -563,7 +569,7 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        sender: &mut impl Sender<Codec = TipAck<V, D>, PublicKey = P>,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -705,7 +711,7 @@ impl<
     async fn broadcast(
         &mut self,
         ack: Ack<V, D>,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        sender: &mut impl Sender<Codec = TipAck<V, D>, PublicKey = P>,
     ) -> Result<(), Error> {
         sender
             .send(

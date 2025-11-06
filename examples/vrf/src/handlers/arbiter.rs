@@ -1,4 +1,5 @@
 use crate::handlers::{wire, ACK_NAMESPACE};
+use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
@@ -95,8 +96,16 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                 result = receiver.recv() => {
                     match result {
                         Ok((peer, msg)) =>{
+                            let msg = match msg {
+                                Ok(bytes) => bytes,
+                                Err(err) => {
+                                    warn!(round, ?peer, ?err, "failed to decode inbound payload");
+                                    arbiter.disqualify(peer);
+                                    continue;
+                                }
+                            };
                             // Parse msg
-                            let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
+                            let msg = match wire::Dkg::decode_cfg(msg.clone(), &self.contributors.len()) {
                                 Ok(msg) => msg,
                                 Err(_) => {
                                     arbiter.disqualify(peer);

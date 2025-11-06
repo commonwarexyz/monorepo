@@ -1038,8 +1038,10 @@ dependencies = [
 name = "commonware-chat"
 version = "0.0.63"
 dependencies = [
+ "bytes",
  "chrono",
  "clap",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",

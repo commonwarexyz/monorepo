@@ -202,14 +202,30 @@ impl Blocker for FuzzBlocker {
 }
 
 #[derive(Debug, Clone)]
-struct MockSender;
+use std::marker::PhantomData;
+
+#[derive(Debug, Clone)]
+struct MockSender<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> Default for MockSender<T> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("mock send error")]
 struct MockSendError;
 
-impl Sender for MockSender {
-    type Codec = bytes::Bytes;
+impl<T> Sender for MockSender<T>
+where
+    T: commonware_codec::Codec + Send + Clone + std::fmt::Debug + 'static,
+{
+    type Codec = T;
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
@@ -224,16 +240,19 @@ impl Sender for MockSender {
 }
 
 #[derive(Debug)]
-struct MockReceiver {
-    rx: mpsc::UnboundedReceiver<(PublicKey, Result<FuzzRequest, CodecError>)>,
+struct MockReceiver<T> {
+    rx: mpsc::UnboundedReceiver<(PublicKey, Result<T, CodecError>)>,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("mock receive error")]
 struct MockRecvError;
 
-impl Receiver for MockReceiver {
-    type Codec = bytes::Bytes;
+impl<T> Receiver for MockReceiver<T>
+where
+    T: commonware_codec::Codec + Send + 'static,
+{
+    type Codec = T;
     type Error = MockRecvError;
     type PublicKey = PublicKey;
 
@@ -241,14 +260,7 @@ impl Receiver for MockReceiver {
         &mut self,
     ) -> Result<(Self::PublicKey, Result<Self::Codec, commonware_codec::Error>), Self::Error> {
         let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
-        match msg {
-            Ok(req) => {
-                let mut buf = bytes::BytesMut::new();
-                req.write(&mut buf);
-                Ok((pk, Ok(buf.freeze())))
-            }
-            Err(_) => Err(MockRecvError),
-        }
+        Ok((pk, msg))
     }
 }
 
@@ -421,12 +433,12 @@ fn fuzz(input: FuzzInput) {
                     mailboxes.insert(idx, mailbox);
 
                     let (_tx, _rx) = mpsc::unbounded();
-                    let mock_receiver = MockReceiver { rx: _rx };
+                    let mock_receiver = MockReceiver::<FuzzRequest> { rx: _rx };
                     engine.start(
-                        (MockSender, mock_receiver),
+                        (MockSender::<FuzzRequest>::default(), mock_receiver),
                         (
-                            MockSender,
-                            MockReceiver {
+                            MockSender::<FuzzResponse>::default(),
+                            MockReceiver::<FuzzResponse> {
                                 rx: mpsc::unbounded().1,
                             },
                         ),

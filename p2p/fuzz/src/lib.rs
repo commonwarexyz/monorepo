@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use bytes::Bytes;
-use commonware_codec::codec::FixedSize;
+use commonware_codec::{codec::FixedSize, RangeCfg};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::{
     authenticated::{
@@ -259,7 +259,8 @@ impl NetworkScheme for Discovery {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) =
+            network.register::<Bytes>(0, quota, DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..=MAX_MSG_SIZE));
 
         // Start the network background task
         let handle = network.start();
@@ -291,8 +292,8 @@ impl NetworkScheme for Discovery {
 pub struct Lookup;
 
 impl NetworkScheme for Lookup {
-    type Sender = lookup::Sender<ed25519::PublicKey>;
-    type Receiver = lookup::Receiver<ed25519::PublicKey>;
+    type Sender = lookup::Sender<ed25519::PublicKey, Bytes>;
+    type Receiver = lookup::Receiver<ed25519::PublicKey, Bytes>;
     type Oracle = lookup::Oracle<ed25519::PublicKey>;
 
     async fn create_network(
@@ -337,7 +338,8 @@ impl NetworkScheme for Lookup {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) =
+            network.register::<Bytes>(0, quota, DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..=MAX_MSG_SIZE));
 
         // Start the network background task
         let handle = network.start();
