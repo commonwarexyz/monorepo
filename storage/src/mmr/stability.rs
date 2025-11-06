@@ -1,20 +1,17 @@
 use crate::mmr::{
     hasher::Hasher,
-    mem::{Clean, Mmr},
+    mem::{Dirty, Mmr},
 };
-use commonware_cryptography::{Hasher as CHasher, Sha256};
+use commonware_cryptography::{sha256::Digest, Hasher as CHasher, Sha256};
 
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
-pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256, Clean>) {
-    let temp_mmr = std::mem::take(mmr);
-    let mut dirty_mmr = temp_mmr.into_dirty();
+pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256, Dirty<Digest>>) {
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        dirty_mmr.add_batched(hasher, &element);
+        mmr.add_batched(hasher, &element);
     }
-    *mmr = dirty_mmr.merkleize(hasher);
 }
 
 /// Sha256 roots for all MMRs with 0..200 elements for testing stability of root computation across
