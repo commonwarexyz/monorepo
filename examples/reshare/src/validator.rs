@@ -432,48 +432,9 @@ mod test {
                     }
                 });
             }
-            drop(crash_sender); // Drop our copy so the channel closes when spawned task exits
 
             loop {
                 select! {
-                    pk = restart_receiver.next() => {
-                        let Some(pk) = pk else {
-                            continue;
-                        };
-
-                        tracing::info!(pk = ?pk, "restarting participant");
-                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                    },
-                    _ = crash_receiver.next() => {
-                        // Crash ticker fired
-                        if let Some(crash) = &self.crash {
-                            // Pick multiple random participants to crash
-                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
-                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
-
-                            for pk in to_crash {
-                                // Try to abort the handle if it exists
-                                if let Some(handle) = team.handles.remove(&pk) {
-                                    handle.abort();
-                                    tracing::info!(pk = ?pk, "crashed participant");
-
-                                    // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
-                                        }
-                                        let _ = restart_sender.send(pk_clone).await;
-                                    });
-                                } else {
-                                    tracing::debug!(pk = ?pk, "participant already crashed");
-                                }
-                            }
-                        }
-                    },
                     update = updates_out.next() => {
                         let Some(update) = update else {
                             return Err(anyhow!("update channel closed unexpectedly"));
@@ -523,6 +484,44 @@ mod test {
                                 return Ok(());
                             } else {
                                 current_epoch = current_epoch.next();
+                            }
+                        }
+                    },
+                    pk = restart_receiver.next() => {
+                        let Some(pk) = pk else {
+                            continue;
+                        };
+
+                        tracing::info!(pk = ?pk, "restarting participant");
+                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                    },
+                    _ = crash_receiver.next() => {
+                        // Crash ticker fired
+                        if let Some(crash) = &self.crash {
+                            // Pick multiple random participants to crash
+                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                            let crash_count = crash.count.min(all_participants.len());
+                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+
+                            for pk in to_crash {
+                                // Try to abort the handle if it exists
+                                if let Some(handle) = team.handles.remove(&pk) {
+                                    handle.abort();
+                                    tracing::info!(pk = ?pk, "crashed participant");
+
+                                    // Schedule restart after downtime
+                                    let mut restart_sender = restart_sender.clone();
+                                    let downtime = crash.downtime;
+                                    let pk_clone = pk.clone();
+                                    ctx.clone().spawn(move |ctx| async move {
+                                        if downtime > Duration::ZERO {
+                                            ctx.sleep(downtime).await;
+                                        }
+                                        let _ = restart_sender.send(pk_clone).await;
+                                    });
+                                } else {
+                                    tracing::debug!(pk = ?pk, "participant already crashed");
+                                }
                             }
                         }
                     },
