@@ -2,6 +2,7 @@
 
 pub mod application;
 pub mod conflicter;
+pub mod duplicator;
 pub mod fixtures;
 pub mod impersonator;
 pub mod nuller;
